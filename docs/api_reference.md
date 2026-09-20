@@ -985,10 +985,22 @@ names, used everywhere including on the functions NumPy contributed (`ptp`,
 `compress`, `delete`, `expand_dims`, `trim_zeros`, `array_split`, …), where
 NumPy would say `axis` and `keepdims`. One name for one thing is worth more
 than matching each function to whichever library it came from; the only
-exception is `take_along_axis`, whose own name says which word it wants.
+exceptions are the names that say which word they want -- the method
+`swapaxes` (against `swapdims`), and the free functions `take_along_axis` and
+`put_along_axis`.
 Reductions accept a list there as well as an integer, so `dim` stays singular
 even when it takes several.
 ```
+
+Two things hold wherever a `dim` appears, and
+`tests/test_dim_and_keepdim_invariants.py` sweeps the whole surface for both
+rather than leaving them to each op: a negative `dim` names the axis
+`dim + ndim` does, and `keepdim=True` differs from `keepdim=False` by exactly
+the one axis, so squeezing it out of the first gives the second. The
+exceptions are the ops whose `dim` is not an axis of the input at all:
+`unsqueeze`, `expand_dims` and `stack` count against the output, which has one
+axis more, and `lexsort` counts against one key, which has one fewer. All four
+place a negative `dim` where NumPy places it.
 
 ### Shape and layout
 
@@ -1006,7 +1018,9 @@ no argument drops every length-1 axis.
 - `split(split_size_or_sections, dim=0)` cuts into pieces of `size` each, the last one
   shorter if the axis does not divide evenly, or into explicitly given sizes.
 - `chunk(sections, dim)` cuts into `sections` pieces of equal size.
-- `split_with_sections(sections, dim)` takes the sizes explicitly.
+- `split_with_sections(sections, dim)` takes the sizes explicitly. They have
+  to sum to the length of the axis: a short list used to return a prefix and
+  drop the rest silently.
 
 `chunk` requires the axis length to be a multiple of `sections` and raises
 otherwise. This is stricter than PyTorch's `chunk`, which shortens the last

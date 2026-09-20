@@ -426,14 +426,26 @@ def test_every_functional_export_is_either_forwarded_or_listed_as_namespaced():
     # name exists catches a removal from `functional`, but an op *added* to
     # `functional` and forgotten in _exports.py would just never appear as
     # `mt.<name>` -- silently, since nothing looks in that direction.
-    from minitensor._exports import _FUNCTIONAL_FORWARDERS, _FUNCTIONAL_ONLY
+    from minitensor._exports import (
+        _FUNCTIONAL_FORWARDERS,
+        _FUNCTIONAL_MIRRORED,
+        _FUNCTIONAL_ONLY,
+    )
 
-    accounted = set(_FUNCTIONAL_FORWARDERS) | set(_FUNCTIONAL_ONLY)
+    lists = (_FUNCTIONAL_FORWARDERS, _FUNCTIONAL_ONLY, _FUNCTIONAL_MIRRORED)
+    accounted = set().union(*(set(names) for names in lists))
     exported = {name for name in dir(mt.functional) if not name.startswith("_")}
     assert not exported - accounted
     # And the lists describe reality, rather than having drifted the other way.
     assert not accounted - exported
-    assert not set(_FUNCTIONAL_FORWARDERS) & set(_FUNCTIONAL_ONLY)
+    for first in range(len(lists)):
+        for second in range(first + 1, len(lists)):
+            assert not set(lists[first]) & set(lists[second])
+
+    # A mirrored name is one function reached two ways, which is the whole
+    # claim the third list makes.
+    for name in _FUNCTIONAL_MIRRORED:
+        assert getattr(mt, name) is getattr(mt.functional, name)
 
 
 def test_functional_forwarder_binding_rejects_an_unlisted_export():

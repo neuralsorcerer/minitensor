@@ -113,8 +113,7 @@ impl PyTensor {
         }
 
         let chunk_size = dim_size / sections;
-        let section_vec = vec![chunk_size; sections];
-        self.split_with_sections(section_vec, axis)
+        self.split_sections_at(&vec![chunk_size; sections], axis)
     }
 
     /// Split tensor by chunk size or explicit sections along an axis
@@ -151,37 +150,18 @@ impl PyTensor {
                 sections.push(chunk);
                 remaining -= chunk;
             }
-        } else if let Ok(list) = split_size_or_sections.cast::<PyList>() {
-            for obj in list.iter() {
-                let size: usize = obj.extract()?;
-                if size == 0 {
+        } else if let Ok(sizes) = split_size_or_sections.extract::<Vec<isize>>() {
+            // Any sequence of sizes, rather than a list arm and a tuple arm
+            // holding the same body twice. A negative entry used to reach
+            // pyo3's `usize` conversion and come back as "can't convert
+            // negative int to unsigned"; it is a section size like any other.
+            for size in sizes {
+                if size <= 0 {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                         "section size must be greater than zero",
                     ));
                 }
-                sections.push(size);
-            }
-            let total: usize = sections.iter().sum();
-            if total != dim_size {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "split sizes do not sum to dimension size",
-                ));
-            }
-        } else if let Ok(tuple) = split_size_or_sections.cast::<PyTuple>() {
-            for obj in tuple.iter() {
-                let size: usize = obj.extract()?;
-                if size == 0 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "section size must be greater than zero",
-                    ));
-                }
-                sections.push(size);
-            }
-            let total: usize = sections.iter().sum();
-            if total != dim_size {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "split sizes do not sum to dimension size",
-                ));
+                sections.push(size as usize);
             }
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -189,21 +169,49 @@ impl PyTensor {
             ));
         }
 
-        self.split_with_sections(sections, axis)
+        self.split_sections_at(&sections, axis)
     }
 
     /// Split into pieces of the given sizes along `dim`.
     ///
     /// `dim`, like every other axis argument here -- the reference has always
     /// documented it that way, and this was the one signature that said
-    /// `axis` without a name asking for it.
+    /// `axis` without a name asking for it. It counts from the end like every
+    /// other one too: taking a `usize` made this the only dim in the library
+    /// that answered a negative value with "can't convert negative int to
+    /// unsigned", because the type rejected it before any of the dim handling
+    /// ran.
     #[pyo3(signature = (sections, dim))]
-    fn split_with_sections(&self, sections: Vec<usize>, dim: usize) -> PyResult<Vec<PyTensor>> {
+    fn split_with_sections(&self, sections: Vec<usize>, dim: isize) -> PyResult<Vec<PyTensor>> {
+        let axis = engine::ops::normalize_dim(dim, self.inner.ndim()).map_err(_convert_error)?;
+        self.split_sections_at(&sections, axis)
+    }
+}
+
+impl PyTensor {
+    /// Cut `sections` consecutive pieces out of an already-resolved axis.
+    ///
+    /// The three public spellings all land here, so the sizes are checked
+    /// against the axis once rather than in each of them. They have to cover
+    /// it exactly, which is what makes the round trip through `cat` in the
+    /// reference true: a short list used to return a prefix and drop the rest
+    /// without a word -- `t.split_with_sections([1], 1)` on an axis of three
+    /// gave one piece -- and a long one reported the slice bounds it had
+    /// computed rather than the mistake that produced them.
+    fn split_sections_at(&self, sections: &[usize], axis: usize) -> PyResult<Vec<PyTensor>> {
+        let dim_size = self.inner.shape().dims()[axis];
+        let total: usize = sections.iter().sum();
+        if total != dim_size {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "split sizes do not sum to dimension size: {total} against an axis of {dim_size}"
+            )));
+        }
+
         let mut outputs = Vec::with_capacity(sections.len());
         let mut start = 0;
         for size in sections {
             let end = start + size;
-            let slice = engine::ops::shape_ops::slice(&self.inner, dim as isize, start, end, 1)
+            let slice = engine::ops::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
                 .map_err(_convert_error)?;
             outputs.push(PyTensor::from_tensor(slice));
             start = end;

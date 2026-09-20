@@ -783,6 +783,13 @@ def combinations(input: object, r: int = 2, with_replacement: bool = False) -> T
     return picked.reshape(len(rows), count)
 
 
+# The two-output selection kernel, held here rather than looked up on
+# `functional` at each call. `partition` and `argpartition` below are put onto
+# `functional` under their own names, so the attribute that used to lead here
+# now leads back to them.
+_select_around = _C.functional.partition
+
+
 def _partition_positions(kth: object, length: int, name: str) -> list[int]:
     """The `kth` argument as a list of positions, checked against the axis."""
 
@@ -829,11 +836,11 @@ def partition(input: object, kth: object, dim: int = -1) -> Tensor:
     if dim is None:
         flat = tensor.reshape(-1)
         positions = _partition_positions(kth, flat.shape[0], "partition")
-        return _C.functional.partition(flat, positions, 0, False)[0]
+        return _select_around(flat, positions, 0, False)[0]
     axis = _normalize_axis(dim, max(tensor.ndim(), 1), "partition")
     length = tensor.shape[axis] if tensor.ndim() else 1
     positions = _partition_positions(kth, length, "partition")
-    return _C.functional.partition(tensor, positions, axis, False)[0]
+    return _select_around(tensor, positions, axis, False)[0]
 
 
 def argpartition(input: object, kth: object, dim: int = -1) -> Tensor:
@@ -856,11 +863,11 @@ def argpartition(input: object, kth: object, dim: int = -1) -> Tensor:
     if dim is None:
         flat = tensor.reshape(-1)
         positions = _partition_positions(kth, flat.shape[0], "argpartition")
-        return _C.functional.partition(flat, positions, 0, True)[1]
+        return _select_around(flat, positions, 0, True)[1]
     axis = _normalize_axis(dim, max(tensor.ndim(), 1), "argpartition")
     length = tensor.shape[axis] if tensor.ndim() else 1
     positions = _partition_positions(kth, length, "argpartition")
-    return _C.functional.partition(tensor, positions, axis, True)[1]
+    return _select_around(tensor, positions, axis, True)[1]
 
 
 def lexsort(keys: object, dim: int = -1) -> Tensor:

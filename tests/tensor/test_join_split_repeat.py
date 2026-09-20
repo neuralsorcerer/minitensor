@@ -136,6 +136,71 @@ def test_split_size_mismatch_raises():
         t.split([2, 5])
 
 
+def test_split_takes_any_sequence_of_sections():
+    """A list and a tuple used to be two identical branches; anything else --
+    a `range`, a NumPy array of sizes -- fell through to "must be int or
+    sequence" despite being one."""
+    t = mt.arange(0, 10).reshape((2, 5))
+    expected = [(2, 2), (2, 3)]
+    for sections in ([2, 3], (2, 3), range(2, 4), np.array([2, 3])):
+        assert [tuple(p.shape) for p in t.split(sections, dim=1)] == expected
+
+
+def test_a_negative_section_size_is_reported_as_a_section_size():
+    """It reached pyo3's `usize` conversion and came back as "can't convert
+    negative int to unsigned", which names neither the argument nor the rule."""
+    t = mt.arange(0, 6)
+    with pytest.raises(ValueError, match="section size must be greater than zero"):
+        t.split([-1, 7])
+
+
+def test_split_with_sections_counts_a_dim_from_the_end():
+    """Its `dim` was a `usize`, so a negative value was rejected by the type
+    before any of the dim handling ran -- the only axis argument in the
+    library that answered one with an OverflowError."""
+    t = mt.arange(0, 24).reshape((2, 3, 4))
+    from_the_end = t.split_with_sections([1, 2], -2)
+    from_the_front = t.split_with_sections([1, 2], 1)
+
+    assert [tuple(p.shape) for p in from_the_end] == [(2, 1, 4), (2, 2, 4)]
+    for end, front in zip(from_the_end, from_the_front):
+        np.testing.assert_array_equal(end.numpy(), front.numpy())
+
+    # And an out-of-range dim says so, the way every other op does.
+    with pytest.raises(IndexError, match=r"\[-3, 2\]"):
+        t.split_with_sections([1, 2], -5)
+
+
+def test_split_with_sections_has_to_cover_the_axis():
+    """Sections that fell short returned a prefix and dropped the rest without
+    a word: `[1]` against an axis of three gave one piece, and the reference's
+    promise that the pieces round-trip through `cat` was quietly false. Too
+    many sections was no better -- it reported the slice bounds it had
+    computed rather than the mistake that produced them."""
+    t = mt.arange(0, 24).reshape((2, 3, 4))
+
+    for sections in ([1], [0], [1, 1], [1, 2, 3], [4]):
+        with pytest.raises(ValueError, match="do not sum to dimension size"):
+            t.split_with_sections(sections, 1)
+
+    pieces = t.split_with_sections([1, 2], 1)
+    np.testing.assert_array_equal(mt.cat(pieces, 1).numpy(), t.numpy())
+
+
+def test_an_empty_axis_is_one_empty_piece():
+    """The zero-length case the three spellings agree on, and the one place a
+    section of zero is right rather than a mistake."""
+    t = mt.zeros([2, 0, 4])
+
+    for pieces in (
+        t.split_with_sections([0], 1),
+        t.split(2, dim=1),
+        t.chunk(1, 1),
+    ):
+        assert [tuple(p.shape) for p in pieces] == [(2, 0, 4)]
+        np.testing.assert_array_equal(mt.cat(pieces, 1).numpy(), t.numpy())
+
+
 class IndexLike:
     def __init__(self, value: int):
         self._value = value

@@ -373,6 +373,16 @@ def default_dtype(dtype: str):
         set_default_dtype(previous)
 
 
+# `functional.partition` was the raw two-output selection kernel, which is not
+# what `mt.partition` is: it took its positions as a sequence and returned a
+# pair, so `F.partition(x, 2)` -- the same call that works at the top level --
+# answered "'int' object is not an instance of 'Sequence'". One name meant two
+# things across two public namespaces. It now means the wrapper in both, and
+# `argpartition` joins it, which is the arrangement every other Python-level
+# op here already has.
+for _selection_name in ("partition", "argpartition"):
+    setattr(functional, _selection_name, globals()[_selection_name])
+
 _bind_functional_forwarders(_FUNCTIONAL_FORWARDERS, globals())
 
 for _name in dir(nn):

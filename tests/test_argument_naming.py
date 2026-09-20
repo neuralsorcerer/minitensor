@@ -431,3 +431,42 @@ def test_no_signature_hides_a_default_behind_none():
         )
 
     assert not offenders, "defaults hidden behind `None`: " + ", ".join(offenders)
+
+
+def _shared_with_functional():
+    """Every name carried by both `minitensor` and `minitensor.functional`."""
+    for name in sorted(dir(mt.functional)):
+        if name.startswith("_"):
+            continue
+        namespaced = getattr(mt.functional, name)
+        top_level = getattr(mt, name, None)
+        if top_level is None or not callable(namespaced):
+            continue
+        yield name, top_level, namespaced
+
+
+def test_a_name_in_both_namespaces_means_one_thing():
+    """`F.partition(x, 2)` failed where `mt.partition(x, 2)` worked.
+
+    `functional.partition` was the raw two-output selection kernel that
+    `mt.partition` and `mt.argpartition` are the two halves of: it wanted its
+    positions as a sequence and returned a pair, so the call that works under
+    one spelling answered "'int' object is not an instance of 'Sequence'"
+    under the other. Same name, same arguments, two different functions.
+
+    Comparing the objects rather than their signatures is what makes this
+    hold: every name here is one definition reached two ways, so two objects
+    under one name is the defect whatever their signatures happen to say.
+    """
+    divergent = []
+    checked = 0
+    for name, top_level, namespaced in _shared_with_functional():
+        checked += 1
+        if top_level is not namespaced:
+            divergent.append(name)
+
+    assert not divergent, (
+        "these name one function at the top level and a different one in "
+        "`functional`: " + ", ".join(divergent)
+    )
+    assert checked > 250, f"only {checked} shared names reached -- the sweep broke"

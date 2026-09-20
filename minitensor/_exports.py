@@ -312,6 +312,22 @@ _FUNCTIONAL_FORWARDERS = (
     "angle",
 )
 
+# Ops that live in both namespaces under one definition: written in Python,
+# exported at the top level, and put onto `functional` in `__init__` so that
+# `F.<name>` and `mt.<name>` are the same function. They are not forwarders --
+# the top-level name is the original, not a copy taken from `functional` --
+# and they are not namespaced either, so the accounting below needs to be told
+# about them or it reports them as unaccounted for.
+#
+# `partition` is why this exists: `functional.partition` used to be the raw
+# two-output kernel, taking a sequence of positions and returning a pair, so
+# the one call that works as `mt.partition(x, 2)` failed as
+# `F.partition(x, 2)`.
+_FUNCTIONAL_MIRRORED = (
+    "partition",
+    "argpartition",
+)
+
 # Public members of `functional` that deliberately stay namespaced. These are
 # the layer-shaped ops -- they take weights, running statistics, or a training
 # flag, so `mt.functional.conv2d(x, w, b)` reads better at a call site than a
@@ -322,9 +338,6 @@ _FUNCTIONAL_FORWARDERS = (
 # `functional`; a name *added* to `functional` and forgotten here would simply
 # never show up as `mt.<name>`, with nothing to notice.
 _FUNCTIONAL_ONLY = (
-    # The raw selection kernel: `partition` and `argpartition` at the top level
-    # are the two halves of it that callers actually want.
-    "partition",
     "adaptive_avg_pool1d",
     "adaptive_avg_pool2d",
     "adaptive_max_pool1d",
@@ -449,13 +462,16 @@ def _bind_functional_forwarders(
         if not name.startswith("_")
         and name not in set(names)
         and name not in set(_FUNCTIONAL_ONLY)
+        and name not in set(_FUNCTIONAL_MIRRORED)
     )
     if unaccounted:
         raise RuntimeError(
             "functional exports not listed in _exports.py: "
             + ", ".join(unaccounted)
             + " -- add each to _FUNCTIONAL_FORWARDERS to expose it as mt.<name>, "
-            "or to _FUNCTIONAL_ONLY to keep it namespaced"
+            "to _FUNCTIONAL_ONLY to keep it namespaced, or to "
+            "_FUNCTIONAL_MIRRORED if it is a Python-level op that both "
+            "namespaces already carry"
         )
 
     for name in names:
