@@ -20,6 +20,7 @@ use crate::{
         activation::sqrt,
         arithmetic::{div, mul, sub},
         comparison::eq,
+        minmax::maximum,
         reduction::{any, argmax, argmin, count_nonzero, nanmean, prod, sum},
         selection::where_op,
         util::create_scalar_tensor,
@@ -81,9 +82,19 @@ pub fn nanvar(
     let total = sum(&squared, dim.clone(), keepdim)?;
     let count = non_nan_count(tensor, dim, keepdim)?;
     let divisor = if unbiased {
-        sub(
+        // Clamped at zero, because a slice with nothing in it has no variance
+        // to report and the division is how this says so. `count - 1` is -1
+        // for a slice that is all NaN, and `0 / -1` is a clean -0.0 -- an
+        // answer claiming the data does not vary, from data that is not
+        // there. At zero the division is `0 / 0`, which is NaN: what `var`
+        // answers for an empty slice, and what NumPy answers for this one.
+        let corrected = sub(
             &count,
             &create_scalar_tensor(1.0, tensor.dtype(), tensor.device())?,
+        )?;
+        maximum(
+            &corrected,
+            &create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?,
         )?
     } else {
         count

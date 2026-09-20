@@ -100,8 +100,26 @@ def test_a_slice_without_enough_entries_reports_nan_rather_than_a_number():
     assert _t(single).nanvar(1, False).numpy()[0] == 0.0
 
 
-def test_an_all_nan_slice_has_no_variance():
-    assert np.isnan(_t(np.array([[np.nan, np.nan]])).nanvar(1, False).numpy()[0])
+@pytest.mark.parametrize("unbiased", [True, False])
+def test_an_all_nan_slice_has_no_variance(unbiased):
+    """With the correction applied -- which is the default -- this answered
+    `-0.0`: the divisor is the non-NaN count less one, so a slice with nothing
+    in it divided by *minus one* and came back as a clean zero. A slice of no
+    data does not have zero variance; it has none, and anything normalising by
+    it would have divided by that zero without a word.
+
+    Clamping the divisor at zero makes the division `0 / 0`, which is NaN --
+    what `var` answers for an empty slice and what NumPy answers for this one.
+    """
+    for slice_of_nothing in (np.array([[np.nan, np.nan]]), np.zeros((1, 0))):
+        assert np.isnan(_t(slice_of_nothing).nanvar(1, unbiased).numpy()[0])
+        assert np.isnan(_t(slice_of_nothing).nanstd(1, unbiased).numpy()[0])
+
+    # One finite entry is the neighbouring case, and it was already right:
+    # the correction takes the divisor to zero rather than past it.
+    single = _t(np.array([[np.nan, 4.0, np.nan]]))
+    assert np.isnan(single.nanvar(1, True).numpy()[0])
+    assert single.nanvar(1, False).numpy()[0] == 0.0
 
 
 @pytest.mark.parametrize(
