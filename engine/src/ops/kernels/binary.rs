@@ -281,13 +281,35 @@ binary_kernel_simd!(
 // semantics). Integer closures use wrapping division so `MIN / -1` wraps
 // instead of panicking inside the parallel loops; the op layer rejects zero
 // divisors for integer dtypes before dispatching here.
+//
+// `(a / b).floor()` is the whole answer only while both sides are finite.
+// Python's `//` and NumPy's `floor_divide` agree on the two cases where it
+// is not, and this used to agree with neither:
+//
+//   * An infinite numerator over a finite, non-zero divisor is NaN. There is
+//     no integer quotient to round to, and both references say so;
+//     `(inf / 3).floor()` said `inf`.
+//   * A finite numerator over an infinite divisor of the opposite sign is
+//     -1. The true quotient is a negative number smaller than any float, so
+//     its floor is -1, where `(3 / -inf).floor()` rounds -0.0 to -0.0.
+//
+// Division by zero keeps its infinity (`inf // 0` is `inf`), which is what
+// both references give and what the float path is for.
 binary_kernel!(
     floordiv_f32_direct,
     as_f32_slice,
     f32,
     Float32,
     "f32",
-    |a: f32, b: f32| (a / b).floor()
+    |a: f32, b: f32| {
+        if a.is_infinite() && b.is_finite() && b != 0.0 {
+            f32::NAN
+        } else if b.is_infinite() && a.is_finite() && a != 0.0 && (a < 0.0) != (b < 0.0) {
+            -1.0
+        } else {
+            (a / b).floor()
+        }
+    }
 );
 binary_kernel!(
     floordiv_f64_direct,
@@ -295,7 +317,15 @@ binary_kernel!(
     f64,
     Float64,
     "f64",
-    |a: f64, b: f64| (a / b).floor()
+    |a: f64, b: f64| {
+        if a.is_infinite() && b.is_finite() && b != 0.0 {
+            f64::NAN
+        } else if b.is_infinite() && a.is_finite() && a != 0.0 && (a < 0.0) != (b < 0.0) {
+            -1.0
+        } else {
+            (a / b).floor()
+        }
+    }
 );
 binary_kernel!(
     floordiv_i32_direct,

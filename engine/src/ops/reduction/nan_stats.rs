@@ -17,7 +17,7 @@
 use crate::{
     error::{MinitensorError, Result},
     ops::{
-        activation::{nan_to_num, sqrt},
+        activation::sqrt,
         arithmetic::{div, mul, sub},
         comparison::eq,
         reduction::{any, argmax, argmin, count_nonzero, nanmean, prod, sum},
@@ -111,7 +111,18 @@ pub fn nanprod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
     if !tensor.dtype().is_float() {
         return prod(tensor, dim, keepdim);
     }
-    prod(&nan_to_num(tensor, 1.0, None, None)?, dim, keepdim)
+    // Only the NaN is replaced. `nan_to_num` with its defaults also replaces
+    // the infinities -- with the dtype's finite extremes, which is what that
+    // function is for -- so `nanprod([nan, inf])` came back as 1.8e308 rather
+    // than `inf`, a finite number standing where an infinite one was.
+    prod(&without_nan_replaced_by(tensor, 1.0)?, dim, keepdim)
+}
+
+/// The tensor with every NaN replaced by `replacement` and everything else,
+/// infinities included, left alone.
+fn without_nan_replaced_by(tensor: &Tensor, replacement: f64) -> Result<Tensor> {
+    let filler = create_scalar_tensor(replacement, tensor.dtype(), tensor.device())?;
+    where_op(&tensor.isnan()?, &filler, tensor)
 }
 
 /// Pushes every NaN to one end so an index reduction skips it, and reports

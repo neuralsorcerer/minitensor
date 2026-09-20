@@ -904,7 +904,15 @@ def nancumsum(input: object, dim: int | None = None) -> Tensor:
     """
 
     tensor = _atleast_tensor(input)
-    filled = _F.nan_to_num(tensor) if "float" in str(tensor.dtype) else tensor
+    if "float" in str(tensor.dtype):
+        # Only the NaN becomes zero. `nan_to_num` with its defaults also
+        # replaces the infinities, with the dtype's finite extremes, so
+        # `nancumsum([inf, -inf])` summed 1.8e308 and its negation and
+        # answered zero where the running total is `inf` and then NaN.
+        zeros = Tensor.full(list(tensor.shape), 0.0, dtype=str(tensor.dtype))
+        filled = _F.where(_F.isnan(tensor), zeros, tensor)
+    else:
+        filled = tensor
     axis = None if dim is None else _normalize_axis(dim, tensor.ndim(), "nancumsum")
     return _F.cumsum(filled, axis)
 

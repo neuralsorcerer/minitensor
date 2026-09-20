@@ -104,6 +104,44 @@ def test_an_all_nan_slice_has_no_variance():
     assert np.isnan(_t(np.array([[np.nan, np.nan]])).nanvar(1, False).numpy()[0])
 
 
+@pytest.mark.parametrize(
+    "name,ours,theirs",
+    [
+        ("nanprod", lambda t: mt.nanprod(t), np.nanprod),
+        ("nancumsum", lambda t: mt.nancumsum(t), np.nancumsum),
+        ("nansum", lambda t: mt.nansum(t), np.nansum),
+        ("nanmax", lambda t: mt.nanmax(t), np.nanmax),
+        ("nanmin", lambda t: mt.nanmin(t), np.nanmin),
+    ],
+)
+def test_only_the_nan_is_replaced(name, ours, theirs):
+    """`nanprod` and `nancumsum` filled the NaN positions with `nan_to_num`,
+    whose defaults also replace the infinities -- with the dtype's finite
+    extremes, which is what that function is for. So `nancumsum([inf, -inf])`
+    added 1.8e308 to its negation and answered zero, where the running total
+    is `inf` and then NaN, and `nanprod([nan, inf])` came back as a finite
+    1.8e308 standing where an infinity was.
+
+    Replacing only the NaN is what `nancumprod` already did, and it is the
+    difference between skipping a value and clamping one.
+    """
+    values = np.array([np.nan, np.inf, 2.0, -np.inf, np.nan, 3.0])
+    with np.errstate(invalid="ignore"):
+        want = theirs(values)
+    got = ours(_t(values)).numpy()
+    np.testing.assert_array_equal(got, want)
+
+
+def test_an_infinity_survives_a_nan_skipping_product_along_an_axis():
+    grid = np.array([[1.5, np.nan, -0.5], [2.0, np.inf, -np.inf]])
+    np.testing.assert_array_equal(
+        mt.nanprod(_t(grid), 0).numpy(), np.nanprod(grid, axis=0)
+    )
+    np.testing.assert_array_equal(
+        mt.nancumprod(_t(grid), 1).numpy(), np.nancumprod(grid, axis=1)
+    )
+
+
 def test_nanvar_of_integers_is_var():
     """An integer holds no NaN, so there is nothing to skip and this is `var`
     -- the delegation `nanprod` and `nanmax` already make. It widens to

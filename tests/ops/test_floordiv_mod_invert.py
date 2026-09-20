@@ -30,6 +30,64 @@ def test_float_floordiv_and_mod_match_numpy():
     np.testing.assert_allclose((10.0 % b).numpy(), 10.0 % FLOAT_B, rtol=1e-6)
 
 
+SPECIAL = [3.0, -3.0, 0.0, -0.0, np.inf, -np.inf, np.nan, 7.5, -0.25]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_floordiv_matches_numpy_on_every_infinity_and_nan(dtype):
+    """`(a / b).floor()` is the whole answer only while both sides are finite,
+    and this used to be the whole implementation. It disagreed with Python and
+    NumPy -- which agree with each other -- in six of the forty-nine
+    combinations of the special values:
+
+        inf // 3   gave  inf   where both references give NaN
+        3 // -inf  gave -0.0   where both give -1.0
+
+    There is no integer quotient to round an infinity to, and a finite number
+    over an infinity of the other sign has a true quotient below every float,
+    so its floor is -1 rather than the -0.0 that rounding lands on. Division
+    by zero keeps its infinity, which both references also give.
+    """
+    reference = np.float32 if dtype == "float32" else np.float64
+    for left in SPECIAL:
+        for right in SPECIAL:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                want = np.floor_divide(reference(left), reference(right))
+            got = mt.floor_divide(
+                mt.Tensor([left], dtype=dtype), mt.Tensor([right], dtype=dtype)
+            ).item()
+            if np.isnan(want):
+                assert np.isnan(got), f"{left} // {right}: {got}"
+            else:
+                assert got == want, f"{left} // {right}: {got} vs {want}"
+                # -0.0 and 0.0 are equal but not the same answer.
+                assert np.signbit(got) == np.signbit(want), f"{left} // {right}"
+
+
+@pytest.mark.parametrize("op", ["remainder", "fmod", "divmod"])
+def test_the_neighbouring_operations_already_agreed(op):
+    """`%`, `fmod` and `divmod` take the same operands through a different
+    path, and were right on all of them -- which is what made the floor
+    division stand out."""
+    for left in SPECIAL:
+        for right in SPECIAL:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                want = getattr(np, op)(left, right)
+            got = getattr(mt, op)(
+                mt.Tensor([left], dtype="float64"), mt.Tensor([right], dtype="float64")
+            )
+            pairs = (
+                zip((half.item() for half in got), want)
+                if op == "divmod"
+                else [(got.item(), want)]
+            )
+            for value, expected in pairs:
+                if np.isnan(expected):
+                    assert np.isnan(value), f"{op}({left}, {right}): {value}"
+                else:
+                    assert value == expected, f"{op}({left}, {right})"
+
+
 def test_floordiv_mod_identity():
     q = (mt.from_numpy(FLOAT_A.copy()) // mt.from_numpy(FLOAT_B.copy())).numpy()
     r = (mt.from_numpy(FLOAT_A.copy()) % mt.from_numpy(FLOAT_B.copy())).numpy()
