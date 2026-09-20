@@ -1518,6 +1518,52 @@ pub fn bucketize(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Ten bins is NumPy's default, and `bins` may equally be the edges
+/// themselves -- an integer means "this many", anything else is a sequence.
+/// `None` back from this says the argument was a count, which `bin_count`
+/// then reads.
+fn parse_bins(value: &Bound<PyAny>) -> PyResult<Option<PyTensor>> {
+    match value.extract::<i64>() {
+        Ok(count) if count >= 0 => Ok(None),
+        Ok(_) => Err(PyValueError::new_err(
+            "histogram: the bin count cannot be negative",
+        )),
+        Err(_) => Ok(Some(PyTensor::from_python_value(value)?)),
+    }
+}
+
+fn bin_count(value: &Bound<PyAny>) -> PyResult<usize> {
+    Ok(value.extract::<i64>()? as usize)
+}
+
+/// The edges `histogram` would use, without counting anything into them. For choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored, as it is in NumPy: no edge rule here depends on them.
+#[pyfunction]
+#[pyo3(signature = (input, bins=None, range=None, weights=None))]
+pub fn histogram_bin_edges(
+    input: &Bound<PyAny>,
+    bins: Option<&Bound<PyAny>>,
+    range: Option<(f64, f64)>,
+    weights: Option<&Bound<PyAny>>,
+) -> PyResult<PyTensor> {
+    // Accepted and ignored, as in NumPy: no edge rule here depends on them.
+    let _ = weights;
+    let values = PyTensor::from_python_value(input)?;
+    let edges;
+    let requested = match bins {
+        None => engine::ops::Bins::Count(10),
+        Some(value) => {
+            edges = parse_bins(value)?;
+            match &edges {
+                Some(tensor) => engine::ops::Bins::Edges(tensor.tensor()),
+                None => engine::ops::Bins::Count(bin_count(value)?),
+            }
+        }
+    };
+    let boundaries =
+        engine::ops::histogram_edges(values.tensor(), requested, range).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(boundaries))
+}
+
 /// The counts in each bin and the edges that defined them, as `(hist, edges)`. `bins` is a bin count or a one-dimensional tensor of edges. Values outside the outermost edges are dropped; the last bin is closed on the right.
 #[pyfunction]
 #[pyo3(signature = (input, bins=None, range=None, weights=None, density=false))]
@@ -1534,22 +1580,15 @@ pub fn histogram(
         None => None,
     };
     let edges;
-    // Ten bins is NumPy's default, and `bins` may equally be the edges
-    // themselves -- an integer means "this many", anything else is a sequence.
     let requested = match bins {
         None => engine::ops::Bins::Count(10),
-        Some(value) => match value.extract::<i64>() {
-            Ok(count) if count >= 0 => engine::ops::Bins::Count(count as usize),
-            Ok(_) => {
-                return Err(PyValueError::new_err(
-                    "histogram: the bin count cannot be negative",
-                ));
+        Some(value) => {
+            edges = parse_bins(value)?;
+            match &edges {
+                Some(tensor) => engine::ops::Bins::Edges(tensor.tensor()),
+                None => engine::ops::Bins::Count(bin_count(value)?),
             }
-            Err(_) => {
-                edges = PyTensor::from_python_value(value)?;
-                engine::ops::Bins::Edges(edges.tensor())
-            }
-        },
+        }
     };
     let (counts, boundaries) = engine::ops::histogram(
         values.tensor(),
@@ -2219,6 +2258,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(bucketize, parent)?)?;
     parent.add_function(wrap_pyfunction!(histogram, parent)?)?;
     parent.add_function(wrap_pyfunction!(histc, parent)?)?;
+    parent.add_function(wrap_pyfunction!(histogram_bin_edges, parent)?)?;
     parent.add_function(wrap_pyfunction!(pinv, parent)?)?;
     parent.add_function(wrap_pyfunction!(matrix_rank, parent)?)?;
     parent.add_function(wrap_pyfunction!(cond, parent)?)?;

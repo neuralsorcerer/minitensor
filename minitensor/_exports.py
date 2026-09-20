@@ -169,6 +169,7 @@ _FUNCTIONAL_FORWARDERS = (
     "searchsorted",
     "bucketize",
     "histogram",
+    "histogram_bin_edges",
     "histc",
     "pinv",
     "matrix_rank",

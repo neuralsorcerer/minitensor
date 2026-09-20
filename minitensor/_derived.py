@@ -851,23 +851,6 @@ def digitize(input: object, bins: object, right: bool = False) -> Tensor:
     ) - _F.searchsorted(flipped, values, not right).astype("int64")
 
 
-def histogram_bin_edges(
-    input: object,
-    bins: object = 10,
-    range: object = None,
-    weights: object | None = None,
-) -> Tensor:
-    """The edges `histogram` would use, without counting anything.
-
-    For choosing one set of edges and reusing it across several tensors, which
-    is the only way two histograms are comparable. `weights` is accepted and
-    ignored, as it is in NumPy: no edge rule here depends on them.
-    """
-
-    del weights
-    return _F.histogram(_atleast_tensor(input), bins, range, None, False)[1]
-
-
 def histogram2d(
     x: object,
     y: object,

@@ -2268,7 +2268,7 @@ cumsum, cumprod, cummax, cummin, logcumsumexp,
 
 # Ordering and search
 sort, argsort, topk, unique, unique_consecutive, searchsorted, bucketize,
-histogram, histc,
+histogram, histogram_bin_edges, histc,
 
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
