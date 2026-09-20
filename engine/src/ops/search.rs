@@ -29,7 +29,7 @@
 
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::par_map_indexed,
+    ops::map::{par_map_indexed, par_out_chunks},
     ops::util::pairwise_fold_vectors,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -170,16 +170,29 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
         let out = data
             .as_i64_slice_mut()
             .ok_or_else(|| MinitensorError::internal_error("searchsorted: output is not int64"))?;
+        // Every value's search is independent of every other's, which is what
+        // makes this parallel at all -- and it was not, which cost more than
+        // the search: a million values against a million-element sequence took
+        // 400 ms on one core while NumPy's `isin`, which is this search plus a
+        // sort, took 102 ms for the whole thing.
+        //
+        // One search is about `log2(width)` probes and, past the cache, each is
+        // a miss. A task wants a few thousand probes in it before the split
+        // pays, so the chunk is that budget divided by the depth of one search:
+        // a short sequence gets wide chunks because each search in it is cheap,
+        // a long one gets narrow chunks because each is not.
+        let batch = sequence.ndim() > 1;
+        let depth = (usize::BITS - width.leading_zeros()).max(1) as usize;
+        let chunk = ((1 << 12) / depth).max(1);
         with_pair!(ordered, queried, haystack, needles, {
-            for (index, needle) in needles.iter().enumerate() {
-                let row = if sequence.ndim() == 1 {
-                    0
-                } else {
-                    index / per_row.max(1)
-                };
-                let start = row * width;
-                out[index] = locate(&haystack[start..start + width], needle, right) as i64;
-            }
+            par_out_chunks(out, chunk, &|start, block| {
+                for (offset, slot) in block.iter_mut().enumerate() {
+                    let index = start + offset;
+                    let row = if batch { index / per_row.max(1) } else { 0 };
+                    let begin = row * width;
+                    *slot = locate(&haystack[begin..begin + width], &needles[index], right) as i64;
+                }
+            });
         });
     }
 
