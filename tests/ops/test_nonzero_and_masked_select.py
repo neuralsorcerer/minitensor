@@ -290,3 +290,62 @@ def test_selecting_by_the_indices_and_by_the_mask_agree():
     by_mask = t.masked_select(mt.Tensor(values != 0, dtype="bool")).numpy()
     by_index = values[tuple(t.nonzero().numpy().T)]
     np.testing.assert_array_equal(by_mask, by_index)
+
+
+# Below `ops::map::COMPACT_MIN_BAND` a compaction runs on one thread, and every
+# test above this line is below it. These cross it, so the counted-then-filled
+# path is the one being checked: the bands each write a disjoint run of the
+# output, and where a band's run starts is the number of elements the bands
+# before it kept. Get that arithmetic wrong and the answer is not merely slower,
+# it is a permutation of itself with holes in it.
+_PAST_ONE_BAND = 1 << 14
+
+
+@pytest.mark.parametrize(
+    "length", [_PAST_ONE_BAND - 1, _PAST_ONE_BAND, _PAST_ONE_BAND + 1, 200_003]
+)
+@pytest.mark.parametrize("density", [0.0, 0.003, 0.5, 1.0])
+def test_a_compaction_spanning_several_bands_answers_as_one_would(length, density):
+    rng = np.random.default_rng(length)
+    values = rng.standard_normal(length)
+    mask = rng.random(length) < density
+    tensor, flags = mt.from_numpy(values), mt.from_numpy(mask)
+
+    np.testing.assert_array_equal(mt.masked_select(tensor, flags).numpy(), values[mask])
+    np.testing.assert_array_equal(tensor[flags].numpy(), values[mask])
+    np.testing.assert_array_equal(
+        mt.flatnonzero(flags).numpy().reshape(-1), np.flatnonzero(mask)
+    )
+    np.testing.assert_array_equal(
+        mt.compress(flags, tensor).numpy(), np.compress(mask, values)
+    )
+
+
+@pytest.mark.parametrize("trailing", [1, 3, 8])
+def test_a_wide_selection_spanning_several_bands_keeps_its_rows_together(trailing):
+    """A mask over the leading axis selects whole rows, and the rows have to
+    arrive whole: the band that copies one is chosen by where the row is, and
+    the place it writes by how many rows came before it.
+
+    Through the subscript rather than through `masked_select`, which is the
+    same kernel under a stricter contract -- it wants a mask shaped like the
+    whole tensor, and the leading-dimensions rule is the subscript's.
+    """
+
+    rows = _PAST_ONE_BAND + 37
+    rng = np.random.default_rng(trailing)
+    values = rng.standard_normal((rows, trailing))
+    mask = rng.random(rows) < 0.3
+    got = mt.from_numpy(values)[mt.from_numpy(mask)]
+    np.testing.assert_array_equal(got.numpy(), values[mask])
+
+
+def test_several_bands_of_a_matrix_report_the_multi_index_of_each_row():
+    """`nonzero` unravels as it fills, one band at a time, so a position found
+    in the last band has to come back with the coordinates of *its* row rather
+    than of the band's first."""
+
+    rng = np.random.default_rng(7)
+    values = (rng.random((701, 53)) < 0.02).astype(np.float64)
+    got = mt.nonzero(mt.from_numpy(values)).numpy()
+    np.testing.assert_array_equal(got, np.argwhere(values))

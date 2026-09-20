@@ -17,6 +17,8 @@ right ones rather than an accident of where the NaN went.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -300,3 +302,42 @@ def test_nanstd_is_the_square_root_of_nanvar():
     np.testing.assert_allclose(
         _t(rows).nanstd(1).numpy(), np.sqrt(_t(rows).nanvar(1).numpy()), rtol=1e-15
     )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "values",
+    [
+        [-np.inf, -np.inf],
+        [np.inf, np.inf],
+        [-np.inf, np.nan, -np.inf],
+        [np.inf, np.nan, np.inf],
+        [np.nan, np.nan, np.nan],
+        [np.nan] * 40_000,
+        [-np.inf] + [np.nan] * 40_000,
+    ],
+)
+def test_an_infinite_extremum_is_not_mistaken_for_the_seed(values, dtype):
+    """The scan starts at `-inf` for a maximum, which is a value the data can
+    hold. What tells the two apart is a separate flag saying whether anything
+    that was not a NaN was seen at all -- so an all-NaN slice answers NaN while
+    a slice of nothing but `-inf` answers `-inf`, and neither borrows the
+    other's answer.
+
+    Long enough in two cases to be folded by several threads, because the seed
+    is per chunk: a chunk that saw only NaN has to hand back "nothing here"
+    rather than its seed, or the merge would take the seed for a real value.
+    """
+
+    data = np.array(values, dtype=dtype)
+    with warnings.catch_warnings():
+        # NumPy warns on an all-NaN slice and still answers NaN, which is the
+        # answer being checked.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for ours, theirs in ((mt.nanmax, np.nanmax), (mt.nanmin, np.nanmin)):
+            want = theirs(data)
+            got = ours(_t(data)).numpy()
+            if np.isnan(want):
+                assert np.isnan(got), (ours.__name__, values[:3], dtype)
+            else:
+                assert got == want, (ours.__name__, values[:3], dtype)

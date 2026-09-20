@@ -232,3 +232,40 @@ def test_insert_follows_numpy_and_casts_what_it_inserts():
     got = mt.insert(integers, 1, mt.from_numpy(np.array([2.5]))).numpy()
     np.testing.assert_array_equal(got, np.insert(np.array([1, 2, 3]), 1, 2.5))
     assert str(got.dtype) == "int64"
+
+
+def test_a_long_list_of_positions_is_resolved_as_a_short_one_is():
+    """`delete` and `partition` take as many positions as the axis has, and
+    both used to walk them one at a time in Python. They are NumPy now, with a
+    fast path that skips the wrap when nothing is negative -- so both sides of
+    that branch are checked, and against enough positions that the difference
+    is the point.
+
+    `partition` also reduces its positions to the distinct ones before handing
+    them over, which the kernel would do anyway; repeating a position and
+    naming one from each end are what would notice if that were not equivalent.
+    """
+
+    rng = np.random.default_rng(9)
+    values = rng.standard_normal(120_007)
+    drop = rng.integers(0, values.size, size=60_011)
+    tensor = mt.from_numpy(values)
+
+    np.testing.assert_array_equal(
+        mt.delete(tensor, mt.from_numpy(drop)).numpy(), np.delete(values, drop)
+    )
+    wrapped = drop - values.size
+    np.testing.assert_array_equal(
+        mt.delete(tensor, mt.from_numpy(wrapped)).numpy(), np.delete(values, wrapped)
+    )
+    with pytest.raises(IndexError):
+        mt.delete(tensor, mt.from_numpy(np.append(drop, values.size)))
+
+    kth = np.array([0, 5, 5, -1, -2, values.size // 2])
+    partitioned = mt.partition(tensor, mt.from_numpy(kth)).numpy()
+    expected = np.partition(values, kth)
+    for position in kth:
+        assert partitioned[position] == expected[position]
+    ordered = mt.argpartition(tensor, mt.from_numpy(kth)).numpy()
+    for position in kth:
+        assert values[ordered[position]] == expected[position]

@@ -749,6 +749,41 @@ def test_index_select_rejects_bad_index_tensors():
         tx.index_select(0, [5])
 
 
+def test_a_long_index_selects_and_reports_out_of_range_the_same_way():
+    """The positions are checked across the pool now, not in a loop, and the
+    selection reads them straight out of the index tensor's buffer instead of
+    narrowing a copy of them. Both only take the parallel path once there are
+    enough positions to be worth splitting, so every other test of this op --
+    all of them a handful of indices -- checks the other one.
+
+    `take` also asks whether anything is negative before rewriting the index to
+    wrap it, so both answers to that question are checked here.
+    """
+
+    rng = np.random.default_rng(5)
+    values = rng.standard_normal(300_001)
+    positions = rng.integers(0, values.size, size=200_003)
+    tensor = mt.from_numpy(values)
+    index = mt.from_numpy(positions)
+
+    np.testing.assert_array_equal(
+        mt.index_select(tensor, 0, index).numpy(), values[positions]
+    )
+    np.testing.assert_array_equal(mt.take(tensor, index).numpy(), values[positions])
+
+    wrapped = positions - values.size
+    np.testing.assert_array_equal(
+        mt.take(tensor, mt.from_numpy(wrapped)).numpy(), values[wrapped]
+    )
+
+    # One bad position among two hundred thousand good ones, at the end where a
+    # scan that stopped early would not reach it.
+    past = positions.copy()
+    past[-1] = values.size
+    with pytest.raises(IndexError):
+        mt.index_select(tensor, 0, mt.from_numpy(past))
+
+
 def test_expand_adds_leading_dimensions():
     x = np.arange(4, dtype=np.float32)
     tx = mt.Tensor(x)

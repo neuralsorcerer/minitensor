@@ -128,6 +128,44 @@ def test_a_three_dimensional_batch():
             )
 
 
+def test_a_batch_wider_than_one_chunk_still_searches_its_own_row():
+    """The searches are split across the pool in chunks of the output, and a
+    chunk knows which row it is in only from where it starts. Every case above
+    fits in one chunk, so this is the one that checks that arithmetic: with 512
+    probes per row the rows are cut several times over, and a chunk that
+    misread its row would search the wrong sequence and still answer something
+    plausible.
+
+    The chunk width comes from the sequence length, so the sequence is long
+    enough here to make the chunks narrow.
+    """
+
+    rng = np.random.default_rng(11)
+    sequences = np.sort(rng.standard_normal((5, 4096)), axis=-1)
+    probes = rng.standard_normal((5, 512))
+    for right in (False, True):
+        got = mt.searchsorted(_t(sequences), _t(probes), right).numpy()
+        expected = np.stack(
+            [
+                np.searchsorted(
+                    sequences[row], probes[row], side="right" if right else "left"
+                )
+                for row in range(5)
+            ]
+        )
+        assert np.array_equal(got, expected)
+
+
+def test_a_long_flat_search_agrees_with_the_short_one():
+    """One sequence and many values, past the point where the work is split."""
+
+    rng = np.random.default_rng(12)
+    sequence = np.sort(rng.standard_normal(100_003))
+    probes = rng.standard_normal(200_003)
+    got = mt.searchsorted(_t(sequence), _t(probes), False).numpy()
+    assert np.array_equal(got, np.searchsorted(sequence, probes))
+
+
 def test_an_empty_sequence_puts_everything_at_zero():
     got = mt.searchsorted(_t(np.zeros(0)), _t(PROBES), False).numpy()
     assert np.array_equal(got, np.zeros(6, dtype=np.int64))
