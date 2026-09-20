@@ -92,6 +92,32 @@ def test_dist_is_the_norm_of_the_difference(p):
     )
 
 
+def test_every_distance_takes_integers_by_widening_them():
+    """A distance between integer points is a real number, and `_require_float`
+    says these widen rather than refuse. `dist` was the one that did not: it
+    handed `norm` an integer difference and came back with "norm requires
+    floating point tensors", while `cdist` -- the same distance, taken
+    pairwise -- answered."""
+    points = mt.from_numpy(np.array([[1, 2], [3, 4]]))
+    origin = mt.from_numpy(np.zeros((2, 2), dtype=np.int64))
+
+    np.testing.assert_allclose(
+        mt.dist(points, origin).item(), np.linalg.norm(points.numpy().astype(float))
+    )
+    for call in (
+        lambda: mt.dist(points, origin),
+        lambda: mt.cdist(points, origin),
+        lambda: mt.pairwise_distance(points, origin),
+        lambda: mt.pdist(points),
+    ):
+        assert str(call().dtype) == "float64"
+
+    # `bool` has no width to widen to, and is refused by all of them.
+    flags = mt.Tensor([[True, False]], dtype="bool")
+    with pytest.raises(ValueError, match="floating point"):
+        mt.dist(flags, flags)
+
+
 @pytest.mark.parametrize("p", [1.0, 2.0, 3.0])
 def test_cdist_matches_the_pairwise_definition(p):
     left, right = RNG.standard_normal((4, 3)), RNG.standard_normal((5, 3))

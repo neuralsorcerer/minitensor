@@ -106,10 +106,16 @@ def kron(input: object, other: object) -> Tensor:
 
 
 def dist(input: object, other: object, p: float = 2.0) -> Tensor:
-    """The `p`-norm of the difference: how far apart two tensors are."""
+    """The `p`-norm of the difference: how far apart two tensors are.
 
-    a = _atleast_tensor(input)
-    b = _atleast_tensor(other)
+    Integer inputs widen, as they do for every other distance here. This was
+    the one that did not: it reached `norm` with an integer difference and
+    came back with "norm requires floating point tensors", while `cdist` --
+    the same distance, taken pairwise -- answered.
+    """
+
+    a = _require_float(_atleast_tensor(input), "dist")
+    b = _require_float(_atleast_tensor(other), "dist")
     return _F.norm(a - b, p)
 
 
