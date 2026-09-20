@@ -6,6 +6,31 @@ as the source of truth. It is intentionally exhaustive and meant to complement
 existing guides such as `custom_operations.md`, `plugin_system.md`, and
 `performance.md`.
 
+## 0) Where this differs from PyTorch and NumPy
+
+Most of this surface follows PyTorch's naming and semantics, so the places it
+does not are the ones worth knowing before you port code. Each is explained in
+full where the function is documented; this table is the index, because meeting
+them one at a time at runtime is how they cost you an afternoon. The ones that
+fail loudly are the cheap ones — it is the two silent rows that matter.
+
+| | MiniTensor | What you may expect | Detail |
+| --- | --- | --- | --- |
+| `zeros_like` and the other `*_like` forms | Inherit the source's `requires_grad`, so `zeros_like(parameter)` is trainable | `torch.*_like` defaults the flag to `False` | [§2](#2-tensor-creation-api) — **silent**; pass `requires_grad=False` to opt out |
+| A tie in `max(dim)` / `min(dim)` | The gradient is divided evenly among the tied elements, although the returned index names only the first | `torch.max(dim)` sends the whole gradient to the one index it returns | [§4](#4-tensor-instance-methods) — **silent** |
+| `kl_div(input, target)` | Both arguments are probabilities | `torch.nn.functional.kl_div` takes log-probabilities as `input` | [§5](#5-functional-api-minitensorfunctional) — a log-probability input gives `inf`, so this one announces itself |
+| `median` with an even count | The lower of the two middle values, with an index naming it | `numpy.median` averages them; `torch.median` also takes the lower | [§4](#4-tensor-instance-methods) — use `quantile(0.5)` for the interpolated value |
+| `chunk` with an uneven split | Refused | `torch.chunk` shortens the last piece | [§4](#4-tensor-instance-methods) |
+| `resize(input, shape)` | Free function; *repeats* the elements to fill | `torch.Tensor.resize_` is in-place and zero-fills; this follows `numpy.resize` | [§1](#1-top-level-module-minitensor) |
+| `xavier_uniform_like` and the other initialisers | Factories returning a new tensor | `torch.nn.init.xavier_uniform_` mutates in place | [§6](#6-neural-network-module-minitensornn) |
+| `.grad` on an interior tensor | Populated after `backward()` | PyTorch gives `None` unless you call `retain_grad()` | [What `backward()` retains](#what-backward-retains) |
+| Negative padding in `functional.pad` | Refused; pad amounts must be non-negative | — | Crop with slicing instead |
+
+Every row here was checked against a running build rather than read off the
+source, and the two marked **silent** are the ones that change results without
+raising: a `*_like` tensor that quietly joins the graph, and a tie whose
+gradient is shared rather than given to one winner.
+
 ## 1) Top-level module (`minitensor`)
 
 ### Core exports
@@ -1035,7 +1060,13 @@ reduction works on integers.
 
 All of them are differentiable. `"amax"`/`"amin"` route each destination's
 gradient to the contributor that won it, with a tie going to the first — the
-rule `max`, `mode` and `cummax` follow here, where PyTorch spreads a tie evenly.
+rule `cummax` and `cummin` follow too. The reductions `max`, `min`, `amax` and
+`amin` do *not*: they divide a tie's gradient evenly among the elements that
+tied, which is the mean-subgradient convention and what PyTorch's `amax` does.
+`mode` is not differentiable at all. (`max(dim)` and `min(dim)` also return an
+index, and that index names only the first of the tied elements even though the
+gradient reaches all of them — PyTorch's `max(dim)` routes the gradient to that
+one index instead.)
 `"mean"` divides by the same count the forward divided by. `"prod"` needs the
 product of every contribution *except* each one, and computes it by counting
 zeros rather than dividing the total: `total / factor` is the obvious form and
