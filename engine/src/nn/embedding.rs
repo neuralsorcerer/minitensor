@@ -110,7 +110,7 @@ impl Embedding {
     }
 
     /// Read the input index tensor into host indices, validating the range.
-    fn host_indices(&self, input: &Tensor) -> Result<Vec<usize>> {
+    fn host_indices(&self, input: &Tensor) -> Result<Vec<i64>> {
         let input = input.contiguous()?;
         let raw: Vec<i64> = match input.dtype() {
             DataType::Int32 => input
@@ -136,19 +136,10 @@ impl Embedding {
             }
         };
 
-        raw.into_iter()
-            .map(|idx| {
-                if idx < 0 || idx as usize >= self.num_embeddings {
-                    Err(MinitensorError::index_error(
-                        idx as isize,
-                        0,
-                        self.num_embeddings,
-                    ))
-                } else {
-                    Ok(idx as usize)
-                }
-            })
-            .collect()
+        // Left as they came. `index_select` checks them against the same axis
+        // and raises the same error, in one parallel pass rather than a
+        // narrowing walk over every token in the batch.
+        Ok(raw)
     }
 }
 
@@ -181,7 +172,7 @@ impl Layer for Embedding {
         if let Some(pad) = self.padding_idx {
             let mask: Vec<f64> = indices
                 .iter()
-                .map(|&idx| if idx == pad { 0.0 } else { 1.0 })
+                .map(|&idx| if idx == pad as i64 { 0.0 } else { 1.0 })
                 .collect();
             let mut mask_dims = input.shape().dims().to_vec();
             mask_dims.push(1);

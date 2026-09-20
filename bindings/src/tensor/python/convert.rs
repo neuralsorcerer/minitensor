@@ -741,7 +741,7 @@ fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
                 "index {v} is out of bounds for dimension 0 with size {dim0}"
             )));
         }
-        idx.push(r as usize);
+        idx.push(r);
     }
     engine::ops::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
 }
@@ -838,7 +838,7 @@ pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i
 }
 
 /// Wrap negative positions and bounds-check against an axis of `dim_size`.
-fn resolve_index_values(values: &[i64], axis: usize, dim_size: usize) -> PyResult<Vec<usize>> {
+fn resolve_index_values(values: &[i64], axis: usize, dim_size: usize) -> PyResult<Vec<i64>> {
     let extent = dim_size as i64;
     let mut resolved = Vec::with_capacity(values.len());
     for &v in values {
@@ -848,7 +848,7 @@ fn resolve_index_values(values: &[i64], axis: usize, dim_size: usize) -> PyResul
                 "index {v} is out of bounds for dimension {axis} with size {dim_size}"
             )));
         }
-        resolved.push(wrapped as usize);
+        resolved.push(wrapped);
     }
     Ok(resolved)
 }
@@ -992,7 +992,7 @@ struct AdvancedIndex {
     /// Where that axis sits in the shape the subscript selects.
     output_axis: usize,
     /// The positions along it, resolved and in the order written.
-    selected: Vec<usize>,
+    selected: Vec<i64>,
     /// The index's own shape, which occupies `index_shape.len()` axes of the
     /// selection starting at `output_axis`.
     index_shape: Vec<usize>,
@@ -1080,10 +1080,10 @@ fn locate_advanced_index(
                     flags.len()
                 )));
             }
-            let taken: Vec<usize> = flags
+            let taken: Vec<i64> = flags
                 .iter()
                 .enumerate()
-                .filter_map(|(i, &on)| on.then_some(i))
+                .filter_map(|(i, &on)| on.then_some(i as i64))
                 .collect();
             let count = taken.len();
             (taken, vec![count])
@@ -1191,7 +1191,7 @@ pub(crate) struct AxisAssign {
     /// Where that one axis sits in `flat`.
     flat_axis: usize,
     /// The positions to write, in the order they were written.
-    selected: Vec<usize>,
+    selected: Vec<i64>,
 }
 
 /// Plan `t[..., idx, ...] = value` if that is what the subscript is.
@@ -1283,7 +1283,7 @@ pub(crate) fn apply_single_array_assign(
         // so every position gets all of it -- `t[:, idx] = row`, and the scalar
         // case with it. Nothing has to be materialised for that.
         for &position in &plan.selected {
-            dest[plan.input_axis] = TensorIndex::Index(position);
+            dest[plan.input_axis] = TensorIndex::Index(position as usize);
             target.index_assign(&dest, &value).map_err(_convert_error)?;
         }
         return Ok(());
@@ -1311,7 +1311,7 @@ pub(crate) fn apply_single_array_assign(
     for (step, &position) in plan.selected.iter().enumerate() {
         share[plan.flat_axis] = TensorIndex::Index(step);
         let part = broadcast.index(&share).map_err(_convert_error)?;
-        dest[plan.input_axis] = TensorIndex::Index(position);
+        dest[plan.input_axis] = TensorIndex::Index(position as usize);
         target.index_assign(&dest, &part).map_err(_convert_error)?;
     }
     Ok(())

@@ -729,13 +729,24 @@ def test_index_select_accepts_tensor_indices():
 
 
 def test_index_select_rejects_bad_index_tensors():
+    """A position out of range is an `IndexError`, whichever end it is out at.
+
+    `index_select` takes positions from 0 up, so -1 is out of range rather than
+    the last element -- `take` is the name that counts from the end. Both ends
+    now say so the same way: -1 used to be a `ValueError` raised before the
+    kernel saw it while 5 was an `IndexError` raised by the kernel, which is
+    two answers to one question.
+    """
+
     tx = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3))
     with pytest.raises(TypeError):
         tx.index_select(0, mt.Tensor([0.5, 1.0]))
     with pytest.raises(ValueError):
         tx.index_select(0, mt.Tensor([[0], [1]], dtype="int64"))
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         tx.index_select(0, [-1])
+    with pytest.raises(IndexError):
+        tx.index_select(0, [5])
 
 
 def test_expand_adds_leading_dimensions():

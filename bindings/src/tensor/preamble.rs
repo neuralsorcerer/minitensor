@@ -102,52 +102,46 @@ fn extract_wrapped_pytensor(value: &Bound<PyAny>) -> Option<PyTensor> {
     None
 }
 
-/// Extract integer indices from either an integer tensor or any Python
+/// Run `body` on integer indices taken from an integer tensor or any Python
 /// sequence of ints (list, tuple, numpy array, ...).
-fn extract_index_vector(indices: &Bound<PyAny>) -> PyResult<Vec<usize>> {
-    if let Some(py_tensor) = extract_wrapped_pytensor(indices) {
-        let tensor = py_tensor.inner.contiguous().map_err(_convert_error)?;
-        if tensor.ndim() > 1 {
-            return Err(PyValueError::new_err(
-                "index tensor must be 0-D or 1-D".to_string(),
-            ));
-        }
-        let values: Vec<i64> = match tensor.dtype() {
-            DataType::Int32 => tensor
+///
+/// A callback rather than a returned `Vec` so that the common case costs
+/// nothing: an `int64` index tensor already holds exactly what the kernel
+/// wants, and its buffer is handed over where it lies. Copying it first is not
+/// free at the sizes this is called with -- `x[perm]` over a million positions
+/// spent more time narrowing the index than gathering the data.
+fn with_index_vector<R>(
+    indices: &Bound<PyAny>,
+    body: impl FnOnce(&[i64]) -> PyResult<R>,
+) -> PyResult<R> {
+    let Some(py_tensor) = extract_wrapped_pytensor(indices) else {
+        return body(&indices.extract::<Vec<i64>>()?);
+    };
+    let tensor = py_tensor.inner.contiguous().map_err(_convert_error)?;
+    if tensor.ndim() > 1 {
+        return Err(PyValueError::new_err(
+            "index tensor must be 0-D or 1-D".to_string(),
+        ));
+    }
+    match tensor.dtype() {
+        DataType::Int32 => body(
+            &tensor
                 .data()
                 .as_i32_slice()
                 .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor data"))?
                 .iter()
                 .map(|&v| v as i64)
-                .collect(),
-            DataType::Int64 => tensor
+                .collect::<Vec<i64>>(),
+        ),
+        DataType::Int64 => body(
+            tensor
                 .data()
                 .as_i64_slice()
-                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor data"))?
-                .to_vec(),
-            dtype => {
-                return Err(PyTypeError::new_err(format!(
-                    "index tensor must have an integer dtype, got {dtype:?}",
-                )));
-            }
-        };
-        values
-            .into_iter()
-            .map(|v| {
-                usize::try_from(v).map_err(|_| {
-                    PyValueError::new_err(format!("index {v} is negative; indices must be >= 0"))
-                })
-            })
-            .collect()
-    } else {
-        let seq = indices.extract::<Vec<isize>>()?;
-        seq.into_iter()
-            .map(|v| {
-                usize::try_from(v).map_err(|_| {
-                    PyValueError::new_err(format!("index {v} is negative; indices must be >= 0"))
-                })
-            })
-            .collect()
+                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor data"))?,
+        ),
+        dtype => Err(PyTypeError::new_err(format!(
+            "index tensor must have an integer dtype, got {dtype:?}",
+        ))),
     }
 }
 

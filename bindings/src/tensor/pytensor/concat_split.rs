@@ -66,10 +66,11 @@ impl PyTensor {
     /// Select elements along a dimension using integer indices
     /// (a Python sequence or an integer tensor)
     pub fn index_select(&self, dim: isize, indices: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let idx_vec = extract_index_vector(indices)?;
-        let result = engine::ops::shape_ops::index_select(&self.inner, dim, &idx_vec)
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
+        with_index_vector(indices, |idx| {
+            engine::ops::shape_ops::index_select(&self.inner, dim, idx)
+                .map(PyTensor::from_tensor)
+                .map_err(_convert_error)
+        })
     }
 
     /// Gather elements along a dimension using an index tensor

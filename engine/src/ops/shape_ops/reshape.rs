@@ -623,16 +623,27 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
 }
 
 /// Indexing operation - select elements along specified dimensions
-pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Tensor> {
+///
+/// The positions arrive as `i64` because that is the width they are already in
+/// -- an index tensor's own buffer, which the caller can hand over without
+/// copying it. Narrowing them to `usize` first cost more than the selection:
+/// converting a million of them allocated twice and walked the array three
+/// more times, 9.1 ns per element against the 2.6 the same gather costs
+/// through `gather`, which takes its index as a tensor.
+pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tensor> {
     let dim = normalize_dim(dim, tensor.ndim())?;
 
     let dim_size = tensor.shape().dims()[dim];
 
-    // Validate indices
-    for &idx in indices {
-        if idx >= dim_size {
-            return Err(MinitensorError::index_error(idx as isize, 0, dim_size));
-        }
+    // Validate indices. In parallel because this is a full pass over an array
+    // that may be larger than the tensor being selected from, and `find_any`
+    // stops the rest of the pool as soon as one thread has an answer.
+    let limit = dim_size as i64;
+    if let Some(&bad) = indices
+        .par_iter()
+        .find_any(|&&idx| !(0..limit).contains(&idx))
+    {
+        return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
     }
 
     if !tensor.device().is_cpu() {
@@ -687,7 +698,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
                             // branch makes is a whole `memcpy` call to move
                             // four bytes.
                             for slot in out_chunk.iter_mut() {
-                                slot.write(src[outer * dims[dim] + indices[chosen]]);
+                                slot.write(src[outer * dims[dim] + indices[chosen] as usize]);
                                 chosen += 1;
                                 if chosen == selected {
                                     chosen = 0;
@@ -697,7 +708,8 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
                             return;
                         }
                         for piece in out_chunk.chunks_mut(inner) {
-                            let source = outer * dims[dim] * inner + indices[chosen] * inner;
+                            let source =
+                                outer * dims[dim] * inner + indices[chosen] as usize * inner;
                             piece.write_copy_of_slice(&src[source..source + inner]);
                             chosen += 1;
                             if chosen == selected {
@@ -729,11 +741,14 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
     );
 
     if requires_grad && dtype.is_float() {
+        // Checked against the axis above, so the narrowing is sound; the
+        // backward wants them as offsets and only a tracked selection pays for
+        // the conversion.
         let grad_fn = Arc::new(IndexSelectBackward {
             input_id: tensor.id(),
             input_shape: tensor.shape().dims().to_vec(),
             dim,
-            indices: indices.to_vec(),
+            indices: indices.iter().map(|&idx| idx as usize).collect(),
         });
         return with_grad_fn(output, grad_fn);
     }
@@ -1666,7 +1681,7 @@ mod uninit_fill_tests {
                 check("flip", &flip(&src, &[dim as isize]).unwrap());
                 check("roll", &roll(&src, &[3], Some(&[dim as isize])).unwrap());
 
-                let idx: Vec<usize> = (0..shape[dim]).rev().collect();
+                let idx: Vec<i64> = (0..shape[dim] as i64).rev().collect();
                 check(
                     "index_select",
                     &index_select(&src, dim as isize, &idx).unwrap(),

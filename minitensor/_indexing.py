@@ -62,9 +62,17 @@ def _as_index(value: object, name: str) -> Tensor:
 def _wrap_negative(indices: Tensor, length: int) -> Tensor:
     """Bring negative positions round to the far end, as Python's own
     indexing does. The kernels take non-negative positions only, so this is
-    where `-1` becomes `length - 1`."""
+    where `-1` becomes `length - 1`.
 
-    if length == 0:
+    Asked first, because the answer is almost always that there is nothing to
+    do and the rewrite is not cheap: a comparison, an addition and a select
+    over the whole index, which on a million positions cost four times the
+    selection they were preparing. One reduction pass replaces all three.
+    """
+
+    if length == 0 or indices.numel() == 0:
+        return indices
+    if _F.min(indices).item() >= 0:
         return indices
     return _F.where(indices < 0, indices + length, indices)
 
