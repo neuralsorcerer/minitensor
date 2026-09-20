@@ -305,3 +305,53 @@ def test_two_float32_sides_stay_in_float32(op):
     signal = mt.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     kernel = mt.from_numpy(np.array([0.5, 0.25], dtype=np.float32))
     assert str(op(signal, kernel, "full").dtype) == "float32"
+
+
+@pytest.mark.parametrize(
+    "op,reference", [(mt.convolve, np.convolve), (mt.correlate, np.correlate)]
+)
+def test_a_long_signal_does_not_lower_the_whole_row(op, reference):
+    """The sliding product is a `conv1d`, which lowers its input to a matrix
+    of one column per output position. That matrix was blocked by output
+    *rows* -- which bounds it only while one row fits, and a 1-D signal is a
+    single row. So the block was the whole thing: `k_dim * output_width`, or
+    `n * (2n - 1)` here.
+
+    At the size below that is 268MB for an input of 32KB. At a million samples
+    a side it is 17.6TB, and the allocation failure aborts the process rather
+    than raising -- no exception, no traceback, the interpreter gone. Blocking
+    by position bounds it at 8MB whatever the row is.
+
+    The result is what matters here, and it is checked to the last few digits
+    against NumPy; the size is chosen to make the old lowering large enough to
+    be the point while the test stays a unit test.
+    """
+    rng = np.random.default_rng(11)
+    n = 4096
+    left, right = rng.standard_normal(n), rng.standard_normal(n)
+
+    got = op(mt.from_numpy(left.copy()), mt.from_numpy(right.copy()), "full").numpy()
+    want = reference(left, right, "full")
+
+    assert got.shape == want.shape
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_the_blocked_lowering_agrees_with_itself_across_the_boundary():
+    """A block that starts part way along an output row is the path a wide
+    signal takes; a block of whole rows is the path everything else takes.
+    Both compute the same convolution, so a signal just either side of where
+    the two swap over has to give the same answer as NumPy -- and as the
+    2-D form of the same data, which reaches `conv2d` with a row that fits.
+    """
+    rng = np.random.default_rng(12)
+    for n in (64, 512, 2048):
+        signal, taps = rng.standard_normal(n), rng.standard_normal(9)
+        np.testing.assert_allclose(
+            mt.convolve(
+                mt.from_numpy(signal.copy()), mt.from_numpy(taps.copy())
+            ).numpy(),
+            np.convolve(signal, taps),
+            rtol=1e-11,
+            atol=1e-11,
+        )

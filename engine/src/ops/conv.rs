@@ -1081,20 +1081,35 @@ fn conv2d_forward<T: ConvScalar>(
         // GEMM near the column count it runs fastest at (below about a thousand
         // columns its efficiency falls off a cliff; above about eight thousand
         // it starts paying for memory again).
-        let per_row = (k_dim * output_width).max(1);
-        let rows_total = batch_size * output_height;
-        let rows_per_block = (COL_BLOCK_BYTES / (per_row * std::mem::size_of::<T>()).max(1))
-            .clamp(1, rows_total.max(1));
-        let block_n = rows_per_block * output_width;
+        // The block is a run of output *positions*, not of output rows. Rows
+        // bound the scratch only while one row fits in it: a single row costs
+        // `k_dim * output_width`, so a 1-D convolution -- one row, a million
+        // columns -- asked for that whole product however small the budget
+        // was. With a million-tap kernel that is 17.6TB, and the allocation
+        // failure aborts the process rather than raising. A 64-tap filter over
+        // a million samples is the same shape at a size that works, and it
+        // lowered 256MB of scratch for an input of 4.
+        let per_column = (k_dim * std::mem::size_of::<T>()).max(1);
+        let positions_total = batch_size * ohw;
+        let budget = (COL_BLOCK_BYTES / per_column).clamp(1, positions_total.max(1));
+        // Whole rows whenever one fits, which is every shape that worked
+        // before this: each copy then starts on a row boundary, as it did when
+        // the block was counted in rows. Only a row too wide for the budget
+        // gets a block that starts or ends part way along one.
+        let row_aligned = output_width > 0 && budget >= output_width;
+        let block_n = if row_aligned {
+            (budget / output_width) * output_width
+        } else {
+            budget
+        };
 
         let mut cols = vec![T::default(); k_dim * block_n];
         let mut gemm_out = vec![T::default(); out_channels * block_n];
 
-        let mut first_row = 0;
-        while first_row < rows_total {
-            let last_row = (first_row + rows_per_block).min(rows_total);
-            let rows = last_row - first_row;
-            let width = rows * output_width;
+        let mut first = 0;
+        while first < positions_total {
+            let last = (first + block_n).min(positions_total);
+            let width = last - first;
 
             // Build the block row by row (one row per kernel-input index `k`),
             // so each row is written contiguously.
@@ -1128,27 +1143,67 @@ fn conv2d_forward<T: ConvScalar>(
                 if oh_lo >= oh_hi || ow_lo >= ow_hi {
                     return;
                 }
-                let span = ow_hi - ow_lo;
-                for position in first_row..last_row {
-                    let n = position / output_height;
-                    let oh = position % output_height;
-                    if oh < oh_lo || oh >= oh_hi {
-                        continue;
-                    }
+                // Dilation moves where a run starts, not how it is spaced:
+                // consecutive output columns are still consecutive input
+                // columns when the stride is 1, so the contiguous copy
+                // survives in both walks below.
+                let mut copy = |n: usize, oh: usize, lo: usize, hi: usize, dst: usize| {
+                    let span = hi - lo;
                     let ih = oh * stride.0 + ky_off - padding.0;
                     let src = ((n * in_channels + ic) * input_height + ih) * input_width;
-                    let dst = (position - first_row) * output_width + ow_lo;
-                    // Dilation moves where the run starts, not how it is
-                    // spaced: consecutive output columns are still consecutive
-                    // input columns when the stride is 1, so the contiguous
-                    // copy survives.
                     if stride.1 == 1 {
-                        let s = src + ow_lo + kx_off - padding.1;
+                        let s = src + lo + kx_off - padding.1;
                         row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
                     } else {
                         for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
-                            let iw = (ow_lo + i) * stride.1 + kx_off - padding.1;
+                            let iw = (lo + i) * stride.1 + kx_off - padding.1;
                             *slot = input_data[src + iw];
+                        }
+                    }
+                };
+
+                if row_aligned {
+                    // Whole rows, which is every shape one row fits in. The
+                    // in-bounds column range is then the same for all of them
+                    // and each row lands at a fixed offset, so neither is
+                    // recomputed -- this is the walk the row-blocked version
+                    // did, kept because it is the common one.
+                    for position in (first..last).step_by(output_width) {
+                        let row_index = position / output_width;
+                        let oh = row_index % output_height;
+                        if oh < oh_lo || oh >= oh_hi {
+                            continue;
+                        }
+                        let n = row_index / output_height;
+                        copy(n, oh, ow_lo, ow_hi, (position - first) + ow_lo);
+                    }
+                } else {
+                    // A row wider than the whole budget, so a block starts and
+                    // ends part way along one. The position is carried forward
+                    // rather than recovered from the counter: three divisions
+                    // for the block instead of two for every row.
+                    let mut position = first;
+                    let mut n = first / ohw;
+                    let mut oh = (first % ohw) / output_width;
+                    let mut ow = (first % ohw) % output_width;
+                    while position < last {
+                        let take = (output_width - ow).min(last - position);
+                        if oh >= oh_lo && oh < oh_hi {
+                            let lo = ow.max(ow_lo);
+                            let hi = (ow + take).min(ow_hi);
+                            if lo < hi {
+                                copy(n, oh, lo, hi, (position - first) + (lo - ow));
+                            }
+                        }
+                        position += take;
+                        ow += take;
+                        if ow == output_width {
+                            ow = 0;
+                            oh += 1;
+                            if oh == output_height {
+                                oh = 0;
+                                n += 1;
+                            }
                         }
                     }
                 }
@@ -1176,22 +1231,21 @@ fn conv2d_forward<T: ConvScalar>(
             }
 
             // Scatter [C_out, width] into [N, C_out, oh, ow], adding bias. A
-            // block is a run of output rows, so within one image each channel
-            // takes a contiguous run of its plane; a block that reaches the end
-            // of an image carries on into the next one, which is why this walks
-            // images rather than assuming one.
-            let mut position = first_row;
-            while position < last_row {
-                let n = position / output_height;
-                let from = position % output_height;
-                let to = (last_row - n * output_height).min(output_height);
-                let taken = (to - from) * output_width;
-                let offset = (position - first_row) * output_width;
+            // block is a run of output positions, so within one image each
+            // channel takes a contiguous run of its plane; a block that reaches
+            // the end of an image carries on into the next one, which is why
+            // this walks images rather than assuming one.
+            let mut position = first;
+            while position < last {
+                let n = position / ohw;
+                let from = position % ohw;
+                let taken = (ohw - from).min(last - position);
+                let offset = position - first;
                 let image = &mut output_vec[n * out_channels * ohw..][..out_channels * ohw];
                 par_out_chunks(image, ohw, &|start, plane| {
                     let oc = start / ohw;
                     let source = &gemm_out[oc * width + offset..][..taken];
-                    let target = &mut plane[from * output_width..][..taken];
+                    let target = &mut plane[from..][..taken];
                     for (o, &v) in target.iter_mut().zip(source) {
                         *o = v;
                         if let Some(bd) = bias_data {
@@ -1199,10 +1253,10 @@ fn conv2d_forward<T: ConvScalar>(
                         }
                     }
                 });
-                position += to - from;
+                position += taken;
             }
 
-            first_row = last_row;
+            first = last;
         }
     }
 
@@ -1216,6 +1270,48 @@ mod tests {
         device::Device,
         tensor::{DataType, Shape, Tensor, TensorData},
     };
+
+    /// The lowered matrix is blocked by output position, not by output row,
+    /// and this is the case that distinguishes the two: a row so wide that the
+    /// whole budget does not hold one. The answer has to be the same one the
+    /// row-blocked walk gives, which is what the reference loop below checks
+    /// element by element.
+    #[test]
+    fn a_row_wider_than_the_block_budget_still_convolves() {
+        let width = 4096usize;
+        let taps = 512usize;
+        // `k_dim * output_width` is 512 * 3585 here -- 14MB of scratch at
+        // f32, against the 8MB budget, so the block cannot be a whole row.
+        let signal: Vec<f32> = (0..width).map(|i| ((i % 17) as f32) - 8.0).collect();
+        let kernel: Vec<f32> = (0..taps).map(|i| ((i % 5) as f32) * 0.25).collect();
+
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(signal.clone(), Device::cpu())),
+            Shape::new(vec![1, 1, 1, width]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let weight = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(kernel.clone(), Device::cpu())),
+            Shape::new(vec![1, 1, 1, taps]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let out = conv2d(&input, &weight, None, (1, 1), (0, 0), (1, 1), 1).unwrap();
+        let got = out.data().as_f32_slice().unwrap();
+        assert_eq!(got.len(), width - taps + 1);
+
+        for (position, &value) in got.iter().enumerate() {
+            let want: f32 = (0..taps).map(|k| signal[position + k] * kernel[k]).sum();
+            assert!(
+                (value - want).abs() <= 1e-3 * want.abs().max(1.0),
+                "position {position}: {value} against {want}"
+            );
+        }
+    }
 
     #[test]
     fn test_conv2d_basic() {
