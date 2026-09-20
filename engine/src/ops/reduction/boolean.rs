@@ -341,7 +341,7 @@ pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
 /// Reported as `Int64` for the reason every accumulating reduction is: a count
 /// over a large tensor leaves the range of the thing being counted, and `Bool`
 /// has no room for a count at all.
-pub fn count_nonzero(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+pub fn count_nonzero(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Written as a sum of the mask rather than a fresh reduction: `sum` already
     // knows how to reduce one dimension, how to keep it, and how to widen the
     // accumulator, and a second implementation of any of that is a second thing
@@ -375,8 +375,7 @@ pub fn count_nonzero(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Resu
         tensor.device(),
         false,
     );
-    let dims = dim.map(|d| vec![d]);
-    crate::ops::reduction::sum(&mask, dims, keepdim)
+    crate::ops::reduction::sum(&mask, dim, keepdim)
 }
 
 /// The values a boolean mask selects, as a 1-D tensor.
@@ -396,26 +395,44 @@ pub fn masked_select(tensor: &Tensor, mask: &Tensor) -> Result<Tensor> {
     crate::ops::selection::masked_index(tensor, mask)
 }
 
-/// Logical `all` reduction, over one dimension or the whole tensor.
-pub fn all(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    match dim {
-        None => bool_fold_all(tensor, keepdim, BoolFold::All),
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            bool_fold_along_dim(tensor, d, keepdim, BoolFold::All)
-        }
-    }
+/// Logical `all` reduction, over any set of dimensions or the whole tensor.
+pub fn all(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    bool_fold(tensor, dim, keepdim, BoolFold::All)
 }
 
-/// Logical `any` reduction, over one dimension or the whole tensor.
-pub fn any(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    match dim {
-        None => bool_fold_all(tensor, keepdim, BoolFold::Any),
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            bool_fold_along_dim(tensor, d, keepdim, BoolFold::Any)
-        }
-    }
+/// Logical `any` reduction, over any set of dimensions or the whole tensor.
+pub fn any(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    bool_fold(tensor, dim, keepdim, BoolFold::Any)
+}
+
+/// The shared body of `all` and `any`: a whole-tensor fold, a one-axis fold,
+/// or -- for several axes -- the one-axis fold over the axis they gather into.
+///
+/// Neither result carries a gradient (both are boolean), so gathering is here
+/// only to answer the question once rather than an axis at a time.
+fn bool_fold(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    fold: BoolFold,
+) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| match axis {
+        None => bool_fold_all(t, keep, fold),
+        Some(d) => bool_fold_along_dim(t, normalize_dim(d, t.ndim())?, keep, fold),
+    })
+}
+
+/// Largest element over any set of dimensions, values only -- `max` without
+/// the index, which is what lets it reduce more than one axis: an index names
+/// a position along a single axis, so `max(dim)` cannot take a list and
+/// `amax` can. NumPy and PyTorch draw the same line at the same two names.
+pub fn amax(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, max)
+}
+
+/// Smallest element over any set of dimensions, values only. See [`amax`].
+pub fn amin(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, min)
 }
 
 /// Reject an extremum reduction that has no elements to choose between.
@@ -580,6 +597,16 @@ pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
         Some(d) => (min_along_dim(tensor, d, keepdim)?, Some(d)),
     };
     attach_minmax_grad(output, tensor, norm_dim, keepdim, false, false, None)
+}
+
+/// Like [`amax`], ignoring NaN: an all-NaN group reduces to NaN.
+pub fn nanamax(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, nanmax)
+}
+
+/// Like [`amin`], ignoring NaN: an all-NaN group reduces to NaN.
+pub fn nanamin(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, nanmin)
 }
 
 /// NaN-aware maximum value along specified dimension
@@ -1506,24 +1533,30 @@ mod bool_fold_tests {
         let t = f32_tensor(vec![1.0, 2.0, 3.0, 0.0, 0.0, 4.0], vec![2, 3]);
 
         assert_eq!(
-            out(&any(&t, Some(0), false).unwrap()),
+            out(&any(&t, Some(vec![0]), false).unwrap()),
             vec![true, true, true]
         );
         assert_eq!(
-            out(&all(&t, Some(0), false).unwrap()),
+            out(&all(&t, Some(vec![0]), false).unwrap()),
             vec![false, false, true]
         );
-        assert_eq!(out(&any(&t, Some(1), false).unwrap()), vec![true, true]);
-        assert_eq!(out(&all(&t, Some(1), false).unwrap()), vec![true, false]);
+        assert_eq!(
+            out(&any(&t, Some(vec![1]), false).unwrap()),
+            vec![true, true]
+        );
+        assert_eq!(
+            out(&all(&t, Some(vec![1]), false).unwrap()),
+            vec![true, false]
+        );
 
         // negative axis resolves the same way
         assert_eq!(
-            out(&all(&t, Some(-1), false).unwrap()),
-            out(&all(&t, Some(1), false).unwrap())
+            out(&all(&t, Some(vec![-1]), false).unwrap()),
+            out(&all(&t, Some(vec![1]), false).unwrap())
         );
 
         // keepdim only changes the shape
-        let kept = all(&t, Some(1), true).unwrap();
+        let kept = all(&t, Some(vec![1]), true).unwrap();
         assert_eq!(kept.shape().dims(), &[2, 1]);
         assert_eq!(out(&kept), vec![true, false]);
 
@@ -1540,12 +1573,18 @@ mod bool_fold_tests {
     #[test]
     fn an_empty_axis_reduces_to_the_identity() {
         let t = f32_tensor(Vec::new(), vec![2, 0]);
-        assert_eq!(out(&any(&t, Some(1), false).unwrap()), vec![false, false]);
-        assert_eq!(out(&all(&t, Some(1), false).unwrap()), vec![true, true]);
+        assert_eq!(
+            out(&any(&t, Some(vec![1]), false).unwrap()),
+            vec![false, false]
+        );
+        assert_eq!(
+            out(&all(&t, Some(vec![1]), false).unwrap()),
+            vec![true, true]
+        );
 
         // Reducing the *other* axis leaves an empty output, not an identity.
-        assert!(out(&any(&t, Some(0), false).unwrap()).is_empty());
-        assert!(out(&all(&t, Some(0), false).unwrap()).is_empty());
+        assert!(out(&any(&t, Some(vec![0]), false).unwrap()).is_empty());
+        assert!(out(&all(&t, Some(vec![0]), false).unwrap()).is_empty());
 
         // ...and so does the whole-tensor form over no elements at all.
         assert_eq!(out(&any(&t, None, false).unwrap()), vec![false]);
@@ -1565,8 +1604,14 @@ mod bool_fold_tests {
         assert_eq!(out(&any(&zeros, None, false).unwrap()), vec![false]);
 
         let b = bool_tensor(vec![false, true, false, false], vec![2, 2]);
-        assert_eq!(out(&any(&b, Some(1), false).unwrap()), vec![true, false]);
-        assert_eq!(out(&all(&b, Some(1), false).unwrap()), vec![false, false]);
+        assert_eq!(
+            out(&any(&b, Some(vec![1]), false).unwrap()),
+            vec![true, false]
+        );
+        assert_eq!(
+            out(&all(&b, Some(vec![1]), false).unwrap()),
+            vec![false, false]
+        );
     }
 
     /// The along-axis fold runs sequentially below the threshold and in
@@ -1585,8 +1630,8 @@ mod bool_fold_tests {
             }
             let t = f32_tensor(data, vec![rows, cols]);
 
-            let alls = out(&all(&t, Some(1), false).unwrap());
-            let anys = out(&any(&t, Some(1), false).unwrap());
+            let alls = out(&all(&t, Some(vec![1]), false).unwrap());
+            let anys = out(&any(&t, Some(vec![1]), false).unwrap());
             assert_eq!(alls.len(), rows);
             assert!(alls.iter().all(|&v| !v), "offender at {offender}");
             assert!(anys.iter().all(|&v| v), "offender at {offender}");

@@ -992,6 +992,25 @@ Reductions accept a list there as well as an integer, so `dim` stays singular
 even when it takes several.
 ```
 
+A reduction takes as many axes as you give it, with one exception, and the
+exception is not a list of op names: **a reduction that reports an index takes
+a single axis**, because an index names a position along one axis and there is
+no position to report over several. So `max`, `min`, `median`, `mode`,
+`argmax`, `argmin` and their NaN-aware forms take one `dim` -- ten in all, and
+they say so rather than failing an integer conversion if given more. Every
+other reduction takes any number: `sum`, `mean`, `prod`, `var`, `std`, `norm`,
+`logsumexp`, `all`, `any`, `count_nonzero`, `amax`, `amin`, `ptp`, `average`,
+`quantile`, `percentile`, `nanmedian`, and the NaN-aware forms of each. That
+is the whole reason `amax` exists alongside `max`, and why `nanmedian` can do
+what `median` cannot.
+
+Several axes are *gathered* and reduced together, not reduced one after
+another. The values agree either way; the gradients do not. `amax` over both
+axes of `[[3, 3], [3, 1]]` has three tied maxima and gives each a third, where
+reducing axis by axis would split within each axis first and hand out a
+quarter, a quarter and a half. Naming every axis is the same request as naming
+none, and a repeated axis is reduced once.
+
 Two things hold wherever a `dim` appears, and
 `tests/test_dim_and_keepdim_invariants.py` sweeps the whole surface for both
 rather than leaving them to each op: a negative `dim` names the axis

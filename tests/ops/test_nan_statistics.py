@@ -110,11 +110,28 @@ def test_nanvar_rejects_a_non_float_tensor():
         integers.nanvar()
 
 
-def test_reducing_more_than_one_dimension_at_a_time_is_refused():
-    # The non-NaN count comes from a single-axis `count_nonzero`, so two axes
-    # would divide by the wrong count. Saying so beats a quietly wrong answer.
-    with pytest.raises(Exception, match="one dimension at a time"):
-        _t(VALUES).nanvar([0, 1])
+@pytest.mark.parametrize("unbiased", [False, True])
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_nanvar_and_nanstd_over_several_axes_match_numpy(unbiased, keepdim):
+    """These used to refuse a list of axes, because the count they divide by
+    came from a `count_nonzero` that reduced one axis at a time -- so the
+    refusal was about the divisor, not about the statistic. `count_nonzero`
+    counts over as many axes as it is given now, and the divisor is right, so
+    there is nothing left to refuse. `var` and `std` always took a list."""
+    grid = np.stack([VALUES, VALUES[::-1] * 1.5])
+    for axes in ([0, 1], [1, 2], [0, 2], [0, 1, 2], [-3, -1]):
+        correction = 1 if unbiased else 0
+        got_var = _t(grid).nanvar(axes, unbiased, keepdim).numpy()
+        got_std = _t(grid).nanstd(axes, unbiased, keepdim).numpy()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            want_var = np.nanvar(
+                grid, axis=tuple(axes), ddof=correction, keepdims=keepdim
+            )
+            want_std = np.nanstd(
+                grid, axis=tuple(axes), ddof=correction, keepdims=keepdim
+            )
+        np.testing.assert_allclose(got_var, want_var, rtol=1e-12, equal_nan=True)
+        np.testing.assert_allclose(got_std, want_std, rtol=1e-12, equal_nan=True)
 
 
 @pytest.mark.parametrize("keepdim", [False, True])

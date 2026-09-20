@@ -45,6 +45,107 @@ impl QuantileInterpolation {
     }
 }
 
+/// Reduce several axes at once, by bringing them together and reducing the one
+/// axis they become.
+///
+/// `reduce` takes a tensor and one axis and reduces it away. Everything around
+/// that call is shape work on `permute` and `reshape`, both of which carry
+/// gradients, so a reduction written for one axis reaches several without a
+/// second backward being written for it -- and the gradient it gets is the
+/// one-axis gradient over the whole group, which is what reducing those axes
+/// together means.
+///
+/// The axes are gathered rather than reduced one after another because those
+/// are two different reductions. Folding `amax` axis by axis splits a tie
+/// within each axis and then again between the partial winners, so
+/// `[[3, 3], [3, 1]]` reduced over both axes sends a quarter, a quarter and a
+/// half to three elements that are equally the maximum. Gathering them first
+/// gives each a third, which is what an even split over the ties means and
+/// what PyTorch's `amax` gives for the same tensor.
+///
+/// Nothing is copied when the axes are already at the end in order, which is
+/// the common case (`dim=(-2, -1)`): the permutation is then the identity and
+/// the reshape is a view.
+pub(crate) fn reduce_gathered_dims<F>(
+    tensor: &Tensor,
+    dims: &[usize],
+    keepdim: bool,
+    reduce: F,
+) -> Result<Tensor>
+where
+    F: FnOnce(&Tensor, usize) -> Result<Tensor>,
+{
+    let shape = tensor.shape().dims().to_vec();
+    let kept: Vec<usize> = (0..tensor.ndim()).filter(|d| !dims.contains(d)).collect();
+
+    let order: Vec<isize> = kept
+        .iter()
+        .chain(dims.iter())
+        .map(|&d| d as isize)
+        .collect();
+    let moved = crate::ops::shape_ops::permute(tensor, order)?;
+
+    let mut gathered: Vec<usize> = kept.iter().map(|&d| shape[d]).collect();
+    gathered.push(dims.iter().map(|&d| shape[d]).product());
+    let grouped = crate::ops::shape_ops::reshape(&moved, Shape::new(gathered))?;
+
+    let reduced = reduce(&grouped, kept.len())?;
+    if !keepdim {
+        // `kept` is ascending, so the surviving axes are already in the order
+        // the input had them in.
+        return Ok(reduced);
+    }
+    let mut with_ones = shape;
+    for &d in dims {
+        with_ones[d] = 1;
+    }
+    // A reduction may report more than one value per slice -- `quantiles`
+    // puts a `q` axis in front -- and those axes are the reduction's own, not
+    // the input's, so they are carried across rather than rebuilt.
+    let reported = reduced.ndim() - kept.len();
+    let mut target: Vec<usize> = reduced.shape().dims()[..reported].to_vec();
+    target.extend(with_ones);
+    crate::ops::shape_ops::reshape(&reduced, Shape::new(target))
+}
+
+/// Let a reduction written for one axis take a list of them.
+///
+/// `axis_op` is the one-axis reduction, called with the `dim` it would have
+/// been called with before. A list of several axes is answered by gathering
+/// them (see [`reduce_gathered_dims`]) and reducing the one axis they become,
+/// so the reduction itself does not learn about lists and its gradient
+/// arrives through the shape ops that did the gathering.
+///
+/// A rank-zero tensor is passed straight through, because each of these ops
+/// has its own reading of `dim` there -- `quantile` takes 0 or -1 on a scalar
+/// and `amax` refuses both -- and normalising first would answer for them.
+pub(crate) fn reduce_over_dims<F>(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    axis_op: F,
+) -> Result<Tensor>
+where
+    F: Fn(&Tensor, Option<isize>, bool) -> Result<Tensor>,
+{
+    if tensor.ndim() == 0 {
+        return match dim.as_deref() {
+            None => axis_op(tensor, None, keepdim),
+            Some([d]) => axis_op(tensor, Some(*d), keepdim),
+            Some(_) => Err(MinitensorError::invalid_argument(
+                "a 0-dimensional tensor has no axes to reduce over",
+            )),
+        };
+    }
+    match normalize_reduction_dims(dim, tensor.ndim())?.as_deref() {
+        None => axis_op(tensor, None, keepdim),
+        Some([d]) => axis_op(tensor, Some(*d as isize), keepdim),
+        Some(dims) => reduce_gathered_dims(tensor, dims, keepdim, |grouped, axis| {
+            axis_op(grouped, Some(axis as isize), false)
+        }),
+    }
+}
+
 /// Resolve a reduction's `dim` list: negatives counted from the end, sorted,
 /// duplicates dropped.
 ///
@@ -369,8 +470,125 @@ fn attach_median_grad(
     with_grad_fn(values, grad_fn)
 }
 
-/// Compute the q-th quantile of the tensor data.
+/// The `q`-th quantile, over one axis, several, or the whole tensor.
+///
+/// Several axes are gathered into one and reduced together, which is the only
+/// reading a quantile has over more than one axis -- the q-th value of the
+/// group, not a quantile of quantiles. NumPy's `axis` tuple means the same.
 pub fn quantile(
+    tensor: &Tensor,
+    q: f64,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    interpolation: QuantileInterpolation,
+) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
+        quantile_axis(t, q, axis, keep, interpolation)
+    })
+}
+
+/// Several quantiles in one pass. See [`quantile`].
+pub fn quantiles(
+    tensor: &Tensor,
+    qs: &[f64],
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    interpolation: QuantileInterpolation,
+) -> Result<Tensor> {
+    if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, false)? {
+        return Ok(stacked);
+    }
+    reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
+        quantiles_axis(t, qs, axis, keep, interpolation)
+    })
+}
+
+/// The batched quantile kernels sort once and read every probability out of
+/// the one ordering, which is the whole reason they exist -- and none of them
+/// reports a gradient. The result came back with `requires_grad` set and no
+/// `grad_fn`, so it looked tracked, `backward()` walked past it as if it were
+/// a leaf, and `quantile(x, [0.1, 0.9]).sum().backward()` left `x.grad` as
+/// `None`: no error, no gradient, which is how a multi-quantile loss trains
+/// nothing and says nothing.
+///
+/// When a gradient is wanted, each probability therefore goes through the
+/// single-probability reduction, which has one, and the results are stacked
+/// along the axis the batched kernel would have put them on. That is `k`
+/// sorts instead of one, paid only by a caller who is going to back-propagate
+/// through it; inference keeps the single pass.
+fn quantiles_with_grad(
+    tensor: &Tensor,
+    qs: &[f64],
+    dim: &Option<Vec<isize>>,
+    keepdim: bool,
+    interpolation: QuantileInterpolation,
+    nan_aware: bool,
+) -> Result<Option<Tensor>> {
+    if qs.is_empty()
+        || !tensor.dtype().is_float()
+        || !tensor.requires_grad()
+        || !crate::autograd::is_grad_enabled()
+    {
+        return Ok(None);
+    }
+
+    let mut parts = Vec::with_capacity(qs.len());
+    for &q in qs {
+        let part = if nan_aware {
+            nanquantile(tensor, q, dim.clone(), keepdim, interpolation)?
+        } else {
+            quantile(tensor, q, dim.clone(), keepdim, interpolation)?
+        };
+        parts.push(crate::ops::shape_ops::unsqueeze(&part, 0)?);
+    }
+    let refs: Vec<&Tensor> = parts.iter().collect();
+    Ok(Some(crate::ops::shape_ops::concatenate(&refs, 0)?))
+}
+
+/// Like [`quantile`], ignoring NaN.
+pub fn nanquantile(
+    tensor: &Tensor,
+    q: f64,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    interpolation: QuantileInterpolation,
+) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
+        nanquantile_axis(t, q, axis, keep, interpolation)
+    })
+}
+
+/// Like [`quantiles`], ignoring NaN.
+pub fn nanquantiles(
+    tensor: &Tensor,
+    qs: &[f64],
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    interpolation: QuantileInterpolation,
+) -> Result<Tensor> {
+    if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, true)? {
+        return Ok(stacked);
+    }
+    reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
+        nanquantiles_axis(t, qs, axis, keep, interpolation)
+    })
+}
+
+/// The median over the non-NaN values, over one axis, several, or the whole
+/// tensor.
+///
+/// `median` cannot take a list and this can, for the reason the two differ at
+/// all: `median` reports the index of the element it selected, and an index
+/// names a position along a single axis.
+///
+/// Like [`median`], an even count selects the lower of the two middle values
+/// rather than averaging them; `nanquantile(0.5)` is the interpolated
+/// equivalent.
+pub fn nanmedian(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    reduce_over_dims(tensor, dim, keepdim, nanmedian_axis)
+}
+
+fn quantile_axis(
     tensor: &Tensor,
     q: f64,
     dim: Option<isize>,
@@ -427,8 +645,7 @@ fn attach_quantile_grad(
     with_grad_fn(output, grad_fn)
 }
 
-/// Compute multiple quantiles of the tensor data in a single pass.
-pub fn quantiles(
+fn quantiles_axis(
     tensor: &Tensor,
     qs: &[f64],
     dim: Option<isize>,
@@ -465,8 +682,7 @@ pub fn quantiles(
     }
 }
 
-/// Compute the q-th quantile of the tensor data while ignoring NaN values.
-pub fn nanquantile(
+fn nanquantile_axis(
     tensor: &Tensor,
     q: f64,
     dim: Option<isize>,
@@ -504,7 +720,7 @@ pub fn nanquantile(
 /// Like [`median`], an even count selects the lower of the two middle values
 /// rather than averaging them; `nanquantile(0.5)` is the interpolated
 /// equivalent.
-pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+fn nanmedian_axis(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
 
     let (values, norm_dim) = match dim {
@@ -525,8 +741,7 @@ pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<T
     attach_median_grad(values, tensor, norm_dim, keepdim, true, None)
 }
 
-/// Compute multiple quantiles of the tensor data in a single pass while ignoring NaN values.
-pub fn nanquantiles(
+fn nanquantiles_axis(
     tensor: &Tensor,
     qs: &[f64],
     dim: Option<isize>,

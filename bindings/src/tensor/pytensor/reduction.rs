@@ -111,17 +111,19 @@ impl PyTensor {
 
     /// Whether every element is true (or non-zero) over `dim`.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn all(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn all(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
-        let result = self.inner.all(dim, keepdim).map_err(_convert_error)?;
+        let dims = normalize_optional_axes(dim)?;
+        let result = self.inner.all(dims, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Whether any element is true (or non-zero) over `dim`.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn any(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn any(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
-        let result = self.inner.any(dim, keepdim).map_err(_convert_error)?;
+        let dims = normalize_optional_axes(dim)?;
+        let result = self.inner.any(dims, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -150,10 +152,15 @@ impl PyTensor {
 
     /// How many elements are non-zero (or true), over `dim` or the whole tensor.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn count_nonzero(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn count_nonzero(
+        &self,
+        dim: Option<&Bound<PyAny>>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Self> {
+        let dims = normalize_optional_axes(dim)?;
         let result = self
             .inner
-            .count_nonzero(dim, keepdim.unwrap_or(false))
+            .count_nonzero(dims, keepdim.unwrap_or(false))
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -199,26 +206,26 @@ impl PyTensor {
     ///
     /// Named for NumPy and PyTorch, which both spell this `amax`.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn amax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
-        self.max_values(dim, keepdim.unwrap_or(false))
+    pub fn amax(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        self.max_values(normalize_optional_axes(dim)?, keepdim.unwrap_or(false))
     }
 
     /// Smallest element over `dim`, values only. See [`Self::amax`].
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn amin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
-        self.min_values(dim, keepdim.unwrap_or(false))
+    pub fn amin(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        self.min_values(normalize_optional_axes(dim)?, keepdim.unwrap_or(false))
     }
 
     /// Like `amax`, ignoring NaN. A slice that is all NaN reduces to NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn nanamax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
-        self.nanmax_values(dim, keepdim.unwrap_or(false))
+    pub fn nanamax(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        self.nanmax_values(normalize_optional_axes(dim)?, keepdim.unwrap_or(false))
     }
 
     /// Like `amin`, ignoring NaN. A slice that is all NaN reduces to NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn nanamin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
-        self.nanmin_values(dim, keepdim.unwrap_or(false))
+    pub fn nanamin(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        self.nanmin_values(normalize_optional_axes(dim)?, keepdim.unwrap_or(false))
     }
 
     /// Largest element over `dim`; with a `dim` it returns the values and their indices.
@@ -226,10 +233,15 @@ impl PyTensor {
     pub fn max<'py>(
         &self,
         py: Python<'py>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(
+            dim,
+            "max",
+            Some("`amax` reduces as many axes as it is given."),
+        )?;
         if let Some(dim) = dim {
             let (values, indices) = self
                 .inner
@@ -249,10 +261,15 @@ impl PyTensor {
     pub fn nanmax<'py>(
         &self,
         py: Python<'py>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(
+            dim,
+            "nanmax",
+            Some("`nanamax` reduces as many axes as it is given."),
+        )?;
         if let Some(dim) = dim {
             let (values, indices) = self
                 .inner
@@ -272,10 +289,15 @@ impl PyTensor {
     pub fn min<'py>(
         &self,
         py: Python<'py>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(
+            dim,
+            "min",
+            Some("`amin` reduces as many axes as it is given."),
+        )?;
         if let Some(dim) = dim {
             let (values, indices) = self
                 .inner
@@ -295,10 +317,15 @@ impl PyTensor {
     pub fn nanmin<'py>(
         &self,
         py: Python<'py>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(
+            dim,
+            "nanmin",
+            Some("`nanamin` reduces as many axes as it is given."),
+        )?;
         if let Some(dim) = dim {
             let (values, indices) = self
                 .inner
@@ -318,10 +345,15 @@ impl PyTensor {
     pub fn median<'py>(
         &self,
         py: Python<'py>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(
+            dim,
+            "median",
+            Some("`nanmedian` and `quantile(0.5)` each reduce as many axes as they are given."),
+        )?;
         let (values, indices) = self.median_with_indices(dim, keepdim)?;
         if dim.is_some() {
             let indices = indices.ok_or_else(|| {
@@ -338,9 +370,13 @@ impl PyTensor {
 
     /// Like `median`, ignoring NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn nanmedian(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn nanmedian(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
-        let result = self.inner.nanmedian(dim, keepdim).map_err(_convert_error)?;
+        let dims = normalize_optional_axes(dim)?;
+        let result = self
+            .inner
+            .nanmedian(dims, keepdim)
+            .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -349,11 +385,12 @@ impl PyTensor {
     pub fn quantile(
         &self,
         q: &Bound<PyAny>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
         interpolation: Option<&str>,
     ) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_optional_axes(dim)?;
         let interpolation = parse_quantile_interpolation(interpolation)?;
         match parse_quantile_arg(q)? {
             QuantileArg::Scalar(prob) => {
@@ -378,11 +415,12 @@ impl PyTensor {
     pub fn nanquantile(
         &self,
         q: &Bound<PyAny>,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         keepdim: Option<bool>,
         interpolation: Option<&str>,
     ) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_optional_axes(dim)?;
         let interpolation = parse_quantile_interpolation(interpolation)?;
         match parse_quantile_arg(q)? {
             QuantileArg::Scalar(prob) => {
@@ -404,32 +442,36 @@ impl PyTensor {
 
     /// Index of the largest element over `dim`. Ties go to the first occurrence.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn argmax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn argmax(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(dim, "argmax", None)?;
         let result = self.inner.argmax(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Index of the smallest element over `dim`. Ties go to the first occurrence.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn argmin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn argmin(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(dim, "argmin", None)?;
         let result = self.inner.argmin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Like `argmax`, ignoring NaN. An all-NaN slice has no index and raises.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn nanargmax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn nanargmax(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(dim, "nanargmax", None)?;
         let result = self.inner.nanargmax(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Like `argmin`, ignoring NaN. An all-NaN slice has no index and raises.
     #[pyo3(signature = (dim=None, keepdim=false))]
-    pub fn nanargmin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn nanargmin(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
+        let dim = normalize_indexed_axis(dim, "nanargmin", None)?;
         let result = self.inner.nanargmin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

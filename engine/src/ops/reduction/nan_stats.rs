@@ -31,7 +31,7 @@ use crate::{
 ///
 /// `count_nonzero` counts the mask, which is what `nanmean` divides by too;
 /// this is the same count in the dtype the division needs.
-fn non_nan_count(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+fn non_nan_count(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     let finite = eq(&tensor.isnan()?, &boolean_false(tensor)?)?;
     count_nonzero(&finite, dim, keepdim)?.astype(tensor.dtype())
 }
@@ -45,19 +45,6 @@ fn boolean_false(like: &Tensor) -> Result<Tensor> {
         like.device(),
         false,
     ))
-}
-
-/// The single reduction axis these take, since the count they divide by comes
-/// from `count_nonzero`, which reduces one axis at a time.
-fn single_dim(dim: Option<Vec<isize>>, name: &str) -> Result<Option<isize>> {
-    match dim {
-        None => Ok(None),
-        Some(dims) if dims.len() == 1 => Ok(Some(dims[0])),
-        Some(dims) => Err(MinitensorError::invalid_operation(format!(
-            "{name} reduces one dimension at a time, got {} of them",
-            dims.len()
-        ))),
-    }
 }
 
 /// Variance over the non-NaN entries along `dim`.
@@ -77,8 +64,6 @@ pub fn nanvar(
         ));
     }
 
-    let axis = single_dim(dim.clone(), "nanvar")?;
-
     // Centred on the NaN-skipping mean, kept broadcastable.
     //
     // The deviation is zeroed at the NaN positions *before* it is squared,
@@ -93,8 +78,8 @@ pub fn nanvar(
     let finite_deviation = where_op(&tensor.isnan()?, &zero, &deviation)?;
     let squared = mul(&finite_deviation, &finite_deviation)?;
 
-    let total = sum(&squared, dim, keepdim)?;
-    let count = non_nan_count(tensor, axis, keepdim)?;
+    let total = sum(&squared, dim.clone(), keepdim)?;
+    let count = non_nan_count(tensor, dim, keepdim)?;
     let divisor = if unbiased {
         sub(
             &count,
@@ -142,7 +127,7 @@ fn without_nan(tensor: &Tensor, replacement: f64) -> Result<Tensor> {
 /// every index it could return points at a NaN. NumPy raises here, and so does
 /// this.
 fn reject_all_nan(tensor: &Tensor, dim: Option<isize>, name: &str) -> Result<()> {
-    let count = non_nan_count(tensor, dim, false)?;
+    let count = non_nan_count(tensor, dim.map(|d| vec![d]), false)?;
     let zero = create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?;
     let empty = eq(&count, &zero)?;
     if any(&empty, None, false)?
@@ -395,10 +380,26 @@ mod tests {
         assert!(nanvar(&ints, None, false, true).is_err());
     }
 
+    /// These refused a list of axes while `var` and `std` accepted one, and
+    /// the reason was the divisor rather than the statistic: the non-NaN count
+    /// came from a `count_nonzero` that reduced a single axis. It counts over
+    /// as many as it is given now, so the only thing left to check is that the
+    /// divisor is still the number of values that were actually summed.
     #[test]
-    fn several_reduction_dims_at_once_are_refused() {
-        let t = tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-        assert!(nanvar(&t, Some(vec![0, 1]), false, true).is_err());
-        assert!(nanstd(&t, Some(vec![0, 1]), false, true).is_err());
+    fn several_reduction_dims_at_once_divide_by_the_non_nan_count() {
+        let t = tensor(vec![1.0, 2.0, f64::NAN, 4.0], vec![2, 2]);
+        let mean: f64 = (1.0 + 2.0 + 4.0) / 3.0;
+        let biased: f64 =
+            ((1.0 - mean).powi(2) + (2.0 - mean).powi(2) + (4.0 - mean).powi(2)) / 3.0;
+
+        let got = nanvar(&t, Some(vec![0, 1]), false, false).unwrap();
+        assert!((got.data().as_f64_slice().unwrap()[0] - biased).abs() < 1e-12);
+
+        let unbiased = biased * 3.0 / 2.0;
+        let got = nanvar(&t, Some(vec![0, 1]), false, true).unwrap();
+        assert!((got.data().as_f64_slice().unwrap()[0] - unbiased).abs() < 1e-12);
+
+        let got = nanstd(&t, Some(vec![0, 1]), false, true).unwrap();
+        assert!((got.data().as_f64_slice().unwrap()[0] - unbiased.sqrt()).abs() < 1e-12);
     }
 }

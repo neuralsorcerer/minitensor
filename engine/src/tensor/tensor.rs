@@ -856,14 +856,14 @@ impl Tensor {
 
     /// Logical all reduction
     #[inline(always)]
-    pub fn all(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn all(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::ops::reduction::all;
         all(self, dim, keepdim)
     }
 
     /// Logical any reduction
     #[inline(always)]
-    pub fn any(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn any(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::ops::reduction::any;
         any(self, dim, keepdim)
     }
@@ -880,7 +880,7 @@ impl Tensor {
     }
 
     /// How many elements count as true.
-    pub fn count_nonzero(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn count_nonzero(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         crate::ops::reduction::count_nonzero(self, dim, keepdim)
     }
 
@@ -929,6 +929,30 @@ impl Tensor {
     pub fn nanmin(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::ops::reduction::nanmin;
         nanmin(self, dim, keepdim)
+    }
+
+    /// Largest value over any set of dimensions, without the index
+    #[inline(always)]
+    pub fn amax(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        crate::ops::reduction::amax(self, dim, keepdim)
+    }
+
+    /// Smallest value over any set of dimensions, without the index
+    #[inline(always)]
+    pub fn amin(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        crate::ops::reduction::amin(self, dim, keepdim)
+    }
+
+    /// Like `amax`, ignoring NaN
+    #[inline(always)]
+    pub fn nanamax(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        crate::ops::reduction::nanamax(self, dim, keepdim)
+    }
+
+    /// Like `amin`, ignoring NaN
+    #[inline(always)]
+    pub fn nanamin(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        crate::ops::reduction::nanamin(self, dim, keepdim)
     }
 
     /// Argument of maximum value
@@ -999,7 +1023,7 @@ impl Tensor {
     pub fn quantile(
         &self,
         q: f64,
-        dim: Option<isize>,
+        dim: Option<Vec<isize>>,
         keepdim: bool,
         interpolation: QuantileInterpolation,
     ) -> Result<Self> {
@@ -1012,7 +1036,7 @@ impl Tensor {
     pub fn nanquantile(
         &self,
         q: f64,
-        dim: Option<isize>,
+        dim: Option<Vec<isize>>,
         keepdim: bool,
         interpolation: QuantileInterpolation,
     ) -> Result<Self> {
@@ -1022,7 +1046,7 @@ impl Tensor {
 
     /// Median reduction that ignores NaN values
     #[inline(always)]
-    pub fn nanmedian(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn nanmedian(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::ops::reduction::nanmedian;
         nanmedian(self, dim, keepdim)
     }
@@ -1032,7 +1056,7 @@ impl Tensor {
     pub fn quantiles(
         &self,
         qs: &[f64],
-        dim: Option<isize>,
+        dim: Option<Vec<isize>>,
         keepdim: bool,
         interpolation: QuantileInterpolation,
     ) -> Result<Self> {
@@ -1045,7 +1069,7 @@ impl Tensor {
     pub fn nanquantiles(
         &self,
         qs: &[f64],
-        dim: Option<isize>,
+        dim: Option<Vec<isize>>,
         keepdim: bool,
         interpolation: QuantileInterpolation,
     ) -> Result<Self> {

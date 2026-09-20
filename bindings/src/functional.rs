@@ -6,6 +6,7 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use crate::tensor::{normalize_indexed_axis, normalize_optional_axes};
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor};
 use pyo3::Py;
@@ -738,7 +739,7 @@ pub fn mean(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> 
 /// Whether every element is true (or non-zero) over `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn all(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn all(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.all(dim, Some(keepdim))
 }
@@ -746,7 +747,7 @@ pub fn all(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
 /// Whether any element is true (or non-zero) over `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn any(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.any(dim, Some(keepdim))
 }
@@ -774,7 +775,7 @@ pub fn nonzero(input: &Bound<PyAny>) -> PyResult<PyTensor> {
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn count_nonzero(
     input: &Bound<PyAny>,
-    dim: Option<isize>,
+    dim: Option<&Bound<PyAny>>,
     keepdim: bool,
 ) -> PyResult<PyTensor> {
     borrow_tensor(input)?.count_nonzero(dim, Some(keepdim))
@@ -792,37 +793,50 @@ pub fn masked_select(input: &Bound<PyAny>, mask: &Bound<PyAny>) -> PyResult<PyTe
 /// cost; see `Tensor.amax`. NumPy and PyTorch both spell this `amax`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn amax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
-    borrow_tensor(input)?.max_values(dim, keepdim)
+pub fn amax(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.max_values(normalize_optional_axes(dim)?, keepdim)
 }
 
 /// Smallest element over `dim`, values only. See [`amax`].
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn amin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
-    borrow_tensor(input)?.min_values(dim, keepdim)
+pub fn amin(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.min_values(normalize_optional_axes(dim)?, keepdim)
 }
 
 /// Like `amax`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanamax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
-    borrow_tensor(input)?.nanmax_values(dim, keepdim)
+pub fn nanamax(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.nanmax_values(normalize_optional_axes(dim)?, keepdim)
 }
 
 /// Like `amin`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanamin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
-    borrow_tensor(input)?.nanmin_values(dim, keepdim)
+pub fn nanamin(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.nanmin_values(normalize_optional_axes(dim)?, keepdim)
 }
 
 /// Largest element over `dim`; with a `dim` it returns the values and their indices.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn max(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+pub fn max(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
     let py = input.py();
+    let dim = normalize_indexed_axis(
+        dim,
+        "max",
+        Some("`amax` reduces as many axes as it is given."),
+    )?;
     if let Some(dim) = dim {
         let (values, indices) = tensor
             .tensor()
@@ -842,9 +856,14 @@ pub fn max(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
 /// Smallest element over `dim`; with a `dim` it returns the values and their indices.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn min(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+pub fn min(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
     let py = input.py();
+    let dim = normalize_indexed_axis(
+        dim,
+        "min",
+        Some("`amin` reduces as many axes as it is given."),
+    )?;
     if let Some(dim) = dim {
         let (values, indices) = tensor
             .tensor()
@@ -864,7 +883,11 @@ pub fn min(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
 /// Index of the largest element over `dim`. Ties go to the first occurrence.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn argmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn argmax(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.argmax(dim, Some(keepdim))
 }
@@ -872,7 +895,11 @@ pub fn argmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
 /// Index of the smallest element over `dim`. Ties go to the first occurrence.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn argmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn argmin(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.argmin(dim, Some(keepdim))
 }
@@ -1081,7 +1108,11 @@ pub fn nanstd(
 /// Like `argmax`, ignoring NaN. An all-NaN slice has no index and raises.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanargmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn nanargmax(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.nanargmax(dim, Some(keepdim))
 }
@@ -1089,7 +1120,11 @@ pub fn nanargmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyR
 /// Like `argmin`, ignoring NaN. An all-NaN slice has no index and raises.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanargmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn nanargmin(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.nanargmin(dim, Some(keepdim))
 }
@@ -1097,9 +1132,18 @@ pub fn nanargmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyR
 /// Like `max`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+pub fn nanmax(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
     let py = input.py();
+    let dim = normalize_indexed_axis(
+        dim,
+        "nanmax",
+        Some("`nanamax` reduces as many axes as it is given."),
+    )?;
     if let Some(dim) = dim {
         let (values, indices) = tensor
             .tensor()
@@ -1119,9 +1163,18 @@ pub fn nanmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
 /// Like `min`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+pub fn nanmin(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
     let py = input.py();
+    let dim = normalize_indexed_axis(
+        dim,
+        "nanmin",
+        Some("`nanamin` reduces as many axes as it is given."),
+    )?;
     if let Some(dim) = dim {
         let (values, indices) = tensor
             .tensor()
@@ -1414,10 +1467,18 @@ fn unique_result(py: Python<'_>, found: engine::ops::UniqueParts) -> PyResult<Py
 /// The value occurring most often along `dim`, as `(values, indices)`. Ties go to the smaller value and the index is its first position along `dim`.
 #[pyfunction]
 // PyO3 renders a negative default as `...`; spelling the signature out
-// keeps `help()` honest about it.
-#[pyo3(signature = (input, dim=-1, keepdim=false))]
+// keeps `help()` honest about it. The default is taken here rather than in
+// the signature because `dim` arrives as an object, so that a list of axes
+// can be answered with the reason `mode` takes one rather than with pyo3's
+// "cannot be interpreted as an integer".
+#[pyo3(signature = (input, dim=None, keepdim=false))]
 #[pyo3(text_signature = "(input, dim=-1, keepdim=False)")]
-pub fn mode(input: &Bound<PyAny>, dim: isize, keepdim: bool) -> PyResult<(PyTensor, PyTensor)> {
+pub fn mode(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<(PyTensor, PyTensor)> {
+    let dim = normalize_indexed_axis(dim, "mode", None)?.unwrap_or(-1);
     let values = PyTensor::from_python_value(input)?;
     let (found, positions) =
         engine::ops::mode(values.tensor(), dim, keepdim).map_err(_convert_error)?;
@@ -1738,8 +1799,17 @@ pub fn argsort(
 /// Middle element over `dim`. For an even count this is the lower of the two, not their average -- use `quantile(0.5)` for the interpolated definition.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+pub fn median(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
+    let dim = normalize_indexed_axis(
+        dim,
+        "median",
+        Some("`nanmedian` and `quantile(0.5)` each reduce as many axes as they are given."),
+    )?;
     let (values, indices_opt) = tensor.median_with_indices(dim, keepdim)?;
     let py = input.py();
     if dim.is_some() {
@@ -1760,7 +1830,11 @@ pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
 /// Like `median`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
-pub fn nanmedian(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+pub fn nanmedian(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.nanmedian(dim, Some(keepdim))
 }
@@ -1771,7 +1845,7 @@ pub fn nanmedian(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyR
 pub fn quantile(
     input: &Bound<PyAny>,
     q: &Bound<PyAny>,
-    dim: Option<isize>,
+    dim: Option<&Bound<PyAny>>,
     keepdim: bool,
     interpolation: &str,
 ) -> PyResult<PyTensor> {
@@ -1785,7 +1859,7 @@ pub fn quantile(
 pub fn nanquantile(
     input: &Bound<PyAny>,
     q: &Bound<PyAny>,
-    dim: Option<isize>,
+    dim: Option<&Bound<PyAny>>,
     keepdim: bool,
     interpolation: &str,
 ) -> PyResult<PyTensor> {

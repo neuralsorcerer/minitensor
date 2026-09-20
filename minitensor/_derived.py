@@ -24,7 +24,7 @@ import numpy as _np
 from . import _core as _C
 from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
-from ._shape import _atleast_tensor, _normalize_axis
+from ._shape import _atleast_tensor, _normalize_axis, _normalize_axis_tuple
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -520,23 +520,25 @@ def corrcoef(input: object) -> Tensor:
     return _F.clamp(normalized, -1.0, 1.0)
 
 
-def ptp(input: object, dim: int | None = None, keepdim: bool = False) -> Tensor:
+def ptp(input: object, dim: object = None, keepdim: bool = False) -> Tensor:
     """The peak-to-peak span: the largest value less the smallest.
 
     Two reductions rather than one pass, which is what `amax` and `amin`
     already are; the point of the name is that a span is what was wanted.
+
+    `dim` may name several axes, since both halves can.
     """
 
     tensor = _atleast_tensor(input)
     if dim is None:
         return _F.amax(tensor) - _F.amin(tensor)
-    axis = _normalize_axis(dim, tensor.ndim(), "ptp")
-    return _F.amax(tensor, axis, keepdim) - _F.amin(tensor, axis, keepdim)
+    axes = list(_normalize_axis_tuple(dim, tensor.ndim(), "ptp"))
+    return _F.amax(tensor, axes, keepdim) - _F.amin(tensor, axes, keepdim)
 
 
 def average(
     input: object,
-    dim: int | None = None,
+    dim: object = None,
     weights: object | None = None,
     keepdim: bool = False,
     returned: bool = False,
@@ -550,7 +552,10 @@ def average(
 
     `weights` may have the tensor's shape, or be one-dimensional and as long as
     the reduced axis -- NumPy's rule, and the one that makes
-    `average(x, dim=0, weights=[1, 2, 3])` mean what it looks like.
+    `average(x, dim=0, weights=[1, 2, 3])` mean what it looks like. The
+    one-dimensional form needs a single axis to line up with, so weighting an
+    average over several axes takes weights shaped like the input; that is
+    NumPy's rule for the same reason.
 
     With `returned=True` the weight total comes back alongside, which is what a
     caller combining averages needs and cannot recover afterwards.
@@ -558,20 +563,19 @@ def average(
 
     tensor = _atleast_tensor(input)
     if weights is None:
-        result = (
-            _F.mean(tensor)
+        axes = (
+            None
             if dim is None
-            else _F.mean(
-                tensor, _normalize_axis(dim, tensor.ndim(), "average"), keepdim
-            )
+            else list(_normalize_axis_tuple(dim, tensor.ndim(), "average"))
         )
+        result = _F.mean(tensor) if axes is None else _F.mean(tensor, axes, keepdim)
         if not returned:
             return result
-        count = (
-            tensor.numel()
-            if dim is None
-            else tensor.shape[_normalize_axis(dim, tensor.ndim(), "average")]
-        )
+        count = tensor.numel()
+        if axes is not None:
+            count = 1
+            for axis in axes:
+                count *= tensor.shape[axis]
         return result, Tensor.full(
             list(result.shape), float(count), dtype=str(result.dtype)
         )
@@ -590,8 +594,15 @@ def average(
             else _F.sum(tensor * weight) / total
         )
 
-    axis = _normalize_axis(dim, tensor.ndim(), "average")
+    axes = list(_normalize_axis_tuple(dim, tensor.ndim(), "average"))
     if weight.ndim() == 1 and tensor.ndim() != 1:
+        if len(axes) != 1:
+            raise ValueError(
+                "average over several axes needs weights shaped like the "
+                f"input, got a one-dimensional {tuple(weight.shape)} for axes "
+                f"{tuple(axes)}"
+            )
+        axis = axes[0]
         if weight.shape[0] != tensor.shape[axis]:
             raise ValueError(
                 f"average needs one weight per position along dimension {axis}, "
@@ -609,15 +620,15 @@ def average(
             f"{tuple(tensor.shape)}"
         )
 
-    total = _F.sum(tensor * weight, axis, keepdim)
-    divisor = _F.sum(weight.expand(list(tensor.shape)), axis, keepdim)
+    total = _F.sum(tensor * weight, axes, keepdim)
+    divisor = _F.sum(weight.expand(list(tensor.shape)), axes, keepdim)
     return (total / divisor, divisor) if returned else total / divisor
 
 
 def percentile(
     input: object,
     q: object,
-    dim: int | None = None,
+    dim: object = None,
     keepdim: bool = False,
     interpolation: str = "linear",
 ) -> Tensor:
@@ -639,7 +650,7 @@ def percentile(
 def nanpercentile(
     input: object,
     q: object,
-    dim: int | None = None,
+    dim: object = None,
     keepdim: bool = False,
     interpolation: str = "linear",
 ) -> Tensor:

@@ -263,6 +263,34 @@ pub(crate) fn normalize_required_axes<'py>(
     }
 }
 
+/// The single axis a reduction that reports an index takes.
+///
+/// `max(dim)`, `median(dim)`, `argmax(dim)` and the rest of the index-reporting
+/// reductions name a position, and a position is a position along one axis, so
+/// they cannot take a list of them. That is the whole difference between `max`
+/// and `amax`, and between `median` and `nanmedian`, both of which reduce as
+/// many axes as they are given.
+///
+/// Passing several used to reach pyo3's `isize` conversion and come back as
+/// "'list' object cannot be interpreted as an integer", which says what failed
+/// but nothing about why one axis is wanted or where to go for several.
+pub(crate) fn normalize_indexed_axis(
+    dim: Option<&Bound<PyAny>>,
+    op: &str,
+    instead: Option<&str>,
+) -> PyResult<Option<isize>> {
+    match normalize_optional_axes(dim)? {
+        None => Ok(None),
+        Some(axes) if axes.len() == 1 => Ok(Some(axes[0])),
+        Some(axes) => Err(PyTypeError::new_err(format!(
+            "{op} reports an index, which names a position along one axis, so \
+             it takes a single dim -- got {}.{}",
+            axes.len(),
+            instead.map(|line| format!(" {line}")).unwrap_or_default()
+        ))),
+    }
+}
+
 pub(crate) fn normalize_optional_axes(dim: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<isize>>> {
     let Some(obj) = dim else {
         return Ok(None);

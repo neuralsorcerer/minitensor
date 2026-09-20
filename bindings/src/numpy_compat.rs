@@ -7,6 +7,7 @@
 use crate::device::PyDevice;
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use crate::tensor::normalize_optional_axes;
 use engine::Device;
 use engine::TensorIndex;
 use engine::ops::arithmetic::{mul, sub};
@@ -541,19 +542,29 @@ fn nansum(
 /// Compute maximum along axis
 #[pyfunction]
 #[pyo3(signature = (tensor, axis=None, keepdims=None))]
-fn max(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn max(
+    tensor: &Bound<PyAny>,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let axes = normalize_optional_axes(axis)?;
     let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
-    tensor.max_values(axis, keepdim)
+    tensor.max_values(axes, keepdim)
 }
 
 /// Compute minimum along axis
 #[pyfunction]
 #[pyo3(signature = (tensor, axis=None, keepdims=None))]
-fn min(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn min(
+    tensor: &Bound<PyAny>,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let axes = normalize_optional_axes(axis)?;
     let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
-    tensor.min_values(axis, keepdim)
+    tensor.min_values(axes, keepdim)
 }
 
 /// Compute NaN-aware maximum along axis
@@ -561,12 +572,13 @@ fn min(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> Py
 #[pyo3(signature = (tensor, axis=None, keepdims=None))]
 fn nanmax(
     tensor: &Bound<PyAny>,
-    axis: Option<isize>,
+    axis: Option<&Bound<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
+    let axes = normalize_optional_axes(axis)?;
     let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
-    tensor.nanmax_values(axis, keepdim)
+    tensor.nanmax_values(axes, keepdim)
 }
 
 /// Compute NaN-aware minimum along axis
@@ -574,10 +586,11 @@ fn nanmax(
 #[pyo3(signature = (tensor, axis=None, keepdims=None))]
 fn nanmin(
     tensor: &Bound<PyAny>,
-    axis: Option<isize>,
+    axis: Option<&Bound<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
+    let axes = normalize_optional_axes(axis)?;
     let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
-    tensor.nanmin_values(axis, keepdim)
+    tensor.nanmin_values(axes, keepdim)
 }

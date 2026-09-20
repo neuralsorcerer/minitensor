@@ -203,8 +203,14 @@ fn test_quantile_linear_interpolation_matches_manual() {
 fn test_quantile_keepdim_higher_mode() {
     let tensor = create_test_tensor_f32(vec![1.0, 5.0, 2.0, 4.0, 3.0, 6.0], vec![2, 3], true);
 
-    let quantile =
-        reduction::quantile(&tensor, 0.5, Some(1), true, QuantileInterpolation::Higher).unwrap();
+    let quantile = reduction::quantile(
+        &tensor,
+        0.5,
+        Some(vec![1]),
+        true,
+        QuantileInterpolation::Higher,
+    )
+    .unwrap();
 
     assert!(quantile.requires_grad());
     assert_eq!(quantile.shape().dims(), &[2, 1]);
@@ -276,9 +282,14 @@ fn test_nanquantiles_dim_sequence_layout() {
     );
     let qs = [0.25, 0.75];
 
-    let quantiles =
-        reduction::nanquantiles(&tensor, &qs, Some(1), true, QuantileInterpolation::Linear)
-            .unwrap();
+    let quantiles = reduction::nanquantiles(
+        &tensor,
+        &qs,
+        Some(vec![1]),
+        true,
+        QuantileInterpolation::Linear,
+    )
+    .unwrap();
 
     assert_eq!(quantiles.shape().dims(), &[2, 2, 1]);
     let values = quantiles.data().as_f32_slice().unwrap();
@@ -618,11 +629,11 @@ fn test_reduction_operations_edges() {
     assert!(reduction::sum(&t, Some(vec![-3]), false).is_err());
 
     let bool_src = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 2.0], vec![2, 2], false);
-    let any_res = reduction::any(&bool_src, Some(1), true).unwrap();
+    let any_res = reduction::any(&bool_src, Some(vec![1]), true).unwrap();
     assert_eq!(any_res.shape().dims(), &[2, 1]);
     assert_eq!(any_res.data().as_bool_slice().unwrap(), &[true, true]);
 
-    let all_res = reduction::all(&bool_src, Some(0), false).unwrap();
+    let all_res = reduction::all(&bool_src, Some(vec![0]), false).unwrap();
     assert_eq!(all_res.shape().dims(), &[2]);
     assert_eq!(all_res.data().as_bool_slice().unwrap(), &[false, false]);
 

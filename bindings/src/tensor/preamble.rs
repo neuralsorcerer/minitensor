@@ -370,23 +370,23 @@ impl PyTensor {
         infer_python_value_dtype(value)
     }
 
-    pub fn max_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
-        let result = self.inner.max(dim, keepdim).map_err(_convert_error)?;
+    pub fn max_values(&self, dim: Option<Vec<isize>>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.amax(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    pub fn nanmax_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
-        let result = self.inner.nanmax(dim, keepdim).map_err(_convert_error)?;
+    pub fn nanmax_values(&self, dim: Option<Vec<isize>>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.nanamax(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    pub fn min_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
-        let result = self.inner.min(dim, keepdim).map_err(_convert_error)?;
+    pub fn min_values(&self, dim: Option<Vec<isize>>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.amin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    pub fn nanmin_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
-        let result = self.inner.nanmin(dim, keepdim).map_err(_convert_error)?;
+    pub fn nanmin_values(&self, dim: Option<Vec<isize>>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.nanamin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 

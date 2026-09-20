@@ -421,10 +421,10 @@ fn the_parallel_kernels_are_bitwise_stable_across_thread_counts() {
             reduction::var(&a, Some(vec![dim]), false, false).unwrap()
         });
         assert_thread_invariant(&format!("all(dim={dim})"), || {
-            reduction::all(&a, Some(dim), false).unwrap()
+            reduction::all(&a, Some(vec![dim]), false).unwrap()
         });
         assert_thread_invariant(&format!("any(dim={dim})"), || {
-            reduction::any(&a, Some(dim), false).unwrap()
+            reduction::any(&a, Some(vec![dim]), false).unwrap()
         });
         assert_thread_invariant(&format!("cumsum(dim={dim})"), || {
             reduction::cumsum(&a, dim).unwrap()

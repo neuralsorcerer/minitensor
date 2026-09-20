@@ -204,7 +204,7 @@ fn a_boolean_fold_costs_about_what_a_sum_along_the_same_axis_costs() {
             &format!("all(dim={dim}) against sum(dim={dim})"),
             6.0,
             || {
-                black_box(reduction::all(&m, Some(dim as isize), false).unwrap());
+                black_box(reduction::all(&m, Some(vec![dim as isize]), false).unwrap());
             },
             || {
                 black_box(reduction::sum(&m, Some(vec![dim as isize]), false).unwrap());

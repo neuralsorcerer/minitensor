@@ -295,7 +295,7 @@ impl GradientFunction for MedianBackward {
 
         let dim_isize = self.dim.map(|d| d as isize);
         let reduced = if self.nan_aware {
-            reduction::nanmedian(input, dim_isize, true)?
+            reduction::nanmedian(input, dim_isize.map(|d| vec![d]), true)?
         } else {
             reduction::median(input, dim_isize, true)?.0
         };

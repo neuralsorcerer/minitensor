@@ -608,7 +608,7 @@ mod tests {
         let result = quantiles(
             &t,
             &[0.5, 0.9],
-            Some(1),
+            Some(vec![1]),
             true,
             QuantileInterpolation::Linear,
         )
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn test_all_along_dim() {
         let t = create_tensor_bool(vec![true, false, true, true], vec![2, 2]);
-        let res = all(&t, Some(1), false).unwrap();
+        let res = all(&t, Some(vec![1]), false).unwrap();
         assert_eq!(res.data().as_bool_slice().unwrap(), &[false, true]);
     }
 
