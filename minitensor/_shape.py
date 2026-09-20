@@ -57,6 +57,20 @@ def _index_tensor(array: "_np.ndarray", like: Tensor) -> Tensor:
     )
 
 
+def _mask_tensor(array: "_np.ndarray", like: Tensor) -> Tensor:
+    """A NumPy boolean mask as a bool tensor beside the data it selects from.
+
+    [`_index_tensor`] for the other spelling of a selection. Which of the two
+    to hand across depends on what the kernel does with it: a mask is one byte
+    per element and is read in order, where positions are eight and are read
+    wherever they point.
+    """
+
+    return Tensor.from_numpy(_np.ascontiguousarray(array, dtype=bool)).to(
+        _C.Device(like.device)
+    )
+
+
 def _constant_like(array: "_np.ndarray", like: Tensor) -> Tensor:
     """A NumPy array as a tensor in `like`'s dtype and on its device.
 
@@ -1099,6 +1113,13 @@ def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
     # a Python set costs more than the copy it is setting up.
     keep = _np.ones(length, dtype=bool)
     keep[_positions_along(obj, length, "delete")] = False
+    if tensor.ndim() == 1:
+        # The complement is already a mask, and a mask is compacted in one pass
+        # -- so handing it over as one is cheaper than writing down where every
+        # kept element was and then gathering at those positions. Only for a
+        # vector: along an axis of something wider, a mask over that axis is
+        # not a mask over the tensor, and the gather is the operation.
+        return _C.functional.masked_select(tensor, _mask_tensor(keep, tensor))
     return _C.functional.index_select(
         tensor, axis, _index_tensor(_np.flatnonzero(keep), tensor)
     )
