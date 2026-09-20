@@ -34,6 +34,14 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     new_shape.swap(dim0_usize, dim1_usize);
     let new_shape_obj = Shape::new(new_shape);
 
+    // Swapping an axis past nothing but axes of extent one moves no element,
+    // so the answer is the same bytes under a different shape.
+    let mut order: Vec<usize> = (0..tensor.ndim()).collect();
+    order.swap(dim0_usize, dim1_usize);
+    if crate::ops::util::preserves_memory_order(tensor.shape().dims(), &order) {
+        return crate::ops::shape_ops::reshape(tensor, new_shape_obj);
+    }
+
     /// One dtype arm: transpose into a fresh buffer (previously this
     /// allocated with `zeros_on_device` — a full memset — and then
     /// overwrote every element).

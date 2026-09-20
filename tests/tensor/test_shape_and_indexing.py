@@ -4,6 +4,8 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -239,6 +241,54 @@ def test_permute_accepts_sequence():
     y = x.permute([2, 0, 1])
     expected = np.arange(24, dtype=np.float32).reshape(2, 3, 4).transpose(2, 0, 1)
     assert np.allclose(y.numpy(), expected)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1, 5), (5, 1), (1, 1, 7), (2, 1, 3), (1, 4, 1), (3, 4), (2, 3, 4), (2, 1, 1, 3)],
+)
+def test_reordering_axes_of_extent_one_answers_as_a_full_reorder_does(shape):
+    """An axis of extent one contributes nothing to a row-major position, so
+    moving it past others moves no element: the result is the same bytes under
+    a different shape, and `transpose` and `permute` hand back a relabelling
+    rather than copying.
+
+    What that must not change is any answer, so every permutation of every one
+    of these shapes is checked against NumPy -- including the ones with no unit
+    axis at all, which still have to copy.
+    """
+
+    values = np.arange(int(np.prod(shape)), dtype=np.float64).reshape(shape)
+    tensor = mt.from_numpy(values)
+
+    for order in itertools.permutations(range(len(shape))):
+        got = mt.permute(tensor, list(order)).numpy()
+        want = np.transpose(values, order)
+        assert got.shape == want.shape, (shape, order)
+        np.testing.assert_array_equal(got, want)
+
+    for first, second in itertools.combinations(range(len(shape)), 2):
+        np.testing.assert_array_equal(
+            mt.transpose(tensor, first, second).numpy(),
+            np.swapaxes(values, first, second),
+        )
+
+
+def test_a_relabelling_transpose_still_carries_its_gradient():
+    """The free path is a `reshape`, whose backward reshapes back -- which is
+    what the inverse transpose would have done, since it is free in the same
+    direction."""
+
+    row = mt.from_numpy(np.arange(6.0).reshape(1, 6)).requires_grad_(True)
+    weights = mt.from_numpy(np.arange(6.0).reshape(6, 1))
+    (mt.transpose(row, 0, 1) * weights).sum().backward()
+    assert tuple(row.grad.shape) == (1, 6)
+    np.testing.assert_array_equal(row.grad.numpy(), np.arange(6.0).reshape(1, 6))
+
+    cube = mt.from_numpy(np.arange(12.0).reshape(1, 3, 4)).requires_grad_(True)
+    mt.permute(cube, [1, 2, 0]).sum().backward()
+    assert tuple(cube.grad.shape) == (1, 3, 4)
+    np.testing.assert_array_equal(cube.grad.numpy(), np.ones((1, 3, 4)))
 
 
 def test_permute_invalid_dims_raises():

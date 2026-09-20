@@ -270,6 +270,16 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
         ));
     }
 
+    // A permutation that leaves the elements where they are is a relabelling.
+    // Checked here as well as inside `transpose` because the decomposition
+    // below is a sequence of swaps, and a free permutation does not have to
+    // decompose into free swaps.
+    if crate::ops::util::preserves_memory_order(tensor.shape().dims(), &normalized) {
+        let dims = tensor.shape().dims();
+        let permuted: Vec<usize> = normalized.iter().map(|&axis| dims[axis]).collect();
+        return reshape(tensor, Shape::new(permuted));
+    }
+
     // Apply sequence of transposes to achieve the permutation
     let mut result = tensor.clone();
     let mut current: Vec<usize> = (0..ndim).collect();

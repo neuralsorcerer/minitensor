@@ -78,6 +78,33 @@ impl NegLogSigmoid for f64 {
     }
 }
 
+/// Whether reading the axes in `order` leaves the elements in the same linear
+/// order they are already in -- in which case the reordering is a relabelling
+/// and not a copy.
+///
+/// An axis of extent one contributes nothing to a row-major linear index, so it
+/// can be moved anywhere for free; what has to stay put, relative to each
+/// other, are the axes with something in them. That is the whole test, and it
+/// catches the cases that come up constantly: transposing a row into a column,
+/// or moving a batch axis of one out of the way.
+///
+/// It is worth catching. `cov` of a million observations spent 3.3 ms of its
+/// 11 transposing a `(1, n)` matrix into an `(n, 1)` one -- a full strided copy
+/// of eight megabytes to produce the bytes it already had.
+pub(crate) fn preserves_memory_order(dims: &[usize], order: &[usize]) -> bool {
+    let mut previous = 0usize;
+    for &axis in order {
+        if dims[axis] <= 1 {
+            continue;
+        }
+        if axis < previous {
+            return false;
+        }
+        previous = axis;
+    }
+    true
+}
+
 /// Resolve a possibly negative dimension index against `ndim`, erroring when
 /// it falls outside `[-ndim, ndim)`. Shared by the shape, linalg, and
 /// reduction clusters.
