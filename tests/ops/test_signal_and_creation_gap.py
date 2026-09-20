@@ -278,3 +278,30 @@ def test_divmod_agrees_with_its_two_halves():
 def test_positive_is_a_copy():
     values = np.array([1.0, -2.0, 0.0])
     np.testing.assert_array_equal(mt.positive(mt.from_numpy(values)).numpy(), values)
+
+
+@pytest.mark.parametrize("op", [mt.convolve, mt.correlate])
+def test_a_sliding_product_meets_at_the_wider_float(op):
+    """`conv1d` is a float kernel, so an integer side becomes `float64`. What
+    the two sides must not do is meet at *one* of their dtypes: a `float64`
+    kernel against a `float32` signal was rounded to `float32` before the
+    multiply, throwing away precision the caller had asked for."""
+    signal = mt.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    kernel = mt.from_numpy(np.array([2.0**40 + 0.5, 1.0]))
+
+    result = op(signal, kernel, "full")
+    assert str(result.dtype) == "float64"
+
+    reference = (np.convolve if op is mt.convolve else np.correlate)(
+        signal.numpy().astype(np.float64), kernel.numpy(), "full"
+    )
+    np.testing.assert_allclose(result.numpy(), reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("op", [mt.convolve, mt.correlate])
+def test_two_float32_sides_stay_in_float32(op):
+    """The promotion only widens where the operands differ; a float32 pair is
+    still a float32 product."""
+    signal = mt.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    kernel = mt.from_numpy(np.array([0.5, 0.25], dtype=np.float32))
+    assert str(op(signal, kernel, "full").dtype) == "float32"

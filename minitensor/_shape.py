@@ -505,6 +505,22 @@ def tensor_split(
     )
 
 
+def _promote_pair(left: Tensor, right: Tensor) -> tuple[Tensor, Tensor]:
+    """Both operands at the dtype the library's promotion gives the pair.
+
+    The alternative, casting one side to the other's dtype, is what several of
+    these helpers used to do, and it does not lose a dtype -- it loses values.
+    `union1d([1, 2, 3], [2.5, 3.5])` answered `[1, 2, 3]`: the float side was
+    truncated onto the integer one, so two of its values landed on values
+    already there and vanished, and the answer contained neither of them.
+    """
+
+    if str(left.dtype) == str(right.dtype):
+        return left, right
+    target = _promoted_dtype(left, right)
+    return left.astype(target), right.astype(target)
+
+
 def _promoted_dtype(left: Tensor, right: Tensor, operation: object = None) -> str:
     """The dtype the library's own promotion gives these two.
 
@@ -990,10 +1006,7 @@ def append(input: object, values: object, dim: int | None = None) -> Tensor:
     is why this is a poor way to build one up element by element.
     """
 
-    tensor = _atleast_tensor(input)
-    extra = _atleast_tensor(values)
-    if str(extra.dtype) != str(tensor.dtype):
-        extra = extra.astype(str(tensor.dtype))
+    tensor, extra = _promote_pair(_atleast_tensor(input), _atleast_tensor(values))
     if dim is None:
         return _C.functional.cat([tensor.reshape(-1), extra.reshape(-1)], 0)
     axis = _normalize_axis(dim, tensor.ndim(), "append")

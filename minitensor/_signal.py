@@ -26,7 +26,7 @@ from __future__ import annotations
 import math as _math
 
 from . import _core as _C
-from ._shape import _atleast_tensor
+from ._shape import _atleast_tensor, _promote_pair
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -148,10 +148,15 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         raise ValueError(f"{name} needs two non-empty sequences")
     if mode not in ("full", "same", "valid"):
         raise ValueError(f"{name} takes mode 'full', 'same' or 'valid', got {mode!r}")
+    # `conv1d` is a float kernel, so an integer side becomes one -- `float64`,
+    # which holds every `int32` and every `int64` below 2**53 exactly. What
+    # the two sides must not do is meet at *one* of their dtypes: a `float64`
+    # kernel against a `float32` signal used to be rounded to `float32`
+    # before the multiply, losing precision the caller had asked for.
+    signal, kernel = _promote_pair(signal, kernel)
     if "float" not in str(signal.dtype):
         signal = signal.astype("float64")
-    if str(kernel.dtype) != str(signal.dtype):
-        kernel = kernel.astype(str(signal.dtype))
+        kernel = kernel.astype("float64")
 
     length, taps = signal.shape[0], kernel.shape[0]
     if flip:

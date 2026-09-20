@@ -917,6 +917,22 @@ operand takes the float operand's width (`int64 + float32` is `float32`, not
 `float64`), and `/` always produces a float (`int64 / int64` is `float32`).
 A `bool` operand promotes to whatever it is paired with.
 
+The same promotion applies to the operations that *join* values rather than
+combine them arithmetically -- `append`, `ediff1d`, `union1d`, `setxor1d`,
+`convolve` and `correlate` all take both operands to their common dtype. Two
+exceptions, each for its own reason:
+
+- `insert` casts the inserted values to the tensor's dtype, as NumPy does.
+- `intersect1d` and `setdiff1d` keep the *left* operand's dtype, because every
+  value they report comes from it. Promoting could lose one (an `int64`
+  against a `float32` would land in `float32`), where keeping it cannot. The
+  membership test behind them still promotes, so the values agree with NumPy
+  even where the dtype does not.
+
+`convolve` and `correlate` answer in `float64` for an integer input, where
+NumPy stays in integers: the sliding product is `conv1d`, which is a float
+kernel. That is exact for any result below 2^53.
+
 Whether an operation accepts a boolean operand is decided by that promoted
 dtype, not by the operands. `-`, `//` and `%` have no boolean result to land
 in, so they are rejected when *both* sides are `bool` — as they are in NumPy —

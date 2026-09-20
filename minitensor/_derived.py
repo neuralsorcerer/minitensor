@@ -24,7 +24,12 @@ import numpy as _np
 from . import _core as _C
 from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
-from ._shape import _atleast_tensor, _normalize_axis, _normalize_axis_tuple
+from ._shape import (
+    _atleast_tensor,
+    _normalize_axis,
+    _normalize_axis_tuple,
+    _promote_pair,
+)
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -922,6 +927,13 @@ def ediff1d(
     """
 
     flat = _atleast_tensor(input).reshape(-1)
+    # The joined-on values promote with the differences rather than being cast
+    # onto their dtype: `to_begin=2.5` against an integer input used to arrive
+    # as 2. NumPy refuses the pair outright; promoting keeps the value, which
+    # is what `append` does with the same argument.
+    for end in (to_begin, to_end):
+        if end is not None:
+            flat, _ = _promote_pair(flat, _atleast_tensor(end).reshape(-1))
     length = flat.shape[0]
     pieces = []
     if to_begin is not None:

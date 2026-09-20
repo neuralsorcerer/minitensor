@@ -187,3 +187,48 @@ def test_cumulative_sum_can_start_from_the_empty_total(values):
 
     with pytest.raises(ValueError, match="needs a dim"):
         mt.cumulative_sum(mt.from_numpy(values))
+
+
+@pytest.mark.parametrize(
+    "joined,reference",
+    [
+        (lambda a, b: mt.append(a, b), lambda a, b: np.append(a, b)),
+        (lambda a, b: mt.ediff1d(a, b), lambda a, b: np.ediff1d(a.astype(b.dtype), b)),
+    ],
+)
+def test_joining_values_of_another_dtype_promotes_rather_than_truncates(
+    joined, reference
+):
+    """`append([1, 2, 3], [2.5])` answered `[1, 2, 3, 2]`: the appended value
+    was cast onto the tensor's integer dtype, so what came back was a value
+    the caller never passed. Concatenation promotes everywhere else in the
+    library, and these are concatenations.
+
+    `insert` is deliberately not in this list -- NumPy casts the inserted
+    values to the array's dtype there, and this follows it.
+    """
+    integers = mt.from_numpy(np.array([1, 2, 3]))
+    halves = mt.from_numpy(np.array([2.5, 3.5]))
+
+    np.testing.assert_array_equal(
+        joined(integers, halves).numpy(),
+        reference(integers.numpy(), halves.numpy()),
+    )
+
+
+def test_appending_a_wide_float_to_a_narrow_one_keeps_the_width():
+    narrow = mt.from_numpy(np.array([1.5], dtype=np.float32))
+    wide = mt.from_numpy(np.array([2.0**40 + 0.5]))
+
+    joined = mt.append(narrow, wide)
+    assert str(joined.dtype) == "float64"
+    assert joined.numpy()[-1] == 2.0**40 + 0.5
+
+
+def test_insert_follows_numpy_and_casts_what_it_inserts():
+    """The one in this family that does truncate, because NumPy does: the
+    inserted values take the array's dtype."""
+    integers = mt.from_numpy(np.array([1, 2, 3]))
+    got = mt.insert(integers, 1, mt.from_numpy(np.array([2.5]))).numpy()
+    np.testing.assert_array_equal(got, np.insert(np.array([1, 2, 3]), 1, 2.5))
+    assert str(got.dtype) == "int64"

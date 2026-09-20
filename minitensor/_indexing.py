@@ -38,6 +38,7 @@ from ._shape import (
     _normalize_axis,
     _normalize_axis_tuple,
     _normalize_shape_argument,
+    _promote_pair,
     _promoted_dtype,
     broadcast_tensors,
     broadcast_to,
@@ -942,10 +943,9 @@ def union1d(input: object, other: object) -> Tensor:
     Both are flattened first: a set has no shape.
     """
 
-    left = _atleast_tensor(input).reshape(-1)
-    right = _atleast_tensor(other).reshape(-1)
-    if str(left.dtype) != str(right.dtype):
-        right = right.astype(str(left.dtype))
+    left, right = _promote_pair(
+        _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
+    )
     return _F.unique(_F.cat([left, right]))
 
 
@@ -1006,10 +1006,10 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
     """
 
     del assume_unique
-    left = _F.unique(_atleast_tensor(input).reshape(-1))
-    right = _F.unique(_atleast_tensor(other).reshape(-1))
-    if str(left.dtype) != str(right.dtype):
-        right = right.astype(str(left.dtype))
+    left, right = _promote_pair(
+        _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
+    )
+    left, right = _F.unique(left), _F.unique(right)
     only_left = _F.masked_select(left, isin(left, right, invert=True))
     only_right = _F.masked_select(right, isin(right, left, invert=True))
     return _F.unique(_F.cat([only_left, only_right]))

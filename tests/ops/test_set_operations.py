@@ -255,3 +255,84 @@ def test_trim_zeros_rejects_a_repeated_axis():
         mt.trim_zeros(grid, "fb", (0, 0))
     with pytest.raises(ValueError, match="repeated axis"):
         mt.trim_zeros(grid, "fb", (1, -1))
+
+
+# The dtypes a caller actually mixes, and a value in the float side that no
+# integer can hold -- which is the whole point: a truncating cast does not
+# lose a dtype, it loses the value.
+MIXED_PAIRS = [
+    ("int64", "float64"),
+    ("float64", "int64"),
+    ("int32", "float32"),
+    ("float32", "float64"),
+    ("bool", "int64"),
+]
+
+
+def _pair(left_dtype, right_dtype):
+    left = [1, 2, 3] if left_dtype != "bool" else [True, False]
+    right = [2.5, 3.5] if "float" in right_dtype else [2, 4]
+    return (
+        mt.Tensor(np.asarray(left), dtype=left_dtype),
+        mt.Tensor(np.asarray(right), dtype=right_dtype),
+    )
+
+
+@pytest.mark.parametrize("left_dtype,right_dtype", MIXED_PAIRS)
+def test_a_union_of_two_dtypes_keeps_the_values_of_both(left_dtype, right_dtype):
+    """`union1d` cast its right operand to the left's dtype, so
+    `union1d([1, 2, 3], [2.5, 3.5])` answered `[1, 2, 3]`: 2.5 and 3.5 were
+    truncated onto values already in the set and disappeared. The answer held
+    neither of the two values the second argument was asked about."""
+    left, right = _pair(left_dtype, right_dtype)
+    got = mt.union1d(left, right).numpy()
+    want = np.union1d(left.numpy(), right.numpy())
+
+    np.testing.assert_array_equal(got, want)
+    # Every value of either input survives, which is what the name promises.
+    for value in np.concatenate([left.numpy().ravel(), right.numpy().ravel()]):
+        assert value in got
+
+
+@pytest.mark.parametrize("left_dtype,right_dtype", MIXED_PAIRS)
+def test_a_symmetric_difference_of_two_dtypes_keeps_the_values_of_both(
+    left_dtype, right_dtype
+):
+    """Same cast, worse answer: `setxor1d([1, 2, 3], [2.5, 3.5])` came back
+    empty, because after truncation both sides held the same values and a
+    symmetric difference of a set with itself is nothing."""
+    left, right = _pair(left_dtype, right_dtype)
+    np.testing.assert_array_equal(
+        mt.setxor1d(left, right).numpy(), np.setxor1d(left.numpy(), right.numpy())
+    )
+
+
+@pytest.mark.parametrize("left_dtype,right_dtype", MIXED_PAIRS)
+def test_the_one_sided_set_operations_keep_their_own_dtype(left_dtype, right_dtype):
+    """`intersect1d` and `setdiff1d` report values from the left operand only,
+    so keeping its dtype cannot lose one -- and promoting could, on an `int64`
+    against a `float32`. The values still have to agree with NumPy, which
+    promotes; the comparison behind them already does."""
+    left, right = _pair(left_dtype, right_dtype)
+
+    for ours, theirs in (
+        (mt.intersect1d, np.intersect1d),
+        (mt.setdiff1d, np.setdiff1d),
+    ):
+        got = ours(left, right).numpy()
+        want = theirs(left.numpy(), right.numpy())
+        np.testing.assert_array_equal(got.astype(np.float64), want.astype(np.float64))
+        assert str(got.dtype) == str(left.numpy().dtype)
+
+
+def test_a_wide_float_is_not_rounded_into_a_narrow_one():
+    """The same cast between two float dtypes, where it costs precision rather
+    than whole values."""
+    # `from_numpy`, not `Tensor`, which is documented to land everything in
+    # float32 and would lose the value before the set operation saw it.
+    narrow = mt.from_numpy(np.array([1.5], dtype=np.float32))
+    wide = mt.from_numpy(np.array([2.0**40 + 0.5]))
+
+    joined = mt.union1d(narrow, wide)
+    assert str(joined.dtype) == "float64"
+    assert joined.numpy()[-1] == 2.0**40 + 0.5
