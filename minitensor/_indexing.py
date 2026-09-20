@@ -892,8 +892,18 @@ def compress(condition: object, input: object, dim: int | None = None) -> Tensor
     length = tensor.shape[axis]
     if flags.shape[0] > length:
         raise ValueError(f"compress has {flags.shape[0]} flags for an axis of {length}")
-    kept = flatnonzero(flags)
-    return _F.index_select(tensor, axis, kept)
+    if tensor.ndim() == 1:
+        # One flag per element is a mask, and a mask is compacted in one pass
+        # rather than by first writing down where every true one was. The
+        # flags may stop short of the axis, which is this operation's whole
+        # difference from a mask, so they are extended with the falsehood that
+        # dropping the rest already means.
+        if flags.shape[0] < length:
+            flags = _F.cat(
+                [flags, Tensor.full([length - flags.shape[0]], False, dtype="bool")]
+            )
+        return _F.masked_select(tensor, flags)
+    return _F.index_select(tensor, axis, flatnonzero(flags))
 
 
 def extract(condition: object, input: object) -> Tensor:

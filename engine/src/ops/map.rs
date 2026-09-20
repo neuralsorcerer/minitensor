@@ -300,6 +300,48 @@ pub(crate) fn outputs_per_task(width: usize) -> usize {
     (TARGET / width.max(1)).max(1)
 }
 
+/// Shortest run worth handing a task when compacting, and how many bands to
+/// aim for.
+///
+/// A compaction -- `x[mask]`, `nonzero` -- is one test and at most one copy per
+/// element, so a band has to be long before the split pays for it. Both come
+/// from the element count and never from the thread pool: the bands decide
+/// where each kept value lands, and an output that moved with the machine's
+/// core count would not be the same answer twice.
+pub(crate) const COMPACT_MIN_BAND: usize = 1 << 14;
+pub(crate) const COMPACT_BANDS: usize = 64;
+
+/// How a compaction's output is divided: the band width, the number of bands,
+/// and where each band's output starts.
+///
+/// A compaction cannot be cut up by its output, because where a band's values
+/// land depends on how many the bands before it kept. `count` is asked for each
+/// band's tally, and what comes back is the running total in front of each --
+/// one more entry than there are bands, so consecutive pairs bound every piece.
+pub(crate) fn compaction_bands(
+    len: usize,
+    count: &(dyn Fn(usize, usize) -> usize + Sync),
+) -> (usize, Vec<usize>) {
+    let band = len.div_ceil(COMPACT_BANDS).max(COMPACT_MIN_BAND);
+    let bands = len.div_ceil(band).max(1);
+    let counts = if bands < 2 {
+        vec![count(0, len)]
+    } else {
+        par_map_indexed(bands, &|index| {
+            let first = index * band;
+            count(first, (first + band).min(len))
+        })
+    };
+    let mut starts = Vec::with_capacity(counts.len() + 1);
+    let mut running = 0usize;
+    for tally in counts {
+        starts.push(running);
+        running += tally;
+    }
+    starts.push(running);
+    (band, starts)
+}
+
 /// The narrowest band of columns worth handing one task.
 ///
 /// A band this thin stops giving the reduction enough contiguous work to be

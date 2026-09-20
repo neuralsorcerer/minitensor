@@ -7,7 +7,9 @@
 use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
-use crate::ops::map::{par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2};
+use crate::ops::map::{
+    compaction_bands, par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2,
+};
 use crate::ops::order::{Entry, float_key32, float_key64, int_key32, int_key64, pack32, pack64};
 use crate::ops::util::check_dim;
 use crate::{
@@ -16,6 +18,7 @@ use crate::{
     ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -299,34 +302,58 @@ fn column_band(inner: usize) -> usize {
 /// the numeric dtypes, the value itself for `Bool` -- because it comes from the
 /// same macro. NaN is nonzero, so it counts; that is NumPy's answer too.
 ///
-/// The scan is sequential. Its output length is not known until the scan is
-/// done, so a parallel version would have to count every chunk, prefix-sum the
-/// counts and then fill -- three passes over the input to save part of one, for
-/// an operation whose output is almost always a small fraction of its input.
+/// The output length is not known until the input has been scanned, so the scan
+/// happens twice: once to count what each band finds and once to write it. That
+/// reads as a pass wasted and is not, because the two passes are not the same
+/// size -- the count reads the input and writes nothing, and only the fill
+/// writes the rows. It also replaces a second serial pass that unravelled every
+/// linear position after the fact; the fill does that as it goes.
 pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
     let dims = tensor.shape().dims().to_vec();
     let ndim = dims.len();
     let contiguous = tensor.contiguous()?;
 
-    let found: Vec<usize> = with_truthy_slice!(&contiguous, |input, truthy| {
-        input
-            .iter()
+    let (found, flat) = with_truthy_slice!(&contiguous, |input, truthy| {
+        let len = input.len();
+        let (band, starts) = compaction_bands(len, &|first, last| {
+            input[first..last].iter().filter(|&&v| truthy(v)).count()
+        });
+        let found = starts[starts.len() - 1];
+        let mut flat = vec![0i64; found * ndim];
+        // The counts say how many rows each band owns, so cutting the output
+        // there hands every band a disjoint run to fill.
+        let mut rest: &mut [i64] = &mut flat;
+        let mut pieces: Vec<&mut [i64]> = Vec::with_capacity(starts.len() - 1);
+        for window in starts.windows(2) {
+            let (head, tail) = rest.split_at_mut((window[1] - window[0]) * ndim);
+            pieces.push(head);
+            rest = tail;
+        }
+        pieces
+            .into_par_iter()
             .enumerate()
-            .filter_map(|(i, &v)| truthy(v).then_some(i))
-            .collect()
+            .for_each(|(index, piece)| {
+                let first = index * band;
+                let last = (first + band).min(len);
+                let mut row = 0usize;
+                for (offset, &value) in input[first..last].iter().enumerate() {
+                    if !truthy(value) {
+                        continue;
+                    }
+                    // Unravel right to left, which is the order row-major
+                    // strides divide in.
+                    let mut position = first + offset;
+                    for axis in (0..ndim).rev() {
+                        piece[row * ndim + axis] = (position % dims[axis]) as i64;
+                        position /= dims[axis];
+                    }
+                    row += 1;
+                }
+            });
+        (found, flat)
     });
 
-    let mut flat = vec![0i64; found.len() * ndim];
-    for (row, &linear) in found.iter().enumerate() {
-        // Unravel right to left, which is the order row-major strides divide in.
-        let mut rest = linear;
-        for axis in (0..ndim).rev() {
-            flat[row * ndim + axis] = (rest % dims[axis]) as i64;
-            rest /= dims[axis];
-        }
-    }
-
-    let shape = Shape::new(vec![found.len(), ndim]);
+    let shape = Shape::new(vec![found, ndim]);
     Ok(Tensor::new(
         Arc::new(TensorData::from_vec_i64(flat, tensor.device())),
         shape,

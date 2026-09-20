@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::ops::map::{par_map_indexed, par_out_chunks};
+use crate::ops::map::{compaction_bands, par_out_chunks};
 use crate::{
     autograd::WhereBackward,
     device::Device,
@@ -169,16 +169,6 @@ pub fn masked_fill_scalar(input: &Tensor, mask: &Tensor, value: f64) -> Result<T
 /// blocks — shape `[n_true] + input.shape[mask.ndim():]`. A full-shape mask
 /// therefore selects individual elements into a 1-D tensor, while a 1-D mask
 /// over a matrix selects rows.
-/// Shortest run of the mask worth handing a task, and how many bands to aim for.
-///
-/// A compaction is one test and at most one copy per element, so a band has to
-/// be long before the split pays for it. Both come from the element count and
-/// never from the thread pool: the bands decide where each kept value lands,
-/// and an output that moved with the machine's core count would not be the
-/// same answer twice.
-const COMPACT_MIN_BAND: usize = 1 << 14;
-const COMPACT_BANDS: usize = 64;
-
 pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     if mask.dtype() != DataType::Bool {
         return Err(MinitensorError::invalid_operation(
@@ -218,26 +208,12 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     // takes 1.0, almost all of it the `Vec<usize>` and a one-element
     // `copy_from_slice` per selected value.
     let len = mask_slice.len();
-    let band = len.div_ceil(COMPACT_BANDS).max(COMPACT_MIN_BAND);
-    let bands = len.div_ceil(band).max(1);
-    let counts = if bands < 2 {
-        vec![mask_slice.iter().filter(|&&m| m).count()]
-    } else {
-        par_map_indexed(bands, &|index| {
-            let first = index * band;
-            let last = (first + band).min(len);
-            mask_slice[first..last].iter().filter(|&&m| m).count()
-        })
-    };
-    let mut starts = Vec::with_capacity(counts.len() + 1);
-    let mut running = 0usize;
-    for &count in &counts {
-        starts.push(running);
-        running += count;
-    }
-    starts.push(running);
+    let (band, starts) = compaction_bands(len, &|first, last| {
+        mask_slice[first..last].iter().filter(|&&m| m).count()
+    });
+    let kept_total = starts[starts.len() - 1];
 
-    let mut out_dims = vec![running];
+    let mut out_dims = vec![kept_total];
     out_dims.extend_from_slice(&in_dims[m_dims.len()..]);
     let out_shape = Shape::new(out_dims);
 
@@ -264,7 +240,7 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
             // The counts say exactly how long each band's piece of the output
             // is, so cutting it there hands every band a disjoint run to fill.
             let mut rest: &mut [$ty] = dst;
-            let mut pieces: Vec<&mut [$ty]> = Vec::with_capacity(counts.len());
+            let mut pieces: Vec<&mut [$ty]> = Vec::with_capacity(starts.len() - 1);
             for window in starts.windows(2) {
                 let (head, tail) = rest.split_at_mut((window[1] - window[0]) * inner);
                 pieces.push(head);

@@ -315,41 +315,65 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
 /// `reduce_with` has no identity element, so there is no sentinel that a real
 /// input value could collide with.
 fn nan_extremum_all<T: Float + Send + Sync>(data: &[T], which: Extremum) -> T {
-    // Folded a chunk at a time rather than through `par_iter().filter()`. The
-    // filtered form charges rayon's consumer machinery per element and cannot
-    // inline the comparison through `T: Float`, which showed as `nanmax`
-    // costing 0.77 ms on a million float64 where `max` over the same data --
-    // the same scan without the NaN test -- costs 0.22.
-    let combine = |a: Option<T>, b: Option<T>| match (a, b) {
-        (Some(x), Some(y)) => Some(match which {
-            Extremum::Max => x.max(y),
-            Extremum::Min => x.min(y),
-        }),
-        (found, None) | (None, found) => found,
-    };
-    par_fold_chunks(
-        data,
-        PAR_CHUNK,
-        None,
-        &|_, block| {
-            let mut best: Option<T> = None;
-            for &value in block {
-                if value.is_nan() {
-                    continue;
+    // Two accumulators with no branch between them: a running extremum seeded
+    // with the identity, and whether anything real was seen at all. A NaN
+    // compares false against everything, so `if value > best` skips it without
+    // being asked to, and the flag is accumulated with `|=` so the loop keeps
+    // no branch of its own. The seed cannot be confused with a real `-inf` because `real`
+    // answers that question separately -- which is the whole reason the flag is
+    // carried rather than inferred from the value.
+    //
+    // The straightforward `par_iter().filter(..).reduce_with(..)` this replaces
+    // charges rayon's consumer machinery per element and branches on a NaN test
+    // and an `Option` discriminant inside the fold. On a million float64 it
+    // read 0.77 ms where `max` over the same data -- the same scan without the
+    // NaN test -- costs 0.22.
+    let fold = |_: usize, block: &[T]| -> (T, bool) {
+        let mut best = match which {
+            Extremum::Max => T::neg_infinity(),
+            Extremum::Min => T::infinity(),
+        };
+        let mut real = false;
+        match which {
+            Extremum::Max => {
+                for &value in block {
+                    real |= !value.is_nan();
+                    if value > best {
+                        best = value;
+                    }
                 }
-                best = Some(match best {
-                    None => value,
-                    Some(current) => match which {
-                        Extremum::Max => current.max(value),
-                        Extremum::Min => current.min(value),
-                    },
-                });
             }
-            best
+            Extremum::Min => {
+                for &value in block {
+                    real |= !value.is_nan();
+                    if value < best {
+                        best = value;
+                    }
+                }
+            }
+        }
+        (best, real)
+    };
+    let combine = |a: (T, bool), b: (T, bool)| match (a.1, b.1) {
+        (true, true) => (
+            match which {
+                Extremum::Max => a.0.max(b.0),
+                Extremum::Min => a.0.min(b.0),
+            },
+            true,
+        ),
+        (true, false) => a,
+        _ => b,
+    };
+    let seed = (
+        match which {
+            Extremum::Max => T::neg_infinity(),
+            Extremum::Min => T::infinity(),
         },
-        &combine,
-    )
-    .unwrap_or_else(T::nan)
+        false,
+    );
+    let (best, real) = par_fold_chunks(data, PAR_CHUNK, seed, &fold, &combine);
+    if real { best } else { T::nan() }
 }
 
 /// Index of the global extremum.
