@@ -44,6 +44,49 @@ impl GradientFunction for DotBackward {
         &self.input_ids
     }
 }
+/// Gradient function for [`crate::ops::linalg::vecdot`].
+///
+/// One dot product per position along every axis but `dim`, so the gradient
+/// w.r.t. each operand is the *other* operand scaled by the incoming gradient
+/// for its position. The incoming gradient is the output's shape, which is the
+/// operands' shape with `dim` taken out; putting a length-one axis back where
+/// it was is what lets the multiply broadcast it along the contracted axis.
+///
+/// The operands have equal shapes here by construction -- the forward only
+/// takes this path when they do -- so no gradient has to be reduced back
+/// afterwards.
+pub struct VecdotBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub dim: usize,
+    pub input_ids: [TensorId; 2],
+    pub lhs_requires_grad: bool,
+    pub rhs_requires_grad: bool,
+}
+
+impl GradientFunction for VecdotBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
+
+        let spread = crate::ops::shape_ops::unsqueeze(grad_output, self.dim as isize)?;
+        if self.lhs_requires_grad {
+            let grad = crate::ops::arithmetic::mul(&self.rhs, &spread)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+        }
+        if self.rhs_requires_grad {
+            let grad = crate::ops::arithmetic::mul(&self.lhs, &spread)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient function for [`crate::ops::linalg::linear`].
 ///
 /// Both gradients are GEMMs over the operands the forward already had, with an

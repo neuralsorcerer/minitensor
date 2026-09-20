@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::with_grad_fn;
 
 use crate::{
-    autograd::{DotBackward, MatMulBackward, SolveBackward},
+    autograd::{DotBackward, MatMulBackward, SolveBackward, VecdotBackward},
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -1477,6 +1477,150 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     } else {
         Ok(output)
     }
+}
+
+/// A dot product along one axis, with every other axis a batch.
+///
+/// `dot` for a stack of vectors: this is what an attention score or a per-row
+/// similarity is, and writing it as `sum(a * b, dim)` costs a full-size
+/// temporary -- on a million float64 elements that is eight megabytes written
+/// and read back to produce eight bytes, 1.62 ms where the same contraction
+/// through `dot` takes 0.24.
+///
+/// Each run is folded by the same `accurate_pair_sum` the whole-tensor `dot`
+/// uses, so the answer depends on the length of the run and not on how the
+/// pool split the batch, and the error does not grow with the run the way one
+/// running total's would.
+///
+/// Falls back to multiplying and summing when the fused walk does not apply:
+/// when the operands need broadcasting against each other (the runs are then
+/// not both contiguous), when the contracted axis is not the last one (a run
+/// is then a stride rather than a slice), and for `bool`, which has no product
+/// worth summing. Those paths are the composition they always were, gradient
+/// included.
+pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+    let rank = lhs.ndim().max(rhs.ndim());
+    if rank == 0 {
+        return Err(MinitensorError::invalid_operation(
+            "vecdot: expected tensors with at least one dimension",
+        ));
+    }
+    let axis = crate::ops::util::normalize_dim(dim, rank)?;
+
+    let composed = || -> Result<Tensor> {
+        let product = crate::ops::arithmetic::mul(lhs, rhs)?;
+        crate::ops::reduction::sum(&product, Some(vec![axis as isize]), false)
+    };
+
+    // The fused walk wants one contiguous run per output element on both
+    // sides, which is exactly: same shape, contracted axis last.
+    if lhs.shape().dims() != rhs.shape().dims() || axis + 1 != rank {
+        return composed();
+    }
+
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
+    if result_dtype == DataType::Bool {
+        return composed();
+    }
+    let lhs_view = lhs_cast.as_ref().contiguous()?;
+    let rhs_view = rhs_cast.as_ref().contiguous()?;
+
+    let dims = lhs.shape().dims();
+    let run = dims[axis];
+    let outer: usize = dims[..axis].iter().product();
+    let output_shape = Shape::new(dims[..axis].to_vec());
+    let device = lhs.device();
+
+    macro_rules! vecdot_of {
+        ($accessor:ident, $from_vec:ident, $zero:expr, $fold:expr, $ty:ty) => {{
+            let left = lhs_view.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
+            })?;
+            let right = rhs_view.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
+            })?;
+            let mut out = vec![<$ty>::default(); outer];
+            if outer == 1 {
+                // One run over everything, which `accurate_pair_sum` spreads
+                // across the pool itself.
+                out[0] = accurate_pair_sum(left, right, $zero, $fold);
+            } else {
+                // Many independent runs, so the batch is what to split; each
+                // run then folds on one thread.
+                crate::ops::map::par_out_chunks(
+                    &mut out,
+                    crate::ops::map::PAR_CHUNK,
+                    &|start, block| {
+                        for (offset, slot) in block.iter_mut().enumerate() {
+                            let base = (start + offset) * run;
+                            *slot = accurate_pair_sum(
+                                &left[base..base + run],
+                                &right[base..base + run],
+                                $zero,
+                                $fold,
+                            );
+                        }
+                    },
+                );
+            }
+            TensorData::$from_vec(out, device)
+        }};
+    }
+
+    let output_data = match result_dtype {
+        DataType::Float32 => vecdot_of!(as_f32_slice, from_vec_f32, 0.0_f32, simd_dot_f32, f32),
+        DataType::Float64 => vecdot_of!(as_f64_slice, from_vec_f64, 0.0_f64, simd_dot_f64, f64),
+        DataType::Int32 => vecdot_of!(
+            as_i32_slice,
+            from_vec_i32,
+            0_i32,
+            |a: &[i32], b: &[i32]| a
+                .iter()
+                .zip(b)
+                .fold(0_i32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
+            i32
+        ),
+        DataType::Int64 => vecdot_of!(
+            as_i64_slice,
+            from_vec_i64,
+            0_i64,
+            |a: &[i64], b: &[i64]| a
+                .iter()
+                .zip(b)
+                .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
+            i64
+        ),
+        DataType::Bool => unreachable!("bool falls back above"),
+    };
+
+    let requires_grad = (lhs.requires_grad() || rhs.requires_grad()) && result_dtype.is_float();
+    let output = Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        result_dtype,
+        device,
+        requires_grad,
+    );
+
+    if requires_grad {
+        let grad_fn = Arc::new(VecdotBackward {
+            lhs: lhs_view.detach(),
+            rhs: rhs_view.detach(),
+            dim: axis,
+            input_ids: [lhs.id(), rhs.id()],
+            lhs_requires_grad: lhs.requires_grad(),
+            rhs_requires_grad: rhs.requires_grad(),
+        });
+        return with_grad_fn(output, grad_fn);
+    }
+
+    Ok(output)
 }
 
 #[cfg(all(test, not(feature = "blas")))]

@@ -720,18 +720,30 @@ def tensorinv(a: object, ind: int = 2) -> Tensor:
 #: is the tensor -- to `Tensor`. See `_elementwise._ELEMENTWISE`.
 
 
+#: The contraction itself, held here rather than looked up on `functional` at
+#: each call: `vecdot` below is put onto `functional` under the same name, so
+#: the attribute that leads here would otherwise lead back to it. Same reason
+#: as `_shape._select_around`.
+_contract = _C.functional.vecdot
+
+
 def vecdot(input: object, other: object, dim: int = -1) -> Tensor:
     """The dot product along one axis, with the others broadcast.
 
     `dot` and `vdot` take vectors; this takes a batch of them and contracts one
     axis, which is what the array API means by the name and what an attention
     score or a per-row similarity actually needs.
+
+    Contracted in one pass where it can be -- operands of the same shape, the
+    last axis, anything but `bool` -- rather than multiplied into a full-size
+    temporary and then summed. The temporary is what the operation costs
+    otherwise: on a million float64 elements it is eight megabytes written and
+    read back to produce eight bytes.
     """
 
     left = _atleast_tensor(input)
     right = _atleast_tensor(other)
-    axis = _normalize_axis(dim, max(left.ndim(), right.ndim()), "vecdot")
-    return _F.sum(left * right, axis)
+    return _contract(left, right, dim)
 
 
 def matvec(input: object, other: object) -> Tensor:

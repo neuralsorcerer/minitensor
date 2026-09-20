@@ -355,3 +355,76 @@ def test_the_blocked_lowering_agrees_with_itself_across_the_boundary():
             rtol=1e-11,
             atol=1e-11,
         )
+
+
+@pytest.mark.parametrize(
+    "shape,dim",
+    [
+        ((7,), 0),
+        ((3, 4), -1),
+        ((3, 4), 1),
+        ((3, 4), 0),
+        ((2, 3, 4), -1),
+        ((2, 3, 4), 1),
+        ((5, 1, 6), 2),
+        ((4, 0), -1),
+    ],
+)
+def test_the_contraction_answers_the_same_whichever_route_it_takes(shape, dim):
+    """`vecdot` contracts in one pass where it can -- operands of one shape,
+    the last axis -- and multiplies and sums where it cannot. Both have to
+    answer the same thing, so every case here is checked against the sum of the
+    product, and the parameters straddle the boundary: the last axis and not,
+    a unit axis, an empty one.
+    """
+
+    rng = np.random.default_rng(abs(hash((shape, dim))) % 2**32)
+    first = rng.standard_normal(shape)
+    second = rng.standard_normal(shape)
+    np.testing.assert_allclose(
+        mt.vecdot(mt.from_numpy(first), mt.from_numpy(second), dim).numpy(),
+        np.sum(first * second, axis=dim),
+        rtol=1e-12,
+        atol=1e-300,
+    )
+
+
+def test_a_contraction_that_has_to_broadcast_still_contracts():
+    """Broadcast operands take the multiply-and-sum route, because neither
+    side's run is contiguous once one of them is stretched."""
+
+    rng = np.random.default_rng(5)
+    rows, vector = rng.standard_normal((3, 4)), rng.standard_normal(4)
+    np.testing.assert_allclose(
+        mt.vecdot(mt.from_numpy(rows), mt.from_numpy(vector)).numpy(),
+        np.vecdot(rows, vector),
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+def test_an_integer_contraction_wraps_where_numpy_wraps(dtype):
+    rng = np.random.default_rng(6)
+    first = rng.integers(-5, 5, (3, 4)).astype(dtype)
+    second = rng.integers(-5, 5, (3, 4)).astype(dtype)
+    np.testing.assert_array_equal(
+        mt.vecdot(mt.from_numpy(first), mt.from_numpy(second)).numpy(),
+        np.vecdot(first, second),
+    )
+
+
+def test_the_contraction_carries_a_gradient_to_both_operands():
+    """Each operand's gradient is the other one scaled by the incoming
+    gradient for its row -- which is what the fused path has to reproduce,
+    since it never forms the product the composition would differentiate."""
+
+    rng = np.random.default_rng(7)
+    left = rng.standard_normal((3, 4))
+    right = rng.standard_normal((3, 4))
+    weights = np.array([1.0, 2.0, 3.0])
+
+    first = mt.from_numpy(left).requires_grad_(True)
+    second = mt.from_numpy(right).requires_grad_(True)
+    (mt.vecdot(first, second) * mt.from_numpy(weights)).sum().backward()
+
+    np.testing.assert_allclose(first.grad.numpy(), right * weights[:, None], rtol=1e-12)
+    np.testing.assert_allclose(second.grad.numpy(), left * weights[:, None], rtol=1e-12)

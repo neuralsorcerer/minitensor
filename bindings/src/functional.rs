@@ -512,6 +512,17 @@ pub fn split(
     tensor.split(split_size_or_sections, Some(dim))
 }
 
+/// The dot product along `dim`, with every other axis a batch.
+#[pyfunction]
+#[pyo3(signature = (input, other, dim = -1))]
+pub fn vecdot(input: &Bound<PyAny>, other: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+    let lhs = borrow_tensor(input)?;
+    let rhs = borrow_tensor(other)?;
+    engine::ops::linalg::vecdot(lhs.tensor(), rhs.tensor(), dim)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2091,6 +2102,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(reciprocal, parent)?)?;
     parent.add_function(wrap_pyfunction!(chunk, parent)?)?;
     parent.add_function(wrap_pyfunction!(split, parent)?)?;
+    parent.add_function(wrap_pyfunction!(vecdot, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;
