@@ -157,9 +157,14 @@ Elementwise arithmetic, where the win is only parallelism and a fused output:
 
 ## What still loses
 
-At 16M elements there is **nothing** in float32 that NumPy computes faster, and
-one thing in float64: `tanh`. It is not only a 16M problem — it loses at every
-size, and worse at the small ones:
+Of the kernels in the tables above, at 16M elements there is **nothing** in
+float32 that NumPy computes faster, and one thing in float64: `tanh`. The
+breadth sweep further down finds nine more float64 transcendentals behind for
+the same reason, which is the one set out here -- this section is where the
+reason lives, that one is where the list is.
+
+`tanh` is not only a 16M problem: it loses at every size, and worse at the
+small ones:
 
 ```
 tanh float64        1,000     14.6us  vs    2.2us    0.15x
@@ -213,9 +218,9 @@ Everything built on these kernels inherits the shape but not the loss — float6
 by the passes they avoid rather than by the transcendental itself. float64
 `exp` and `log` do lose at 1000 elements (0.29× and 0.38×), for the reason the
 next paragraph gives, but close as the array grows and are ahead or level by
-16M: `exp` 1.07–1.11× and `log` 0.99–1.02× over repeat runs. `tanh` is the only
-one that stays behind at every size, which is why it is the only one described
-here.
+16M: `exp` 1.07–1.11× and `log` 0.99–1.02× over repeat runs. Of the ops in
+these tables `tanh` is the only one that stays behind at every size, which is
+why it is the one described here.
 
 Below 16M the remaining losses are small ones at small sizes, where a few
 microseconds of call overhead is the whole measurement, and in the band the
@@ -224,6 +229,126 @@ measurements in that file, taken on a different machine; re-tuning them to this
 container would improve these numbers and regress that one, so they are left
 alone. If you are tuning for a specific host, that file is where to look and
 this script is how to check.
+
+## Every name NumPy also has
+
+The tables above come from hand-written cases: a few dozen operations at four
+sizes, chosen because they are where the dispatch decision lives. They say
+nothing about the other hundred and forty names this library shares with NumPy,
+and a library is not fast because its six most-discussed kernels are.
+
+The `surface` family answers for the rest, and it is not a list. It pairs every
+public `minitensor` name against the NumPy name spelled the same way, gives both
+the same values, and times them at a million elements — past last-level cache,
+where the kernel is what is being measured rather than the call around it.
+Nothing has to be added to it when an operation is added to the library, which
+is the point: a list is a thing someone has to remember to extend, and the
+operations that go quietly wrong are exactly the ones nobody was thinking about.
+
+Four questions decide whether a name belongs, and each is asked of the code
+rather than answered in advance:
+
+- **Does the call work on both sides?** Most do not, on the sweep's operands —
+  `eye`, `full`, `tile` and forty others want a shape or a repeat count where
+  they are being handed an array. They raise, and a name that raises is skipped.
+  Integer operands are tried when the float ones are refused, which is how
+  `bitwise_and`, `gcd` and the shifts get measured at all.
+- **Did both do the same thing?** Matching output shapes is the cheapest honest
+  test. `mt.sort` returns values *and* indices where `np.sort` returns values
+  alone, so timing one against the other would report a ratio that is really a
+  statement about the two APIs; `nonzero`, `divmod`, `frexp` and the `unique_*`
+  family go the same way.
+- **Did ours do anything at all?** `conj` of a real tensor *is* that tensor, and
+  `np.conj` copies it. Timing the two measures a copy against nothing and reports
+  five thousand, which is true and is not about a kernel. A call that hands an
+  operand straight back is dropped.
+- **Is the cost linear in the input?** `convolve` is a fine operation and a
+  meaningless row: it is O(n·m), so the sweep would spend minutes on it and
+  report a number that says nothing. Rather than name the quadratic ones, the
+  sweep measures two small probes four sizes apart. Everything genuinely
+  quadratic reads 13× or more — `convolve` 13.7, `kron` 13.8, `outer` 17.3,
+  `diagflat` 21.3 — and the limit sits at 10, above the 7.4× that a perfectly
+  linear `cos` shows when the thread pool happens to turn on between the two
+  probes.
+
+307 cases survive that, and on this container:
+
+```
+overall   1.73x     float64  1.78x    int64  1.40x
+                    float32  1.80x    int32  1.29x
+```
+
+207 ahead of NumPy, 85 behind, 15 level.
+
+### What it found the first time it ran
+
+Nine operations were behind by more than the kernels they are built from, and
+in every case the reason was work being done *around* the kernel rather than in
+it. Times are for a million elements, before and after, with NumPy for scale:
+
+| | before | after | NumPy |
+|---|---|---|---|
+| `delete` | 171.11 ms | 9.95 ms | 2.49 ms |
+| `argpartition` | 125.54 ms | 48.30 ms | 22.35 ms |
+| `partition` | 136.65 ms | 44.98 ms | 23.74 ms |
+| `isin` | 434 ms | 117 ms | 116 ms |
+| `searchsorted` | 400 ms | 96 ms | 210 ms |
+| `take` | 9.96 ms | 1.11 ms | 0.90 ms |
+| `index_select` | 9.56 ms | 0.68 ms | 0.86 ms |
+| `masked_select` | 9.55 ms | 1.70 ms | 5.60 ms |
+| `compress` | 8.20 ms | 1.75 ms | 1.68 ms |
+| `nonzero` | 6.33 ms | 2.21 ms | 0.86 ms |
+
+Four causes, each of which the deep families could not have shown, because they
+only appear at a size the deep families do not reach with an argument the deep
+families do not have:
+
+- **A million positions taken one at a time.** `delete` and `partition` built
+  their index lists with Python loops, and `index_select` narrowed an `i64`
+  index tensor into a `Vec<usize>` — two allocations and three passes to move
+  nothing.
+- **A loop that was never parallel.** `searchsorted` ran its binary searches on
+  one core. They are independent by construction; that is the shape of the
+  operation.
+- **A compaction that could not be.** `masked_select` and `nonzero` collected
+  the true positions into a vector and then copied one element per entry.
+  Counting the bands first makes both halves parallel and the vector
+  unnecessary.
+- **Work to prepare for work.** `take` rewrote its whole index to wrap negative
+  positions that were not there; `signbit` wrote a million ones to read a
+  million sign bits off them.
+
+### What it still says is behind
+
+Four groups, and only the first is a surprise:
+
+- **float64 transcendentals**, which is the `tanh` story below applied to the
+  rest of the family: `asinh` 0.32×, `sinh` 0.36, `cbrt` 0.37, `log1p` 0.44,
+  `tan` 0.45, `expm1` 0.57, `log10` 0.60, `atan2` 0.61, `atan` 0.73, `cosh`
+  0.80. `ops::simd::transcendental` is float32-only by design — it computes in
+  float64 and rounds once, which is exactly the headroom a float64 output does
+  not have — so these fall through to scalar libm while NumPy vectorises them.
+  The section below says why that is a different algorithm rather than a better
+  polynomial. It is a real gap and it is the largest one left.
+- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.67× are five
+  passes (two `isnan`, an extremum, two `where`) against one; `vecdot` 0.36×
+  writes a full-size product and then sums it, which is what `norm` used to do
+  before it was fused; `cov` 0.14× and `corrcoef` 0.24× centre and transpose
+  into fresh buffers where NumPy subtracts in place.
+- **Sorting.** `unique` 0.62×, `union1d` 0.62×, `setxor1d` 0.39× and
+  `percentile` 0.55× are all a comparison sort underneath, and ours is a
+  portable one.
+- **Two that are answers rather than problems.** `empty_like` reads 0.00×
+  because it zeroes: the kernels take `&mut [T]`, and reading uninitialised
+  floats is undefined behaviour, so an "uninitialised" buffer here is a zeroed
+  one. `flipud` reads 0.00× because NumPy returns a view with a negative stride
+  and a tensor here is always contiguous, so a flip is a copy.
+
+Two rows are worth reading with care rather than believing. `array_equal`
+(2724×) and `allclose` (84×) stop at the first element that differs, and the
+sweep gives them two different random arrays, so they stop at the first one.
+That is a real advantage on data that differs early and no advantage at all on
+data that does not, which is the kind of thing a single number cannot say.
 
 ## Reading a run
 
@@ -234,7 +359,7 @@ watching after a change. As of the run these tables come from:
 
 ```
 elementwise  1.32x     gemm  0.87x     reduction  1.77x
-shape        1.19x     unary 1.41x
+shape        1.19x     unary 1.41x     surface    1.73x
 ```
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is

@@ -18,6 +18,13 @@ and ``--native`` pushes the delegation thresholds out of reach so the same
 sweep measures the engine's own kernels -- running it both ways is how the two
 paths are compared on one build.
 
+Four families are hand-written and go deep: a few dozen operations across four
+sizes, chosen because they are where the dispatch decision lives. The fifth,
+``surface``, goes wide and derives its own case list by pairing every public
+name this library shares with NumPy, so an operation added tomorrow is measured
+without anyone remembering to add it here. It is most of the runtime; narrow to
+the others with ``--filter`` while iterating on one of them.
+
 Each case times the *kernel only*. Operands are built once, outside the timing
 loop, in each library's own native container, so no conversion cost is charged
 to either side. Timing is min-of-repeats rather than mean: the minimum is the
@@ -32,6 +39,7 @@ that has already been wrong once.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import statistics
 import sys
@@ -298,12 +306,207 @@ def _shape_cases(dtype: str) -> Iterable[Case]:
     )
 
 
+# The breadth sweep runs at one size, past last-level cache, where the kernel
+# is what is being measured rather than the call around it.
+_SURFACE_ELEMENTS = 1 << 20
+
+# Two probe sizes, a factor of four apart, and the growth allowed between them.
+#
+# `convolve(a, b)` is a fine operation and a meaningless entry in this table: it
+# is O(n*m), so at a million elements a side the sweep would spend minutes on
+# one op and report a ratio that says nothing about the kernel. The obvious fix
+# is a list of names to skip, which is a list someone has to remember to extend.
+# Measuring the growth instead asks the same question of the code, and answers
+# it the same way for a name nobody thought of: four times the data is four
+# times the work for a linear kernel and sixteen for a quadratic one.
+#
+# The limit sits at ten rather than halfway, because the smaller probe can be
+# cheap for a reason that has nothing to do with the kernel's shape. The engine
+# turns on its thread pool at a few thousand elements, so an op measured at
+# 2048 and again at 8192 is measured once below that threshold and once above,
+# and pays the pool's wake-up only on the second. That reads as growth: `cos`
+# and `tan` grow 7.4x between these two sizes and are perfectly linear.
+# Measured here, everything genuinely quadratic reads 13x or more -- `convolve`
+# 13.7, `kron` 13.8, `outer` 17.3, `diagflat` 21.3 -- so ten separates the two
+# groups with room on both sides.
+_PROBE_SIZES = (2048, 8192)
+_PROBE_GROWTH_LIMIT = 10.0
+
+# Already measured above, at four sizes each. The breadth sweep exists to find
+# what nothing else looks at, so it does not time these a second time.
+_SURFACE_ALREADY_DEEP = frozenset(
+    {
+        "add",
+        "argmax",
+        "divide",
+        "exp",
+        "log",
+        "matmul",
+        "max",
+        "maximum",
+        "mean",
+        "multiply",
+        "reshape",
+        "sqrt",
+        "sum",
+        "tanh",
+        "transpose",
+    }
+)
+
+# Integer widths to retry an op on when the float operands are refused. A
+# `bitwise_and` is not a worse kernel for being undefined on floats, and half a
+# dozen of these would otherwise be invisible to the sweep.
+_SURFACE_INTEGRAL = {"float32": "int32", "float64": "int64"}
+
+
+def _required_positionals(fn: Callable) -> int | None:
+    """How many arguments the call needs, or None if that cannot be read."""
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    return sum(
+        1
+        for p in params
+        if p.default is inspect.Parameter.empty
+        and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    )
+
+
+def _surface_operands(size: int, dtype: str, integral: str | None) -> tuple:
+    """Two operands of `size` elements, as NumPy arrays and as tensors.
+
+    Strictly positive, so `log`, `sqrt` and `reciprocal` measure their
+    arithmetic rather than a NaN path, and so a divisor is never zero.
+    """
+    rng = np.random.default_rng(11)
+    if integral is not None:
+        left = rng.integers(1, 8, size=size).astype(integral)
+        right = rng.integers(1, 8, size=size).astype(integral)
+    else:
+        left = (np.abs(rng.standard_normal(size)) + 0.5).astype(dtype)
+        right = (np.abs(rng.standard_normal(size)) + 0.5).astype(dtype)
+    return left, right, mt.Tensor.from_numpy(left), mt.Tensor.from_numpy(right)
+
+
+def _same_work(got: object, want: object) -> bool:
+    """Whether the two calls were asked for the same thing.
+
+    A shared name is not a shared contract. `mt.sort` returns values *and*
+    indices where `np.sort` returns values alone, so timing one against the
+    other would report a ratio that is really a statement about the two APIs.
+    Matching output shapes is the cheapest honest test of that, and a full
+    reduction passes it because a 0-d tensor and a NumPy scalar both have shape
+    `()`.
+    """
+    if isinstance(got, mt.Tensor):
+        # `np.shape` of a ragged tuple raises rather than answering, and some
+        # of these names do return one: `unique_counts` gives values and counts
+        # of different lengths where ours gives a tensor. Nothing NumPy returns
+        # as a tuple is the same call as something we return as a tensor, so
+        # the question does not have to be asked.
+        if not isinstance(want, (np.ndarray, np.generic, bool, int, float)):
+            return False
+        return tuple(got.shape) == np.shape(want)
+    if isinstance(got, (bool, int, float)):
+        return isinstance(want, (bool, int, float, np.generic))
+    return False
+
+
+def _quick(fn: Callable[[], object]) -> float:
+    """Seconds for the fastest of three calls -- a probe, not a published number."""
+    best = float("inf")
+    for _ in range(3):
+        start = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+def _grows_linearly(build: Callable[[int], Callable[[], object]]) -> bool:
+    """Whether four times the input costs no more than `_PROBE_GROWTH_LIMIT`."""
+    small = _quick(build(_PROBE_SIZES[0]))
+    large = _quick(build(_PROBE_SIZES[1]))
+    return large <= small * _PROBE_GROWTH_LIMIT
+
+
+def _surface_cases(dtype: str) -> Iterable[Case]:
+    """Every public name shared with NumPy, timed on the same values by both.
+
+    The families above are hand-written: they go deep, across four sizes and
+    the shapes that decide dispatch. This one goes wide and derives its own
+    case list from the two modules, so an op added to the library tomorrow is
+    measured against NumPy without anyone remembering to add it here -- and an
+    op that is quietly an order of magnitude behind shows up as a row rather
+    than as nothing at all.
+    """
+    operands = {
+        kind: {
+            size: _surface_operands(size, dtype, kind)
+            for size in (*_PROBE_SIZES, _SURFACE_ELEMENTS)
+        }
+        for kind in (None, _SURFACE_INTEGRAL[dtype])
+    }
+
+    for name in sorted(dir(mt)):
+        if name.startswith("_") or name in _SURFACE_ALREADY_DEEP:
+            continue
+        ours = getattr(mt, name)
+        theirs = getattr(np, name, None)
+        if theirs is None or inspect.isclass(ours):
+            continue
+        if not callable(ours) or not callable(theirs):
+            continue
+        arity = _required_positionals(ours)
+        if arity not in (1, 2):
+            continue
+
+        for kind in (None, _SURFACE_INTEGRAL[dtype]):
+            sized = operands[kind]
+
+            def call(fn, size, native, _arity=arity, _sized=sized):
+                left_np, right_np, left_mt, right_mt = _sized[size]
+                left, right = (left_np, right_np) if native else (left_mt, right_mt)
+                return (lambda: fn(left)) if _arity == 1 else (lambda: fn(left, right))
+
+            try:
+                got = call(ours, _PROBE_SIZES[0], False)()
+                want = call(theirs, _PROBE_SIZES[0], True)()
+            except Exception:
+                continue  # not this operand kind, or not this op
+            if any(got is operand for operand in sized[_PROBE_SIZES[0]][2:]):
+                # The call handed an operand straight back. `conj` of a real
+                # tensor *is* that tensor and `np.conj` copies it, so timing
+                # the two against each other measures a copy against nothing
+                # and reports five thousand. That is a true fact about the two
+                # libraries and not a fact about a kernel, which is what this
+                # table is for.
+                break
+            if not _same_work(got, want):
+                break  # the two names do different work; no dtype fixes that
+            if not _grows_linearly(lambda n: call(ours, n, False)):
+                break
+            if not _grows_linearly(lambda n: call(theirs, n, True)):
+                break
+            yield Case(
+                family="surface",
+                op=name,
+                shape=f"{_SURFACE_ELEMENTS}",
+                dtype=dtype if kind is None else kind,
+                mt_fn=call(ours, _SURFACE_ELEMENTS, False),
+                np_fn=call(theirs, _SURFACE_ELEMENTS, True),
+            )
+            break
+
+
 def collect_cases(dtypes: Sequence[str]) -> list[Case]:
     cases: list[Case] = []
     for dtype in dtypes:
         cases.extend(_gemm_cases(dtype))
         cases.extend(_sized_cases(dtype))
         cases.extend(_shape_cases(dtype))
+        cases.extend(_surface_cases(dtype))
     return cases
 
 
