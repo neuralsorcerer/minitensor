@@ -58,10 +58,10 @@ pub fn nanvar(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
+    // An integer holds no NaN, so this is `var` -- the same delegation
+    // `nanmax` and `nanprod` make, rather than a refusal.
     if !tensor.dtype().is_float() {
-        return Err(MinitensorError::invalid_operation(
-            "nanvar is only supported for floating point tensors",
-        ));
+        return crate::ops::reduction::var(tensor, dim, keepdim, unbiased);
     }
 
     // Centred on the NaN-skipping mean, kept broadcastable.
@@ -377,7 +377,13 @@ mod tests {
                 .unwrap(),
             &[30]
         );
-        assert!(nanvar(&ints, None, false, true).is_err());
+        // `nanvar` falls through too: it is `var`, which widens an integer
+        // to a float rather than refusing it. It used to be the one member of
+        // this family that raised.
+        let variance = nanvar(&ints, None, false, true).unwrap();
+        assert_eq!(variance.dtype(), DataType::Float64);
+        let got = variance.data().as_f64_slice().unwrap()[0];
+        assert!((got - 2.333_333_333_333_333_5).abs() < 1e-12, "got {got}");
     }
 
     /// These refused a list of axes while `var` and `std` accepted one, and

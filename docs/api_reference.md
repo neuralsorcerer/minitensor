@@ -1680,10 +1680,10 @@ their gradients the gradients of the operations underneath — `nanvar` is
 differentiable because `sub`, `mul` and `sum` are, with the deviation zeroed at
 the NaN positions before it is squared so no `0 * NaN` reaches the chain rule.
 
-`nanvar`, `nanstd`, `nanargmax` and `nanargmin` reduce one dimension at a time,
-since the non-NaN count they divide by comes from a single-axis
-`count_nonzero`; passing more than one dimension raises rather than reducing
-the wrong count.
+`nanargmax` and `nanargmin` reduce one dimension at a time, because they
+report an index and an index names a position along one axis. `nanvar`,
+`nanstd` and `nanmedian` take as many axes as they are given, like the
+reductions they are built from.
 
 `mean` over an integer tensor returns a float: `float32` for `int32`,
 `float64` for `int64`. On a `bool` tensor `mean`, `var`, `std`, `norm` and
@@ -1712,9 +1712,31 @@ answer is an integer:
   unit (`silu`, `selu`, `mish`, `softsign`, `logsigmoid`, `hardsigmoid`,
   `hardswish`, `tanhshrink`, `celu`, `softshrink`, `threshold`) is
   real-valued and widens.
-- **The derived statistics widen too.** `cov`, `corrcoef`, `cdist`, `pdist`,
+- **The statistics widen too.** `var`, `std`, `nanvar`, `nanstd`, `norm`,
+  `logsumexp`, `logcumsumexp`, `quantile`, `nanquantile`, `percentile`,
+  `nanpercentile`, `cov`, `corrcoef`, `dist`, `cdist`, `pdist`,
   `pairwise_distance`, `normalize`, `trapezoid` and `histogramdd` all answer
   in real numbers, so an integer argument widens rather than being refused.
+  `nanmedian` is the exception that proves the rule: an integer holds no NaN,
+  so it is `median`, whose answer is one of the input's own values and stays
+  an integer.
+- **So do the activations that are not clamps.** `softmax`, `log_softmax`,
+  `softmin`, `masked_softmax`, `masked_log_softmax`, `softplus`, `gelu`,
+  `elu`, `leaky_relu`, `hardshrink` and `glu` take an integer by widening it,
+  as `sigmoid` and `selu` already did.
+- **A `*_like` initializer takes its shape from the reference, not its
+  dtype.** `rand_like`, `randn_like`, `uniform_like`, `truncated_normal_like`
+  and the six fan initializers fall back to the default float dtype for a
+  non-float reference. An explicit `dtype=` is a different argument and an
+  integer one is refused: `rand` promises samples from `[0, 1)`, `randn` the
+  standard normal and `uniform` samples over `[a, b)`, and no integer dtype
+  can hold any of them. `randint` is the integer constructor, and it takes
+  its bounds.
+- **The layer-shaped ops refuse an integer, together.** `conv1d`, the
+  poolings, `layer_norm`, `batch_norm`, `group_norm`, `rms_norm`, the losses
+  and `scaled_dot_product_attention` take model activations, which are float
+  by construction. `matmul` is not one of them: an integer matrix product is
+  exact, and it stays integer.
 - **A `bool` is refused either way.** It has no width to widen to, and
   answering for a mask here while `mean` declines to would be worse than not
   answering at all.

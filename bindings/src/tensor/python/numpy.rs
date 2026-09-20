@@ -194,6 +194,15 @@ pub(crate) fn create_random_tensor(
     requires_grad: bool,
     normal: bool,
 ) -> PyResult<Tensor> {
+    // `rand` promises samples from `[0, 1)` and `randn` samples from the
+    // standard normal; an integer dtype can hold neither, and what the
+    // integer arms here used to do was not a rounding of either. `rand`
+    // filled an `int64` with `rng.random::<i64>()` -- uniform over the whole
+    // integer range, a different distribution with a different support --
+    // and `randn` cast each normal sample to an integer, which truncates
+    // towards zero and lands on 0 or +/-1 almost always. Neither said so.
+    // `randint` is the constructor for integers, and it takes its bounds.
+    ensure_float_dtype(dtype, if normal { "randn" } else { "rand" })?;
     let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
 
     match dtype {
@@ -233,52 +242,7 @@ pub(crate) fn create_random_tensor(
                 });
             }
         }
-        DataType::Int32 => {
-            if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                use rand::RngExt;
-                random::with_rng(|rng| {
-                    if normal {
-                        use rand_distr::{Distribution, Normal};
-                        let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
-                        for val in slice.iter_mut() {
-                            *val = normal_dist.sample(rng) as i32;
-                        }
-                    } else {
-                        for val in slice.iter_mut() {
-                            *val = rng.random::<i32>();
-                        }
-                    }
-                });
-            }
-        }
-        DataType::Int64 => {
-            if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                use rand::RngExt;
-                random::with_rng(|rng| {
-                    if normal {
-                        use rand_distr::{Distribution, Normal};
-                        let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
-                        for val in slice.iter_mut() {
-                            *val = normal_dist.sample(rng) as i64;
-                        }
-                    } else {
-                        for val in slice.iter_mut() {
-                            *val = rng.random::<i64>();
-                        }
-                    }
-                });
-            }
-        }
-        DataType::Bool => {
-            if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                use rand::RngExt;
-                random::with_rng(|rng| {
-                    for val in slice.iter_mut() {
-                        *val = rng.random::<bool>();
-                    }
-                });
-            }
-        }
+        _ => unreachable!("a non-float dtype is refused above"),
     }
 
     Ok(Tensor::new(
@@ -380,6 +344,12 @@ pub(crate) fn create_uniform_tensor(
             "uniform requires high to be greater than low",
         ));
     }
+
+    // Samples over `[low, high)` truncated into an integer dtype are not
+    // samples over `[low, high)`: with the default bounds every draw landed
+    // on 0, so `uniform_like(integers)` was a uniform distribution that
+    // returned zero every time. `randint` takes integer bounds and means it.
+    ensure_float_dtype(dtype, "uniform")?;
 
     let tensor = nn::init::init_uniform(shape, low, high, dtype, device, requires_grad)
         .map_err(_convert_error)?;

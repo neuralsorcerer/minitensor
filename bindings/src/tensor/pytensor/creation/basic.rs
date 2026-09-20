@@ -181,7 +181,13 @@ impl PyTensor {
 
         let dtype = match dtype {
             Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
+            // The reference gives the shape; its dtype is only a default, and
+            // an integer one is not a default a uniform sample can use. This
+            // is the arm `rand_like` and `randn_like` already have.
+            None => match reference_tensor.dtype() {
+                DataType::Float32 | DataType::Float64 => reference_tensor.dtype(),
+                _ => dtype::default_float_dtype(),
+            },
         };
 
         let device = resolve_device_or(device, reference_tensor.device())?;
@@ -244,7 +250,17 @@ macro_rules! fan_init_constructors {
                     let reference_tensor = reference.tensor();
                     let dtype = match dtype {
                         Some(name) => dtype::parse_dtype(name)?,
-                        None => reference_tensor.dtype(),
+                        // An integer reference gives its shape, not its dtype:
+                        // an initializer draws real numbers, and there is no
+                        // integer version of one to fall back to. This is the
+                        // arm `rand_like` and `randn_like` already have, and
+                        // without it these six answered "only supports float32
+                        // or float64" for a reference every other `*_like`
+                        // constructor accepts.
+                        None => match reference_tensor.dtype() {
+                            DataType::Float32 | DataType::Float64 => reference_tensor.dtype(),
+                            _ => dtype::default_float_dtype(),
+                        },
                     };
                     let device = resolve_device_or(device, reference_tensor.device())?;
                     let requires_grad =

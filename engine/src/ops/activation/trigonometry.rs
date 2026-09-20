@@ -413,6 +413,13 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
         ));
     }
 
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return softplus(&widened, beta, threshold);
+    }
+
     let output_data = match tensor.dtype() {
         DataType::Float32 => softplus_f32(tensor, beta as f32, threshold as f32)?,
         DataType::Float64 => softplus_f64(tensor, beta, threshold)?,
@@ -447,6 +454,12 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
 
 /// GELU activation function with optional tanh approximation
 pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return gelu(&widened, approximate);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => gelu_f32(tensor, approximate)?,
         DataType::Float64 => gelu_f64(tensor, approximate)?,
@@ -480,6 +493,12 @@ pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
 
 /// ELU activation function with configurable alpha
 pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return elu(&widened, alpha);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => elu_f32(tensor, alpha as f32)?,
         DataType::Float64 => elu_f64(tensor, alpha)?,
@@ -679,6 +698,13 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
         ));
     }
 
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return hardshrink(&widened, lambd);
+    }
+
     // Gate the mask on the same condition `Tensor::new` uses for
     // `requires_grad`, so it is neither computed for inference nor missing
     // when the gradient function needs it (the bare `requires_grad()` check
@@ -721,6 +747,13 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
 
 /// LeakyReLU activation function with gradient support
 pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return leaky_relu(&widened, negative_slope);
+    }
+
     // As with `relu`, only materialize the backward mask when a gradient
     // function will consume it.
     let store_mask = tensor.requires_grad() && crate::autograd::is_grad_enabled();
@@ -768,6 +801,12 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
 
 /// Softmax activation function with gradient support
 pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return softmax(&widened, dim);
+    }
     if tensor.ndim() == 0 {
         let mut output_data =
             TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
@@ -863,6 +902,12 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
 
 /// Log-Softmax activation function with gradient support
 pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return log_softmax(&widened, dim);
+    }
     if tensor.ndim() == 0 {
         let mut output_data =
             TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());

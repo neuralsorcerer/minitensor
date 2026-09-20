@@ -22,6 +22,12 @@ use std::sync::Arc;
 
 /// Numerically stable log-sum-exp reduction along specified dimensions
 pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a variance, a norm and a log-sum-exp of integers are
+    // all real numbers. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return logsumexp(&widened, dim, keepdim);
+    }
     match tensor.dtype() {
         DataType::Float32 | DataType::Float64 => {}
         _ => {

@@ -831,6 +831,12 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
 /// modern Transformers. Built from autograd-tracked slice / sigmoid / multiply,
 /// so the gradient is exact. The split dimension must have even length.
 pub fn glu(input: &Tensor, dim: isize) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(input)? {
+        return glu(&widened, dim);
+    }
     if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
         return Err(MinitensorError::invalid_operation(
             "glu only supports floating point tensors",

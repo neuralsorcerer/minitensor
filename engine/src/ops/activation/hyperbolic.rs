@@ -25,6 +25,12 @@ pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Res
         ));
     }
 
+    // The values widen if they are integers, as they do for `softmax`; the
+    // mask stays boolean. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return masked_softmax(&widened, mask, dim);
+    }
+
     if tensor.device() != mask.device() {
         return Err(MinitensorError::device_mismatch(
             format!("{:?}", tensor.device()),
@@ -142,6 +148,12 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
         return Err(MinitensorError::invalid_operation(
             "masked_log_softmax mask must have bool dtype",
         ));
+    }
+
+    // The values widen if they are integers, as they do for `softmax`; the
+    // mask stays boolean. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return masked_log_softmax(&widened, mask, dim);
     }
 
     if tensor.device() != mask.device() {

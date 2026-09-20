@@ -181,8 +181,15 @@ def test_logsumexp_keepdim_and_all_dims():
     expected_collapsed = expected_keepdim.reshape(collapsed.shape)
     np.testing.assert_allclose(collapsed.numpy(), expected_collapsed, rtol=1e-6)
 
-    with pytest.raises(RuntimeError):
-        _ = tensor.astype("int32").logsumexp(dim=1)
+    # An integer input widens rather than being refused: a log-sum-exp of
+    # integers is a real number, and this is the rule `mean` follows.
+    from_integers = tensor.astype("int32").logsumexp(dim=1)
+    assert str(from_integers.dtype) == "float32"
+    np.testing.assert_allclose(
+        from_integers.numpy(),
+        np.log(np.exp(data.astype(np.int32).astype(np.float32)).sum(axis=1)),
+        rtol=1e-6,
+    )
 
 
 def test_logsumexp_non_finite_rows():

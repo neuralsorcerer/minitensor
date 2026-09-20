@@ -482,10 +482,13 @@ def test_nanmedian_all_nan_and_empty_slices_return_nan():
     assert np.isnan(empty_values.numpy()).all()
 
 
-def test_nanmedian_rejects_non_float_tensors():
-    data = mt.tensor([1, 2, 3], dtype="int32")
-    with pytest.raises(ValueError, match="nanmedian"):
-        data.nanmedian()
+def test_nanmedian_of_integers_is_the_median():
+    """An integer holds no NaN, so there is nothing to skip: this delegates to
+    `median`, the same way `nanmax` and `nanprod` do, and keeps the integer
+    dtype rather than refusing the call."""
+    data = mt.tensor([3, 1, 2], dtype="int32")
+    assert data.nanmedian().item() == data.median().item() == 2
+    assert str(data.nanmedian().dtype) == "int32"
 
 
 def test_nanquantile_sequence_dim_keepdim():
@@ -1058,17 +1061,24 @@ def test_norm_of_empty_is_zero():
     np.testing.assert_array_equal(empty.norm(2.0, 0).numpy(), np.zeros(3))
 
 
-def test_norm_rejects_unsupported_orders_and_dtypes():
+def test_norm_rejects_unsupported_orders():
     with pytest.raises(Exception):
         mt.Tensor([1.0]).norm(-2.0)
     with pytest.raises(Exception):
         mt.Tensor([1.0]).norm(float("nan"))
-    with pytest.raises(Exception):
-        mt.Tensor([1, 2], dtype="int64").norm(2.0)
     with pytest.raises(ValueError):
         mt.Tensor([1.0]).norm("nuc")
     with pytest.raises(Exception):
         mt.Tensor([1.0]).norm(2.0, 5)
+
+
+def test_norm_of_integers_is_the_norm_of_the_reals():
+    """The length of an integer vector is a real number, so an integer input
+    widens rather than being refused -- the rule `mean` follows and `norm`
+    did not."""
+    got = mt.Tensor([3, 4], dtype="int64").norm(2.0)
+    assert str(got.dtype) == "float64"
+    np.testing.assert_allclose(got.item(), 5.0)
 
 
 # min/max/argmin/argmax along a dimension all run through one shared reducer,

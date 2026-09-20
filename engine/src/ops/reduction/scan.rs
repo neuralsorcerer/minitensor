@@ -239,6 +239,12 @@ pub(crate) fn logcumsumexp_raw(
 /// for everything after; combining in the log domain keeps every step
 /// representable, which is why it exists as its own operation.
 pub fn logcumsumexp(tensor: &Tensor, dim: isize) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a variance, a norm and a log-sum-exp of integers are
+    // all real numbers. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return logcumsumexp(&widened, dim);
+    }
     let dim = normalize_dim(dim, tensor.ndim())?;
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(

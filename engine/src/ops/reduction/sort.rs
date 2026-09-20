@@ -701,6 +701,12 @@ pub fn var(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a variance, a norm and a log-sum-exp of integers are
+    // all real numbers. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return var(&widened, dim, keepdim, unbiased);
+    }
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",

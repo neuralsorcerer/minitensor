@@ -300,9 +300,15 @@ def test_the_gradient_of_the_sum_is_one_per_column():
     assert np.allclose(tensor.grad.numpy().sum(axis=0), 7.0)
 
 
-def test_logcumsumexp_rejects_integers():
-    with pytest.raises(Exception, match="floating point"):
-        mt.logcumsumexp(mt.Tensor.from_numpy(np.array([1, 2], dtype=np.int64)), 0)
+def test_logcumsumexp_widens_integers():
+    """A running log-sum-exp of integers is a sequence of real numbers, so the
+    input widens -- `int64` to `float64`, the width `mean` widens to -- rather
+    than being refused."""
+    got = mt.logcumsumexp(mt.Tensor.from_numpy(np.array([1, 2], dtype=np.int64)), 0)
+    assert str(got.dtype) == "float64"
+    np.testing.assert_allclose(
+        got.numpy(), [1.0, np.log(np.exp(1.0) + np.exp(2.0))], rtol=1e-12
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

@@ -520,6 +520,12 @@ pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
 /// `softmax` of the negated input: the distribution that favours the smallest
 /// element instead of the largest.
 pub fn softmin(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, as it does for
+    // the rest of this family: none of these has an integer answer. See
+    // `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return softmin(&widened, dim);
+    }
     // Composed rather than given its own kernel: negation is exact in floating
     // point, so this is the same distribution to the last bit, and it inherits
     // the shift-by-the-maximum that keeps `softmax` from overflowing.

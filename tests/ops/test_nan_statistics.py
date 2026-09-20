@@ -104,10 +104,16 @@ def test_an_all_nan_slice_has_no_variance():
     assert np.isnan(_t(np.array([[np.nan, np.nan]])).nanvar(1, False).numpy()[0])
 
 
-def test_nanvar_rejects_a_non_float_tensor():
+def test_nanvar_of_integers_is_var():
+    """An integer holds no NaN, so there is nothing to skip and this is `var`
+    -- the delegation `nanprod` and `nanmax` already make. It widens to
+    `float64` as `var` does, rather than refusing the call."""
     integers = mt.Tensor(np.array([1, 2, 3], dtype=np.int64), dtype="int64")
-    with pytest.raises(Exception, match="floating point"):
-        integers.nanvar()
+    assert str(integers.nanvar().dtype) == "float64"
+    np.testing.assert_allclose(
+        integers.nanvar().item(), np.var([1.0, 2.0, 3.0], ddof=1)
+    )
+    np.testing.assert_allclose(integers.nanvar().item(), integers.var().item())
 
 
 @pytest.mark.parametrize("unbiased", [False, True])

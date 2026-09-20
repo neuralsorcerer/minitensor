@@ -33,20 +33,51 @@ def test_arange_int64():
     assert np.array_equal(x.numpy(), np.arange(0, 5, dtype=np.int64))
 
 
-def test_rand_bool_shape_and_dtype():
-    x = Tensor.rand(2, 2, dtype="bool")
-    arr = x.numpy()
-    assert x.dtype == "bool"
-    assert arr.dtype == np.bool_
-    assert arr.shape == (2, 2)
+def test_rand_refuses_bool_as_it_refuses_the_integers():
+    """A fair coin is not a sample from `[0, 1)`, and the boolean arm these
+    used to take ignored the `normal` flag entirely -- `randn(dtype="bool")`
+    and `rand(dtype="bool")` returned the same distribution, which cannot be
+    right for both. A random mask is `randint(0, 2, shape).astype("bool")`,
+    or a `bernoulli` draw at the probability the caller wants."""
+    for call in (
+        lambda: Tensor.rand(2, 2, dtype="bool"),
+        lambda: Tensor.randn(2, 2, dtype="bool"),
+        lambda: Tensor.uniform(2, dtype="bool"),
+    ):
+        with pytest.raises(ValueError, match="float32 or float64"):
+            call()
+
+    mask = Tensor.randint(0, 2, (2, 2), dtype="int64").astype("bool")
+    assert mask.dtype == "bool"
+    assert mask.numpy().shape == (2, 2)
 
 
-def test_randn_int32_dtype():
-    x = Tensor.randn(3, dtype="int32")
-    arr = x.numpy()
-    assert x.dtype == "int32"
-    assert arr.dtype == np.int32
-    assert arr.shape == (3,)
+def test_the_random_constructors_refuse_an_integer_dtype():
+    """`rand` promises samples from `[0, 1)`, `randn` samples from the standard
+    normal and `uniform` samples over `[a, b)`. An integer dtype can hold none
+    of them, and what these used to answer was not a rounding of any:
+    `rand(dtype="int64")` filled the tensor with `rng.random::<i64>()` --
+    uniform over the whole integer range, a different distribution over a
+    different support -- `randn` truncated each sample towards zero, landing
+    on 0 or +/-1 almost always, and `uniform` with its default bounds returned
+    zeros. `randint` is the integer constructor, and it takes its bounds."""
+    for call in (
+        lambda: Tensor.randn(3, dtype="int32"),
+        lambda: Tensor.rand(3, dtype="int64"),
+        lambda: Tensor.uniform(3, dtype="int32"),
+    ):
+        with pytest.raises(ValueError, match="float32 or float64"):
+            call()
+
+    # A `*_like` reference is a different argument: it gives the shape, and a
+    # non-float dtype falls back to the default rather than being refused.
+    integers = Tensor.ones((3,), dtype="int64")
+    for like in (Tensor.rand_like, Tensor.randn_like, Tensor.uniform_like):
+        assert "float" in str(like(integers).dtype)
+
+    counts = Tensor.randint(0, 10, (3,), dtype="int64")
+    assert counts.dtype == "int64"
+    assert all(0 <= value < 10 for value in counts.tolist())
 
 
 def test_uniform_respects_bounds_and_dtype():
@@ -272,15 +303,29 @@ def test_rand_like_defaults_to_float_for_integer_inputs():
 
 
 def test_uniform_like_inherits_reference_metadata():
-    base = Tensor.ones((3, 2), dtype="int32", requires_grad=True)
+    base = Tensor.ones((3, 2), dtype="float64", requires_grad=True)
     result = Tensor.uniform_like(base, low=-3.0, high=5.0)
     arr = result.numpy()
 
     assert result.shape == base.shape
-    assert result.dtype == "int32"
+    assert result.dtype == "float64"
     assert result.requires_grad is True
     assert (arr >= -3).all()
     assert (arr < 5).all()
+
+
+def test_uniform_like_falls_back_to_a_float_for_an_integer_reference():
+    """The reference gives the shape; its dtype is only a default, and an
+    integer one is not a default a uniform sample can use. Truncated into
+    `int32`, the default `[0, 1)` bounds made every draw zero: a uniform
+    distribution that returned the same value every time, without a word."""
+    base = Tensor.ones((3, 2), dtype="int32", requires_grad=False)
+    result = Tensor.uniform_like(base)
+
+    assert str(result.dtype) == str(Tensor.rand_like(base).dtype)
+    assert "float" in str(result.dtype)
+    assert result.shape == base.shape
+    assert (result.numpy() > 0).any()
 
 
 def test_he_normal_like_matches_reference_metadata_and_variance():
@@ -328,13 +373,20 @@ def test_uniform_raises_for_invalid_bounds():
         Tensor.uniform(2, low=1.0, high=0.0)
 
 
-def test_fan_initializers_reject_non_float_dtypes():
+def test_fan_initializers_reject_a_non_float_dtype_but_not_a_reference():
+    """An initializer draws real numbers, so `dtype="int32"` is a request it
+    cannot fill. A `*_like` reference is a different argument: it gives the
+    shape, and its dtype is a default to fall back from -- which is what
+    `rand_like` and `randn_like` already did, while these six answered
+    "only supports float32 or float64" for the same reference."""
     with pytest.raises(ValueError, match="float32 or float64"):
         Tensor.xavier_uniform(3, 3, dtype="int32")
 
     integer_base = Tensor.ones((3, 3), dtype="int32")
-    with pytest.raises(ValueError, match="float32 or float64"):
-        Tensor.he_uniform_like(integer_base)
+    assert str(Tensor.he_uniform_like(integer_base).dtype) == str(
+        Tensor.rand_like(integer_base).dtype
+    )
+    assert "float" in str(Tensor.he_uniform_like(integer_base).dtype)
 
 
 def test_fan_initializers_require_positive_dimensions():
@@ -446,7 +498,7 @@ def test_tensor_new_ones_defaults_to_reference_metadata():
 
 
 def test_tensor_new_full_respects_fill_and_defaults():
-    base = Tensor.rand((1,), dtype="int32", requires_grad=True)
+    base = Tensor.ones((1,), dtype="int32", requires_grad=True)
     result = base.new_full(5, 3)
 
     assert result.shape == (5,)

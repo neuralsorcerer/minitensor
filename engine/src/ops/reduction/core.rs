@@ -482,6 +482,12 @@ pub fn quantile(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a quantile of integers is an interpolated real number,
+    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return quantile(&widened, q, dim, keepdim, interpolation);
+    }
     reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
         quantile_axis(t, q, axis, keep, interpolation)
     })
@@ -495,6 +501,12 @@ pub fn quantiles(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a quantile of integers is an interpolated real number,
+    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return quantiles(&widened, qs, dim, keepdim, interpolation);
+    }
     if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, false)? {
         return Ok(stacked);
     }
@@ -553,6 +565,12 @@ pub fn nanquantile(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a quantile of integers is an interpolated real number,
+    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return nanquantile(&widened, q, dim, keepdim, interpolation);
+    }
     reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
         nanquantile_axis(t, q, axis, keep, interpolation)
     })
@@ -566,6 +584,12 @@ pub fn nanquantiles(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
+    // An integer argument widens rather than being refused, the rule `mean`
+    // already follows: a quantile of integers is an interpolated real number,
+    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return nanquantiles(&widened, qs, dim, keepdim, interpolation);
+    }
     if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, true)? {
         return Ok(stacked);
     }
@@ -721,6 +745,12 @@ fn nanquantile_axis(
 /// rather than averaging them; `nanquantile(0.5)` is the interpolated
 /// equivalent.
 fn nanmedian_axis(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    // An integer holds no NaN, so this is `median` -- the same delegation
+    // `nanmax` and `nanprod` make, rather than a refusal. The median of
+    // integers is an integer, so this one widens nothing.
+    if !tensor.dtype().is_float() {
+        return Ok(median(tensor, dim, keepdim)?.0);
+    }
     ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
 
     let (values, norm_dim) = match dim {
