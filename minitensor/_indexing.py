@@ -244,6 +244,26 @@ def argwhere(input: object) -> Tensor:
     return _F.nonzero(_atleast_tensor(input))
 
 
+def _present_in_sorted(values: Tensor, ordered: Tensor) -> Tensor:
+    """Whether each of `values` appears in the already-sorted `ordered`.
+
+    `searchsorted` reports where a value *would* go; the value is present
+    exactly when what is already there equals it. The clamp keeps a value past
+    the end of the test set reading a real position rather than one off the
+    end, and the comparison then rejects it.
+
+    Split out of `isin` because the set operations below already hold a sorted
+    test set -- `unique` returns one -- and `isin` would sort it again. Two of
+    them called it twice, so five sorts were doing the work of three.
+    """
+
+    if ordered.shape[0] == 0:
+        # Nothing to be a member of.
+        return Tensor.full(list(values.shape), False, dtype="bool")
+    slot = _F.clamp(_F.searchsorted(ordered, values), 0, ordered.shape[0] - 1)
+    return _F.index_select(ordered, 0, slot) == values
+
+
 def isin(
     elements: object,
     test_elements: object,
@@ -267,21 +287,12 @@ def isin(
     tests = _atleast_tensor(test_elements).reshape(-1)
 
     shape = list(values.shape)
-    if tests.shape[0] == 0:
-        # Nothing to be a member of.
-        present = Tensor.full(shape, False, dtype="bool")
-        return _F.logical_not(present) if invert else present
-
     dtype = _promoted_dtype(values, tests)
     flat = values.reshape(-1).astype(dtype)
-    ordered = _F.sort(tests.astype(dtype))[0]
-
-    # `searchsorted` reports where a value *would* go; the value is present
-    # exactly when what is already there equals it. The clamp keeps a value
-    # past the end of the test set reading a real position rather than one off
-    # the end, and the comparison then rejects it.
-    slot = _F.clamp(_F.searchsorted(ordered, flat), 0, ordered.shape[0] - 1)
-    present = (_F.index_select(ordered, 0, slot) == flat).reshape(shape)
+    ordered = tests.astype(dtype)
+    if ordered.shape[0]:
+        ordered = _F.sort(ordered)[0]
+    present = _present_in_sorted(flat, ordered).reshape(shape)
     return _F.logical_not(present) if invert else present
 
 
@@ -991,7 +1002,8 @@ def intersect1d(
     if return_indices:
         left_values, left_first = _F.unique(left, return_index=True)
         right_values, right_first = _F.unique(right, return_index=True)
-        keep = isin(left_values, right_values)
+        # Both came back sorted, so the membership test needs no sort of its own.
+        keep = _present_in_sorted(*_promote_pair(left_values, right_values))
         common = _F.masked_select(left_values, keep)
         # Where the common values sit in each side's distinct list, which is
         # sorted -- so a search finds them without comparing every pair.
@@ -1003,7 +1015,8 @@ def intersect1d(
 
     left_values = _F.unique(left)
     right_values = _F.unique(right)
-    return _F.masked_select(left_values, isin(left_values, right_values))
+    keep = _present_in_sorted(*_promote_pair(left_values, right_values))
+    return _F.masked_select(left_values, keep)
 
 
 def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tensor:
@@ -1028,8 +1041,12 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
     left, right = _F.unique(left), _F.unique(right)
-    only_left = _F.masked_select(left, isin(left, right, invert=True))
-    only_right = _F.masked_select(right, isin(right, left, invert=True))
+    # Both sides are sorted and distinct by now, which is exactly the state
+    # `isin` would spend a sort reaching.
+    only_left = _F.masked_select(left, _F.logical_not(_present_in_sorted(left, right)))
+    only_right = _F.masked_select(
+        right, _F.logical_not(_present_in_sorted(right, left))
+    )
     return _F.unique(_F.cat([only_left, only_right]))
 
 
