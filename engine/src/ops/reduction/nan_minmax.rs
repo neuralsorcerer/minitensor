@@ -315,14 +315,41 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
 /// `reduce_with` has no identity element, so there is no sentinel that a real
 /// input value could collide with.
 fn nan_extremum_all<T: Float + Send + Sync>(data: &[T], which: Extremum) -> T {
-    data.par_iter()
-        .copied()
-        .filter(|v| !v.is_nan())
-        .reduce_with(|a, b| match which {
-            Extremum::Max => a.max(b),
-            Extremum::Min => a.min(b),
-        })
-        .unwrap_or_else(T::nan)
+    // Folded a chunk at a time rather than through `par_iter().filter()`. The
+    // filtered form charges rayon's consumer machinery per element and cannot
+    // inline the comparison through `T: Float`, which showed as `nanmax`
+    // costing 0.77 ms on a million float64 where `max` over the same data --
+    // the same scan without the NaN test -- costs 0.22.
+    let combine = |a: Option<T>, b: Option<T>| match (a, b) {
+        (Some(x), Some(y)) => Some(match which {
+            Extremum::Max => x.max(y),
+            Extremum::Min => x.min(y),
+        }),
+        (found, None) | (None, found) => found,
+    };
+    par_fold_chunks(
+        data,
+        PAR_CHUNK,
+        None,
+        &|_, block| {
+            let mut best: Option<T> = None;
+            for &value in block {
+                if value.is_nan() {
+                    continue;
+                }
+                best = Some(match best {
+                    None => value,
+                    Some(current) => match which {
+                        Extremum::Max => current.max(value),
+                        Extremum::Min => current.min(value),
+                    },
+                });
+            }
+            best
+        },
+        &combine,
+    )
+    .unwrap_or_else(T::nan)
 }
 
 /// Index of the global extremum.

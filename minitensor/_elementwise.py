@@ -275,7 +275,12 @@ def signbit(input: object) -> Tensor:
     """
 
     tensor = _atleast_tensor(input)
-    return _F.copysign(_C.Tensor.ones_like(tensor), tensor) < 0
+    # The one is a scalar, not a tensor of ones: `copysign` broadcasts it, so
+    # the sign of a million values is read without first writing a million
+    # ones to read them onto. Same three operations, one fewer pass and one
+    # fewer buffer the size of the input.
+    one = _C.Tensor.full([], 1.0, dtype=str(tensor.dtype))
+    return _F.copysign(one, tensor) < 0
 
 
 def sgn(input: object) -> Tensor:
