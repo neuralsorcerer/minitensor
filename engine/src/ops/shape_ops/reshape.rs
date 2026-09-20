@@ -635,13 +635,15 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
 
     let dim_size = tensor.shape().dims()[dim];
 
-    // Validate indices. In parallel because this is a full pass over an array
-    // that may be larger than the tensor being selected from, and `find_any`
-    // stops the rest of the pool as soon as one thread has an answer.
+    // Validate indices. In parallel, because this is a full pass over an array
+    // that may be larger than the tensor being selected from. `find_first`
+    // rather than `find_any`: both stop the pool early, and the first is the
+    // one the caller wrote first, so the message names the same position
+    // however the work was split.
     let limit = dim_size as i64;
     if let Some(&bad) = indices
         .par_iter()
-        .find_any(|&&idx| !(0..limit).contains(&idx))
+        .find_first(|&&idx| !(0..limit).contains(&idx))
     {
         return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
     }

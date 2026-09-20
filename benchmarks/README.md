@@ -282,41 +282,49 @@ overall   1.73x     float64  1.78x    int64  1.40x
 
 ### What it found the first time it ran
 
-Nine operations were behind by more than the kernels they are built from, and
+Twelve operations were behind by more than the kernels they are built from, and
 in every case the reason was work being done *around* the kernel rather than in
-it. Times are for a million elements, before and after, with NumPy for scale:
+it. Both columns are this script on this container, a million elements, float64
+except the four that take an integer argument -- so they are the same
+measurement twice. Over the 116 float64 operations none of this touched, the
+two runs differ by a median of 0.9%, and NumPy's own column by 0.2%.
 
-| | before | after | NumPy |
-|---|---|---|---|
-| `delete` | 171.11 ms | 9.95 ms | 2.49 ms |
-| `argpartition` | 125.54 ms | 48.30 ms | 22.35 ms |
-| `partition` | 136.65 ms | 44.98 ms | 23.74 ms |
-| `isin` | 434 ms | 117 ms | 116 ms |
-| `searchsorted` | 400 ms | 96 ms | 210 ms |
-| `take` | 9.96 ms | 1.11 ms | 0.90 ms |
-| `index_select` | 9.56 ms | 0.68 ms | 0.86 ms |
-| `masked_select` | 9.55 ms | 1.70 ms | 5.60 ms |
-| `compress` | 8.20 ms | 1.75 ms | 1.68 ms |
-| `nonzero` | 6.33 ms | 2.21 ms | 0.86 ms |
+| | before | after | | NumPy |
+|---|---|---|---|---|
+| `delete` | 148.27 ms | 4.78 ms | 31× | 2.51 ms |
+| `compress` | 9.09 ms | 1.35 ms | 6.7× | 3.90 ms |
+| `partition` | 110.14 ms | 24.91 ms | 4.4× | 14.67 ms |
+| `isin` | 434.32 ms | 113.96 ms | 3.8× | 108.69 ms |
+| `take` | 3.81 ms | 1.05 ms | 3.6× | 0.80 ms |
+| `argpartition` | 125.54 ms | 36.96 ms | 3.4× | 14.70 ms |
+| `argwhere` | 6.27 ms | 1.99 ms | 3.2× | 3.78 ms |
+| `flatnonzero` | 6.33 ms | 2.03 ms | 3.1× | 2.91 ms |
+| `setdiff1d` | 96.61 ms | 48.62 ms | 2.0× | 52.89 ms |
+| `signbit` | 1.45 ms | 0.77 ms | 1.9× | 0.35 ms |
+| `setxor1d` | 217.91 ms | 114.67 ms | 1.9× | 44.60 ms |
+| `nanmax` | 0.77 ms | 0.52 ms | 1.5× | 0.35 ms |
 
-Four causes, each of which the deep families could not have shown, because they
-only appear at a size the deep families do not reach with an argument the deep
-families do not have:
+Four causes, none of which the deep families could have shown, because each
+only appears at a size they do not reach with an argument they do not have:
 
 - **A million positions taken one at a time.** `delete` and `partition` built
   their index lists with Python loops, and `index_select` narrowed an `i64`
-  index tensor into a `Vec<usize>` — two allocations and three passes to move
-  nothing.
+  index tensor into a `Vec<usize>` -- two allocations and three passes over the
+  index to move nothing. A selection of a million elements cost 9.6 ms of which
+  the gather was 0.7.
 - **A loop that was never parallel.** `searchsorted` ran its binary searches on
   one core. They are independent by construction; that is the shape of the
-  operation.
+  operation. It is what `isin` and the four set operations spend their time in.
 - **A compaction that could not be.** `masked_select` and `nonzero` collected
-  the true positions into a vector and then copied one element per entry.
-  Counting the bands first makes both halves parallel and the vector
-  unnecessary.
+  the true positions into a vector and then copied one element per entry, both
+  serially. Counting the bands first makes both halves parallel and the vector
+  unnecessary -- `x[mask]` went 9.6 ms to 1.7.
 - **Work to prepare for work.** `take` rewrote its whole index to wrap negative
   positions that were not there; `signbit` wrote a million ones to read a
   million sign bits off them.
+
+`unique` is the one row that did not move, and it is the one whose time is
+genuinely inside the kernel: a comparison sort, which is the group below.
 
 ### What it still says is behind
 
