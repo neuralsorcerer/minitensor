@@ -271,14 +271,15 @@ rather than answered in advance:
   linear `cos` shows when the thread pool happens to turn on between the two
   probes.
 
-307 cases survive that, and on this container:
+306 cases survive that, and on this container the script reports **1.63x**
+overall: 216 ahead of NumPy, 81 behind, 9 level. Per dtype, leaving out the two
+rows per dtype that read 0.00 because they are answers rather than measurements
+(`empty_like` and `flipud`, both explained below):
 
 ```
-overall   1.73x     float64  1.78x    int64  1.40x
-                    float32  1.80x    int32  1.29x
+float64  1.91x    int64  1.47x
+float32  1.82x    int32  1.31x
 ```
-
-207 ahead of NumPy, 85 behind, 15 level.
 
 ### What it found the first time it ran
 
@@ -286,23 +287,26 @@ Twelve operations were behind by more than the kernels they are built from, and
 in every case the reason was work being done *around* the kernel rather than in
 it. Both columns are this script on this container, a million elements, float64
 except the four that take an integer argument -- so they are the same
-measurement twice. Over the 116 float64 operations none of this touched, the
-two runs differ by a median of 0.9%, and NumPy's own column by 0.2%.
+measurement twice. Over the 108 float64 operations none of this touched, the
+two runs differ by a median of 1.8%, and NumPy's own column by 0.7%.
 
 | | before | after | | NumPy |
 |---|---|---|---|---|
-| `delete` | 148.27 ms | 4.78 ms | 31× | 2.51 ms |
-| `compress` | 9.09 ms | 1.35 ms | 6.7× | 3.90 ms |
-| `partition` | 110.14 ms | 24.91 ms | 4.4× | 14.67 ms |
-| `isin` | 434.32 ms | 113.96 ms | 3.8× | 108.69 ms |
-| `take` | 3.81 ms | 1.05 ms | 3.6× | 0.80 ms |
-| `argpartition` | 125.54 ms | 36.96 ms | 3.4× | 14.70 ms |
-| `argwhere` | 6.27 ms | 1.99 ms | 3.2× | 3.78 ms |
-| `flatnonzero` | 6.33 ms | 2.03 ms | 3.1× | 2.91 ms |
-| `setdiff1d` | 96.61 ms | 48.62 ms | 2.0× | 52.89 ms |
-| `signbit` | 1.45 ms | 0.77 ms | 1.9× | 0.35 ms |
-| `setxor1d` | 217.91 ms | 114.67 ms | 1.9× | 44.60 ms |
-| `nanmax` | 0.77 ms | 0.52 ms | 1.5× | 0.35 ms |
+| `delete` | 148.27 ms | 4.80 ms | 31× | 2.35 ms |
+| `compress` | 9.09 ms | 1.21 ms | 7.5× | 4.14 ms |
+| `cov` | 10.10 ms | 2.25 ms | 4.5× | 2.49 ms |
+| `partition` | 110.14 ms | 25.04 ms | 4.4× | 14.96 ms |
+| `isin` | 434.32 ms | 116.04 ms | 3.7× | 103.07 ms |
+| `take` | 3.81 ms | 1.08 ms | 3.5× | 0.84 ms |
+| `argpartition` | 125.54 ms | 36.84 ms | 3.4× | 15.60 ms |
+| `argwhere` | 6.27 ms | 1.90 ms | 3.3× | 3.74 ms |
+| `flatnonzero` | 6.33 ms | 1.95 ms | 3.2× | 3.00 ms |
+| `setxor1d` | 217.91 ms | 116.78 ms | 1.9× | 49.62 ms |
+| `setdiff1d` | 96.61 ms | 52.77 ms | 1.8× | 59.28 ms |
+| `signbit` | 1.45 ms | 0.92 ms | 1.6× | 0.41 ms |
+
+Five of those are now ahead of NumPy rather than behind it: `compress` 3.4×,
+`argwhere` 2.0×, `flatnonzero` 1.5×, `cov` 1.1×, `setdiff1d` 1.1×.
 
 Four causes, none of which the deep families could have shown, because each
 only appears at a size they do not reach with an argument they do not have:
@@ -321,10 +325,18 @@ only appears at a size they do not reach with an argument they do not have:
   unnecessary -- `x[mask]` went 9.6 ms to 1.7.
 - **Work to prepare for work.** `take` rewrote its whole index to wrap negative
   positions that were not there; `signbit` wrote a million ones to read a
-  million sign bits off them.
+  million sign bits off them; `cov` transposed a `(1, n)` matrix into an
+  `(n, 1)` one, which is eight megabytes copied to produce the bytes it already
+  had.
 
 `unique` is the one row that did not move, and it is the one whose time is
 genuinely inside the kernel: a comparison sort, which is the group below.
+
+The sweep has also caught a regression since, which is the other half of what
+it is for. `index_select` was validating its positions with `find_first` so the
+error message would name the first bad one deterministically; that cost eight
+times as much to find nothing, and `take` showed up at 0.15x in a run where it
+had been 0.77x with NumPy's column unmoved.
 
 ### What it still says is behind
 
@@ -338,22 +350,25 @@ Four groups, and only the first is a surprise:
   not have — so these fall through to scalar libm while NumPy vectorises them.
   The section below says why that is a different algorithm rather than a better
   polynomial. It is a real gap and it is the largest one left.
-- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.67× are five
-  passes (two `isnan`, an extremum, two `where`) against one; `vecdot` 0.36×
-  writes a full-size product and then sums it, which is what `norm` used to do
-  before it was fused; `cov` 0.14× and `corrcoef` 0.24× centre and transpose
-  into fresh buffers where NumPy subtracts in place.
-- **Sorting.** `unique` 0.62×, `union1d` 0.62×, `setxor1d` 0.39× and
-  `percentile` 0.55× are all a comparison sort underneath, and ours is a
-  portable one.
+- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.43–0.63× are five
+  passes (two `isnan`, an extremum, two `where`) against one, and a `where`
+  whose mask the branch predictor cannot guess costs six times one it can;
+  `vecdot` 0.11× at float64 writes a full-size product and then sums it, which
+  is what `norm` used to do before it was fused.
+- **Sorting.** `unique` 0.45–0.60×, `union1d` 0.49–0.63×, `setxor1d`
+  0.33–0.42×, `percentile` 0.57× and `partition` 0.50–0.60× are all a
+  comparison sort or a selection underneath, and ours is a portable one where
+  NumPy's is vectorised per microarchitecture. This is the group with the most
+  operations in it and the one that a single change would move furthest.
 - **Two that are answers rather than problems.** `empty_like` reads 0.00×
   because it zeroes: the kernels take `&mut [T]`, and reading uninitialised
   floats is undefined behaviour, so an "uninitialised" buffer here is a zeroed
   one. `flipud` reads 0.00× because NumPy returns a view with a negative stride
   and a tensor here is always contiguous, so a flip is a copy.
 
-Two rows are worth reading with care rather than believing. `array_equal`
-(2724×) and `allclose` (84×) stop at the first element that differs, and the
+Two rows are worth reading with care rather than believing. `array_equal` and
+`allclose`, which read in the thousands and the tens, stop at the first element
+that differs, and the
 sweep gives them two different random arrays, so they stop at the first one.
 That is a real advantage on data that differs early and no advantage at all on
 data that does not, which is the kind of thing a single number cannot say.
@@ -367,7 +382,7 @@ watching after a change. As of the run these tables come from:
 
 ```
 elementwise  1.32x     gemm  0.87x     reduction  1.77x
-shape        1.19x     unary 1.41x     surface    1.73x
+shape        1.19x     unary 1.41x     surface    1.63x
 ```
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
