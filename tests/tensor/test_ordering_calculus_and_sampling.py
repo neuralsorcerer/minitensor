@@ -223,6 +223,46 @@ def test_gradient_matches_numpy_with_uneven_coordinates(edge_order):
     )
 
 
+@pytest.mark.parametrize("edge_order", [1, 2])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_a_missing_sample_stays_where_it_was_put(bad, edge_order):
+    """The general stencil weights the middle sample by
+    `(ahead - behind) / (behind * ahead)`, which is exactly zero on a uniform
+    grid -- and `0 * NaN` is NaN, as is `0 * inf`. Multiplying it through
+    spread one bad sample to both of its neighbours, which a central
+    difference never reads: `gradient([1, nan, 3, 4])` answered
+    `[nan, nan, nan, 1]` where the derivative at the second point is
+    `(3 - 1) / 2`. NumPy reports that number, and separates the uniform case
+    for the same reason."""
+    values = np.array([1.0, bad, 3.0, 4.0, 5.0, 6.0])
+
+    np.testing.assert_array_equal(
+        mt.gradient(_t(values), edge_order=edge_order).numpy(),
+        np.gradient(values, edge_order=edge_order),
+    )
+
+    # Uneven coordinates keep the general stencil, where the middle weight is
+    # not zero and the contamination is arithmetic rather than an artefact.
+    # NumPy spreads it there too, and the two still agree.
+    np.testing.assert_array_equal(
+        mt.gradient(_t(values), _t(UNEVEN), edge_order=edge_order).numpy(),
+        np.gradient(values, UNEVEN, edge_order=edge_order),
+    )
+
+
+@pytest.mark.parametrize("edge_order", [1, 2])
+def test_the_two_paths_agree_on_the_grid_they_share(edge_order):
+    """A step of `h` and the coordinates `h * arange(n)` are the same grid, so
+    the two paths have to answer the same thing on it -- to the last bit, since
+    both reduce to the same stencil."""
+    for step in (1.0, 0.25, 3.0):
+        coordinates = step * np.arange(len(SAMPLES), dtype=np.float64)
+        np.testing.assert_array_equal(
+            mt.gradient(_t(SAMPLES), step, edge_order=edge_order).numpy(),
+            mt.gradient(_t(SAMPLES), _t(coordinates), edge_order=edge_order).numpy(),
+        )
+
+
 def test_gradient_over_every_axis_returns_one_tensor_each():
     values = RNG.standard_normal((4, 5, 3))
     got = mt.gradient(_t(values))
