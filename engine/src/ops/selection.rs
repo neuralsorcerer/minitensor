@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::{par_map_indexed, par_out_chunks};
 use crate::{
     autograd::WhereBackward,
     device::Device,
@@ -13,6 +13,7 @@ use crate::{
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -168,6 +169,16 @@ pub fn masked_fill_scalar(input: &Tensor, mask: &Tensor, value: f64) -> Result<T
 /// blocks — shape `[n_true] + input.shape[mask.ndim():]`. A full-shape mask
 /// therefore selects individual elements into a 1-D tensor, while a 1-D mask
 /// over a matrix selects rows.
+/// Shortest run of the mask worth handing a task, and how many bands to aim for.
+///
+/// A compaction is one test and at most one copy per element, so a band has to
+/// be long before the split pays for it. Both come from the element count and
+/// never from the thread pool: the bands decide where each kept value lands,
+/// and an output that moved with the machine's core count would not be the
+/// same answer twice.
+const COMPACT_MIN_BAND: usize = 1 << 14;
+const COMPACT_BANDS: usize = 64;
+
 pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     if mask.dtype() != DataType::Bool {
         return Err(MinitensorError::invalid_operation(
@@ -198,13 +209,35 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from mask"))?;
 
-    let selected: Vec<usize> = mask_slice
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| m.then_some(i))
-        .collect();
+    // A compaction cannot be cut up by its output: where a band's values land
+    // depends on how many the bands before it kept. So the mask is counted
+    // first and copied second, both in parallel, and nothing in between is
+    // materialised. Collecting the selected positions into a vector instead
+    // made the whole operation serial and cost more than the copy it was
+    // describing -- `x[mask]` over a million elements took 9.6 ms where NumPy
+    // takes 1.0, almost all of it the `Vec<usize>` and a one-element
+    // `copy_from_slice` per selected value.
+    let len = mask_slice.len();
+    let band = len.div_ceil(COMPACT_BANDS).max(COMPACT_MIN_BAND);
+    let bands = len.div_ceil(band).max(1);
+    let counts = if bands < 2 {
+        vec![mask_slice.iter().filter(|&&m| m).count()]
+    } else {
+        par_map_indexed(bands, &|index| {
+            let first = index * band;
+            let last = (first + band).min(len);
+            mask_slice[first..last].iter().filter(|&&m| m).count()
+        })
+    };
+    let mut starts = Vec::with_capacity(counts.len() + 1);
+    let mut running = 0usize;
+    for &count in &counts {
+        starts.push(running);
+        running += count;
+    }
+    starts.push(running);
 
-    let mut out_dims = vec![selected.len()];
+    let mut out_dims = vec![running];
     out_dims.extend_from_slice(&in_dims[m_dims.len()..]);
     let out_shape = Shape::new(out_dims);
 
@@ -213,7 +246,7 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
 
     /// Copies the selected trailing blocks for one dtype.
     macro_rules! gather_arm {
-        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+        ($ty:ty, $accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
             let src = input_c.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -228,20 +261,52 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
                     " slice for output"
                 ))
             })?;
-            for (k, &blk) in selected.iter().enumerate() {
-                dst[k * inner..(k + 1) * inner]
-                    .copy_from_slice(&src[blk * inner..(blk + 1) * inner]);
+            // The counts say exactly how long each band's piece of the output
+            // is, so cutting it there hands every band a disjoint run to fill.
+            let mut rest: &mut [$ty] = dst;
+            let mut pieces: Vec<&mut [$ty]> = Vec::with_capacity(counts.len());
+            for window in starts.windows(2) {
+                let (head, tail) = rest.split_at_mut((window[1] - window[0]) * inner);
+                pieces.push(head);
+                rest = tail;
             }
+            pieces
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(index, piece)| {
+                    let first = index * band;
+                    let last = (first + band).min(len);
+                    let mut kept = 0usize;
+                    if inner == 1 {
+                        // One element per block, where the other branch would
+                        // call `memcpy` to move a single value.
+                        for (offset, &on) in mask_slice[first..last].iter().enumerate() {
+                            if on {
+                                piece[kept] = src[first + offset];
+                                kept += 1;
+                            }
+                        }
+                        return;
+                    }
+                    for (offset, &on) in mask_slice[first..last].iter().enumerate() {
+                        if on {
+                            let block = first + offset;
+                            piece[kept * inner..(kept + 1) * inner]
+                                .copy_from_slice(&src[block * inner..(block + 1) * inner]);
+                            kept += 1;
+                        }
+                    }
+                });
         }};
     }
 
     if inner > 0 {
         match input.dtype() {
-            DataType::Float32 => gather_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
-            DataType::Float64 => gather_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
-            DataType::Int32 => gather_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
-            DataType::Int64 => gather_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
-            DataType::Bool => gather_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
+            DataType::Float32 => gather_arm!(f32, as_f32_slice, as_f32_slice_mut, "f32"),
+            DataType::Float64 => gather_arm!(f64, as_f64_slice, as_f64_slice_mut, "f64"),
+            DataType::Int32 => gather_arm!(i32, as_i32_slice, as_i32_slice_mut, "i32"),
+            DataType::Int64 => gather_arm!(i64, as_i64_slice, as_i64_slice_mut, "i64"),
+            DataType::Bool => gather_arm!(bool, as_bool_slice, as_bool_slice_mut, "bool"),
         }
     }
 
