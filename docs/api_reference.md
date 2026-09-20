@@ -17,7 +17,7 @@ fail loudly are the cheap ones — it is the two silent rows that matter.
 | | MiniTensor | What you may expect | Detail |
 | --- | --- | --- | --- |
 | `zeros_like` and the other `*_like` forms | Inherit the source's `requires_grad`, so `zeros_like(parameter)` is trainable | `torch.*_like` defaults the flag to `False` | [§2](#2-tensor-creation-api) — **silent**; pass `requires_grad=False` to opt out |
-| A tie in `max(dim)` / `min(dim)` | The gradient is divided evenly among the tied elements, although the returned index names only the first | `torch.max(dim)` sends the whole gradient to the one index it returns | [§4](#4-tensor-instance-methods) — **silent** |
+| A tie in `amax` / `amin` / `nanmedian` | The gradient is divided evenly among the tied elements | `torch.amax` does the same; `torch.max(dim)` instead sends it all to one index, and so does this library's `max(dim)` | [§4](#4-tensor-instance-methods) — **silent** |
 | `kl_div(input, target)` | Both arguments are probabilities | `torch.nn.functional.kl_div` takes log-probabilities as `input` | [§5](#5-functional-api-minitensorfunctional) — a log-probability input gives `inf`, so this one announces itself |
 | `median` with an even count | The lower of the two middle values, with an index naming it | `numpy.median` averages them; `torch.median` also takes the lower | [§4](#4-tensor-instance-methods) — use `quantile(0.5)` for the interpolated value |
 | `chunk` with an uneven split | Refused | `torch.chunk` shortens the last piece | [§4](#4-tensor-instance-methods) |
@@ -29,7 +29,7 @@ fail loudly are the cheap ones — it is the two silent rows that matter.
 Every row here was checked against a running build rather than read off the
 source, and the two marked **silent** are the ones that change results without
 raising: a `*_like` tensor that quietly joins the graph, and a tie whose
-gradient is shared rather than given to one winner.
+gradient is shared among the tied elements rather than given to one of them.
 
 ## 1) Top-level module (`minitensor`)
 
@@ -1060,13 +1060,14 @@ reduction works on integers.
 
 All of them are differentiable. `"amax"`/`"amin"` route each destination's
 gradient to the contributor that won it, with a tie going to the first — the
-rule `cummax` and `cummin` follow too. The reductions `max`, `min`, `amax` and
-`amin` do *not*: they divide a tie's gradient evenly among the elements that
-tied, which is the mean-subgradient convention and what PyTorch's `amax` does.
-`mode` is not differentiable at all. (`max(dim)` and `min(dim)` also return an
-index, and that index names only the first of the tied elements even though the
-gradient reaches all of them — PyTorch's `max(dim)` routes the gradient to that
-one index instead.)
+rule `cummax` and `cummin` follow too.
+
+The reductions split on whether they report an index. `max(dim)`, `min(dim)`,
+their NaN-aware forms and `median(dim)` send the whole gradient to the element
+their index names, so the value, the index and the gradient all identify the
+same element. `amax`, `amin` and `nanmedian` report no index and divide a tie's
+gradient evenly among the elements that tied — the mean subgradient, and what
+PyTorch's `amax` does. `mode` is not differentiable at all.
 `"mean"` divides by the same count the forward divided by. `"prod"` needs the
 product of every contribution *except* each one, and computes it by counting
 zeros rather than dividing the total: `total / factor` is the obvious form and

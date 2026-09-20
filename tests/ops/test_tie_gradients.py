@@ -11,26 +11,29 @@ and any convex combination of the tied elements is a valid subgradient. Two
 conventions are in use here and the difference is invisible until two elements
 are exactly equal:
 
-- `max`, `min`, `amax`, `amin` divide the gradient **evenly** among the tied
-  elements. This is the mean-subgradient convention, and what PyTorch's `amax`
-  does.
+- The forms that **report an index** -- `max(dim)`, `min(dim)`, their NaN-aware
+  variants, and `median(dim)` -- send the whole gradient to the element that
+  index names. Value, index and gradient then all say the same thing about
+  which element was selected.
+- The forms that **report no index** -- `amax`, `amin`, `nanmedian` -- divide
+  the gradient **evenly** among everything equal to the extremum. That is the
+  mean subgradient, and what PyTorch's `amax` does. With no index to be
+  consistent with, there is no reason to prefer one tied element.
 - `cummax`, `cummin` and `scatter_reduce`'s `"amax"`/`"amin"` give the whole
   gradient to the **first** element that won.
 
-Nothing pinned either of them, and the API reference asserted the opposite of
-the first: it said `max` gave a tie to the first contributor "where PyTorch
-spreads a tie evenly", which is backwards for `max` and names `mode`, which has
-no gradient at all. A convention nothing checks is a convention that drifts,
-and this one drifts silently -- every test built on distinct values passes
-either way.
+Nothing pinned any of them, and the API reference asserted the opposite: it
+said `max` gave a tie to the first contributor "where PyTorch spreads a tie
+evenly", which was backwards, and named `mode`, which has no gradient at all.
+A convention nothing checks is a convention that drifts, and this one drifts
+silently -- every test built on distinct values passes either way, which is
+the last test here.
 
-`max(dim)` and `min(dim)` are worth a second look. They return an index as well
-as a value, and that index names only the *first* tied element while the
-gradient reaches all of them. Both halves are defensible on their own; together
-they say two different things about which element was selected. PyTorch's
-`max(dim)` resolves it the other way, sending the whole gradient to the index it
-returned. This file pins what the code does rather than changing it, because
-changing a gradient convention changes what people's training runs produce.
+Until recently every one of these reductions took the split, so `max(dim)`
+returned index 1 and then fed the gradient to positions 1 *and* 2. Either half
+is a defensible subgradient alone; disagreeing with each other is not, and it
+is the index that has to win, because the index is the part a caller can act
+on.
 """
 
 from __future__ import annotations
@@ -60,40 +63,55 @@ def _grad_of(build, data=TIED):
 @pytest.mark.parametrize(
     "name,build",
     [
-        ("max", lambda t: mt.max(t, 0)),
-        ("min", lambda t: mt.min(t, 0)),
         ("amax", lambda t: mt.amax(t, 0)),
         ("amin", lambda t: mt.amin(t, 0)),
+        ("nanmedian", lambda t: mt.nanmedian(t, 0)),
     ],
 )
-def test_the_reductions_share_a_ties_gradient_evenly(name, build):
-    data = TIED if name in ("max", "amax") else [-v for v in TIED]
+def test_the_index_free_reductions_share_a_ties_gradient_evenly(name, build):
+    data = TIED if name == "amax" else [-v for v in TIED]
+    expected = np.array([0.0, 0.5, 0.5, 0.0])
+    if name == "nanmedian":
+        data, expected = [3.0, 3.0, 3.0, 1.0], np.array([1 / 3, 1 / 3, 1 / 3, 0.0])
     grad, _ = _grad_of(build, data)
+    np.testing.assert_allclose(
+        grad, expected, err_msg=f"{name} no longer divides a tie evenly"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,build,data",
+    [
+        ("max", lambda t: mt.max(t, 0), TIED),
+        ("min", lambda t: mt.min(t, 0), [-v for v in TIED]),
+        ("nanmax", lambda t: mt.nanmax(t, 0), TIED),
+        ("nanmin", lambda t: mt.nanmin(t, 0), [-v for v in TIED]),
+        ("median", lambda t: mt.median(t, 0, False), [3.0, 3.0, 3.0, 1.0]),
+        ("median-even", lambda t: mt.median(t, 0, False), [1.0, 2.0, 2.0, 5.0]),
+    ],
+)
+def test_the_gradient_goes_to_the_element_the_index_names(name, build, data):
+    grad, index = _grad_of(build, data)
+    position = int(index[0])
+    expected = np.zeros(len(data))
+    expected[position] = 1.0
     np.testing.assert_array_equal(
         grad,
-        np.array([0.0, 0.5, 0.5, 0.0]),
-        err_msg=f"{name} no longer divides a tie evenly",
+        expected,
+        err_msg=f"{name} reported index {position} but its gradient went elsewhere",
     )
 
 
-@pytest.mark.parametrize("name", ["max", "min"])
-def test_the_returned_index_names_only_the_first_tied_element(name):
-    """Deliberately pinned, and deliberately not the same thing as the gradient.
-
-    The index says "position 1"; the gradient credits positions 1 and 2. That
-    is the inconsistency this file exists to make visible rather than hide.
-    """
-    data = TIED if name == "max" else [-v for v in TIED]
-    grad, index = _grad_of(lambda t: getattr(mt, name)(t, 0), data)
-
-    position = int(index[0])
-    assert position == 1, "the index should be the first of the tied elements"
-    only_the_index = np.zeros(4)
-    only_the_index[position] = 1.0
-    assert not np.array_equal(grad, only_the_index), (
-        "the gradient now follows the returned index -- if that was intended, "
-        "this test and the note in the API reference both need updating"
+def test_an_all_nan_slice_no_longer_divides_by_a_zero_tie_count():
+    """The equality-mask path cannot serve these: `NaN == NaN` is false, so the
+    mask is empty, the tie count is zero, and the gradient is 0/0."""
+    grad, index = _grad_of(
+        lambda t: mt.nanmax(t, 0), [float("nan"), float("nan"), float("nan")]
     )
+    assert not np.isnan(grad).any(), f"all-NaN slice gave {grad}"
+    expected = np.zeros(3)
+    expected[int(index[0])] = 1.0
+    np.testing.assert_array_equal(grad, expected)
 
 
 @pytest.mark.parametrize(

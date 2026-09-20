@@ -338,17 +338,22 @@ pub fn median(
             (values, Some(indices), Some(axis))
         }
     };
-    let values = attach_median_grad(values, tensor, norm_dim, keepdim, false)?;
+    let values = attach_median_grad(values, tensor, norm_dim, keepdim, false, indices.as_ref())?;
     Ok((values, indices))
 }
 
 /// Attach a [`MedianBackward`] gradient to a median value reduction.
+///
+/// `selected` is the index tensor when the caller reported one, which makes the
+/// gradient go to that element rather than being split among everything equal
+/// to the median. See [`MedianBackward`].
 fn attach_median_grad(
     values: Tensor,
     input: &Tensor,
     dim: Option<usize>,
     keepdim: bool,
     nan_aware: bool,
+    selected: Option<&Tensor>,
 ) -> Result<Tensor> {
     if !input.requires_grad() || !input.dtype().is_float() {
         return Ok(values);
@@ -359,6 +364,7 @@ fn attach_median_grad(
         dim,
         keepdim,
         nan_aware,
+        selected: selected.map(|t| t.detach()),
     });
     with_grad_fn(values, grad_fn)
 }
@@ -516,7 +522,7 @@ pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<T
             }
         }
     };
-    attach_median_grad(values, tensor, norm_dim, keepdim, true)
+    attach_median_grad(values, tensor, norm_dim, keepdim, true, None)
 }
 
 /// Compute multiple quantiles of the tensor data in a single pass while ignoring NaN values.

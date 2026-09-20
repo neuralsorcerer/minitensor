@@ -484,7 +484,7 @@ pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
         }
         Some(d) => (max_along_dim(tensor, d, keepdim)?, Some(d)),
     };
-    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, false)
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, false, None)
 }
 
 /// Attach a [`GatherBackward`] gradient to a value tensor that was formed by
@@ -516,6 +516,10 @@ pub(crate) fn attach_gather_like_grad(
 
 /// Attach a [`MinMaxBackward`] gradient to a `min`/`max`/`nanmax`/`nanmin` value
 /// reduction (`nan_aware` selects the NaN-ignoring recompute in the backward).
+///
+/// `selected` is the index tensor when the caller is one of the `*_with_indices`
+/// forms, which makes the gradient follow the position they reported instead of
+/// being split among ties. See [`MinMaxBackward`].
 fn attach_minmax_grad(
     output: Tensor,
     input: &Tensor,
@@ -523,6 +527,7 @@ fn attach_minmax_grad(
     keepdim: bool,
     is_max: bool,
     nan_aware: bool,
+    selected: Option<&Tensor>,
 ) -> Result<Tensor> {
     if !input.requires_grad() || !input.dtype().is_float() {
         return Ok(output);
@@ -534,6 +539,7 @@ fn attach_minmax_grad(
         keepdim,
         is_max,
         nan_aware,
+        selected: selected.map(|t| t.detach()),
     });
     with_grad_fn(output, grad_fn)
 }
@@ -573,7 +579,7 @@ pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
         }
         Some(d) => (min_along_dim(tensor, d, keepdim)?, Some(d)),
     };
-    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, false)
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, false, None)
 }
 
 /// NaN-aware maximum value along specified dimension
@@ -617,7 +623,7 @@ pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
             (values, Some(d))
         }
     };
-    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, true)
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, true, None)
 }
 
 /// NaN-aware minimum value along specified dimension
@@ -661,14 +667,22 @@ pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
             (values, Some(d))
         }
     };
-    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, true)
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, true, None)
 }
 
 /// Maximum values and their indices along specified dimension
 pub fn max_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = checked_reduction_dim(tensor, Some(dim), "max")?.expect("dim was Some");
     let (values, indices) = max_along_dim_with_indices(tensor, d, keepdim)?;
-    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, false)?;
+    let values = attach_minmax_grad(
+        values,
+        tensor,
+        Some(d),
+        keepdim,
+        true,
+        false,
+        Some(&indices),
+    )?;
     Ok((values, indices))
 }
 
@@ -680,7 +694,7 @@ pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
 
     let d = checked_reduction_dim(tensor, Some(dim), "nanmax")?.expect("dim was Some");
     let (values, indices) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
-    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, true)?;
+    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, true, Some(&indices))?;
     Ok((values, indices))
 }
 
@@ -688,7 +702,15 @@ pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
 pub fn min_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = checked_reduction_dim(tensor, Some(dim), "min")?.expect("dim was Some");
     let (values, indices) = min_along_dim_with_indices(tensor, d, keepdim)?;
-    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, false)?;
+    let values = attach_minmax_grad(
+        values,
+        tensor,
+        Some(d),
+        keepdim,
+        false,
+        false,
+        Some(&indices),
+    )?;
     Ok((values, indices))
 }
 
@@ -700,7 +722,15 @@ pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
 
     let d = checked_reduction_dim(tensor, Some(dim), "nanmin")?.expect("dim was Some");
     let (values, indices) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
-    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, true)?;
+    let values = attach_minmax_grad(
+        values,
+        tensor,
+        Some(d),
+        keepdim,
+        false,
+        true,
+        Some(&indices),
+    )?;
     Ok((values, indices))
 }
 

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::ops::map::par_out_chunks;
+use crate::ops::shape_ops;
 use crate::{
     error::{MinitensorError, Result},
     ops::util::create_scalar_tensor,
@@ -143,10 +144,21 @@ impl GradientFunction for LayerNormBackward {
 /// Gradient function for `min`/`max` reductions (global with `dim == None`, or
 /// along a single `dim`).
 ///
-/// The gradient flows to every input element equal to the reduced extremum,
-/// split equally among ties so the contributions sum to the upstream gradient. The
-/// extremum, its selection mask and the tie count are recomputed from the stored
-/// (detached) input, so nothing beyond the input needs to be retained.
+/// Two conventions, chosen by whether the forward reported an index.
+///
+/// `max(dim)` and `min(dim)` return the position they selected, so the gradient
+/// goes there and nowhere else: the value, the index and the gradient then all
+/// name the same element. `amax`/`amin` report no index and have no such
+/// element to name, so their gradient is split equally among everything equal
+/// to the extremum -- the mean subgradient, and what PyTorch's `amax` does.
+///
+/// Both are valid subgradients of a function that has no derivative at a tie.
+/// What is not valid is the pair disagreeing, which is what happened while
+/// every reduction took the split: `max(dim)` said "position 1" and then fed
+/// positions 1 and 2.
+///
+/// The split path recomputes the extremum, its selection mask and the tie count
+/// from the stored (detached) input, so it retains nothing beyond that input.
 pub struct MinMaxBackward {
     pub input_id: TensorId,
     pub input: Tensor,
@@ -154,6 +166,37 @@ pub struct MinMaxBackward {
     pub keepdim: bool,
     pub is_max: bool,
     pub nan_aware: bool,
+    /// The positions the forward reported, for the forms that report any.
+    pub selected: Option<Tensor>,
+}
+
+/// Put the upstream gradient exactly where the forward said it came from.
+///
+/// The reductions that report an index -- `max(dim)`, `min(dim)`, `median(dim)`
+/// and their NaN-aware forms -- have already chosen one element per reduced
+/// slice, so their gradient has one place to go. Splitting it among everything
+/// equal to the extremum instead would contradict the index they returned.
+///
+/// It also sidesteps a hole in the equality-mask path: an all-NaN slice reduces
+/// to NaN, `NaN == NaN` is false, so that mask is empty, the tie count is zero
+/// and the division is 0/0.
+fn route_grad_to_selected(
+    input: &Tensor,
+    indices: &Tensor,
+    grad_output: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<Tensor> {
+    let input_shape = input.shape().dims().to_vec();
+    let dims_vec = Some(vec![dim]);
+    let grad_kd = expand_reduction_grad(grad_output, &input_shape, &dims_vec, keepdim)?;
+    let index_kd = if keepdim {
+        indices.clone()
+    } else {
+        shape_ops::reshape(indices, grad_kd.shape().clone())?
+    };
+    let zeros = Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), false);
+    shape_ops::scatter(&zeros, dim as isize, &index_kd, &grad_kd)
 }
 
 /// Route `grad_output` to every input element equal to the selected reduction
@@ -190,6 +233,14 @@ impl GradientFunction for MinMaxBackward {
             return Ok(gradients);
         }
 
+        // When the forward named a position, that is the whole answer.
+        if let (Some(indices), Some(dim)) = (&self.selected, self.dim) {
+            let grad_input =
+                route_grad_to_selected(input, indices, grad_output, dim, self.keepdim)?;
+            accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+            return Ok(gradients);
+        }
+
         let dim_isize = self.dim.map(|d| d as isize);
         // Recompute the extremum with keepdim so it broadcasts against the input.
         // NaN-aware reductions must recompute with the matching op, otherwise the
@@ -220,6 +271,8 @@ pub struct MedianBackward {
     pub dim: Option<usize>,
     pub keepdim: bool,
     pub nan_aware: bool,
+    /// The positions `median(dim)` reported. `nanmedian` reports none.
+    pub selected: Option<Tensor>,
 }
 
 impl GradientFunction for MedianBackward {
@@ -230,6 +283,13 @@ impl GradientFunction for MedianBackward {
         if input.numel() == 0 {
             let zero = Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), false);
             accumulate_grad(&mut gradients, self.input_id, zero)?;
+            return Ok(gradients);
+        }
+
+        if let (Some(indices), Some(dim)) = (&self.selected, self.dim) {
+            let grad_input =
+                route_grad_to_selected(input, indices, grad_output, dim, self.keepdim)?;
+            accumulate_grad(&mut gradients, self.input_id, grad_input)?;
             return Ok(gradients);
         }
 
