@@ -396,19 +396,15 @@ nan_extremum_all_entry!(
 nan_extremum_all_entry!(
     nanmin_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::INFINITY, <, 4
 );
-/// `arg{min,max}_all_*`: the index of the global extremum.
+/// The chunked lane fold both index reductions below share: `(nan_at, best,
+/// best_at)` over `data`, with positions absolute.
 ///
-/// Ties go to the lowest index. A NaN wins outright, and ties among NaNs go to
-/// the lowest index too. An empty input answers 0.
+/// Written with one accumulator and an `Option` it did not vectorise --
+/// `argmax` over a million float32 took 0.34ms where `max` over the same data,
+/// the same scan without the index, takes 0.065. Lane-blocked it takes 0.134.
 ///
-/// The lane-blocked shape of the extremum above, carrying a position beside
-/// each lane's running best. Written with one accumulator and an `Option` it
-/// did not vectorise: `argmax` over a million float32 took 0.34ms where `max`
-/// over the same data -- the same scan without the index -- takes 0.065.
-/// Lane-blocked it takes 0.134, against NumPy's 0.145.
-///
-/// Four things the lanes make delicate, and each is why the code below is
-/// shaped the way it is:
+/// Four things the lanes make delicate, and each is why the body is shaped the
+/// way it is:
 ///
 /// * Lane `l` walks positions `l, l + LANES, l + 2 * LANES, ...`, so a later
 ///   lane holds *earlier* positions than an earlier lane's second block. The
@@ -422,109 +418,112 @@ nan_extremum_all_entry!(
 ///   than a negated comparison: with no NaN on either side, "neither is
 ///   better" *is* equality, and the two candidates for a tie -- equal values,
 ///   and `+0.0` against `-0.0` -- both want the lower index.
-/// * The hot loop only *flags* NaN, per lane and branch-free, the way the
-///   value fold in `sum_prod` does; a chunk that raised its flag then locates
-///   the first NaN with a short-circuiting scan. Carrying the position instead
-///   costs more than everything else put together: it needs a `usize` min and
-///   select per element, which for f32 is two 64-bit-lane vectors against the
-///   one the values occupy. Carrying it left f32 `argmax` at 0.297ms over a
-///   million elements; flagging and locating brought it to 0.134, and f64 from
-///   0.363 to 0.199. The one input that loses by it is an array whose *first*
-///   element is NaN, where NumPy returns immediately and we still scan: a
-///   hundredth of NumPy's speed on a pathological input, for twice its speed
-///   on every ordinary one.
+/// * `$nan` decides whether NaN is noticed at all, and when it is the loop
+///   only *flags* it, per lane and branch-free, the way the value fold in
+///   `sum_prod` does; a chunk that raised its flag then locates the first NaN
+///   with a short-circuiting scan. Carrying the position instead costs more
+///   than everything else put together: a `usize` min and select per element,
+///   which for f32 is two 64-bit-lane vectors against the one the values
+///   occupy. Carried, f32 `argmax` sat at 0.297ms over a million elements;
+///   flagged and located it is 0.134, and f64 went 0.363 to 0.199.
+///   `nanarg{min,max}` and the integer instantiations pass `false`, which
+///   compiles the flag, the locate and the branch that reads them away.
 ///
 /// Positions inside the loop are `u32` and relative to the chunk, which
 /// `par_fold_chunks` caps at `MINMAX_CHUNK` -- 8192, so they cannot overflow.
 /// That is what makes the index lanes the same width as the value lanes for a
 /// 32-bit type, rather than twice it.
-///
-/// The seed is the type's extreme value, which a real input can equal. That
-/// costs nothing here: the only way nothing beats the seed is that every
-/// element equals it or is NaN, and then the answer is either the first NaN or
-/// -- ties going to the lowest index -- position 0, which is what the fallback
-/// gives.
-/// The fold both index reductions below share: `(nan_at, best, best_at)` over
-/// `data`, with positions absolute. `$nan` decides whether NaN is noticed at
-/// all -- `nanarg{min,max}` and the integer instantiations pass `false`, which
-/// compiles the flag, the locate and the branch that reads them away.
 macro_rules! arg_lane_fold {
     ($data:expr, $ty:ty, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
         par_fold_chunks(
-                $data,
-                MINMAX_CHUNK,
-                (usize::MAX, $identity, usize::MAX),
-                &|offset, chunk| {
-                    const LANES: usize = $lanes;
-                    let mut bests = [$identity; LANES];
-                    let mut wheres = [u32::MAX; LANES];
-                    let mut nans = [0u32; LANES];
-                    let mut blocks = chunk.chunks_exact(LANES);
-                    let mut base = 0u32;
-                    for block in &mut blocks {
-                        for lane in 0..LANES {
-                            let v = block[lane];
-                            if v $better bests[lane] {
-                                bests[lane] = v;
-                                wheres[lane] = base + lane as u32;
-                            }
-                            if $nan {
-                                nans[lane] |= (v != v) as u32;
-                            }
-                        }
-                        base += LANES as u32;
-                    }
-
-                    let mut best: $ty = $identity;
-                    let mut best_at = u32::MAX;
-                    let mut nan = 0u32;
+            $data,
+            MINMAX_CHUNK,
+            (usize::MAX, $identity, usize::MAX),
+            &|offset, chunk| {
+                const LANES: usize = $lanes;
+                let mut bests = [$identity; LANES];
+                let mut wheres = [u32::MAX; LANES];
+                let mut nans = [0u32; LANES];
+                let mut blocks = chunk.chunks_exact(LANES);
+                let mut base = 0u32;
+                for block in &mut blocks {
                     for lane in 0..LANES {
-                        nan |= nans[lane];
-                        if bests[lane] $better best
-                            || (bests[lane] == best && wheres[lane] < best_at)
-                        {
-                            best = bests[lane];
-                            best_at = wheres[lane];
-                        }
-                    }
-                    for (step, &v) in blocks.remainder().iter().enumerate() {
-                        let at = base + step as u32;
-                        if v $better best {
-                            best = v;
-                            best_at = at;
+                        let v = block[lane];
+                        if v $better bests[lane] {
+                            bests[lane] = v;
+                            wheres[lane] = base + lane as u32;
                         }
                         if $nan {
-                            nan |= (v != v) as u32;
+                            nans[lane] |= (v != v) as u32;
                         }
                     }
+                    base += LANES as u32;
+                }
 
-                    let nan_at = if nan != 0 {
-                        chunk
-                            .iter()
-                            .position(|v| v != v)
-                            .map_or(usize::MAX, |at| offset + at)
-                    } else {
-                        usize::MAX
-                    };
-                    let best_at = if best_at == u32::MAX {
-                        usize::MAX
-                    } else {
-                        offset + best_at as usize
-                    };
-                    (nan_at, best, best_at)
-                },
-                &|a, b| {
-                    let nan = a.0.min(b.0);
-                    if b.1 $better a.1 || (a.1 == b.1 && b.2 < a.2) {
-                        (nan, b.1, b.2)
-                    } else {
-                        (nan, a.1, a.2)
+                let mut best: $ty = $identity;
+                let mut best_at = u32::MAX;
+                let mut nan = 0u32;
+                for lane in 0..LANES {
+                    nan |= nans[lane];
+                    if bests[lane] $better best
+                        || (bests[lane] == best && wheres[lane] < best_at)
+                    {
+                        best = bests[lane];
+                        best_at = wheres[lane];
                     }
-                },
+                }
+                for (step, &v) in blocks.remainder().iter().enumerate() {
+                    let at = base + step as u32;
+                    if v $better best {
+                        best = v;
+                        best_at = at;
+                    }
+                    if $nan {
+                        nan |= (v != v) as u32;
+                    }
+                }
+
+                let nan_at = if nan != 0 {
+                    chunk
+                        .iter()
+                        .position(|v| v != v)
+                        .map_or(usize::MAX, |at| offset + at)
+                } else {
+                    usize::MAX
+                };
+                let best_at = if best_at == u32::MAX {
+                    usize::MAX
+                } else {
+                    offset + best_at as usize
+                };
+                (nan_at, best, best_at)
+            },
+            &|a, b| {
+                let nan = a.0.min(b.0);
+                if b.1 $better a.1 || (a.1 == b.1 && b.2 < a.2) {
+                    (nan, b.1, b.2)
+                } else {
+                    (nan, a.1, a.2)
+                }
+            },
             )
     };
 }
 
+/// `arg{min,max}_all_*`: the index of the global extremum.
+///
+/// Ties go to the lowest index. A NaN wins outright, and ties among NaNs go to
+/// the lowest index too. An empty input answers 0.
+///
+/// The seed is the type's extreme value, which a real input can equal. That
+/// costs nothing: the only way nothing beats the seed is that every element
+/// equals it or is NaN, and then the answer is either the first NaN or -- ties
+/// going to the lowest index -- position 0, which is what the fallback gives.
+///
+/// The one input that loses by locating the NaN rather than carrying it is an
+/// array whose *first* element is NaN, where NumPy returns immediately and we
+/// still scan: a hundredth of its speed on a pathological input, for twice its
+/// speed on every ordinary one.
 macro_rules! arg_extremum_all_lanes {
     ($name:ident, $accessor:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
