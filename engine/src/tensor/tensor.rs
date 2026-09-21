@@ -2252,6 +2252,71 @@ impl Tensor {
         self.float_predicate(|x: f32| x.is_nan(), |x: f64| x.is_nan(), false)
     }
 
+    /// Element-wise sign bit: whether each element carries it.
+    ///
+    /// Not `self < 0`. Negative zero is not less than zero and does carry the
+    /// bit, and telling the two zeros apart is the only reason to ask -- so
+    /// the float arms read the bit rather than comparing. An integer has no
+    /// bit to read that is not its sign, and a `bool` has no sign at all.
+    ///
+    /// One pass. Composed out of `copysign` and a comparison, as this used to
+    /// be, it was two of them and a buffer the size of the input in between.
+    pub fn signbit(&self) -> Result<Tensor> {
+        let output = match self.dtype {
+            DataType::Float32 => TensorData::from_vec::<bool>(
+                unary_map(
+                    self.data
+                        .as_f32_slice()
+                        .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?,
+                    |x: f32| x.is_sign_negative(),
+                ),
+                DataType::Bool,
+                self.device,
+            ),
+            DataType::Float64 => TensorData::from_vec::<bool>(
+                unary_map(
+                    self.data
+                        .as_f64_slice()
+                        .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?,
+                    |x: f64| x.is_sign_negative(),
+                ),
+                DataType::Bool,
+                self.device,
+            ),
+            DataType::Int32 => TensorData::from_vec::<bool>(
+                unary_map(
+                    self.data
+                        .as_i32_slice()
+                        .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?,
+                    |x: i32| x < 0,
+                ),
+                DataType::Bool,
+                self.device,
+            ),
+            DataType::Int64 => TensorData::from_vec::<bool>(
+                unary_map(
+                    self.data
+                        .as_i64_slice()
+                        .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?,
+                    |x: i64| x < 0,
+                ),
+                DataType::Bool,
+                self.device,
+            ),
+            DataType::Bool => {
+                TensorData::from_vec::<bool>(vec![false; self.numel()], DataType::Bool, self.device)
+            }
+        };
+
+        Ok(Tensor::new(
+            Arc::new(output),
+            self.shape.clone(),
+            DataType::Bool,
+            self.device,
+            false,
+        ))
+    }
+
     /// Element-wise check for infinite values
     pub fn isinf(&self) -> Result<Tensor> {
         self.float_predicate(|x: f32| x.is_infinite(), |x: f64| x.is_infinite(), false)

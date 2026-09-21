@@ -266,21 +266,28 @@ def isreal(input: object) -> Tensor:
     return _F.eq(tensor, tensor) | _F.ne(tensor, tensor)
 
 
+#: The sign-bit predicate, held here rather than looked up on `functional` at
+#: each call: `signbit` below is put onto `functional` under the same name, so
+#: the attribute that leads here would otherwise lead back to it. Same reason
+#: as `_shape._select_around`.
+_sign_bit = _C.functional.signbit
+
+
 def signbit(input: object) -> Tensor:
     """Whether each element's sign *bit* is set.
 
     Not `input < 0`: negative zero is not less than zero but carries the bit,
-    and telling the two zeros apart is the only reason to ask. `copysign`
-    reads the bit, so borrowing it is what makes this exact.
+    and telling the two zeros apart is the only reason to ask. The float arms
+    read the bit; an integer has no bit to read that is not its sign, and a
+    `bool` has no sign at all.
+
+    One pass over the input. Written as a `copysign` against a one and a
+    comparison, which is how this asked the question before, it was two passes
+    and a buffer the size of the input in between -- to read a bit that was
+    already there.
     """
 
-    tensor = _atleast_tensor(input)
-    # The one is a scalar, not a tensor of ones: `copysign` broadcasts it, so
-    # the sign of a million values is read without first writing a million
-    # ones to read them onto. Same three operations, one fewer pass and one
-    # fewer buffer the size of the input.
-    one = _C.Tensor.full([], 1.0, dtype=str(tensor.dtype))
-    return _F.copysign(one, tensor) < 0
+    return _sign_bit(_atleast_tensor(input))
 
 
 def sgn(input: object) -> Tensor:

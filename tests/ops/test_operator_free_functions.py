@@ -305,6 +305,38 @@ def test_signbit_tells_the_two_zeros_apart_where_a_comparison_cannot():
     assert not (_t([-0.0]) < 0).numpy()[0]
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+def test_signbit_reads_the_bit_on_every_dtype_that_has_one(dtype):
+    """The float arms read the sign bit and the integer arms compare, because
+    an integer has no bit to read that is not its sign. NaN carries a sign like
+    anything else, and the answer is the bit rather than any ordering, so a
+    negative NaN is negative here where it is nothing at all to `<`.
+    """
+
+    if dtype.startswith("float"):
+        values = np.array(
+            [-0.0, 0.0, -1.0, 2.0, -np.inf, np.inf, np.nan, -np.nan], dtype=dtype
+        )
+    else:
+        values = np.array([-2, -1, 0, 1, 3], dtype=dtype)
+    np.testing.assert_array_equal(
+        mt.signbit(mt.from_numpy(values)).numpy(), np.signbit(values)
+    )
+
+
+def test_signbit_of_a_bool_is_false_and_of_nothing_is_nothing():
+    """A `bool` has no sign at all, and an empty tensor has nothing to have
+    one -- both of which the kernel has to answer rather than reach past."""
+
+    np.testing.assert_array_equal(
+        mt.signbit(mt.from_numpy(np.array([True, False]))).numpy(),
+        np.array([False, False]),
+    )
+    assert mt.signbit(mt.from_numpy(np.array([], dtype=np.float64))).numel() == 0
+    scalar = mt.signbit(mt.from_numpy(np.array(-3.0)))
+    assert tuple(scalar.shape) == () and bool(scalar.numpy())
+
+
 def test_sgn_is_sign():
     np.testing.assert_array_equal(mt.sgn(_t(A)).numpy(), mt.sign(_t(A)).numpy())
 

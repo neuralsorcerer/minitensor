@@ -1224,6 +1224,12 @@ pub fn isinf(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     finite_predicate(input, Tensor::isinf)
 }
 
+/// Element-wise sign bit, which `-0.0` carries and `0.0` does not.
+#[pyfunction]
+pub fn signbit(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    finite_predicate(input, Tensor::signbit)
+}
+
 /// Element-wise test for a value that is neither NaN nor infinite.
 #[pyfunction]
 pub fn isfinite(input: &Bound<PyAny>) -> PyResult<PyTensor> {
@@ -2152,6 +2158,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nanamax, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanamin, parent)?)?;
     parent.add_function(wrap_pyfunction!(isnan, parent)?)?;
+    parent.add_function(wrap_pyfunction!(signbit, parent)?)?;
     parent.add_function(wrap_pyfunction!(isinf, parent)?)?;
     parent.add_function(wrap_pyfunction!(isfinite, parent)?)?;
     parent.add_function(wrap_pyfunction!(nan_to_num, parent)?)?;
