@@ -368,6 +368,18 @@ Four groups, and only the first is a surprise:
   and ours is a portable one where NumPy's is vectorised per microarchitecture.
   This is the group with the most operations in it and the one a single change
   would move furthest.
+
+  One plausible change is not that change, and it is worth writing down so the
+  next person does not spend the afternoon: `unique` sorts with a comparator
+  closure, while `ops::order` holds order-preserving integer keys whose header
+  records comparisons falling from 62 ms to 18. Sorting a million float32 as
+  keys rather than through the comparator is **1.16×** -- 11.52 ms against 9.89
+  including the pass that builds the keys -- where the distance to NumPy is
+  2.3×. In a debug build the same measurement reads 1.87×, which is what makes
+  it tempting; in release the comparator inlines. The keys pay for themselves
+  in `sort` and `topk`, where the position has to be carried alongside the
+  value anyway and the packing is what makes that free. They do not pay here.
+  What is left is the algorithm, and matching it means a vectorised quicksort.
 - **Compositions where NumPy has a kernel.** `signbit` 0.31–0.40× reads a sign
   bit with a `copysign` and a comparison; `fmax`/`fmin` 0.43–0.71 are five
   passes (two `isnan`, an extremum, two `where`) against one, and a `where`
