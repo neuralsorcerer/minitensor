@@ -844,15 +844,24 @@ pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
     }
 }
 
-/// Index of the largest non-NaN entry in the whole tensor.
+/// The error a NaN-skipping index reduction gives a dtype that has no NaN.
 ///
-/// Only the float dtypes reach here; an integer tensor has no NaN to skip and
-/// `nanargmax` sends it straight to [`argmax`].
+/// Only the float dtypes reach [`nanargmax_all`] and [`nanargmin_all`]:
+/// `nanargmax` sends everything else straight to [`argmax`], where skipping is
+/// a no-op. Saying so is better than falling through to the `i64` kernel,
+/// which would read an `i32` or `bool` buffer as something it is not.
+fn no_nan_to_skip(op: &str) -> MinitensorError {
+    MinitensorError::invalid_operation(format!(
+        "{op}: only floating point tensors have a NaN to skip"
+    ))
+}
+
+/// Index of the largest non-NaN entry in the whole tensor.
 pub(crate) fn nanargmax_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
     whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
         DataType::Float32 => nanargmax_all_f32(tensor, out),
         DataType::Float64 => nanargmax_all_f64(tensor, out),
-        _ => argmax_all_i64(tensor, out),
+        _ => Err(no_nan_to_skip("nanargmax")),
     })
 }
 
@@ -861,7 +870,7 @@ pub(crate) fn nanargmin_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
     whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
         DataType::Float32 => nanargmin_all_f32(tensor, out),
         DataType::Float64 => nanargmin_all_f64(tensor, out),
-        _ => argmin_all_i64(tensor, out),
+        _ => Err(no_nan_to_skip("nanargmin")),
     })
 }
 

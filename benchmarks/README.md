@@ -133,7 +133,7 @@ Reductions, where the win is parallelism plus a single pass:
 | `sum(axis=0)` | 3.4× |
 | `norm` | 3.3× |
 | `max` | 3.3× |
-| `argmax` | 1.2× |
+| `argmax` | 1.1× |
 
 `norm` was on the wrong side of this table until the sweep found it: 0.33× at
 16M, while `sum` over the same data was 5.6×. It was not an accuracy tax — the
@@ -145,6 +145,32 @@ by an accumulator and never again, so it is a dot product against the input
 twice. Fused, the whole-tensor norm went 15377 µs → 1430 µs, and the row norms
 of a 4000×4000 went 13613 µs → 1485 µs. Same accumulation, same accuracy, no
 buffer.
+
+The `argmax` row is the same shape of finding, one column over: it read 0.50×
+against NumPy until the index was folded the way the value already was. `max`
+over a million float32 takes 0.065 ms and `argmax` took 0.34 — five times the
+cost of the same scan, for a number NumPy carries for about a fifth more. The
+fold threaded `(Option<usize>, Option<(usize, T)>)` through one accumulator,
+which is a serial dependency chain over two `Option` discriminants and
+vectorises to nothing. Lane-blocking it the way `max` already was, and *flagging*
+NaN per lane rather than carrying its position — carrying it costs a `usize` min
+and select per element, which for f32 is two 64-bit-lane vectors against the one
+the values occupy — took 4000×4000 float32 from 4.55 ms to 1.90, and float64
+from 4.93 to 2.82. The one input that loses by locating the NaN instead of
+carrying it is an array whose first element is NaN, where NumPy returns
+immediately and this still scans.
+
+`nanargmax` and `nanargmin` were the same story with a worse multiplier. They
+were `argmax(where(isnan(x), -inf, x))` behind an all-NaN check built from a
+second full-size count: seven passes and two full-size temporaries around a
+reduction that is one pass, 1.750 ms over a million float32 where the `argmax`
+underneath took 0.134. A NaN satisfies no comparison, so the fold already skips
+it — the NaN-skipping index reduction *is* the instantiation the integers use —
+and they now read 6.7–7.8× instead of 0.63–0.90. That also changed an answer:
+the substitution could not tell a NaN pushed to `-inf` from an `-inf` that was
+always there, so `nanargmax([nan, -inf])` named index 0, a NaN, from the
+reduction whose whole job is to skip them. NumPy still does. This deliberately
+does not.
 
 Elementwise arithmetic, where the win is only parallelism and a fused output:
 
@@ -355,22 +381,30 @@ had been 0.77x with NumPy's column unmoved.
 
 ### What it still says is behind
 
-Four groups, and only the first is a surprise:
+Five groups, and the first two used to be told as one:
 
-- **Transcendentals**, which is the `tanh` story below applied to the rest of
-  the family: `asinh` 0.13–0.24×, `cbrt` 0.22–0.28, `log10` 0.22–0.41, `atan2`
-  0.14–0.46, `sinh` 0.30, `log1p` 0.34. `ops::simd::transcendental` is
-  float32-only by design — it computes in
-  float64 and rounds once, which is exactly the headroom a float64 output does
-  not have — so these fall through to scalar libm while NumPy vectorises them.
+- **Transcendentals with no vectorised kernel at all.** `asinh` 0.12–0.24×,
+  `atan2` 0.14–0.49, `cbrt` 0.20–0.32, `log10` 0.23–0.48, `exp2` 0.48–0.65,
+  `pow` 0.53–0.76. These are behind in *both* dtypes, which is what separates
+  them from the group below, and it is worth separating because the fix is
+  different and much smaller. `log` runs at 1.14× in float32 and `log10` at
+  0.23 — the same curve times a constant, not reaching the same kernel.
+  Likewise `exp` 1.24 against `exp2` 0.48. This is the cheapest gap left in the
+  file.
+- **Transcendentals in float64.** `log1p` 0.33×, `sinh` 0.35, `expm1` 0.46,
+  `tanh` 0.53, `exp` 0.88 — all of them at or above 1.2× in float32, and all of
+  them falling through to scalar libm in float64 while NumPy vectorises.
+  `ops::simd::transcendental` is float32-only by design: it computes in float64
+  and rounds once, which is exactly the headroom a float64 output does not have.
   The section below says why that is a different algorithm rather than a better
-  polynomial. It is a real gap and it is the largest one left.
-- **Sorting and selection.** `setxor1d` 0.25–0.37×, `unique` 0.40–0.57,
-  `union1d` 0.45–0.62, `percentile` 0.48, `intersect1d` 0.49–0.73,
-  `argpartition` 0.52–0.59, `partition` 0.61. Every one of them is a comparison sort or a selection underneath,
-  and ours is a portable one where NumPy's is vectorised per microarchitecture.
-  This is the group with the most operations in it and the one a single change
-  would move furthest.
+  polynomial. It is the largest gap left, and the one with no cheap version.
+- **Sorting and selection.** `setxor1d` 0.24–0.33×, `unique` 0.41–0.60,
+  `argpartition` 0.43–0.55, `union1d` 0.46–0.48, `nanpercentile` 0.49–0.50,
+  `percentile` 0.50–0.51, `intersect1d` 0.54–0.66, `partition` 0.58–0.61. Every
+  one of them is a comparison sort or a selection underneath, and ours is a
+  portable one where NumPy's is vectorised per microarchitecture. This is the
+  group with the most operations in it and the one a single change would move
+  furthest.
 
   One plausible change is not that change, and it is worth writing down so the
   next person does not spend the afternoon: `unique` sorts with a comparator
@@ -383,18 +417,23 @@ Four groups, and only the first is a surprise:
   in `sort` and `topk`, where the position has to be carried alongside the
   value anyway and the packing is what makes that free. They do not pay here.
   What is left is the algorithm, and matching it means a vectorised quicksort.
-- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.58–0.77× are five
+- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.54–0.73× are five
   passes (two `isnan`, an extremum, two `where`) against one, and a `where`
-  whose mask the branch predictor cannot guess costs six times one it can;
-  `nanmax`/`nanmin` 0.33–0.67 and `nanargmax`/`nanargmin` 0.38–0.67 pay for a
-  NaN test the plain extremum does not make. `vecdot`, `cov` and `signbit` were
-  in this group until each got the one pass it needed, and they are the pattern
-  for the rest of it: what costs is the intermediate, not the arithmetic.
+  whose mask the branch predictor cannot guess costs six times one it can.
+  `histogram_bin_edges` 0.41–0.82 is a min and a max and then a `linspace` over
+  the answer. `nanmax`/`nanmin` and `nanargmax`/`nanargmin` were the largest
+  entries in this group and are now 2.2–2.8× and 6.7–7.8×; `vecdot`, `cov` and
+  `signbit` left it earlier the same way. They are the pattern for the rest:
+  what costs is the intermediate, not the arithmetic.
 - **Two that are answers rather than problems.** `empty_like` reads 0.00×
   because it zeroes: the kernels take `&mut [T]`, and reading uninitialised
   floats is undefined behaviour, so an "uninitialised" buffer here is a zeroed
   one. `flipud` reads 0.00× because NumPy returns a view with a negative stride
   and a tensor here is always contiguous, so a flip is a copy.
+
+Two more sit just under the dead band rather than in a group: `delete`
+0.78–0.93× and `squeeze` 0.91–0.93. Twenty-two of the 166 names measured here
+are below 0.95, and six of those twenty-two are the first bullet.
 
 Two rows are worth reading with care rather than believing. `array_equal` and
 `allclose`, which read in the thousands and the tens, stop at the first element
@@ -411,8 +450,8 @@ operation. The per-family geometric mean at the bottom is the summary worth
 watching after a change. As of the run these tables come from:
 
 ```
-elementwise  1.47x     gemm  0.90x     reduction  1.87x
-shape        1.57x     unary 1.36x     surface    1.86x
+elementwise  1.38x     gemm  0.90x     reduction  2.00x
+shape        1.66x     unary 1.34x     surface    1.96x
 ```
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
