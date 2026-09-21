@@ -68,7 +68,7 @@ pub(crate) fn quantiles_all(
             }
 
             let positions = quantile_positions_for_len(buffer.len(), qs);
-            buffer.sort_by(|a, b| a.total_cmp(b));
+            order_for_quantiles(&mut buffer, &positions, interpolation, true);
             for (slot, position) in values.iter_mut().zip(positions.iter()) {
                 *slot = quantile_from_sorted_position(&buffer, position, interpolation);
             }
@@ -115,7 +115,7 @@ pub(crate) fn quantiles_all(
             }
 
             let positions = quantile_positions_for_len(buffer.len(), qs);
-            buffer.sort_by(|a, b| a.total_cmp(b));
+            order_for_quantiles(&mut buffer, &positions, interpolation, true);
             for (slot, position) in values.iter_mut().zip(positions.iter()) {
                 *slot = quantile_from_sorted_position(&buffer, position, interpolation);
             }
@@ -196,7 +196,7 @@ pub(crate) fn nanquantiles_all(
                 values.fill(f32::NAN);
             } else {
                 let positions = quantile_positions_for_len(sorted.len(), qs);
-                sorted.sort_by(|a, b| a.total_cmp(b));
+                order_for_quantiles(&mut sorted, &positions, interpolation, true);
                 for (slot, position) in values.iter_mut().zip(positions.iter()) {
                     *slot = quantile_from_sorted_position(&sorted, position, interpolation);
                 }
@@ -241,7 +241,7 @@ pub(crate) fn nanquantiles_all(
                 values.fill(f64::NAN);
             } else {
                 let positions = quantile_positions_for_len(sorted.len(), qs);
-                sorted.sort_by(|a, b| a.total_cmp(b));
+                order_for_quantiles(&mut sorted, &positions, interpolation, true);
                 for (slot, position) in values.iter_mut().zip(positions.iter()) {
                     *slot = quantile_from_sorted_position(&sorted, position, interpolation);
                 }
@@ -502,7 +502,6 @@ fn quantiles_along_dim_core<T: TotalCmp + Send + Sync>(
                 continue;
             }
 
-            buffer.sort_by(|a, b| a.total_order(b));
             let positions = match cached {
                 Some((len, ref positions)) if len == buffer.len() => positions,
                 _ => {
@@ -510,6 +509,9 @@ fn quantiles_along_dim_core<T: TotalCmp + Send + Sync>(
                     &cached.as_ref().expect("positions just cached").1
                 }
             };
+            // `false`: this is already one row per worker, so a parallel sort
+            // here would be fighting its own siblings for the same cores.
+            order_for_quantiles(&mut buffer, positions, interpolation, false);
             for (slot_out, position) in out.iter_mut().zip(positions.iter()) {
                 *slot_out = quantile_from_sorted_position(&buffer, position, interpolation);
             }

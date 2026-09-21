@@ -1462,3 +1462,86 @@ def test_a_long_axis_medians_the_same_as_a_sort_would(length):
     got, where = F.median(mt.Tensor(values, dtype="float64"), 0)
     assert got.item() == np.sort(values)[(length - 1) // 2]
     assert values[int(where.item())] == got.item()
+
+
+# A quantile reads one or two order statistics per `q`, so a full sort is the
+# obvious way to get at them and usually the wrong one: `percentile` with two
+# quantiles sorted a million elements to answer two questions and read 0.12x of
+# NumPy. Below a limit on the number of distinct ranks the ranks are
+# quickselected instead, and above it the sort runs on the thread pool.
+#
+# That makes two code paths for one answer, so these pin that they are the same
+# answer -- exactly, not approximately.
+QUANTILE_MODES = ["linear", "lower", "higher", "nearest", "midpoint"]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("size", [2, 3, 17, 1000, 100_000])
+@pytest.mark.parametrize("mode", QUANTILE_MODES)
+def test_selecting_the_ranks_answers_what_sorting_them_does(dtype, size, mode):
+    # Each mode reads a different rank out of each position -- `lower` and
+    # `higher` one apiece, `linear` two -- so each asks the selection for a
+    # different set and each has to come back with the same numbers.
+    rng = np.random.default_rng(size)
+    values = (rng.standard_normal(size) * 10).astype(dtype)
+    tensor = mt.from_numpy(values)
+    quantiles = np.linspace(0.0, 100.0, 8).astype(dtype)
+
+    via_select = mt.percentile(
+        tensor, mt.from_numpy(quantiles), interpolation=mode
+    ).numpy()
+    # The same quantiles repeated past the limit, which forces the sort.
+    padded = np.concatenate([quantiles] * 40).astype(dtype)
+    via_sort = mt.percentile(tensor, mt.from_numpy(padded), interpolation=mode).numpy()
+
+    np.testing.assert_array_equal(via_select, via_sort[: quantiles.size])
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 31, 32, 33, 64, 65, 200])
+def test_quantile_matches_numpy_on_either_side_of_the_limit(count):
+    # The limit is on distinct ranks rather than on quantiles, and `linear`
+    # asks for two ranks per quantile, so the crossover sits near half the
+    # counts here. Both sides of it have to match NumPy.
+    rng = np.random.default_rng(count)
+    values = rng.standard_normal(5_000)
+    quantiles = np.linspace(0.0, 100.0, count) if count > 1 else np.array([50.0])
+    got = mt.percentile(mt.from_numpy(values), mt.from_numpy(quantiles)).numpy()
+    np.testing.assert_allclose(got, np.percentile(values, quantiles), rtol=1e-12)
+
+
+@pytest.mark.parametrize("count", [2, 3, 64, 65, 300])
+def test_per_row_quantiles_match_numpy_on_either_side_of_the_limit(count):
+    # The per-row path runs one row per worker and so must not sort in
+    # parallel; it takes the same selection, with the ranks cached across rows.
+    rng = np.random.default_rng(count)
+    rows = rng.standard_normal((37, 811))
+    rows[rng.random(rows.shape) < 0.1] = np.nan
+    quantiles = np.linspace(0.0, 100.0, count)
+
+    got = mt.nanpercentile(mt.from_numpy(rows), mt.from_numpy(quantiles), dim=1).numpy()
+    np.testing.assert_allclose(
+        got, np.nanpercentile(rows, quantiles, axis=1), rtol=1e-12
+    )
+
+
+@pytest.mark.parametrize("count", [2, 5, 40])
+def test_repeated_and_unsorted_quantiles_are_answered_in_order(count):
+    # The ranks are sorted and deduplicated before selection, so a caller
+    # asking for them out of order, or twice, must still get its own order
+    # back.
+    rng = np.random.default_rng(count)
+    values = rng.standard_normal(2_000)
+    quantiles = rng.permutation(np.repeat(np.linspace(0.0, 100.0, count), 2))
+    got = mt.percentile(mt.from_numpy(values), mt.from_numpy(quantiles)).numpy()
+    np.testing.assert_allclose(got, np.percentile(values, quantiles), rtol=1e-12)
+
+
+def test_quantiles_at_the_ends_come_from_the_extremes():
+    # Rank 0 and rank n-1 are the ones a partial selection is most likely to
+    # leave unplaced, since nothing sits outside them to partition against.
+    rng = np.random.default_rng(9)
+    values = rng.standard_normal(10_000)
+    got = mt.percentile(
+        mt.from_numpy(values), mt.from_numpy(np.array([0.0, 100.0]))
+    ).numpy()
+    np.testing.assert_array_equal(got, [values.min(), values.max()])

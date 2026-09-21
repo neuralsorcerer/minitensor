@@ -14,6 +14,7 @@ use crate::{
     ops::map::unary_map,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -1130,6 +1131,97 @@ fn select_rank_pair<T: TotalCmp>(values: &mut [T], lower_idx: usize, upper_idx: 
     let upper = select_rank(values, upper_idx);
     let lower = select_rank(&mut values[..upper_idx], lower_idx);
     (lower, upper)
+}
+
+/// Puts every rank in `ranks` at its own index, so reading `values[r]` for any
+/// `r` in `ranks` gives the element of that rank.
+///
+/// `select_nth_unstable_by` partitions around the rank it finds, so selecting
+/// the *middle* rank first leaves every lower rank inside the prefix and every
+/// higher one inside the suffix. Recursing that way costs `O(n log k)`, where
+/// selecting each rank over the whole slice would cost `O(n k)`.
+///
+/// `ranks` must be ascending, without duplicates, and inside `values`.
+fn select_ranks<T: TotalCmp>(values: &mut [T], offset: usize, ranks: &[usize]) {
+    if ranks.is_empty() {
+        return;
+    }
+    let mid = ranks.len() / 2;
+    // `ranks[mid]` is a rank of the whole slice; `offset` is where this
+    // subslice starts in it, so the local index is the difference.
+    let local = ranks[mid] - offset;
+    debug_assert!(local < values.len());
+    select_rank(values, local);
+    select_ranks(&mut values[..local], offset, &ranks[..mid]);
+    select_ranks(
+        &mut values[local + 1..],
+        offset + local + 1,
+        &ranks[mid + 1..],
+    );
+}
+
+/// The ranks `quantile_from_sorted_position` will actually read.
+///
+/// Only `Linear` and `Midpoint` look at two; the other three read one apiece,
+/// so asking for all of them would select up to three times the work.
+fn ranks_for_positions(
+    positions: &[QuantilePosition],
+    interpolation: QuantileInterpolation,
+) -> Vec<usize> {
+    let mut ranks = Vec::with_capacity(positions.len() * 2);
+    for position in positions {
+        match interpolation {
+            QuantileInterpolation::Lower => ranks.push(position.lower_idx),
+            QuantileInterpolation::Higher => ranks.push(position.upper_idx),
+            QuantileInterpolation::Nearest => ranks.push(position.nearest_idx),
+            QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+                ranks.push(position.lower_idx);
+                ranks.push(position.upper_idx);
+            }
+        }
+    }
+    ranks.sort_unstable();
+    ranks.dedup();
+    ranks
+}
+
+/// Above this many distinct ranks, ordering the whole slice beats selecting
+/// them one at a time.
+///
+/// Measured over a million float32: one quickselect costs 3.7ms and a serial
+/// sort 31, so selection is ahead while `log2(k)` stays under about eight.
+/// The crossover is flat enough either side that a constant is as good as a
+/// formula, and being wrong by a factor of two here costs a few milliseconds
+/// rather than a wrong answer.
+const QUANTILE_SELECT_LIMIT: usize = 64;
+
+/// Arranges `values` so `quantile_from_sorted_position` can read every entry
+/// of `positions`, by whichever of selection and sorting is cheaper.
+///
+/// A full sort is the obvious way and usually the wrong one: `percentile` with
+/// two quantiles read 0.12x of NumPy because it sorted a million elements to
+/// answer two questions, where NumPy selects.
+///
+/// `parallel` says whether a sort here may use the thread pool. It is false
+/// when the caller is already inside it with one row per worker, where a
+/// nested parallel sort would fight its own siblings for the same cores.
+pub(crate) fn order_for_quantiles<T: TotalCmp + Send>(
+    values: &mut [T],
+    positions: &[QuantilePosition],
+    interpolation: QuantileInterpolation,
+    parallel: bool,
+) {
+    let ranks = ranks_for_positions(positions, interpolation);
+    if ranks.len() <= QUANTILE_SELECT_LIMIT {
+        select_ranks(values, 0, &ranks);
+    } else if parallel {
+        values.par_sort_unstable_by(|a, b| a.total_order(b));
+    } else {
+        // Unstable rather than stable: the order is total and equal elements
+        // are read by index alone, so there is nothing for stability to
+        // preserve -- and the stable sort allocates a second buffer.
+        values.sort_unstable_by(|a, b| a.total_order(b));
+    }
 }
 
 /// The `q`-th quantile of an unsorted slice, via quickselect rather than a full
