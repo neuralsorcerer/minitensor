@@ -291,6 +291,73 @@ def test_a_relabelling_transpose_still_carries_its_gradient():
     np.testing.assert_array_equal(cube.grad.numpy(), np.ones((1, 3, 4)))
 
 
+@pytest.mark.parametrize(
+    "view",
+    [
+        pytest.param(lambda t: mt.transpose(t, 0, 1), id="transpose"),
+        pytest.param(lambda t: mt.permute(t, [1, 0]), id="permute"),
+        pytest.param(lambda t: t.T, id="T"),
+        pytest.param(lambda t: mt.movedim(t, 0, 1), id="movedim"),
+        pytest.param(lambda t: t.reshape(6, 1), id="reshape"),
+    ],
+)
+def test_a_relabelling_shares_its_bytes_and_still_lets_nothing_through(view):
+    """Reordering axes of extent one hands back the source's buffer, where it
+    used to hand back a copy. That is the point, and it is also the risk: a
+    tensor here is a value, so no write through one name may show up under the
+    other.
+
+    Checked in both directions and through every in-place spelling the library
+    has, against `reshape`, which shared its bytes before any of this and is
+    the behaviour the others now have to match.
+    """
+
+    source = np.arange(6.0).reshape(1, 6)
+
+    tensor = mt.from_numpy(source.copy())
+    relabelled = view(tensor)
+    assert (
+        relabelled.__array_interface__["data"][0]
+        == tensor.__array_interface__["data"][0]
+    ), "the relabelling copied, so this test is no longer testing anything"
+
+    for mutate in (
+        lambda x: x.fill_(99.0),
+        lambda x: x.__setitem__(0, 99.0),
+        lambda x: x.copy_(mt.from_numpy(np.full(tuple(x.shape), 99.0))),
+    ):
+        tensor = mt.from_numpy(source.copy())
+        relabelled = view(tensor)
+        mutate(relabelled)
+        np.testing.assert_array_equal(tensor.numpy(), source)
+
+    # And the other way: writing to the source leaves the relabelling alone.
+    tensor = mt.from_numpy(source.copy())
+    relabelled = view(tensor)
+    taken = relabelled.numpy().copy()
+    tensor.fill_(7.0)
+    np.testing.assert_array_equal(relabelled.numpy(), taken)
+
+
+def test_a_relabelled_operand_of_a_live_graph_cannot_be_written_through():
+    """The tape saves operands by sharing them, so a write to one between the
+    forward and the backward would change what the backward reads. The guard
+    that refuses such a write is on the tensor, not on how the graph reached
+    it, and a free transpose reaches it by sharing."""
+
+    tracked = mt.from_numpy(np.arange(6.0).reshape(1, 6)).requires_grad_(True)
+    kept = mt.transpose(tracked, 0, 1).sum()
+
+    with pytest.raises(ValueError):
+        tracked.fill_(1.0)
+
+    # Writing to the relabelling is allowed, because that copies rather than
+    # reaching the operand the graph is holding.
+    mt.transpose(tracked, 0, 1).fill_(1.0)
+    kept.backward()
+    np.testing.assert_array_equal(tracked.grad.numpy(), np.ones((1, 6)))
+
+
 def test_permute_invalid_dims_raises():
     x = mt.arange(6).reshape(1, 2, 3)
     with pytest.raises(ValueError):
