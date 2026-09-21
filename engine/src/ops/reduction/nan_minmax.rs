@@ -14,7 +14,6 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use num_traits::Float;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -307,75 +306,6 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
     );
 }
 
-/// Global min/max over the non-NaN elements.
-///
-/// Returns NaN when every element is NaN -- there is no non-NaN element to
-/// report. The four dtype-specific versions this replaces each carried a
-/// `(value, found)` accumulator seeded with a `±inf` sentinel;
-/// `reduce_with` has no identity element, so there is no sentinel that a real
-/// input value could collide with.
-fn nan_extremum_all<T: Float + Send + Sync>(data: &[T], which: Extremum) -> T {
-    // Two accumulators with no branch between them: a running extremum seeded
-    // with the identity, and whether anything real was seen at all. A NaN
-    // compares false against everything, so `if value > best` skips it without
-    // being asked to, and the flag is accumulated with `|=` so the loop keeps
-    // no branch of its own. The seed cannot be confused with a real `-inf` because `real`
-    // answers that question separately -- which is the whole reason the flag is
-    // carried rather than inferred from the value.
-    //
-    // The straightforward `par_iter().filter(..).reduce_with(..)` this replaces
-    // charges rayon's consumer machinery per element and branches on a NaN test
-    // and an `Option` discriminant inside the fold. On a million float64 it
-    // read 0.77 ms where `max` over the same data -- the same scan without the
-    // NaN test -- costs 0.22.
-    let fold = |_: usize, block: &[T]| -> (T, bool) {
-        let mut best = match which {
-            Extremum::Max => T::neg_infinity(),
-            Extremum::Min => T::infinity(),
-        };
-        let mut real = false;
-        match which {
-            Extremum::Max => {
-                for &value in block {
-                    real |= !value.is_nan();
-                    if value > best {
-                        best = value;
-                    }
-                }
-            }
-            Extremum::Min => {
-                for &value in block {
-                    real |= !value.is_nan();
-                    if value < best {
-                        best = value;
-                    }
-                }
-            }
-        }
-        (best, real)
-    };
-    let combine = |a: (T, bool), b: (T, bool)| match (a.1, b.1) {
-        (true, true) => (
-            match which {
-                Extremum::Max => a.0.max(b.0),
-                Extremum::Min => a.0.min(b.0),
-            },
-            true,
-        ),
-        (true, false) => a,
-        _ => b,
-    };
-    let seed = (
-        match which {
-            Extremum::Max => T::neg_infinity(),
-            Extremum::Min => T::infinity(),
-        },
-        false,
-    );
-    let (best, real) = par_fold_chunks(data, PAR_CHUNK, seed, &fold, &combine);
-    if real { best } else { T::nan() }
-}
-
 /// Index of the global extremum.
 ///
 /// Ties go to the lowest index. A NaN wins outright; ties among NaNs also go
@@ -454,30 +384,95 @@ fn write_index(result_data: &mut TensorData, index: usize) -> Result<()> {
 }
 
 /// `nan{min,max}_all_{f32,f64}`: the whole-tensor NaN-skipping extremum.
+///
+/// The lane-blocked shape of [`super::sum_prod`]'s `float_extremum_all!`, with
+/// the flag inverted. That one records whether a NaN was *seen*, so it can
+/// propagate one; this one records whether anything that was *not* a NaN was
+/// seen, so it can answer NaN only when nothing was. Neither needs a NaN test
+/// in the comparison: a NaN is greater than nothing and less than nothing, so
+/// `v > best` passes over it without being asked to.
+///
+/// Written generically over `T: Float` it did not vectorise -- one accumulator
+/// serialises the compare-and-select, and the trait call blocks the lane
+/// blocking that fixes it. On a million float32 that read 0.44 ms where the
+/// same scan without the NaN test reads 0.11.
+///
+/// The identity is a value the data can hold, and that is what the flag is
+/// for: a slice of nothing but `-inf` answers `-inf`, and a slice of nothing
+/// but NaN answers NaN, and the extremum alone cannot tell those apart.
 macro_rules! nan_extremum_all_entry {
-    ($name:ident, $which:ident, $accessor:ident, $mut_accessor:ident, $tyname:literal) => {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
             let data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
-            let value = nan_extremum_all(data, Extremum::$which);
-            let slot = result_data.$mut_accessor().ok_or_else(|| {
+
+            let (value, has_real) = par_fold_chunks(
+                data,
+                MINMAX_CHUNK,
+                ($identity, false),
+                &|_, chunk| {
+                    const LANES: usize = $lanes;
+                    let mut bests = [$identity; LANES];
+                    let mut reals = [0u32; LANES];
+                    let mut blocks = chunk.chunks_exact(LANES);
+                    for block in &mut blocks {
+                        for lane in 0..LANES {
+                            let v = block[lane];
+                            if v $better bests[lane] {
+                                bests[lane] = v;
+                            }
+                            // `as u32` rather than a bool `|=`: keeps the lane
+                            // update branch-free so it vectorizes with the
+                            // comparison above.
+                            reals[lane] |= (v == v) as u32;
+                        }
+                    }
+                    let mut best: $ty = $identity;
+                    let mut real = 0u32;
+                    for lane in 0..LANES {
+                        if bests[lane] $better best {
+                            best = bests[lane];
+                        }
+                        real |= reals[lane];
+                    }
+                    for &v in blocks.remainder() {
+                        if v $better best {
+                            best = v;
+                        }
+                        real |= (v == v) as u32;
+                    }
+                    (best, real != 0)
+                },
+                &|a, b| (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1),
+            );
+
+            let result_slice = result_data.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get mutable ",
                     $tyname,
                     " slice"
                 ))
             })?;
-            slot[0] = value;
+
+            result_slice[0] = if has_real { value } else { <$ty>::NAN };
             Ok(())
         }
     };
 }
 
-nan_extremum_all_entry!(nanmax_all_f32, Max, as_f32_slice, as_f32_slice_mut, "f32");
-nan_extremum_all_entry!(nanmax_all_f64, Max, as_f64_slice, as_f64_slice_mut, "f64");
-nan_extremum_all_entry!(nanmin_all_f32, Min, as_f32_slice, as_f32_slice_mut, "f32");
-nan_extremum_all_entry!(nanmin_all_f64, Min, as_f64_slice, as_f64_slice_mut, "f64");
+nan_extremum_all_entry!(
+    nanmax_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::NEG_INFINITY, >, 8
+);
+nan_extremum_all_entry!(
+    nanmax_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::NEG_INFINITY, >, 4
+);
+nan_extremum_all_entry!(
+    nanmin_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::INFINITY, <, 8
+);
+nan_extremum_all_entry!(
+    nanmin_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::INFINITY, <, 4
+);
 
 /// `arg{min,max}_all_*` for a dtype that can hold NaN.
 macro_rules! arg_extremum_all_float {

@@ -545,7 +545,7 @@ prod_along_dim_kernel!(
 
 /// Chunk length for the parallel min/max folds. Large enough that the per-chunk
 /// overhead disappears, small enough to keep every core fed.
-const MINMAX_CHUNK: usize = 8 * 1024;
+pub(crate) const MINMAX_CHUNK: usize = 8 * 1024;
 
 /// Float min/max over a chunked parallel fold.
 ///
