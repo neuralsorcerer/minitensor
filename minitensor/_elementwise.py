@@ -12,10 +12,18 @@ These are those names -- written once here, in terms of the operators, so
 `mt.add` cannot drift from `+`.
 
 The rest of the file is the same idea applied further out: `lerp` is one
-multiply-add, `fmax` is a `maximum` with the NaN cases picked out, `signbit` is
-a `copysign` compared against zero, `square` is a product. Each is an
-arrangement, so none of them adds a kernel and each inherits the accuracy,
-the dtype rules and the gradient of what it is arranged from.
+multiply-add, `signbit` is a `copysign` compared against zero, `square` is a
+product. Each is an arrangement, so none of them adds a kernel and each
+inherits the accuracy, the dtype rules and the gradient of what it is arranged
+from.
+
+`fmax` and `fmin` used to be here on the same grounds -- a `maximum` with the
+NaN cases picked out -- and they are the counter-example. Picking those cases
+out took two `isnan` and two `where` around the comparison, five passes and
+four full-size temporaries, and a `where` whose mask the branch predictor
+cannot guess costs six times one it can. They are one kernel now, in
+`ops::binary_math`, and the arrangement was also answering `-0.0` where NumPy
+answers `0.0`.
 """
 
 from __future__ import annotations
@@ -199,40 +207,6 @@ def ldexp(input: object, other: object) -> Tensor:
     return _atleast_tensor(input) * _F.exp2(_atleast_tensor(other).astype("float64"))
 
 
-# --- the NaN-skipping extrema ---------------------------------------------
-
-
-def _nan_aware(input: object, other: object, pick: object) -> Tensor:
-    """`pick` with each operand's NaN replaced by the other one.
-
-    `maximum` and `minimum` propagate NaN, which is right for a comparison and
-    wrong for a running extremum over data with holes in it. Two `where`s pick
-    the other operand wherever one is NaN, and leave NaN only where both are.
-    """
-
-    left = _atleast_tensor(input)
-    right = _atleast_tensor(other)
-    return _F.where(
-        _F.isnan(left), right, _F.where(_F.isnan(right), left, pick(left, right))
-    )
-
-
-def fmax(input: object, other: object) -> Tensor:
-    """Element-wise maximum, ignoring a NaN in either operand.
-
-    `maximum` propagates NaN; this one propagates it only where both operands
-    are NaN and there is genuinely nothing to compare.
-    """
-
-    return _nan_aware(input, other, _F.maximum)
-
-
-def fmin(input: object, other: object) -> Tensor:
-    """Element-wise minimum, ignoring a NaN in either operand."""
-
-    return _nan_aware(input, other, _F.minimum)
-
-
 # --- predicates -----------------------------------------------------------
 
 
@@ -313,8 +287,6 @@ _ELEMENTWISE = (
     "frexp",
     "div",
     "float_power",
-    "fmax",
-    "fmin",
     "isneginf",
     "isposinf",
     "isreal",

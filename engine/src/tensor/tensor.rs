@@ -2662,6 +2662,16 @@ impl Tensor {
         crate::ops::binary_math::atan2(self, other)
     }
 
+    /// Element-wise larger of two tensors, ignoring a NaN in either.
+    pub fn fmax(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::fmax(self, other)
+    }
+
+    /// Element-wise smaller of two tensors, ignoring a NaN in either.
+    pub fn fmin(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::fmin(self, other)
+    }
+
     /// `sqrt(self^2 + other^2)` without forming either square.
     #[inline(always)]
     pub fn hypot(&self, other: &Self) -> Result<Self> {

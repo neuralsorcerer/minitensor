@@ -407,3 +407,129 @@ def test_the_angle_conversions_scale_the_gradient_by_the_same_factor():
     degrees = _t([90.0], requires_grad=True)
     mt.deg2rad(degrees).sum().backward()
     assert degrees.grad.numpy()[0] == pytest.approx(math.pi / 180.0, rel=1e-15)
+
+
+# `fmax`/`fmin` were five passes of Python -- two `isnan`, a `maximum` and two
+# `where` -- and are one kernel now. Two things had to survive that: the
+# gradient, which the arrangement decided implicitly, and every NaN case. One
+# thing deliberately did not.
+FMAX_FMIN_EDGES = [
+    (-0.0, 0.0),
+    (0.0, -0.0),
+    (-0.0, -0.0),
+    (0.0, 0.0),
+    (np.nan, 1.0),
+    (1.0, np.nan),
+    (np.nan, np.nan),
+    (np.inf, 1.0),
+    (-np.inf, np.nan),
+    (np.nan, -np.inf),
+    (1.0, 1.0),
+    (2.0, 1.0),
+    (1.0, 2.0),
+]
+
+
+@pytest.mark.parametrize("name", ["fmax", "fmin"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_fmax_and_fmin_match_numpy_on_every_value(name, dtype):
+    left = np.array([a for a, _ in FMAX_FMIN_EDGES], dtype=dtype)
+    right = np.array([b for _, b in FMAX_FMIN_EDGES], dtype=dtype)
+    np.testing.assert_array_equal(
+        getattr(mt, name)(mt.from_numpy(left), mt.from_numpy(right)).numpy(),
+        getattr(np, name)(left, right),
+    )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("size", [1, 2, 3, 4, 8, 17, 64, 1000])
+def test_the_signed_zero_tie_is_decided_the_same_way_every_time(dtype, size):
+    # `-0.0` and `+0.0` compare equal, so either is "the larger", and there is
+    # no reference to copy: `np.fmax` over an array of `(-0.0, +0.0)` pairs
+    # answers `+0.0` for the elements its vectorized body handles and `-0.0`
+    # for the ones left to its scalar tail, so the same two operands give
+    # different signs at different lengths and, at some lengths, within one
+    # array. Asserting against NumPy here fails on NumPy's own inconsistency.
+    #
+    # The rule is IEEE 754-2019's `maximumNumber` instead: `-0.0` sits below
+    # `+0.0`, which is the order the rest of this library sorts them in, and
+    # the answer does not depend on where in a buffer the operands sat.
+    minus = np.full(size, -0.0, dtype=dtype)
+    plus = np.full(size, 0.0, dtype=dtype)
+
+    for left, right in ((minus, plus), (plus, minus)):
+        assert not np.signbit(
+            mt.fmax(mt.from_numpy(left), mt.from_numpy(right)).numpy()
+        ).any(), "fmax(-0.0, +0.0) must be +0.0 at every length and position"
+        assert np.signbit(
+            mt.fmin(mt.from_numpy(left), mt.from_numpy(right)).numpy()
+        ).all(), "fmin(-0.0, +0.0) must be -0.0 at every length and position"
+
+    # Two of a kind keep their own sign, in both directions.
+    for filled, negative in ((minus, True), (plus, False)):
+        for name in ("fmax", "fmin"):
+            got = getattr(mt, name)(mt.from_numpy(filled), mt.from_numpy(filled))
+            assert bool(np.signbit(got.numpy()).all()) is negative
+
+
+@pytest.mark.parametrize("name", ["fmax", "fmin"])
+def test_the_gradient_goes_to_the_first_operand_at_a_tie(name):
+    # The value ties to the second operand and the derivative to the first.
+    # That is not an inconsistency -- at a tie the two values are equal, so
+    # which is "returned" is unobservable, while the derivative has to pick a
+    # side. These are the sides the five passes picked.
+    left = mt.Tensor(
+        np.array([a for a, _ in FMAX_FMIN_EDGES]), dtype="float64", requires_grad=True
+    )
+    right = mt.Tensor(
+        np.array([b for _, b in FMAX_FMIN_EDGES]), dtype="float64", requires_grad=True
+    )
+    getattr(mt, name)(left, right).sum().backward()
+
+    other = "fmin" if name == "fmax" else "fmax"
+    del other
+    for i, (a, b) in enumerate(FMAX_FMIN_EDGES):
+        if a != a:  # a NaN operand is never the answer unless both are
+            want_left = 0.0
+        elif b != b or (a >= b if name == "fmax" else a <= b):
+            want_left = 1.0
+        else:
+            want_left = 0.0
+        assert left.grad.numpy()[i] == want_left, f"d/dleft at {(a, b)}"
+        assert right.grad.numpy()[i] == 1.0 - want_left, f"d/dright at {(a, b)}"
+
+
+@pytest.mark.parametrize("name", ["fmax", "fmin"])
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_fmax_and_fmin_agree_with_numpy_over_noisy_data(name, size):
+    # A fifth of each operand NaN, so every combination of NaN and number
+    # occurs many times and at every alignment of the block loop.
+    rng = np.random.default_rng(size)
+    left = rng.standard_normal(size)
+    right = rng.standard_normal(size)
+    left[rng.random(size) < 0.2] = np.nan
+    right[rng.random(size) < 0.2] = np.nan
+    got = getattr(mt, name)(_t(left), _t(right)).numpy()
+    np.testing.assert_array_equal(got, getattr(np, name)(left, right))
+
+
+@pytest.mark.parametrize("name", ["fmax", "fmin"])
+def test_fmax_and_fmin_broadcast_and_promote(name):
+    # They are declared beside `atan2` and `hypot` now, so they inherit that
+    # family's broadcast.
+    rows = np.array([[1.0, np.nan], [3.0, 4.0]])
+    column = np.array([[2.0], [np.nan]])
+    np.testing.assert_array_equal(
+        getattr(mt, name)(_t(rows), _t(column)).numpy(),
+        getattr(np, name)(rows, column),
+    )
+
+    # They do not inherit its promotion. An integer pair has no NaN to skip, so
+    # it is a plain `maximum` and keeps its dtype, where this family turns two
+    # integers into a float the way `/` does -- and NumPy's `fmax` of two
+    # integers is an integer.
+    left = np.array([1, 5], dtype=np.int64)
+    right = np.array([3, 2], dtype=np.int64)
+    result = getattr(mt, name)(mt.from_numpy(left), mt.from_numpy(right))
+    assert "int64" in str(result.dtype)
+    np.testing.assert_array_equal(result.numpy(), getattr(np, name)(left, right))

@@ -28,6 +28,17 @@ use std::sync::Arc;
 /// A pair of function pointers rather than a generic, so that a single value
 /// can stand for a forward kernel in one place and for a partial derivative in
 /// [`FloatBinaryBackward`] in another.
+///
+/// That choice has a price, and it is larger than it looks. A function pointer
+/// is opaque to the optimizer, so every kernel in this file runs as a scalar
+/// call per element where `ops::minmax` -- which hands
+/// `broadcast_binary_map` a closure, and so monomorphizes -- vectorizes.
+/// Measured over a million float32: `maximum` 0.174ms against `fmax` 0.666,
+/// and `maximum` has the *branchier* body of the two. Whoever wants that back
+/// has to give the forward a concrete function item, which means `float_pair!`
+/// naming its two halves at module scope instead of hiding them in a `const`
+/// block, and it would speed up `atan2`, `hypot`, `copysign` and `xlogy` at
+/// the same time.
 pub type FloatBinaryKernel = (fn(f32, f32) -> f32, fn(f64, f64) -> f64);
 
 /// Defines one [`FloatBinaryKernel`] from a single body, instantiated at both
@@ -72,6 +83,109 @@ float_pair!(
     ATAN2_D_X, |y, x| {
         let h = y.hypot(x);
         (-y / h) / h
+    }
+);
+
+// --- fmax and fmin ---------------------------------------------------------
+
+float_pair!(
+    /// The larger of two values, ignoring a NaN in either.
+    ///
+    /// `maximum` propagates NaN, which is right for a comparison and wrong for
+    /// a running extremum over data with holes in it. This was five passes of
+    /// Python -- two `isnan`, a `maximum` and two `where` -- with four
+    /// full-size temporaries between them, and the `where`s were the expensive
+    /// part: a mask the branch predictor cannot guess costs six times one it
+    /// can.
+    ///
+    /// The last arm is the tie, and it is there because the obvious reference
+    /// has no answer. `-0.0` and `+0.0` compare equal, so either is "the
+    /// larger", and NumPy picks *neither consistently*: `np.fmax` over an
+    /// array of `(-0.0, +0.0)` pairs returns `+0.0` for the elements its
+    /// vectorized body handles and `-0.0` for the ones left to the scalar
+    /// tail, so the same two operands give different signs at different array
+    /// lengths and, at some lengths, within one array. There is nothing there
+    /// to match.
+    ///
+    /// So the rule is IEEE 754-2019's `maximumNumber` instead: `-0.0` is below
+    /// `+0.0`, which is the order every other part of this crate already sorts
+    /// them in, and the answer does not depend on where in a buffer the
+    /// operands sat.
+    FMAX, |x, y| {
+        // `y >= x` is false when either is NaN, so the `x.is_nan()` test is
+        // what picks `y` when only `x` is -- and when both are, which gives
+        // NaN either way. Two comparisons and a select, no branch.
+        let extremum = if y >= x || x.is_nan() { y } else { x };
+        // The tie, settled without a branch either. The only distinguishable
+        // values that compare equal are the two zeros, and `-0.0 + +0.0` is
+        // `+0.0` while `-0.0 + -0.0` is `-0.0` -- which is the rule, spelled
+        // as arithmetic. Writing it as a chain of comparisons instead cost
+        // four times as much: 0.47ms over a million float32 against 2.01.
+        if x == 0.0 && y == 0.0 { x + y } else { extremum }
+    }
+);
+float_pair!(
+    /// The smaller of two values, ignoring a NaN in either. See [`FMAX`], and
+    /// note that the tie goes the other way: `fmin(-0.0, +0.0)` is `-0.0`.
+    FMIN, |x, y| {
+        let extremum = if y <= x || x.is_nan() { y } else { x };
+        // Mirrors [`FMAX`], negated: `fmin` wants `-0.0` wherever `fmax` wants
+        // `+0.0`, and negating both operands turns the one rule into the other.
+        if x == 0.0 && y == 0.0 { -((-x) + (-y)) } else { extremum }
+    }
+);
+float_pair!(
+    /// `d/dx fmax(x, y)`: one where `x` is what came out, zero where `y` was.
+    ///
+    /// The derivative ties to `x` where the value ties on the sign bit. That
+    /// is not an inconsistency -- a tie means the two values are equal, so
+    /// which one is "returned" is unobservable, while the derivative has to
+    /// pick a side and the first operand is the conventional one. It is also
+    /// the side the five passes this replaces picked, so no gradient moves.
+    FMAX_D_X, |x, y| {
+        if x.is_nan() {
+            0.0
+        } else if y.is_nan() || x >= y {
+            1.0
+        } else {
+            0.0
+        }
+    }
+);
+float_pair!(
+    /// `d/dy fmax(x, y)`, the complement of [`FMAX_D_X`].
+    FMAX_D_Y, |x, y| {
+        if x.is_nan() {
+            1.0
+        } else if y.is_nan() || x >= y {
+            0.0
+        } else {
+            1.0
+        }
+    }
+);
+float_pair!(
+    /// `d/dx fmin(x, y)`. See [`FMAX_D_X`].
+    FMIN_D_X, |x, y| {
+        if x.is_nan() {
+            0.0
+        } else if y.is_nan() || x <= y {
+            1.0
+        } else {
+            0.0
+        }
+    }
+);
+float_pair!(
+    /// `d/dy fmin(x, y)`, the complement of [`FMIN_D_X`].
+    FMIN_D_Y, |x, y| {
+        if x.is_nan() {
+            1.0
+        } else if y.is_nan() || x <= y {
+            0.0
+        } else {
+            1.0
+        }
     }
 );
 
@@ -324,6 +438,28 @@ float_binary_op!(
     "The angle of the point `(other, input)` from the positive x-axis, in \
      `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses."
 );
+/// Element-wise larger of two tensors, ignoring a NaN in either operand. NaN
+/// only where both are.
+///
+/// An integer or boolean pair has no NaN to skip, so it is a plain `maximum` --
+/// which also keeps its dtype, where this family's promotion would turn two
+/// `int64` operands into a float the way `/` does.
+pub fn fmax(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
+        return crate::ops::minmax::maximum(lhs, rhs);
+    }
+    float_binary(lhs, rhs, FMAX, [FMAX_D_X, FMAX_D_Y])
+}
+
+/// Element-wise smaller of two tensors, ignoring a NaN in either operand. NaN
+/// only where both are. See [`fmax`].
+pub fn fmin(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
+        return crate::ops::minmax::minimum(lhs, rhs);
+    }
+    float_binary(lhs, rhs, FMIN, [FMIN_D_X, FMIN_D_Y])
+}
+
 float_binary_op!(
     hypot,
     HYPOT,

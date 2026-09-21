@@ -447,6 +447,8 @@ binary_forwarders!(
     dot => "Inner product of two 1-D tensors.",
     eq => "Element-wise equality, giving a boolean tensor.",
     floor_divide => "Element-wise division rounded towards negative infinity, matching Python's `//`.",
+    fmax => "Element-wise larger of two tensors, ignoring a NaN in either operand. NaN only where both are.",
+    fmin => "Element-wise smaller of two tensors, ignoring a NaN in either operand. NaN only where both are.",
     ge => "Element-wise `>=`, giving a boolean tensor.",
     gt => "Element-wise `>`, giving a boolean tensor.",
     le => "Element-wise `<=`, giving a boolean tensor.",
@@ -2243,6 +2245,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(gt, parent)?)?;
     parent.add_function(wrap_pyfunction!(ge, parent)?)?;
     parent.add_function(wrap_pyfunction!(floor_divide, parent)?)?;
+    parent.add_function(wrap_pyfunction!(fmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(fmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(remainder, parent)?)?;
     parent.add_function(wrap_pyfunction!(nextafter, parent)?)?;
     parent.add_function(wrap_pyfunction!(heaviside, parent)?)?;
