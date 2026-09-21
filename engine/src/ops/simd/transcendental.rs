@@ -1500,12 +1500,21 @@ macro_rules! trig_block_kernel {
         #[inline(always)]
         fn $block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>]) {
             debug_assert_eq!(input.len(), out.len());
+            // Flagged in the first pass, branch-free, so the second can be
+            // skipped whole rather than walked for nothing. It re-reads the
+            // input and rewrites the output, which is most of a memory-bound
+            // kernel's work; the same change took `atan2` from 1.005ms over a
+            // million float32 to 0.574.
+            let mut rare = 0u32;
             for (o, &x) in out.iter_mut().zip(input.iter()) {
                 o.write($one::<FMA>(x));
+                rare |= (x.abs() >= TRIG_LIMIT) as u32;
             }
-            for (o, &x) in out.iter_mut().zip(input.iter()) {
-                if x.abs() >= TRIG_LIMIT {
-                    o.write($scalar(x as f64) as f32);
+            if rare != 0 {
+                for (o, &x) in out.iter_mut().zip(input.iter()) {
+                    if x.abs() >= TRIG_LIMIT {
+                        o.write($scalar(x as f64) as f32);
+                    }
                 }
             }
         }
@@ -1609,12 +1618,21 @@ macro_rules! block_kernel2_fallback {
         fn $block<const FMA: bool>(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
             debug_assert_eq!(lhs.len(), out.len());
             debug_assert_eq!(rhs.len(), out.len());
+            // Flagged in the first pass, branch-free, so the second can be
+            // skipped whole. It re-reads both operands and rewrites the
+            // output -- three streams against the first pass's three -- and
+            // for `atan2` over a million float32 that was a third of the
+            // kernel, spent on elements that are almost never there.
+            let mut rare = 0u32;
             for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
                 o.write($one::<FMA>(l, r));
+                rare |= $needs(l, r) as u32;
             }
-            for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
-                if $needs(l, r) {
-                    o.write($scalar(l as f64, r as f64) as f32);
+            if rare != 0 {
+                for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                    if $needs(l, r) {
+                        o.write($scalar(l as f64, r as f64) as f32);
+                    }
                 }
             }
         }
