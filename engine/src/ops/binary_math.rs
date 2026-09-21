@@ -23,27 +23,52 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// One element-wise binary function, in both float widths.
+/// One element-wise binary partial derivative, in both float widths.
 ///
 /// A pair of function pointers rather than a generic, so that a single value
-/// can stand for a forward kernel in one place and for a partial derivative in
-/// [`FloatBinaryBackward`] in another.
+/// can stand for both halves of a derivative in [`FloatBinaryBackward`],
+/// which stores two of them and does not know which op it came from.
 ///
-/// That choice has a price, and it is larger than it looks. A function pointer
-/// is opaque to the optimizer, so every kernel in this file runs as a scalar
-/// call per element where `ops::minmax` -- which hands
-/// `broadcast_binary_map` a closure, and so monomorphizes -- vectorizes.
-/// Measured over a million float32: `maximum` 0.174ms against `fmax` 0.666,
-/// and `maximum` has the *branchier* body of the two. Whoever wants that back
-/// has to give the forward a concrete function item, which means `float_pair!`
-/// naming its two halves at module scope instead of hiding them in a `const`
-/// block, and it would speed up `atan2`, `hypot`, `copysign` and `xlogy` at
-/// the same time.
+/// Forwards do *not* go through this, and the difference is larger than it
+/// looks. A function pointer is opaque to the optimizer, so a per-element call
+/// through one cannot inline: routed this way `fmax` ran at 0.666ms over a
+/// million float32 where `ops::minmax`'s `maximum` -- the same shape of work
+/// behind a closure, with a branchier body -- ran at 0.174. Forwards are
+/// declared by [`float_kernel!`] instead, which names both halves at module
+/// scope so [`float_binary_mono`] instantiates per op. That took `fmax` to
+/// 0.195 and `copysign` from 0.56 to 0.15.
+///
+/// The backward keeps the pointers because it is not hot and because
+/// monomorphizing it would mean a generic `FloatBinaryBackward` per op.
 pub type FloatBinaryKernel = (fn(f32, f32) -> f32, fn(f64, f64) -> f64);
 
+/// Defines a forward kernel as two named functions, one per width, from a
+/// single body.
+///
+/// Named rather than hidden in a `const` so the call site passes a concrete
+/// function *item* and the loop inlines it -- see [`FloatBinaryKernel`] for
+/// what that is worth. The body has to typecheck as `f32` and as `f64`, which
+/// rules out naming either type inside it -- write `a.hypot(b)`, not
+/// `f64::hypot(a, b)`.
+macro_rules! float_kernel {
+    ($(#[$meta:meta])* $narrow:ident, $wide:ident, |$a:pat_param, $b:pat_param| $body:expr) => {
+        $(#[$meta])*
+        #[inline(always)]
+        fn $narrow($a: f32, $b: f32) -> f32 {
+            $body
+        }
+
+        #[doc = concat!("See [`", stringify!($narrow), "`].")]
+        #[inline(always)]
+        fn $wide($a: f64, $b: f64) -> f64 {
+            $body
+        }
+    };
+}
+
 /// Defines one [`FloatBinaryKernel`] from a single body, instantiated at both
-/// widths. The body has to typecheck as `f32` and as `f64`, which rules out
-/// naming either type inside it -- write `a.hypot(b)`, not `f64::hypot(a, b)`.
+/// widths. Used for the partial derivatives, which are stored rather than
+/// called directly. Same typechecking rule as [`float_kernel!`].
 macro_rules! float_pair {
     ($(#[$meta:meta])* $name:ident, |$a:pat_param, $b:pat_param| $body:expr) => {
         $(#[$meta])*
@@ -63,11 +88,11 @@ macro_rules! float_pair {
 
 // --- atan2 -----------------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// The angle in `(-pi, pi]` from the positive x-axis to `(x, y)`, which
     /// `(y / x).atan()` cannot give: it loses the quadrant, and divides by
     /// zero on the y-axis.
-    ATAN2, |y, x| y.atan2(x)
+    atan2_f32, atan2_f64, |y, x| y.atan2(x)
 );
 float_pair!(
     /// `d/dy atan2(y, x) = x / (x^2 + y^2)`, grouped through `hypot` so the
@@ -88,7 +113,7 @@ float_pair!(
 
 // --- fmax and fmin ---------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// The larger of two values, ignoring a NaN in either.
     ///
     /// `maximum` propagates NaN, which is right for a comparison and wrong for
@@ -111,7 +136,7 @@ float_pair!(
     /// `+0.0`, which is the order every other part of this crate already sorts
     /// them in, and the answer does not depend on where in a buffer the
     /// operands sat.
-    FMAX, |x, y| {
+    fmax_f32, fmax_f64, |x, y| {
         // `y >= x` is false when either is NaN, so the `x.is_nan()` test is
         // what picks `y` when only `x` is -- and when both are, which gives
         // NaN either way. Two comparisons and a select, no branch.
@@ -119,18 +144,18 @@ float_pair!(
         // The tie, settled without a branch either. The only distinguishable
         // values that compare equal are the two zeros, and `-0.0 + +0.0` is
         // `+0.0` while `-0.0 + -0.0` is `-0.0` -- which is the rule, spelled
-        // as arithmetic. Writing it as a chain of comparisons instead cost
-        // four times as much: 0.47ms over a million float32 against 2.01.
+        // as arithmetic. A chain of comparisons instead cost four times as
+        // much: 0.47ms over a million float32 against 2.01.
         if x == 0.0 && y == 0.0 { x + y } else { extremum }
     }
 );
-float_pair!(
+float_kernel!(
     /// The smaller of two values, ignoring a NaN in either. See [`FMAX`], and
     /// note that the tie goes the other way: `fmin(-0.0, +0.0)` is `-0.0`.
-    FMIN, |x, y| {
+    fmin_f32, fmin_f64, |x, y| {
         let extremum = if y <= x || x.is_nan() { y } else { x };
-        // Mirrors [`FMAX`], negated: `fmin` wants `-0.0` wherever `fmax` wants
-        // `+0.0`, and negating both operands turns the one rule into the other.
+        // Mirrors `FMAX`, negated: `fmin` wants `-0.0` wherever `fmax` wants
+        // `+0.0`, and negating both operands turns one rule into the other.
         if x == 0.0 && y == 0.0 { -((-x) + (-y)) } else { extremum }
     }
 );
@@ -191,10 +216,10 @@ float_pair!(
 
 // --- hypot -----------------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// `sqrt(x^2 + y^2)` without forming either square, so it answers for
     /// operands whose squares would overflow or flush to zero.
-    HYPOT, |x, y| x.hypot(y)
+    hypot_f32, hypot_f64, |x, y| x.hypot(y)
 );
 float_pair!(
     /// `d/dx hypot(x, y) = x / hypot(x, y)`. Undefined at the origin, where
@@ -208,10 +233,10 @@ float_pair!(
 
 // --- copysign --------------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// The magnitude of `x` with the sign of `y`, signed zeros and NaN
     /// included -- `copysign(1, -0.0)` is `-1`.
-    COPYSIGN, |x, y| x.copysign(y)
+    copysign_f32, copysign_f64, |x, y| x.copysign(y)
 );
 float_pair!(
     /// `d/dx copysign(x, y)` is `+1` where the sign is kept and `-1` where it
@@ -226,14 +251,14 @@ float_pair!(
 
 // --- xlogy -----------------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// `x * log(y)`, defined as `0` wherever `x` is zero.
     ///
     /// That is the limit the entropy and cross-entropy formulas need: the
     /// plain product gives `0 * -inf = NaN` at `x = 0, y = 0`, which is the
     /// case those formulas hit most. A NaN `y` still poisons the result, since
     /// then there is no limit to take.
-    XLOGY, |x, y| {
+    xlogy_f32, xlogy_f64, |x, y| {
         if x == 0.0 && !y.is_nan() {
             0.0
         } else {
@@ -252,13 +277,13 @@ float_pair!(
 
 // --- heaviside -------------------------------------------------------------
 
-float_pair!(
+float_kernel!(
     /// The step: `0` below zero, `1` above it, and `other` exactly at it --
     /// which is the whole reason it takes a second operand, since that value
     /// is the one convention never agrees on.
     ///
     /// A NaN input stays NaN; it is on neither side of the step.
-    HEAVISIDE, |x, at_zero| {
+    heaviside_f32, heaviside_f64, |x, at_zero| {
         if x < 0.0 {
             0.0
         } else if x > 0.0 {
@@ -323,8 +348,6 @@ macro_rules! next_after_fn {
 next_after_fn!(next_after_f32, f32);
 next_after_fn!(next_after_f64, f64);
 
-/// One representable value from `from` in the direction of `towards`.
-const NEXTAFTER: FloatBinaryKernel = (next_after_f32, next_after_f64);
 float_pair!(
     /// `nextafter(x, y)` differs from `x` by a single ulp, so as a
     /// real-valued function it is the identity and this is its slope. The
@@ -337,20 +360,31 @@ float_pair!(
     NEXTAFTER_D_TOWARDS, |_x, _y| 0.0
 );
 
-/// The shared body: promote, broadcast, run `forward`, and record `partials`
-/// if either operand wants a gradient.
-fn float_binary(
+/// Runs one element-wise binary float function and records its chain rule.
+///
+/// The forward arrives as two concrete function items rather than as a
+/// [`FloatBinaryKernel`], so the per-element call inlines into the broadcast
+/// loop instead of going through a pointer -- see that type for the
+/// measurement. The partials stay pointers: the backward is not hot, and
+/// monomorphizing it would mean a `FloatBinaryBackward` per op.
+fn float_binary_mono<N, W>(
     lhs: &Tensor,
     rhs: &Tensor,
-    forward: FloatBinaryKernel,
+    narrow: N,
+    wide: W,
     partials: [FloatBinaryKernel; 2],
-) -> Result<Tensor> {
+) -> Result<Tensor>
+where
+    N: Fn(f32, f32) -> f32 + Send + Sync,
+    W: Fn(f64, f64) -> f64 + Send + Sync,
+{
     let (lhs_cast, rhs_cast, dtype, output_shape) =
         coerce_and_broadcast(lhs, rhs, BinaryOpKind::Div)?;
     let lhs_tensor = lhs_cast.into_owned();
     let rhs_tensor = rhs_cast.into_owned();
 
-    let output_data = float_binary_data(&lhs_tensor, &rhs_tensor, dtype, &output_shape, forward)?;
+    let output_data =
+        float_binary_data_with(&lhs_tensor, &rhs_tensor, dtype, &output_shape, narrow, wide)?;
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
     let output = Tensor::new(
@@ -387,12 +421,34 @@ pub(crate) fn float_binary_data(
     output_shape: &Shape,
     kernel: FloatBinaryKernel,
 ) -> Result<TensorData> {
+    float_binary_data_with(lhs, rhs, dtype, output_shape, kernel.0, kernel.1)
+}
+
+/// [`float_binary_data`] taking its two halves as generic parameters rather
+/// than as function pointers.
+///
+/// Handed concrete function *items* -- `fmax_of::<f32>` rather than a
+/// `FloatBinaryKernel` field -- this instantiates per kernel and the
+/// per-element call inlines into the loop. Handed the fields, it is the
+/// pointer version and nothing is lost; that is what the wrapper above does.
+pub(crate) fn float_binary_data_with<N, W>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    dtype: DataType,
+    output_shape: &Shape,
+    narrow: N,
+    wide: W,
+) -> Result<TensorData>
+where
+    N: Fn(f32, f32) -> f32 + Send + Sync,
+    W: Fn(f64, f64) -> f64 + Send + Sync,
+{
     Ok(match dtype {
         DataType::Float32 => {
-            broadcast_binary_arm!(lhs, rhs, output_shape, as_f32_slice, "f32", kernel.0)
+            broadcast_binary_arm!(lhs, rhs, output_shape, as_f32_slice, "f32", narrow)
         }
         DataType::Float64 => {
-            broadcast_binary_arm!(lhs, rhs, output_shape, as_f64_slice, "f64", kernel.1)
+            broadcast_binary_arm!(lhs, rhs, output_shape, as_f64_slice, "f64", wide)
         }
         other => {
             return Err(MinitensorError::internal_error(format!(
@@ -422,17 +478,18 @@ pub(crate) fn float_binary_tensor(
 
 /// Declares one public op from its forward kernel and its two partials.
 macro_rules! float_binary_op {
-    ($name:ident, $forward:ident, $d_lhs:ident, $d_rhs:ident, $doc:literal) => {
+    ($name:ident, $narrow:ident, $wide:ident, $d_lhs:ident, $d_rhs:ident, $doc:literal) => {
         #[doc = $doc]
         pub fn $name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
-            float_binary(lhs, rhs, $forward, [$d_lhs, $d_rhs])
+            float_binary_mono(lhs, rhs, $narrow, $wide, [$d_lhs, $d_rhs])
         }
     };
 }
 
 float_binary_op!(
     atan2,
-    ATAN2,
+    atan2_f32,
+    atan2_f64,
     ATAN2_D_Y,
     ATAN2_D_X,
     "The angle of the point `(other, input)` from the positive x-axis, in \
@@ -448,7 +505,7 @@ pub fn fmax(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
         return crate::ops::minmax::maximum(lhs, rhs);
     }
-    float_binary(lhs, rhs, FMAX, [FMAX_D_X, FMAX_D_Y])
+    float_binary_mono(lhs, rhs, fmax_f32, fmax_f64, [FMAX_D_X, FMAX_D_Y])
 }
 
 /// Element-wise smaller of two tensors, ignoring a NaN in either operand. NaN
@@ -457,12 +514,13 @@ pub fn fmin(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
         return crate::ops::minmax::minimum(lhs, rhs);
     }
-    float_binary(lhs, rhs, FMIN, [FMIN_D_X, FMIN_D_Y])
+    float_binary_mono(lhs, rhs, fmin_f32, fmin_f64, [FMIN_D_X, FMIN_D_Y])
 }
 
 float_binary_op!(
     hypot,
-    HYPOT,
+    hypot_f32,
+    hypot_f64,
     HYPOT_D_X,
     HYPOT_D_Y,
     "`sqrt(input^2 + other^2)`, computed without forming either square, so it \
@@ -470,14 +528,16 @@ float_binary_op!(
 );
 float_binary_op!(
     copysign,
-    COPYSIGN,
+    copysign_f32,
+    copysign_f64,
     COPYSIGN_D_X,
     COPYSIGN_D_Y,
     "The magnitude of `input` with the sign of `other`, signed zeros included."
 );
 float_binary_op!(
     xlogy,
-    XLOGY,
+    xlogy_f32,
+    xlogy_f64,
     XLOGY_D_X,
     XLOGY_D_Y,
     "`input * log(other)`, taken as `0` wherever `input` is zero rather than \
@@ -485,14 +545,16 @@ float_binary_op!(
 );
 float_binary_op!(
     heaviside,
-    HEAVISIDE,
+    heaviside_f32,
+    heaviside_f64,
     HEAVISIDE_D_X,
     HEAVISIDE_D_AT_ZERO,
     "The unit step of `input`, taking the value `other` at exactly zero."
 );
 float_binary_op!(
     nextafter,
-    NEXTAFTER,
+    next_after_f32,
+    next_after_f64,
     NEXTAFTER_D_FROM,
     NEXTAFTER_D_TOWARDS,
     "The next representable value after `input` in the direction of `other`."
