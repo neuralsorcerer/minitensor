@@ -224,6 +224,16 @@
 //! `log10f`'s 29,787,059 misroundings (0.693%, up to two ulp) that is an
 //! accuracy gain of seven orders of magnitude, and it is also 4.7x faster.
 //!
+//! `asinh` and `acosh` are bit-identical too, and they replace routines that
+//! are not merely imprecise but wrong at the top of the range: `f32::asinh`
+//! and `f32::acosh` both form `2x` in float32, which is infinity for every
+//! `x > f32::MAX/2`, so both answer infinity where the true value is about
+//! 88.7. Against the float64 reference `asinhf` differs on 98,197,734 of the
+//! 2^32 inputs and `acoshf` on 25,756,405, each with a worst case of a billion
+//! ulp -- that is the overflow, not a rounding. `asinh` was also the slowest
+//! routine in this crate by a wide margin, 8.1ms over a million float32 where
+//! the `log` kernel it is now built from costs 0.324.
+//!
 //! `erf` and `erfc` are within one ulp of the correctly rounded result
 //! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
 //! of the 2^32 inputs respectively. The routines they replace misround
@@ -932,6 +942,71 @@ fn log_one<const FMA: bool>(x: f32) -> f32 {
     log_core::<FMA, false>(x as f64, 0.0) as f32
 }
 
+/// `acosh(x)`, as `log(x + sqrt((x - 1)(x + 1)))`.
+///
+/// Its argument is at least one, so nothing cancels the way it does for
+/// [`asinh_one`] and the plain logarithm is enough. `(x-1)(x+1)` rather than
+/// `x*x - 1` because the difference is what vanishes at the domain edge, and
+/// `x - 1` is exact there by Sterbenz.
+///
+/// The domain is `[1, inf)` and the final select is what enforces it, because
+/// the arithmetic alone does not. Below one the product is negative and its
+/// square root NaN for most of the range -- but for `x <= -2^26` the `- 1` is
+/// lost to rounding, `sqrt(x^2 - 1)` comes back as exactly `|x|`, and
+/// `x + |x|` is zero, which `log_core` reads as a legitimate argument and
+/// answers `-inf`. That is 855,638,014 of the 2^32 inputs given a number where
+/// the answer is NaN, and it is what the exhaustive sweep is for: the first
+/// draft of this kernel said "no input needs a fixup" and was wrong about a
+/// fifth of the domain.
+///
+/// `x >= 1.0` is false for NaN as well, so one compare covers both.
+///
+/// Like `asinh`, this replaces a standard-library routine that overflows:
+/// `f32::acosh` forms `2x` in float32, which is infinity for every
+/// `x > f32::MAX/2`, and answers infinity where `acosh(f32::MAX)` is 89.4.
+#[inline(always)]
+fn acosh_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let y = log_core::<FMA, false>(xd + ((xd - 1.0) * (xd + 1.0)).sqrt(), 0.0) as f32;
+    if x >= 1.0 { y } else { f32::NAN }
+}
+
+/// `asinh(x)`, as `sign(x) * log1p(|x| + x^2/(1 + sqrt(1 + x^2)))`.
+///
+/// The slowest routine this file replaces by a wide margin: glibc's `asinhf`
+/// costs 8.1ms over a million float32 where the `log` kernel above costs
+/// 0.324, which is 25 logarithms per inverse sine. It is one logarithm.
+///
+/// The obvious `ln(x + sqrt(x*x + 1))` is not it. As `x` goes to zero the
+/// argument goes to one and the logarithm keeps none of the answer: in float64
+/// every float32 below about 1e-8 has `1 + x` round to exactly 1, so `asinh`
+/// of a small number would come back as zero rather than as the number. The
+/// algebraically equal `|x| + x^2/(1 + sqrt(1 + x^2))` is `x + sqrt(1+x^2) - 1`
+/// with the cancelling `- 1` removed, so it goes to zero with `x` and `log1p`
+/// is accurate exactly there. `log_core`'s correction term carries the residual
+/// of the `1 + w` that rounds, the same way `log1p` uses it.
+///
+/// Odd, so only `|x|` is evaluated and the sign is put back at the end -- which
+/// also gets `asinh(-0.0) = -0.0` right, where taking the sign from the
+/// logarithm would not.
+///
+/// `x^2` cannot overflow float64 for any float32 input (`3.4e38^2` is `1.2e77`),
+/// so only a genuine infinity reaches `inf/inf`. `asinh` of every non-finite
+/// input is that input, so the fixup is to hand back `x` itself.
+#[inline(always)]
+fn asinh_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let a = xd.abs();
+    let t = a * a;
+    let w = a + t / (1.0 + (1.0 + t).sqrt());
+    let u = 1.0 + w;
+    // The exact residual of the sum, as in `log1p_one`: `u - 1` is exact by
+    // Sterbenz while `w <= 1`, which is the range where it matters.
+    let c = w - (u - 1.0);
+    let y = log_core::<FMA, true>(u, c).copysign(xd) as f32;
+    if x.is_finite() { y } else { x }
+}
+
 /// `log(x) / ln(base)`, for the fixed-base logarithms.
 ///
 /// `log2` and `log10` are this curve times a constant, and were reaching
@@ -1507,6 +1582,8 @@ block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
 block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
+block_kernel!(asinh_block, asinh_one, asinh_block_avx512, asinh_block_avx2);
+block_kernel!(acosh_block, acosh_one, acosh_block_avx512, acosh_block_avx2);
 block_kernel!(
     sigmoid_block,
     sigmoid_one,
@@ -1903,6 +1980,32 @@ impl F32Kernel {
         )
     }
 
+    /// Write `acosh(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn acosh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            acosh_block,
+            acosh_block_avx512,
+            acosh_block_avx2
+        )
+    }
+
+    /// Write `asinh(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn asinh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            asinh_block,
+            asinh_block_avx512,
+            asinh_block_avx2
+        )
+    }
+
     /// Write `log1p(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn log1p(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -2072,6 +2175,8 @@ mod tests {
         Sinh,
         Cosh,
         Erfc,
+        Acosh,
+        Asinh,
         Exp2,
         Log,
         Log2,
@@ -2099,6 +2204,8 @@ mod tests {
             Op::Cosh => k.cosh(input, out),
             Op::Erfc => k.erfc(input, out),
             Op::Exp => k.exp(input, out),
+            Op::Acosh => k.acosh(input, out),
+            Op::Asinh => k.asinh(input, out),
             Op::Exp2 => k.exp_scaled(input, out, std::f64::consts::LN_2),
             Op::Log => k.log(input, out),
             Op::Log2 => k.log_scaled(input, out, std::f64::consts::LOG2_E),
@@ -2337,6 +2444,8 @@ mod tests {
             Op::Cosh => xd.cosh() as f32,
             Op::Erfc => libm::erfc(xd) as f32,
             Op::Exp => xd.exp() as f32,
+            Op::Acosh => xd.acosh() as f32,
+            Op::Asinh => xd.asinh() as f32,
             Op::Exp2 => xd.exp2() as f32,
             Op::Log => xd.ln() as f32,
             Op::Log2 => xd.log2() as f32,
@@ -2370,10 +2479,12 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 11] {
+    fn bit_exact_ops() -> [Op; 13] {
         [
             Op::Tanh,
             Op::Exp,
+            Op::Asinh,
+            Op::Acosh,
             Op::Expm1,
             Op::Sinh,
             Op::Cosh,

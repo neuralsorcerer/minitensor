@@ -780,13 +780,108 @@ pub(crate) fn cosh_f32(tensor: &Tensor) -> Result<TensorData> {
 
 float_unary_kernel!(cosh_f64, as_f64_slice, f64, Float64, "f64", f64::cosh);
 
-float_unary_kernel!(asinh_f32, as_f32_slice, f32, Float32, "f32", f32::asinh);
+/// Above this the `x^2` in the exact form would overflow long before it
+/// mattered: `asinh(a) - ln(2a)` is under `1/(4a^2)`, which at `2^28` is 3e-18
+/// against a result near 20 -- two orders of magnitude below the float64
+/// rounding already applied. Both float64 routines below switch here.
+const INVERSE_HYPERBOLIC_LARGE: f64 = 268_435_456.0; // 2^28
 
-float_unary_kernel!(asinh_f64, as_f64_slice, f64, Float64, "f64", f64::asinh);
+/// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
+pub(crate) fn asinh_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `asinh` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.asinh(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
-float_unary_kernel!(acosh_f32, as_f32_slice, f32, Float32, "f32", f32::acosh);
+// `f64::asinh` forms `2x`, which is infinity for every `x > f64::MAX/2`, so it
+// answers infinity where `asinh(f64::MAX)` is 710.5. Float64 has nothing wider
+// to promote to, so the repair is the identity rather than the width, in the
+// three ranges each identity is the accurate one.
+//
+// Odd, so only the magnitude is evaluated and the sign is restored at the
+// end -- which is also what keeps `asinh(-0.0)` at `-0.0`. A NaN fails every
+// comparison and reaches the last arm, where it stays a NaN.
+float_unary_kernel!(asinh_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
+    let a = x.abs();
+    let y = if a > INVERSE_HYPERBOLIC_LARGE {
+        // `asinh(a) - ln(2a)` is already below the rounding here.
+        a.ln() + std::f64::consts::LN_2
+    } else if a > 2.0 {
+        // `ln(2a + 1/(a + sqrt(a^2+1)))`: the reciprocal is what `ln(2a)`
+        // leaves out, and forming it this way never subtracts two close
+        // numbers.
+        (2.0 * a + 1.0 / (a + (a * a + 1.0).sqrt())).ln()
+    } else {
+        // `a + a^2/(1 + sqrt(1 + a^2))` is `a + sqrt(1 + a^2) - 1` without the
+        // cancelling `- 1`, so it goes to zero with `a` and `ln_1p` is accurate
+        // exactly there -- which `ln` is not, since `1 + a` rounds to 1 for
+        // every `a` below the float64 epsilon and would answer zero.
+        (a + a * a / (1.0 + (1.0 + a * a).sqrt())).ln_1p()
+    };
+    y.copysign(x)
+});
 
-float_unary_kernel!(acosh_f64, as_f64_slice, f64, Float64, "f64", f64::acosh);
+/// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
+pub(crate) fn acosh_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `acosh` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.acosh(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
+// `f64::acosh` overflows the same way and at the same place. The domain is
+// `[1, inf)` and the last arm is what enforces it: below `-2^26` the `- 1` is
+// lost to rounding, `sqrt(x^2 - 1)` comes back as exactly `|x|`, and `x + |x|`
+// is zero, which a logarithm reads as a legitimate argument. A NaN fails both
+// comparisons and lands there too.
+//
+// Written around `t = x - 1` rather than around `x`. `acosh(1 + t)` is about
+// `sqrt(2t)`, so for a small `t` the answer is enormously larger than the
+// perturbation that produced it -- `x + sqrt(x^2 - 1)` is then `1 + sqrt(2t)`,
+// and adding `sqrt(2t)` to one discards half the digits of the result before
+// the logarithm ever sees it. Measured at `x = 1 + 2.2e-16`: 4e-9 relative,
+// against 1e-16 for the form below. `t + sqrt(t(t+2))` goes to zero with `t`
+// instead, and `ln_1p` is accurate exactly there.
+//
+// The float32 kernel can use the plain logarithm because it promotes: a
+// float32 `x` next to one perturbs the float64 argument in its twelfth digit,
+// and only seven survive the narrowing anyway. Float64 has nowhere to promote
+// to, so it needs the identity instead.
+float_unary_kernel!(acosh_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
+    if x > INVERSE_HYPERBOLIC_LARGE {
+        x.ln() + std::f64::consts::LN_2
+    } else if x >= 1.0 {
+        // `t(t+2)` is `(x-1)(x+1)` shifted; `x - 1` is exact near one by
+        // Sterbenz, so `t` carries the whole perturbation.
+        let t = x - 1.0;
+        (t + (t * (t + 2.0)).sqrt()).ln_1p()
+    } else {
+        f64::NAN
+    }
+});
 
 /// `atanh(x)`, split at a half so one logarithm serves both sides.
 ///

@@ -1369,3 +1369,83 @@ def test_float32_log_bases_are_the_same_at_every_length(name, size):
     got = getattr(mt.from_numpy(values), name)().numpy()
     want = getattr(np, name)(values.astype(np.float64)).astype(np.float32)
     np.testing.assert_array_equal(got, want)
+
+
+# `asinh` and `acosh` are built from the `log` kernel now, in both widths.
+# Each replaces a standard-library routine with two defects: it overflows at
+# the top of the range, and -- for `acosh` in float64 -- it loses most of its
+# digits next to the domain edge.
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("name", ["asinh", "acosh"])
+def test_inverse_hyperbolics_do_not_overflow_at_the_top(dtype, name):
+    # `f32::asinh`, `f32::acosh`, `f64::asinh` and `f64::acosh` all form `2x`
+    # in the working width, which is infinity for every `x > MAX/2`, so all
+    # four answered infinity where the true value is about 88.7 or 710.5.
+    biggest = np.finfo(dtype).max
+    values = np.array([biggest, biggest / 2, biggest / 1.9], dtype=dtype)
+    got = getattr(mt.from_numpy(values), name)().numpy()
+    assert np.all(np.isfinite(got)), f"{name} overflowed: {got}"
+    np.testing.assert_allclose(
+        got,
+        getattr(np, "arc" + name[1:])(values),
+        rtol=1e-6 if dtype == "float32" else 1e-15,
+    )
+
+
+def test_acosh_keeps_its_digits_next_to_one():
+    # `acosh(1 + t)` is about `sqrt(2t)`, enormously larger than the `t` that
+    # produced it, so `x + sqrt(x^2 - 1)` is `1 + sqrt(2t)` and adding
+    # `sqrt(2t)` to one throws away half the digits before the logarithm sees
+    # them. `f64::acosh` does exactly that and is 4e-9 relative at the first
+    # float64 above one, where this is 1e-16.
+    steps = np.array([2.0**-k for k in range(1, 53)])
+    values = 1.0 + steps
+    values = values[values > 1.0]
+    got = mt.from_numpy(values).acosh().numpy()
+    np.testing.assert_allclose(got, np.arccosh(values), rtol=1e-15)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_acosh_is_nan_below_its_domain(dtype):
+    # Including far below it. The kernel's first draft answered `-inf` for
+    # every `x <= -2^26`: there `x**2 - 1` rounds back to `x**2`, so
+    # `sqrt(x**2 - 1)` is exactly `|x|` and `x + |x|` is a zero the logarithm
+    # reads as a legitimate argument. 855,638,014 of the 2^32 float32 inputs.
+    below = np.array(
+        [0.0, -0.0, 0.5, -1.0, -2.0, -1e7, -6.7108864e7, -1e20, -np.finfo(dtype).max],
+        dtype=dtype,
+    )
+    assert np.all(np.isnan(mt.from_numpy(below).acosh().numpy()))
+    assert np.isnan(mt.from_numpy(np.array([np.nan], dtype)).acosh().numpy()[0])
+    # The edge itself is in the domain and answers zero.
+    assert mt.from_numpy(np.array([1.0], dtype)).acosh().numpy()[0] == 0.0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_asinh_is_odd_through_zero(dtype):
+    # Only the magnitude is evaluated and the sign restored, so the signed zero
+    # has to survive that and a NaN has to stay one.
+    tiny = np.finfo(dtype).tiny
+    values = np.array([0.0, -0.0, tiny, -tiny, 1.0, -1.0, 1e10, -1e10], dtype=dtype)
+    got = mt.from_numpy(values).asinh().numpy()
+    np.testing.assert_array_equal(got, getattr(np, "arcsinh")(values))
+    assert math.copysign(1.0, got[1]) == -1.0, "asinh(-0.0) lost its sign"
+    assert np.isnan(mt.from_numpy(np.array([np.nan], dtype)).asinh().numpy()[0])
+    for inf in (np.inf, -np.inf):
+        assert mt.from_numpy(np.array([inf], dtype)).asinh().numpy()[0] == inf
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("name", ["asinh", "acosh"])
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_inverse_hyperbolics_agree_at_every_length(dtype, name, size):
+    # The float32 path is a vectorized block loop with a scalar tail and a
+    # parallel threshold; a length landing in either must not answer
+    # differently.
+    rng = np.random.default_rng(size)
+    values = rng.uniform(1.0, 50.0, size).astype(dtype)
+    if name == "asinh":
+        values = (values * rng.choice([-1.0, 1.0], size)).astype(dtype)
+    got = getattr(mt.from_numpy(values), name)().numpy()
+    want = getattr(np, "arc" + name[1:])(values.astype(np.float64)).astype(dtype)
+    np.testing.assert_allclose(got, want, rtol=1e-6 if dtype == "float32" else 1e-14)
