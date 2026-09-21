@@ -62,6 +62,109 @@ macro_rules! integer_pow {
 integer_pow!(integer_pow_i32, i32);
 integer_pow!(integer_pow_i64, i64);
 
+/// `base ** exponent` over two equal-length slices.
+///
+/// Float32 goes through `ops::simd::transcendental`, which composes it from
+/// the `exp` and `log` kernels in float64 -- see `pow_one` there for why that
+/// is accurate and why it would not be at float32 width. Every other dtype
+/// keeps `powf`, which for float64 is the only thing accurate enough and for
+/// the integers is not reached at all.
+///
+/// A trait rather than a `match` on the dtype because the caller is inside a
+/// macro that has already chosen `$ty`; specializing on it here is what lets
+/// one arm serve both widths.
+trait PowKernels: Sized + Copy {
+    /// `base[i] ** exponent[i]`.
+    fn pow_slice(base: &[Self], exponent: &[Self]) -> Vec<Self>;
+    /// `base[i] ** exponent`, for one exponent the whole slice shares.
+    fn pow_by_scalar(base: &[Self], exponent: Self) -> Vec<Self>;
+    /// `base ** exponent[i]`, for one base the whole slice shares.
+    fn scalar_pow(base: Self, exponent: &[Self]) -> Vec<Self>;
+}
+
+impl PowKernels for f32 {
+    fn pow_slice(base: &[f32], exponent: &[f32]) -> Vec<f32> {
+        let kernel = crate::ops::simd::F32Kernel::select();
+        // SAFETY: `pow` writes every element of each block it is given.
+        unsafe {
+            crate::ops::map::binary_map_blocks_threshold(
+                base,
+                exponent,
+                crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                crate::ops::map::SIMD_PAR_CHUNK,
+                |x, y, out| kernel.pow(x, y, out),
+            )
+        }
+    }
+
+    fn pow_by_scalar(base: &[f32], exponent: f32) -> Vec<f32> {
+        if !exponent.is_finite() {
+            // An infinite or NaN exponent has a table of answers rather than
+            // a formula, and one that does not vary down the slice -- so it
+            // is not worth a kernel, and `pow_const` refuses it.
+            return unary_map_threshold(base, EXPENSIVE_PAR_THRESHOLD, move |x: f32| {
+                x.powf(exponent)
+            });
+        }
+        let kernel = crate::ops::simd::F32Kernel::select();
+        let wide = exponent as f64;
+        // SAFETY: `pow_const` writes every element of each block it is given.
+        unsafe {
+            crate::ops::map::unary_map_blocks_threshold(
+                base,
+                crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                |src, dst| kernel.pow_const(src, dst, wide),
+            )
+        }
+    }
+
+    fn scalar_pow(base: f32, exponent: &[f32]) -> Vec<f32> {
+        // `b ** y` is `exp(y * ln b)`, and `ln b` is a constant -- which makes
+        // it exactly the `exp` kernel's scaled form, with no `pow` kernel
+        // needed at all. Only for a base the logarithm answers for, and not
+        // `1`, where `ln b` is zero and `1 ** inf` would come out of
+        // `exp(inf * 0)` as NaN instead of as one.
+        if base > 0.0 && base.is_finite() && base != 1.0 {
+            let kernel = crate::ops::simd::F32Kernel::select();
+            let ln_base = (base as f64).ln();
+            // SAFETY: `exp_scaled` writes every element of each block.
+            return unsafe {
+                crate::ops::map::unary_map_blocks_threshold(
+                    exponent,
+                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                    |src, dst| kernel.exp_scaled(src, dst, ln_base),
+                )
+            };
+        }
+        unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f32| {
+            base.powf(y)
+        })
+    }
+}
+
+impl PowKernels for f64 {
+    fn pow_slice(base: &[f64], exponent: &[f64]) -> Vec<f64> {
+        crate::ops::map::binary_map(base, exponent, |x: f64, y: f64| x.powf(y))
+    }
+
+    fn pow_by_scalar(base: &[f64], exponent: f64) -> Vec<f64> {
+        unary_map_threshold(base, EXPENSIVE_PAR_THRESHOLD, move |x: f64| {
+            x.powf(exponent)
+        })
+    }
+
+    fn scalar_pow(base: f64, exponent: &[f64]) -> Vec<f64> {
+        unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f64| {
+            base.powf(y)
+        })
+    }
+}
+
+#[inline]
+fn pow_same_shape<T: PowKernels>(base: &[T], exponent: &[T]) -> Vec<T> {
+    T::pow_slice(base, exponent)
+}
+
 /// Element-wise power with tensor exponent and gradient support
 pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     // Check device and dtype compatibility
@@ -136,11 +239,8 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                 ))
             })?;
             let out = match broadcast {
-                PowBroadcast::None => crate::ops::map::binary_map(b, e, |x: $ty, y: $ty| x.powf(y)),
-                PowBroadcast::BaseScalar => {
-                    let base_val = b[0];
-                    unary_map_threshold(e, EXPENSIVE_PAR_THRESHOLD, move |y: $ty| base_val.powf(y))
-                }
+                PowBroadcast::None => pow_same_shape(b, e),
+                PowBroadcast::BaseScalar => <$ty as PowKernels>::scalar_pow(b[0], e),
                 PowBroadcast::ExponentScalar => {
                     let exp_val = e[0];
                     // Fast paths for the small integer exponents, which avoid
@@ -174,9 +274,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                     } else if exp_val == -1.0 {
                         unary_map(b, |x: $ty| 1.0 / x)
                     } else {
-                        unary_map_threshold(b, EXPENSIVE_PAR_THRESHOLD, move |x: $ty| {
-                            x.powf(exp_val)
-                        })
+                        <$ty as PowKernels>::pow_by_scalar(b, exp_val)
                     }
                 }
             };

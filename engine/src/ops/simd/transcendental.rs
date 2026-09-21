@@ -1368,6 +1368,52 @@ fn atan2_one<const FMA: bool>(y: f32, x: f32) -> f32 {
     folded as f32
 }
 
+/// `x^y` as `exp(y * log(x))`, for the operands where that is what it means.
+///
+/// `powf` is a `libm` call per element, 1.8ms over a million float32 where the
+/// `exp` and `log` kernels it is made of cost 0.23 and 0.32. Composing them
+/// costs one of each and a multiply.
+///
+/// The composition is only *accurate* because the middle is float64. `exp`
+/// turns an absolute error in its argument into a relative error in its
+/// answer, so the error here is about `|y log x|` times float64's epsilon --
+/// and `|y log x|` is at most 88 for any result a float32 can hold, which puts
+/// the relative error near 1e-14 against the 6e-8 a float32 needs. In float32
+/// the same composition would have none of that headroom, which is why `powf`
+/// exists rather than everyone writing this.
+///
+/// [`pow_needs_scalar`] names the operands this is not: `x` at or below zero,
+/// where the logarithm has no answer and the sign of an integer `y` decides
+/// one, and either operand infinite or NaN, where IEEE has a table of results
+/// rather than a formula. `x^0 = 1` and `1^y = 1` need no help -- the first
+/// falls out of `exp(0)` and the second of `log(1) = 0`.
+#[inline(always)]
+fn pow_one<const FMA: bool>(x: f32, y: f32) -> f32 {
+    exp_core::<FMA>(y as f64 * log_core::<FMA, false>(x as f64, 0.0)) as f32
+}
+
+/// `x^c` for an exponent the whole block shares. See [`pow_one`].
+///
+/// The constant arrives already widened, so the multiply is the only thing
+/// per element that the two-operand form does not also do.
+#[inline(always)]
+fn pow_const_one<const FMA: bool>(x: f32, exponent: f64, _unused: f64) -> f32 {
+    exp_core::<FMA>(exponent * log_core::<FMA, false>(x as f64, 0.0)) as f32
+}
+
+/// The bases [`pow_const_one`] cannot express. The exponent is checked once by
+/// the caller rather than once per element, since it does not vary.
+#[inline(always)]
+fn pow_const_needs_scalar(x: f32, _exponent: f64) -> bool {
+    !(x > 0.0 && x.is_finite())
+}
+
+/// The `pow` operands the composition cannot express. See [`pow_one`].
+#[inline(always)]
+fn pow_needs_scalar(x: f32, y: f32) -> bool {
+    !(x > 0.0 && x.is_finite() && y.is_finite())
+}
+
 /// The `atan2` inputs the quotient cannot express. See [`atan2_one`].
 #[inline(always)]
 fn atan2_needs_scalar(y: f32, x: f32) -> bool {
@@ -1559,6 +1605,42 @@ macro_rules! block_kernel_param {
     };
 }
 
+/// [`block_kernel_param!`] with the rare-case second pass of
+/// [`block_kernel2_fallback!`], for a kernel that takes a runtime scalar and
+/// still cannot express every input.
+macro_rules! block_kernel_param_fallback {
+    ($block:ident, $one:ident, $needs:ident, $scalar:path, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            debug_assert_eq!(input.len(), out.len());
+            let mut rare = 0u32;
+            for (o, &x) in out.iter_mut().zip(input.iter()) {
+                o.write($one::<FMA>(x, a, b));
+                rare |= $needs(x, a) as u32;
+            }
+            if rare != 0 {
+                for (o, &x) in out.iter_mut().zip(input.iter()) {
+                    if $needs(x, a) {
+                        o.write($scalar(x as f64, a) as f32);
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            $block::<true>(input, out, a, b)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            $block::<true>(input, out, a, b)
+        }
+    };
+}
+
 /// Dispatch for [`block_kernel_param!`].
 macro_rules! dispatch_param {
     ($self:expr, $input:expr, $out:expr, $a:expr, $b:expr,
@@ -1675,6 +1757,22 @@ block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
 block_kernel!(asinh_block, asinh_one, asinh_block_avx512, asinh_block_avx2);
+block_kernel_param_fallback!(
+    pow_const_block,
+    pow_const_one,
+    pow_const_needs_scalar,
+    f64::powf,
+    pow_const_block_avx512,
+    pow_const_block_avx2
+);
+block_kernel2_fallback!(
+    pow_block,
+    pow_one,
+    pow_needs_scalar,
+    f64::powf,
+    pow_block_avx512,
+    pow_block_avx2
+);
 block_kernel2_fallback!(
     atan2_block,
     atan2_one,
@@ -2078,6 +2176,31 @@ impl F32Kernel {
             log_scaled_block_avx512,
             log_scaled_block_avx2
         )
+    }
+
+    /// Write `input[i].powf(exponent)` into every element of `out`.
+    ///
+    /// `exponent` must be finite; an infinite or NaN one has an IEEE table of
+    /// answers rather than a formula, and the caller checks it once.
+    #[inline]
+    pub(crate) fn pow_const(self, input: &[f32], out: &mut [MaybeUninit<f32>], exponent: f64) {
+        debug_assert!(exponent.is_finite());
+        dispatch_param!(
+            self,
+            input,
+            out,
+            exponent,
+            0.0,
+            pow_const_block,
+            pow_const_block_avx512,
+            pow_const_block_avx2
+        )
+    }
+
+    /// Write `x[i].powf(y[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn pow(self, x: &[f32], y: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(self, x, y, out, pow_block, pow_block_avx512, pow_block_avx2)
     }
 
     /// Write `atan2(y[i], x[i])` into every element of `out`.

@@ -1449,3 +1449,128 @@ def test_inverse_hyperbolics_agree_at_every_length(dtype, name, size):
     got = getattr(mt.from_numpy(values), name)().numpy()
     want = getattr(np, "arc" + name[1:])(values.astype(np.float64)).astype(dtype)
     np.testing.assert_allclose(got, want, rtol=1e-6 if dtype == "float32" else 1e-14)
+
+
+# float32 `pow` is `exp(y * log(x))` through the vectorized kernels now, rather
+# than a `powf` call per element. It reaches three shapes -- two arrays, an
+# array and a constant exponent, and a constant base against an array -- and
+# each takes a different route: the two-operand kernel, its parameterized form,
+# and the `exp` kernel scaled by `log(base)`, which needs no `pow` kernel at
+# all. Three routes to one answer, so these check they *are* one answer.
+POW_SPECIAL = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    2.0,
+    -2.0,
+    0.5,
+    -0.5,
+    3.0,
+    -3.0,
+    np.inf,
+    -np.inf,
+    np.nan,
+    np.finfo("float32").tiny,
+    np.finfo("float32").max,
+    -np.finfo("float32").max,
+    1e-20,
+    4.0,
+    -4.0,
+]
+
+
+def _pow_reference(bases, exponents):
+    """`base ** exponent` computed in float64 and narrowed once.
+
+    Both operands are arrays on purpose. `np.power` does not answer the same
+    way for an array exponent and a scalar one -- `np.power(x, np.float32(0.5))`
+    is NaN at `x = -inf` where `np.power(x, [0.5])` is `+inf`, and `+inf` is
+    what C and IEEE say `(-inf) ** 0.5` is. The array form is the one to hold
+    this to.
+    """
+    with np.errstate(all="ignore"):
+        return np.power(
+            np.asarray(bases, dtype=np.float64), np.asarray(exponents, dtype=np.float64)
+        ).astype("float32")
+
+
+def test_the_three_pow_routes_give_one_answer_on_every_special_pair():
+    bases, exponents = (
+        a.ravel() for a in np.meshgrid(*[np.array(POW_SPECIAL, dtype="float32")] * 2)
+    )
+    want = _pow_reference(bases, exponents)
+    both = mt.pow(mt.from_numpy(bases), mt.from_numpy(exponents)).numpy()
+    np.testing.assert_array_equal(both, want)
+    np.testing.assert_array_equal(np.signbit(both), np.signbit(want))
+
+    # The same answers one constant at a time, through the other two routes.
+    column = np.array(POW_SPECIAL, dtype="float32")
+    for constant in POW_SPECIAL:
+        scalar = np.float32(constant)
+        by_scalar = mt.pow(mt.from_numpy(column), float(scalar)).numpy()
+        np.testing.assert_array_equal(
+            by_scalar, _pow_reference(column, np.full_like(column, scalar))
+        )
+
+        of_scalar = mt.pow(
+            mt.from_numpy(np.array(scalar)), mt.from_numpy(column)
+        ).numpy()
+        np.testing.assert_array_equal(
+            of_scalar, _pow_reference(np.full_like(column, scalar), column)
+        )
+
+
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_float32_pow_is_the_correctly_rounded_answer(size):
+    # `exp` turns an absolute error in its argument into a relative one in its
+    # answer, so the error here is about `|y log x|` times float64's epsilon --
+    # at most 88 times it for any result a float32 can hold, which is seven
+    # orders of magnitude below what a float32 can see.
+    rng = np.random.default_rng(size)
+    bases = (10.0 ** rng.uniform(-30, 30, size)).astype("float32")
+    exponents = rng.uniform(-8, 8, size).astype("float32")
+    np.testing.assert_array_equal(
+        mt.pow(mt.from_numpy(bases), mt.from_numpy(exponents)).numpy(),
+        _pow_reference(bases, exponents),
+    )
+
+
+@pytest.mark.parametrize("exponent", [2.5, 0.5, -1.5, 7.0, -0.25])
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_a_constant_exponent_answers_what_the_pair_does(exponent, size):
+    # The parameterized kernel checks the exponent once instead of per element,
+    # so a length landing in the block loop and one landing in the tail have to
+    # agree with the two-operand route that checks nothing once.
+    rng = np.random.default_rng(size)
+    bases = (10.0 ** rng.uniform(-20, 20, size)).astype("float32")
+    # One draw, used for both the positions and the count -- two draws give
+    # two different masks and NumPy refuses the assignment.
+    degenerate = rng.random(size) < 0.2
+    bases[degenerate] = rng.choice(
+        np.array([0.0, -0.0, -1.0, np.inf, -np.inf, np.nan], dtype="float32"),
+        int(degenerate.sum()),
+    )
+    as_constant = mt.pow(mt.from_numpy(bases), exponent).numpy()
+    as_pair = mt.pow(
+        mt.from_numpy(bases),
+        mt.from_numpy(np.full(size, exponent, dtype="float32")),
+    ).numpy()
+    np.testing.assert_array_equal(as_constant, as_pair)
+    np.testing.assert_array_equal(np.signbit(as_constant), np.signbit(as_pair))
+
+
+@pytest.mark.parametrize("base", [2.5, 0.5, 10.0, 1.0, -2.0, 0.0])
+def test_a_constant_base_answers_what_the_pair_does(base):
+    # A constant base is `exp(y * log base)` with `log base` folded in, which
+    # only works where the logarithm has an answer -- and not at `1`, where it
+    # is zero and `1 ** inf` would come out of `exp(inf * 0)` as NaN.
+    exponents = np.array(POW_SPECIAL + [0.3, -7.5, 12.0], dtype="float32")
+    as_constant = mt.pow(
+        mt.from_numpy(np.array(np.float32(base))), mt.from_numpy(exponents)
+    ).numpy()
+    as_pair = mt.pow(
+        mt.from_numpy(np.full_like(exponents, base)), mt.from_numpy(exponents)
+    ).numpy()
+    np.testing.assert_array_equal(as_constant, as_pair)
+    np.testing.assert_array_equal(np.signbit(as_constant), np.signbit(as_pair))
