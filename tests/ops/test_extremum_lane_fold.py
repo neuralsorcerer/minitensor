@@ -194,3 +194,157 @@ def test_indices_do_not_depend_on_the_thread_count():
         ).stdout.strip()
 
     assert run("1") == run("2") == run("8")
+
+
+# The whole-tensor `argmax`/`argmin` fold is lane-blocked the same way, but it
+# carries a position beside each lane's running best, and that makes ties a
+# correctness question rather than a free choice. Lane `l` walks positions
+# `l, l + LANES, l + 2 * LANES, ...`, so a later lane holds earlier positions
+# than an earlier lane's second block: folding the lanes together in lane order
+# would report index 9 over index 2 unless the tie is broken on the index.
+ARG_SIZES = [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 33, 8191, 8192, 8193, 100_000]
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
+@pytest.mark.parametrize("size", ARG_SIZES)
+def test_argmax_and_argmin_match_numpy_across_the_lane_seams(dtype, size):
+    values = _sample(size, dtype, np.random.default_rng(size))
+    tensor = mt.from_numpy(values)
+    assert tensor.argmax().numpy() == np.argmax(values)
+    assert tensor.argmin().numpy() == np.argmin(values)
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
+@pytest.mark.parametrize("size", ARG_SIZES)
+def test_an_all_equal_tensor_answers_index_zero(dtype, size):
+    # Nothing ever beats the running best, so the answer is decided entirely by
+    # the tie-break -- across lanes, across the remainder, and across chunks.
+    values = np.full(size, 3, dtype=dtype)
+    tensor = mt.from_numpy(values)
+    assert tensor.argmax().numpy() == 0
+    assert tensor.argmin().numpy() == 0
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (2, 9),  # a later lane's first block against an earlier lane's second
+        (9, 2),  # the same pair, met in the other order
+        (0, 7),  # the first and last lane of one block
+        (3, 8195),  # either side of the 8192-element parallel chunk
+        (8190, 8192),  # the chunk seam itself
+        (5, 99_999),  # a lane block against the remainder tail
+    ],
+)
+def test_a_repeated_extremum_answers_the_lower_index(dtype, first, second):
+    size = 100_000
+    values = _sample(size, dtype, np.random.default_rng(6))
+    winner = np.iinfo(dtype).max if dtype.startswith("int") else 1e30
+    loser = np.iinfo(dtype).min if dtype.startswith("int") else -1e30
+
+    values[first] = values[second] = winner
+    assert mt.from_numpy(values).argmax().numpy() == min(first, second)
+
+    values[first] = values[second] = loser
+    assert mt.from_numpy(values).argmin().numpy() == min(first, second)
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
+def test_the_seed_value_is_a_real_answer(dtype):
+    # The fold seeds each lane with the type's extreme, which an input can
+    # equal. Every element equal to the seed means nothing ever beats it, and
+    # the answer has to be index 0 rather than "nothing seen".
+    if dtype.startswith("int"):
+        low, high = np.iinfo(dtype).min, np.iinfo(dtype).max
+    else:
+        low, high = -np.inf, np.inf
+
+    assert mt.from_numpy(np.full(100_000, low, dtype=dtype)).argmax().numpy() == 0
+    assert mt.from_numpy(np.full(100_000, high, dtype=dtype)).argmin().numpy() == 0
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+@pytest.mark.parametrize("size", [1, 8, 9, 17, 8193, 100_000])
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_a_nan_wins_the_argument_from_any_lane(dtype, size, position):
+    # A NaN satisfies no comparison, so it can never become a lane's best; its
+    # position is tracked separately and overrides the comparison's answer.
+    values = np.random.default_rng(7).standard_normal(size).astype(dtype)
+    index = {"first": 0, "middle": size // 2, "last": size - 1}[position]
+    values[index] = np.nan
+    tensor = mt.from_numpy(values)
+
+    assert tensor.argmax().numpy() == np.argmax(values) == index
+    assert tensor.argmin().numpy() == np.argmin(values) == index
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+@pytest.mark.parametrize("first,second", [(2, 9), (9, 2), (3, 8195), (5, 99_999)])
+def test_ties_among_nans_also_go_to_the_lower_index(dtype, first, second):
+    values = np.random.default_rng(8).standard_normal(100_000).astype(dtype)
+    values[first] = values[second] = np.nan
+    tensor = mt.from_numpy(values)
+    assert tensor.argmax().numpy() == min(first, second)
+    assert tensor.argmin().numpy() == min(first, second)
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+@pytest.mark.parametrize("size", [1, 9, 100_000])
+def test_all_nan_answers_the_first_position(dtype, size):
+    values = np.full(size, np.nan, dtype=dtype)
+    tensor = mt.from_numpy(values)
+    assert tensor.argmax().numpy() == 0
+    assert tensor.argmin().numpy() == 0
+
+
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_signed_zeros_tie_on_the_index(dtype):
+    # `-0.0 == 0.0`, and neither is greater, so the pair is a tie and the lower
+    # index wins -- which is what the `==` in the lane tie-break spells out.
+    for values in ([-0.0, 0.0], [0.0, -0.0]):
+        tensor = mt.from_numpy(np.array(values * 50_000, dtype=dtype))
+        assert tensor.argmax().numpy() == 0
+        assert tensor.argmin().numpy() == 0
+
+
+def test_bool_argument_finds_the_first_of_its_kind():
+    values = np.zeros(100_000, dtype=bool)
+    values[12_345] = True
+    values[54_321] = True
+    tensor = mt.from_numpy(values)
+    assert tensor.argmax().numpy() == np.argmax(values) == 12_345
+    assert tensor.argmin().numpy() == np.argmin(values) == 0
+
+    assert mt.from_numpy(np.ones(1000, dtype=bool)).argmax().numpy() == 0
+    assert mt.from_numpy(np.zeros(1000, dtype=bool)).argmax().numpy() == 0
+
+
+def test_the_answer_does_not_depend_on_the_thread_count():
+    # The chunks are folded by rayon, so a tie resolved by combine order rather
+    # than by index would move with the worker count.
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import numpy as np, minitensor as mt\n"
+        "a = np.random.default_rng(9).standard_normal(200_000).astype(np.float32)\n"
+        "a[7] = a[80_000] = a[199_999] = 1e30\n"
+        "a[11] = a[90_000] = -1e30\n"
+        "t = mt.from_numpy(a)\n"
+        "print(t.argmax().numpy(), t.argmin().numpy())\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def run(threads):
+        env = dict(os.environ, RAYON_NUM_THREADS=threads, PYTHONPATH=root)
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        ).stdout.strip()
+
+    assert run("1") == run("2") == run("8") == "7 11"
