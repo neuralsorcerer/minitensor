@@ -798,6 +798,28 @@ fn exp_shifted_one<const FMA: bool>(x: f32, shift: f64, _unused: f64) -> f32 {
     exp_core::<FMA>(x as f64 - shift) as f32
 }
 
+/// `base^x` as `exp(x * ln base)` for one float32, the mirror of
+/// [`log_scaled_one`].
+///
+/// `exp2` computed this as scalar `exp2f`, on the stated grounds that
+/// `exp(x * ln 2)` "rounds the exponent before using it". That is true in
+/// float32 and false here: the product is formed in float64, where `ln 2` has
+/// 29 more bits than the float32 result needs, so the only rounding is the
+/// narrowing every kernel in this file does once.
+///
+/// The clamp inside `exp_core` is on the product, so it bites at
+/// `|x| > 110/ln 2 = 158.7` -- past float32 `exp2`'s own range in both
+/// directions (`2^128` is already infinity and `2^-150` already zero), so
+/// nothing representable reaches it.
+///
+/// It is kept separate from `exp_shifted_one` rather than merged into an
+/// `a*x - b` form: `softmax` spends about half its time in the shifted one,
+/// and a runtime multiply by 1.0 is not a constant the compiler can fold away.
+#[inline(always)]
+fn exp_scaled_one<const FMA: bool>(x: f32, ln_base: f64, _unused: f64) -> f32 {
+    exp_core::<FMA>(x as f64 * ln_base) as f32
+}
+
 /// `expm1` in float64.
 #[inline(always)]
 fn expm1_core<const FMA: bool>(xd: f64) -> f64 {
@@ -1531,6 +1553,12 @@ block_kernel_param!(
     log_scaled_block_avx512,
     log_scaled_block_avx2
 );
+block_kernel_param!(
+    exp_scaled_block,
+    exp_scaled_one,
+    exp_scaled_block_avx512,
+    exp_scaled_block_avx2
+);
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
 block_kernel!(atan_block, atan_one, atan_block_avx512, atan_block_avx2);
 block_kernel!(asin_block, asin_one, asin_block_avx512, asin_block_avx2);
@@ -1840,6 +1868,23 @@ impl F32Kernel {
         )
     }
 
+    /// Write `exp(input[i] * ln_base)` into every element of `out`.
+    ///
+    /// `ln_base` is `LN_2` for `exp2`.
+    #[inline]
+    pub(crate) fn exp_scaled(self, input: &[f32], out: &mut [MaybeUninit<f32>], ln_base: f64) {
+        dispatch_param!(
+            self,
+            input,
+            out,
+            ln_base,
+            0.0,
+            exp_scaled_block,
+            exp_scaled_block_avx512,
+            exp_scaled_block_avx2
+        )
+    }
+
     /// Write `log(input[i]) * inv_ln_base` into every element of `out`.
     ///
     /// `inv_ln_base` is `1/ln(base)`: `LOG2_E` for `log2`, `LOG10_E` for
@@ -2027,6 +2072,7 @@ mod tests {
         Sinh,
         Cosh,
         Erfc,
+        Exp2,
         Log,
         Log2,
         Log10,
@@ -2053,6 +2099,7 @@ mod tests {
             Op::Cosh => k.cosh(input, out),
             Op::Erfc => k.erfc(input, out),
             Op::Exp => k.exp(input, out),
+            Op::Exp2 => k.exp_scaled(input, out, std::f64::consts::LN_2),
             Op::Log => k.log(input, out),
             Op::Log2 => k.log_scaled(input, out, std::f64::consts::LOG2_E),
             Op::Log10 => k.log_scaled(input, out, std::f64::consts::LOG10_E),
@@ -2290,6 +2337,7 @@ mod tests {
             Op::Cosh => xd.cosh() as f32,
             Op::Erfc => libm::erfc(xd) as f32,
             Op::Exp => xd.exp() as f32,
+            Op::Exp2 => xd.exp2() as f32,
             Op::Log => xd.ln() as f32,
             Op::Log2 => xd.log2() as f32,
             Op::Log10 => xd.log10() as f32,
@@ -2640,21 +2688,26 @@ mod tests {
             .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1))
     }
 
-    /// `log10`'s claim is one ulp rather than bit-exact, and stated as a
-    /// number.
+    /// `log10` and `exp2` claim one ulp rather than bit-exactness, and the
+    /// claim is stated as a number.
     ///
-    /// It cannot be bit-exact the way `log2` turned out to be: the kernel
-    /// forms `ln(x) * (1/ln 10)` in float64 where the reference calls float64
-    /// `log10` directly, and the two differ in the last float64 bit often
-    /// enough that twice it survives the rounding to float32. The bound is
-    /// loose enough not to be a rounding-mode tripwire, and the comparison
-    /// against the scalar routine is the one that matters: `log10f` misrounds
-    /// 29,787,059 by up to two ulp, so this is an accuracy gain of seven
-    /// orders of magnitude as well as a speedup.
+    /// Neither can be bit-exact the way `log2` turned out to be: the kernels
+    /// form `ln(x) * (1/ln 10)` and `exp(x * ln 2)` in float64 where the
+    /// reference calls float64 `log10` and `exp2` directly, and the two differ
+    /// in the last float64 bit often enough that twice and once respectively
+    /// it survives the narrowing to float32. The bound is loose enough not to
+    /// be a rounding-mode tripwire, and the comparison against the scalar
+    /// routine each replaced is the one that matters -- `log10f` misrounds
+    /// 29,787,059 by up to two ulp and `exp2f` 168,364 -- so both are large
+    /// accuracy gains as well as speedups, and the test asserts that rather
+    /// than remembering it.
     #[test]
     #[ignore = "sweeps all 2^32 float32 inputs per op; takes a few minutes"]
-    fn log10_is_almost_always_the_promoted_reference_exhaustively() {
-        for (op, scalar) in [(Op::Log10, f32::log10 as fn(f32) -> f32)] {
+    fn scaled_kernels_are_almost_always_the_promoted_reference_exhaustively() {
+        for (op, scalar) in [
+            (Op::Log10, f32::log10 as fn(f32) -> f32),
+            (Op::Exp2, f32::exp2 as fn(f32) -> f32),
+        ] {
             let (scalar_worst, scalar_differing) = sweep_scalar(op, scalar);
             println!(
                 "  {op:?}/scalar (replaced): {scalar_differing} of 2^32 differ, worst {scalar_worst} ulp"

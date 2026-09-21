@@ -310,3 +310,64 @@ def test_float32_agrees_with_float64(name):
     ).numpy()
     assert single.dtype == np.float32
     np.testing.assert_allclose(single, double.astype(np.float32), rtol=1e-6)
+
+
+# float32 `exp2` runs through the vectorized `exp` kernel with its argument
+# scaled by `ln 2` in float64, rather than scalar `exp2f`. The scale must
+# happen at float64 width: at float32 it would round the exponent before using
+# it, which is what the scalar spelling was chosen to avoid.
+def test_float32_exp2_rounds_once():
+    # `exp2f` misses 168,364 of the 2^32 float32 inputs against a float64
+    # reference narrowed once; the kernel misses exactly one. A spread this
+    # wide would show the scalar routine and does not show this one.
+    rng = np.random.default_rng(5)
+    values = np.concatenate(
+        [
+            rng.uniform(-149.0, 127.0, 80_000),
+            rng.uniform(-1.0, 1.0, 20_000),
+            np.arange(-149.0, 128.0),  # every exact power in float32's range
+            [0.0, -0.0],
+        ]
+    ).astype(np.float32)
+
+    got = mt.exp2(mt.from_numpy(values)).numpy()
+    want = np.exp2(values.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_exp2_of_an_integer_is_that_power_exactly():
+    # The float64 product carries 29 bits more than the float32 answer needs,
+    # so an exact power has to come back exact rather than one ulp off.
+    powers = np.arange(-149.0, 128.0, dtype=np.float32)
+    got = mt.exp2(mt.from_numpy(powers)).numpy()
+    np.testing.assert_array_equal(got, np.float32(2.0) ** powers)
+
+
+def test_exp2_at_the_ends_of_the_range():
+    # Past float32's range in both directions, and at the one input where this
+    # and a correctly rounded `exp2` disagree: `2^-150` is exactly half of the
+    # smallest subnormal, so the correct answer is 0 by round-half-to-even and
+    # the kernel's float64 product lands a hair above the tie.
+    ends = np.array(
+        [128.0, 129.0, 1e30, np.inf, -np.inf, -200.0, -1e30], dtype=np.float32
+    )
+    # The reference is what overflows here, not the kernel: `np.exp2(1e30)` is
+    # infinity and says so, and this suite turns warnings into failures.
+    with np.errstate(over="ignore"):
+        want = np.exp2(ends.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(mt.exp2(mt.from_numpy(ends)).numpy(), want)
+    assert np.isnan(mt.exp2(mt.from_numpy(np.array([np.nan], "float32"))).numpy()[0])
+
+    at_the_tie = mt.exp2(mt.from_numpy(np.array([-150.0], "float32"))).numpy()[0]
+    assert at_the_tie in (0.0, np.float32(2.0) ** -149)
+
+
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_float32_exp2_is_the_same_at_every_length(size):
+    # A length that lands in the scalar tail, or past the parallel threshold,
+    # must not answer differently from one that does not.
+    values = (np.random.default_rng(size).standard_normal(size) * 30).astype("float32")
+    np.testing.assert_array_equal(
+        mt.exp2(mt.from_numpy(values)).numpy(),
+        np.exp2(values.astype(np.float64)).astype(np.float32),
+    )
