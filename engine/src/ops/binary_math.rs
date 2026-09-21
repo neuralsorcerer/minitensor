@@ -385,7 +385,94 @@ where
 
     let output_data =
         float_binary_data_with(&lhs_tensor, &rhs_tensor, dtype, &output_shape, narrow, wide)?;
+    attach_float_binary_grad(
+        lhs,
+        rhs,
+        lhs_tensor,
+        rhs_tensor,
+        dtype,
+        output_shape,
+        output_data,
+        partials,
+    )
+}
 
+/// [`float_binary_mono`] with a float32 kernel that wants whole blocks.
+///
+/// Some forwards are not made faster by inlining because their body is a
+/// `libm` call: `atan2` costs 5.5ms over a million float32 where the `atan`
+/// kernel beside it costs 0.32, and no amount of monomorphizing a call to
+/// `atan2f` changes that. Those need the vectorized kernel, which works on
+/// slices rather than elements, so this takes one -- used when both operands
+/// are float32 and already the output shape, which is where a block exists to
+/// hand it. Everything else, broadcasts and float64 included, falls through to
+/// the element-wise path.
+fn float_binary_blocked<N, W, B>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    narrow: N,
+    wide: W,
+    blocks: B,
+    partials: [FloatBinaryKernel; 2],
+) -> Result<Tensor>
+where
+    N: Fn(f32, f32) -> f32 + Send + Sync,
+    W: Fn(f64, f64) -> f64 + Send + Sync,
+    B: Fn(&[f32], &[f32], &mut [std::mem::MaybeUninit<f32>]) + Send + Sync,
+{
+    let (lhs_cast, rhs_cast, dtype, output_shape) =
+        coerce_and_broadcast(lhs, rhs, BinaryOpKind::Div)?;
+    let lhs_tensor = lhs_cast.into_owned();
+    let rhs_tensor = rhs_cast.into_owned();
+
+    let blocked = dtype == DataType::Float32
+        && lhs_tensor.shape().dims() == output_shape.dims()
+        && rhs_tensor.shape().dims() == output_shape.dims();
+    let output_data = match (
+        blocked,
+        lhs_tensor.data().as_f32_slice(),
+        rhs_tensor.data().as_f32_slice(),
+    ) {
+        (true, Some(left), Some(right)) => {
+            // SAFETY: the kernel writes every element of each block it is
+            // given, and the blocks tile the output.
+            let out = unsafe {
+                crate::ops::map::binary_map_blocks_threshold(
+                    left,
+                    right,
+                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                    crate::ops::map::SIMD_PAR_CHUNK,
+                    blocks,
+                )
+            };
+            TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device())
+        }
+        _ => float_binary_data_with(&lhs_tensor, &rhs_tensor, dtype, &output_shape, narrow, wide)?,
+    };
+    attach_float_binary_grad(
+        lhs,
+        rhs,
+        lhs_tensor,
+        rhs_tensor,
+        dtype,
+        output_shape,
+        output_data,
+        partials,
+    )
+}
+
+/// Wrap one of these kernels' output as a tensor and record its chain rule.
+#[allow(clippy::too_many_arguments)]
+fn attach_float_binary_grad(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    lhs_tensor: Tensor,
+    rhs_tensor: Tensor,
+    dtype: DataType,
+    output_shape: Shape,
+    output_data: TensorData,
+    partials: [FloatBinaryKernel; 2],
+) -> Result<Tensor> {
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
     let output = Tensor::new(
         Arc::new(output_data),
@@ -486,15 +573,23 @@ macro_rules! float_binary_op {
     };
 }
 
-float_binary_op!(
-    atan2,
-    atan2_f32,
-    atan2_f64,
-    ATAN2_D_Y,
-    ATAN2_D_X,
-    "The angle of the point `(other, input)` from the positive x-axis, in \
-     `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses."
-);
+/// The angle of the point `(other, input)` from the positive x-axis, in
+/// `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses.
+///
+/// Float32 goes through `ops::simd::transcendental`, which computes it as
+/// `atan(y / x)` in float64 and narrows once. `atan2f` was the last name in
+/// this file behind NumPy, at 5.5ms over a million elements where the `atan`
+/// kernel it is one division away from costs 0.32.
+pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    float_binary_blocked(
+        lhs,
+        rhs,
+        atan2_f32,
+        atan2_f64,
+        |y, x, out| crate::ops::simd::F32Kernel::select().atan2(y, x, out),
+        [ATAN2_D_Y, ATAN2_D_X],
+    )
+}
 /// Element-wise larger of two tensors, ignoring a NaN in either operand. NaN
 /// only where both are.
 ///

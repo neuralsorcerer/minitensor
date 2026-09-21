@@ -179,3 +179,144 @@ def test_empty_and_mismatched_shapes():
     b = mt.from_numpy(np.array([1.0, 2.0]))
     with pytest.raises(ValueError):
         mt.atan2(a, b)
+
+
+# float32 `atan2` is a vectorized kernel now: `atan(y/x)` computed in float64
+# and narrowed once, with a quadrant correction, rather than a call to scalar
+# `atan2f` per element. The quotient is what the kernel cannot always form --
+# `y/x` is an infinity or a NaN rather than a slope when `x` is a zero, and
+# `inf/inf` when both are infinite -- so those are redone by a second pass.
+# These pin that the second pass covers exactly what it must.
+ATAN2_SPECIAL = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    np.inf,
+    -np.inf,
+    np.nan,
+    np.finfo("float32").tiny,
+    -np.finfo("float32").tiny,
+    np.finfo("float32").max,
+    -np.finfo("float32").max,
+    1e-30,
+    -1e-30,
+    0.41421356,  # tan(pi/8), the kernel's lower branch boundary
+    2.4142136,  # tan(3pi/8), its upper one
+]
+
+
+def test_atan2_matches_numpy_on_every_pair_of_special_values():
+    # Every special against every other, which is where the quotient stops
+    # being a slope and the fallback has to take over. These all have answers
+    # both libraries agree on exactly -- the zeros, the infinities, the NaN,
+    # and the axis angles -- so this compares against NumPy directly.
+    values = np.array(ATAN2_SPECIAL, dtype="float32")
+    ys, xs = (a.ravel() for a in np.meshgrid(values, values))
+    degenerate = (ys == 0) | (xs == 0) | ~np.isfinite(ys) | ~np.isfinite(xs)
+    ys, xs = ys[degenerate], xs[degenerate]
+
+    got = mt.atan2(mt.from_numpy(ys), mt.from_numpy(xs)).numpy()
+    want = np.arctan2(ys, xs)
+    np.testing.assert_array_equal(got, want)
+    # The sign of a zero result is the whole point of keeping the quadrant.
+    np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+
+
+def test_float32_atan2_is_the_correctly_rounded_answer_where_numpy_is_not():
+    # The reference is the one the rest of these kernels are held to: computed
+    # in float64, narrowed once. Against it, over a wide random sample, this
+    # kernel differs on nothing and `np.arctan2` on about 6% of pairs by up to
+    # three ulp -- so asserting against NumPy at the same width would be
+    # asserting the less accurate of the two.
+    rng = np.random.default_rng(11)
+    n = 200_000
+    y = (np.sign(rng.standard_normal(n)) * 10.0 ** rng.uniform(-38, 38, n)).astype(
+        "float32"
+    )
+    x = (np.sign(rng.standard_normal(n)) * 10.0 ** rng.uniform(-38, 38, n)).astype(
+        "float32"
+    )
+    truth = np.arctan2(y.astype(np.float64), x.astype(np.float64)).astype(np.float32)
+
+    np.testing.assert_array_equal(
+        mt.atan2(mt.from_numpy(y), mt.from_numpy(x)).numpy(), truth
+    )
+    # And the claim about NumPy, so this test fails if that ever stops being
+    # the reason the comparison is written this way.
+    apart = np.abs(
+        np.arctan2(y, x).view(np.int32).astype(np.int64)
+        - truth.view(np.int32).astype(np.int64)
+    )
+    assert apart.max() >= 1, "np.arctan2 now matches; the reference can be simplified"
+
+
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_float32_atan2_matches_a_float64_reference_across_the_exponent_range(size):
+    # Log-uniform over the whole float32 exponent range and both signs, so the
+    # quotient spans about 1e-76 to 1e76 -- far outside what a float32 ratio
+    # could hold, and well inside what a float64 one can, which is why the
+    # kernel forms it wide.
+    rng = np.random.default_rng(size)
+    y = (
+        np.sign(rng.standard_normal(size)) * 10.0 ** rng.uniform(-38, 38, size)
+    ).astype("float32")
+    x = (
+        np.sign(rng.standard_normal(size)) * 10.0 ** rng.uniform(-38, 38, size)
+    ).astype("float32")
+    got = mt.atan2(mt.from_numpy(y), mt.from_numpy(x)).numpy()
+    want = np.arctan2(y.astype(np.float64), x.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_the_fallback_pass_finds_its_elements_at_every_alignment(size):
+    # The elements needing the scalar redo are found by a second pass over the
+    # block, so one landing in the vectorized body and one in the tail have to
+    # come back the same. A fifth of each operand is a zero or an infinity.
+    rng = np.random.default_rng(size + 1)
+    y = rng.standard_normal(size).astype("float32")
+    x = rng.standard_normal(size).astype("float32")
+    for arr in (y, x):
+        picks = rng.random(size) < 0.2
+        arr[picks] = rng.choice(
+            np.array([0.0, -0.0, np.inf, -np.inf], dtype="float32"), picks.sum()
+        )
+    got = mt.atan2(mt.from_numpy(y), mt.from_numpy(x)).numpy()
+    want = np.arctan2(y.astype(np.float64), x.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+
+
+def test_atan2_broadcasts_off_the_kernel_path():
+    # The kernel only runs when both operands already have the output shape;
+    # a broadcast falls back to the element-wise path and must still agree.
+    rows = np.random.default_rng(2).standard_normal((64, 129)).astype("float32")
+    column = np.random.default_rng(3).standard_normal((64, 1)).astype("float32")
+    np.testing.assert_allclose(
+        mt.atan2(mt.from_numpy(rows), mt.from_numpy(column)).numpy(),
+        np.arctan2(rows, column),
+        rtol=1e-6,
+    )
+    scalar = np.array([2.0], dtype="float32")
+    np.testing.assert_allclose(
+        mt.atan2(mt.from_numpy(rows), mt.from_numpy(scalar)).numpy(),
+        np.arctan2(rows, scalar),
+        rtol=1e-6,
+    )
+
+
+def test_atan2_reads_a_transposed_operand_in_its_own_order():
+    # The kernel is handed the raw buffer, which is only the logical order
+    # because a tensor here is always contiguous -- `expand` materializes
+    # rather than striding. If that invariant ever moves, this is where a
+    # transposed operand starts answering in the wrong order.
+    rows = np.random.default_rng(4).standard_normal((129, 64)).astype("float32")
+    other = np.random.default_rng(5).standard_normal((64, 129)).astype("float32")
+    transposed = mt.from_numpy(rows).transpose(0, 1)
+
+    got = mt.atan2(transposed, mt.from_numpy(other)).numpy()
+    want = np.arctan2(rows.T.astype(np.float64), other.astype(np.float64)).astype(
+        "float32"
+    )
+    np.testing.assert_array_equal(got, want)

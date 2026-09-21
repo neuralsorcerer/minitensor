@@ -1305,7 +1305,12 @@ fn atan_poly<const FMA: bool>(u: f64) -> f64 {
 /// carries `-0.0` through to `-0.0`.
 #[inline(always)]
 fn atan_one<const FMA: bool>(x: f32) -> f32 {
-    let xd = x as f64;
+    atan_core::<FMA>(x as f64) as f32
+}
+
+/// [`atan_one`] in float64, so `atan2` can reuse it on a quotient.
+#[inline(always)]
+fn atan_core<const FMA: bool>(xd: f64) -> f64 {
     let a = xd.abs();
     let big = a > ATAN_HI;
     let mid = a > ATAN_LO;
@@ -1334,7 +1339,39 @@ fn atan_one<const FMA: bool>(x: f32) -> f32 {
 
     let w = numerator / denominator;
     let folded = fma_or::<FMA>(w, atan_poly::<FMA>(w * w), base);
-    (folded.copysign(xd)) as f32
+    folded.copysign(xd)
+}
+
+/// The angle of `(x, y)` from the positive x-axis, in `(-pi, pi]`.
+///
+/// `atan(y / x)` plus the quadrant `x < 0` loses. The quotient is formed in
+/// float64, where no pair of float32 operands can overflow it -- the widest
+/// ratio a float32 pair can ask for is about 1e83 against float64's 1e308 --
+/// so the only inputs the arithmetic cannot express are the ones where the
+/// quotient itself is meaningless: `x` a zero, where `y / x` is an infinity
+/// or a NaN rather than a slope, and both operands infinite, where it is
+/// `inf / inf`. [`atan2_needs_scalar`] names exactly those, and the block
+/// kernel redoes them afterwards rather than branching per element.
+///
+/// `pi` carries the sign of `y` rather than being added or subtracted on a
+/// test, which is what puts the answer in the right half and keeps
+/// `atan2(-0.0, -1.0)` at `-pi`.
+#[inline(always)]
+fn atan2_one<const FMA: bool>(y: f32, x: f32) -> f32 {
+    let (yd, xd) = (y as f64, x as f64);
+    let quadrant = atan_core::<FMA>(yd / xd);
+    let folded = if xd < 0.0 {
+        quadrant + std::f64::consts::PI.copysign(yd)
+    } else {
+        quadrant
+    };
+    folded as f32
+}
+
+/// The `atan2` inputs the quotient cannot express. See [`atan2_one`].
+#[inline(always)]
+fn atan2_needs_scalar(y: f32, x: f32) -> bool {
+    x == 0.0 || (!x.is_finite() && !y.is_finite())
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,6 +1596,43 @@ macro_rules! block_kernel2 {
     };
 }
 
+/// [`block_kernel2!`] with a second pass over the elements the vectorized
+/// body cannot express.
+///
+/// The same shape as [`trig_block_kernel!`] and for the same reason: a scalar
+/// `libm` call inside the main loop would scalarize all of it, for inputs that
+/// essentially never occur. The second pass is a compare per element over a
+/// block still in cache, and its body is almost never taken.
+macro_rules! block_kernel2_fallback {
+    ($block:ident, $one:ident, $needs:ident, $scalar:path, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            debug_assert_eq!(lhs.len(), out.len());
+            debug_assert_eq!(rhs.len(), out.len());
+            for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                o.write($one::<FMA>(l, r));
+            }
+            for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                if $needs(l, r) {
+                    o.write($scalar(l as f64, r as f64) as f32);
+                }
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+    };
+}
+
 /// Dispatch for [`block_kernel2!`].
 macro_rules! dispatch2 {
     ($self:expr, $lhs:expr, $rhs:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {
@@ -1583,6 +1657,14 @@ block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
 block_kernel!(asinh_block, asinh_one, asinh_block_avx512, asinh_block_avx2);
+block_kernel2_fallback!(
+    atan2_block,
+    atan2_one,
+    atan2_needs_scalar,
+    f64::atan2,
+    atan2_block_avx512,
+    atan2_block_avx2
+);
 block_kernel!(acosh_block, acosh_one, acosh_block_avx512, acosh_block_avx2);
 block_kernel!(
     sigmoid_block,
@@ -1977,6 +2059,20 @@ impl F32Kernel {
             log_scaled_block,
             log_scaled_block_avx512,
             log_scaled_block_avx2
+        )
+    }
+
+    /// Write `atan2(y[i], x[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn atan2(self, y: &[f32], x: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            y,
+            x,
+            out,
+            atan2_block,
+            atan2_block_avx512,
+            atan2_block_avx2
         )
     }
 
@@ -2812,6 +2908,80 @@ mod tests {
     /// 29,787,059 by up to two ulp and `exp2f` 168,364 -- so both are large
     /// accuracy gains as well as speedups, and the test asserts that rather
     /// than remembering it.
+    /// `atan2` takes two operands, so there is no sweeping all of its domain:
+    /// 2^64 pairs is out of reach. This sweeps *one* operand exhaustively
+    /// against the other held at each value that makes the quotient
+    /// interesting -- the zeros and infinities the quotient cannot express,
+    /// the powers that put the ratio at the kernel's branch boundaries, and
+    /// both signs of each -- which is 2^32 pairs per fixed operand and covers
+    /// every branch the kernel has.
+    #[test]
+    #[ignore = "sweeps all 2^32 float32 values against each fixed operand; takes a while"]
+    fn atan2_is_within_one_ulp_of_the_promoted_reference_exhaustively() {
+        use rayon::prelude::*;
+        const FIXED: [f32; 14] = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::MAX,
+            -f32::MAX,
+            1.0e-30,
+            0.414_213_56, // tan(pi/8), the kernel's lower branch boundary
+            2.414_213_6,  // tan(3pi/8), its upper one
+        ];
+
+        for backend in available() {
+            for fixed in FIXED {
+                for (label, swept_is_y) in [("y swept", true), ("x swept", false)] {
+                    let (worst, differing) = (0..(1u64 << 32) / 8192)
+                        .into_par_iter()
+                        .map(|b| {
+                            let swept: Vec<f32> = (0..8192)
+                                .map(|k| f32::from_bits((b * 8192 + k) as u32))
+                                .collect();
+                            let other = vec![fixed; swept.len()];
+                            let (ys, xs) = if swept_is_y {
+                                (&swept, &other)
+                            } else {
+                                (&other, &swept)
+                            };
+                            let mut out = vec![MaybeUninit::uninit(); swept.len()];
+                            F32Kernel(backend).atan2(ys, xs, &mut out);
+                            ys.iter().zip(xs).zip(out).fold(
+                                (0i64, 0u64),
+                                |(worst, n), ((&y, &x), o)| {
+                                    // SAFETY: the kernel initialized every element.
+                                    let got = unsafe { o.assume_init() };
+                                    let want = (y as f64).atan2(x as f64) as f32;
+                                    if got.to_bits() == want.to_bits()
+                                        || (got.is_nan() && want.is_nan())
+                                    {
+                                        (worst, n)
+                                    } else {
+                                        (worst.max(ulps_apart(got, want)), n + 1)
+                                    }
+                                },
+                            )
+                        })
+                        .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1));
+                    println!(
+                        "  {backend:?} {label} against {fixed:e}: {differing} of 2^32 differ, worst {worst} ulp"
+                    );
+                    assert!(
+                        worst <= 1,
+                        "{backend:?} {label} against {fixed:e}: worst {worst} ulp"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "sweeps all 2^32 float32 inputs per op; takes a few minutes"]
     fn scaled_kernels_are_almost_always_the_promoted_reference_exhaustively() {
