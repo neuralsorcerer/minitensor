@@ -476,7 +476,11 @@ pub fn amin(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
 /// that has no element `0`, which then reads out of bounds in a later `gather`.
 /// Normalizes `dim` and applies the check in one step, so each caller resolves
 /// the dimension exactly once.
-fn checked_reduction_dim(tensor: &Tensor, dim: Option<isize>, op: &str) -> Result<Option<usize>> {
+pub(crate) fn checked_reduction_dim(
+    tensor: &Tensor,
+    dim: Option<isize>,
+    op: &str,
+) -> Result<Option<usize>> {
     let norm = match dim {
         Some(d) => Some(normalize_dim(d, tensor.ndim())?),
         None => None,
@@ -788,72 +792,77 @@ pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
     Ok((values, indices))
 }
 
+/// The one-element `Int64` tensor an index reduction over a whole tensor
+/// answers with, filled by `fill`. An index never carries a gradient, so
+/// nothing here attaches to the tape.
+fn whole_tensor_index(
+    tensor: &Tensor,
+    keepdim: bool,
+    fill: impl FnOnce(&Tensor, &mut TensorData) -> Result<()>,
+) -> Result<Tensor> {
+    let shape = if keepdim {
+        Shape::new(vec![1; tensor.ndim()])
+    } else {
+        Shape::scalar()
+    };
+    let mut data = TensorData::zeros_on_device(1, DataType::Int64, tensor.device());
+    fill(tensor, &mut data)?;
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        DataType::Int64,
+        tensor.device(),
+        false,
+    ))
+}
+
 /// Argument of maximum value along specified dimension
 pub fn argmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    let dim = checked_reduction_dim(tensor, dim, "argmax")?;
-    match dim {
-        None => {
-            // Find global argmax
-            let result_shape = if keepdim {
-                Shape::new(vec![1; tensor.ndim()])
-            } else {
-                Shape::scalar()
-            };
-
-            let mut result_data = TensorData::zeros_on_device(1, DataType::Int64, tensor.device());
-
-            match tensor.dtype() {
-                DataType::Float32 => argmax_all_f32(tensor, &mut result_data)?,
-                DataType::Float64 => argmax_all_f64(tensor, &mut result_data)?,
-                DataType::Int32 => argmax_all_i32(tensor, &mut result_data)?,
-                DataType::Int64 => argmax_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => argmax_all_bool(tensor, &mut result_data)?,
-            }
-
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                DataType::Int64,
-                tensor.device(),
-                false, // argmax doesn't require gradients
-            ))
-        }
+    match checked_reduction_dim(tensor, dim, "argmax")? {
+        None => whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
+            DataType::Float32 => argmax_all_f32(tensor, out),
+            DataType::Float64 => argmax_all_f64(tensor, out),
+            DataType::Int32 => argmax_all_i32(tensor, out),
+            DataType::Int64 => argmax_all_i64(tensor, out),
+            DataType::Bool => argmax_all_bool(tensor, out),
+        }),
         Some(d) => argmax_along_dim(tensor, d, keepdim),
     }
 }
 
 /// Argument of minimum value along specified dimension
 pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    let dim = checked_reduction_dim(tensor, dim, "argmin")?;
-    match dim {
-        None => {
-            // Find global argmin
-            let result_shape = if keepdim {
-                Shape::new(vec![1; tensor.ndim()])
-            } else {
-                Shape::scalar()
-            };
-
-            let mut result_data = TensorData::zeros_on_device(1, DataType::Int64, tensor.device());
-
-            match tensor.dtype() {
-                DataType::Float32 => argmin_all_f32(tensor, &mut result_data)?,
-                DataType::Float64 => argmin_all_f64(tensor, &mut result_data)?,
-                DataType::Int32 => argmin_all_i32(tensor, &mut result_data)?,
-                DataType::Int64 => argmin_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => argmin_all_bool(tensor, &mut result_data)?,
-            }
-
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                DataType::Int64,
-                tensor.device(),
-                false, // argmin doesn't require gradients
-            ))
-        }
+    match checked_reduction_dim(tensor, dim, "argmin")? {
+        None => whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
+            DataType::Float32 => argmin_all_f32(tensor, out),
+            DataType::Float64 => argmin_all_f64(tensor, out),
+            DataType::Int32 => argmin_all_i32(tensor, out),
+            DataType::Int64 => argmin_all_i64(tensor, out),
+            DataType::Bool => argmin_all_bool(tensor, out),
+        }),
         Some(d) => argmin_along_dim(tensor, d, keepdim),
     }
+}
+
+/// Index of the largest non-NaN entry in the whole tensor.
+///
+/// Only the float dtypes reach here; an integer tensor has no NaN to skip and
+/// `nanargmax` sends it straight to [`argmax`].
+pub(crate) fn nanargmax_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+    whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
+        DataType::Float32 => nanargmax_all_f32(tensor, out),
+        DataType::Float64 => nanargmax_all_f64(tensor, out),
+        _ => argmax_all_i64(tensor, out),
+    })
+}
+
+/// Index of the smallest non-NaN entry in the whole tensor.
+pub(crate) fn nanargmin_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+    whole_tensor_index(tensor, keepdim, |tensor, out| match tensor.dtype() {
+        DataType::Float32 => nanargmin_all_f32(tensor, out),
+        DataType::Float64 => nanargmin_all_f64(tensor, out),
+        _ => argmin_all_i64(tensor, out),
+    })
 }
 
 #[inline]

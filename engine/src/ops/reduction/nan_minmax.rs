@@ -444,15 +444,14 @@ nan_extremum_all_entry!(
 /// element equals it or is NaN, and then the answer is either the first NaN or
 /// -- ties going to the lowest index -- position 0, which is what the fallback
 /// gives.
-macro_rules! arg_extremum_all_lanes {
-    ($name:ident, $accessor:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
-        pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-            let data = tensor.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
-            })?;
-
-            let (nan_at, _, best_at) = par_fold_chunks(
-                data,
+/// The fold both index reductions below share: `(nan_at, best, best_at)` over
+/// `data`, with positions absolute. `$nan` decides whether NaN is noticed at
+/// all -- `nanarg{min,max}` and the integer instantiations pass `false`, which
+/// compiles the flag, the locate and the branch that reads them away.
+macro_rules! arg_lane_fold {
+    ($data:expr, $ty:ty, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
+        par_fold_chunks(
+                $data,
                 MINMAX_CHUNK,
                 (usize::MAX, $identity, usize::MAX),
                 &|offset, chunk| {
@@ -522,7 +521,18 @@ macro_rules! arg_extremum_all_lanes {
                         (nan, a.1, a.2)
                     }
                 },
-            );
+            )
+    };
+}
+
+macro_rules! arg_extremum_all_lanes {
+    ($name:ident, $accessor:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
+        pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            let data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+
+            let (nan_at, _, best_at) = arg_lane_fold!(data, $ty, $identity, $better, $lanes, $nan);
 
             let index = if nan_at != usize::MAX {
                 nan_at
@@ -530,6 +540,47 @@ macro_rules! arg_extremum_all_lanes {
                 best_at
             } else {
                 0
+            };
+            write_index(result_data, index)
+        }
+    };
+}
+
+/// `nanarg{min,max}_all_*`: the index of the global extremum among the
+/// non-NaN entries.
+///
+/// This was `argmax(where(isnan(x), -inf, x))` behind an all-NaN check built
+/// from `isnan`, a sum, an `eq` and an `any` -- seven passes over the data and
+/// two full-size temporaries, 1.75ms over a million float32 where the plain
+/// `argmax` underneath it takes 0.134.
+///
+/// None of that work was ever needed: a NaN satisfies no comparison, so the
+/// fold above *already* skips it. Skipping is what `$nan = false` means, so
+/// the nan-skipping index reduction is the same fold the integers run, and the
+/// only thing left to decide is what to answer when nothing beat the seed.
+///
+/// That happens when every element is NaN or equal to the seed -- the type's
+/// own infinity, which an input can hold for real. The non-NaN ones are then
+/// all equal, so the answer is the first of them, and if there is none the
+/// slice is all NaN and has no index to report. Both come from one
+/// short-circuiting scan, which only runs in that degenerate case.
+macro_rules! nanarg_extremum_all_lanes {
+    ($name:ident, $accessor:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $what:literal) => {
+        pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            let data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+
+            let (_, _, best_at) = arg_lane_fold!(data, $ty, $identity, $better, $lanes, false);
+
+            let index = match best_at {
+                usize::MAX => data.iter().position(|v| !v.is_nan()).ok_or_else(|| {
+                    MinitensorError::invalid_operation(concat!(
+                        $what,
+                        ": a slice of all-NaN values has no index to report"
+                    ))
+                })?,
+                found => found,
             };
             write_index(result_data, index)
         }
@@ -575,6 +626,19 @@ arg_extremum_all_lanes!(argmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY,
 arg_extremum_all_lanes!(argmin_all_i32, as_i32_slice, i32, "i32", i32::MAX, <, 8, false);
 arg_extremum_all_lanes!(argmin_all_i64, as_i64_slice, i64, "i64", i64::MAX, <, 4, false);
 arg_extremum_all_bool!(argmin_all_bool, false);
+
+nanarg_extremum_all_lanes!(
+    nanargmax_all_f32, as_f32_slice, f32, "f32", f32::NEG_INFINITY, >, 8, "nanargmax"
+);
+nanarg_extremum_all_lanes!(
+    nanargmax_all_f64, as_f64_slice, f64, "f64", f64::NEG_INFINITY, >, 4, "nanargmax"
+);
+nanarg_extremum_all_lanes!(
+    nanargmin_all_f32, as_f32_slice, f32, "f32", f32::INFINITY, <, 8, "nanargmin"
+);
+nanarg_extremum_all_lanes!(
+    nanargmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY, <, 4, "nanargmin"
+);
 
 /// Fold one contiguous float row to its extremum, propagating NaN.
 ///

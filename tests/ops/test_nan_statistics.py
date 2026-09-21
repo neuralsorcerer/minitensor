@@ -341,3 +341,90 @@ def test_an_infinite_extremum_is_not_mistaken_for_the_seed(values, dtype):
                 assert np.isnan(got), (ours.__name__, values[:3], dtype)
             else:
                 assert got == want, (ours.__name__, values[:3], dtype)
+
+
+# `nanargmax`/`nanargmin` stopped being a substitution: a NaN loses every
+# comparison, so the extremum fold skips it without help. These pin the lane
+# seams the substitution never had, and the one answer that moved.
+NANARG_SIZES = [1, 2, 7, 8, 9, 17, 8191, 8192, 8193, 100_000]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("size", NANARG_SIZES)
+def test_nanarg_matches_numpy_across_the_lane_seams(dtype, size):
+    rng = np.random.default_rng(size)
+    values = rng.standard_normal(size).astype(dtype)
+    if size > 1:
+        # Enough NaN to land in every lane, but never all of them.
+        values[rng.choice(size, size // 2, replace=False)] = np.nan
+        values[int(np.argmin(np.isnan(values)))] = values[0] if size else 0.0
+    if np.all(np.isnan(values)):
+        values[0] = 1.0
+    tensor = mt.from_numpy(values)
+    assert tensor.nanargmax().item() == int(np.nanargmax(values))
+    assert tensor.nanargmin().item() == int(np.nanargmin(values))
+
+
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_the_only_number_wins_from_any_lane(position):
+    # Everything else NaN, so the answer is whichever lane the one number
+    # landed in -- and nothing ever beats the seed except it.
+    size = 8193
+    values = np.full(size, np.nan, dtype="float32")
+    index = {"first": 0, "middle": size // 2, "last": size - 1}[position]
+    values[index] = 1.5
+    tensor = mt.from_numpy(values)
+    assert tensor.nanargmax().item() == index
+    assert tensor.nanargmin().item() == index
+
+
+@pytest.mark.parametrize("size", [2, 9, 8193, 100_000])
+def test_an_infinity_behind_a_nan_is_still_found(size):
+    # Nothing beats the seed, because the seed *is* the only value present.
+    # The answer is then the first index holding a number, which is neither 0
+    # nor "nothing found".
+    values = np.full(size, np.nan, dtype="float64")
+    values[1::2] = -np.inf
+    assert mt.from_numpy(values).nanargmax().item() == 1
+
+    values = np.full(size, np.nan, dtype="float64")
+    values[1::2] = np.inf
+    assert mt.from_numpy(values).nanargmin().item() == 1
+
+
+def test_the_index_reported_never_points_at_a_nan():
+    # Where this library and NumPy part. NumPy substitutes -inf for NaN and
+    # then takes an argmax, which cannot tell the two apart, so it answers 0 --
+    # a NaN, from the function whose name says it skips them. We answer 1.
+    values = np.array([np.nan, -np.inf, np.nan, -np.inf])
+    assert np.nanargmax(values) == 0 and np.isnan(values[0])
+    assert mt.from_numpy(values).nanargmax().item() == 1
+
+    values = np.array([np.nan, np.inf, np.nan, np.inf])
+    assert np.nanargmin(values) == 0 and np.isnan(values[0])
+    assert mt.from_numpy(values).nanargmin().item() == 1
+
+
+def test_whole_tensor_and_per_row_agree():
+    # Two code paths -- the lane fold and the indexed dim reduction -- and one
+    # question. A row read on its own must answer what the row answers inside
+    # the matrix.
+    rng = np.random.default_rng(11)
+    rows = rng.standard_normal((7, 8193)).astype("float32")
+    rows[rng.random(rows.shape) < 0.5] = np.nan
+    rows[:, 0] = 0.0  # so no row is all-NaN
+
+    per_row = mt.from_numpy(rows).nanargmax(1).numpy()
+    for r, row in enumerate(rows):
+        assert per_row[r] == mt.from_numpy(row).nanargmax().item()
+
+    per_row = mt.from_numpy(rows).nanargmin(1).numpy()
+    for r, row in enumerate(rows):
+        assert per_row[r] == mt.from_numpy(row).nanargmin().item()
+
+
+@pytest.mark.parametrize("size", [1, 8, 8193])
+def test_all_nan_is_still_refused_at_every_size(size):
+    for name in ("nanargmax", "nanargmin"):
+        with pytest.raises(Exception, match="no index"):
+            getattr(mt.from_numpy(np.full(size, np.nan, dtype="float32")), name)()

@@ -7,12 +7,19 @@
 //! The NaN-skipping reductions that are arrangements of the others.
 //!
 //! `nansum`, `nanmean`, `nanmax` and the rest each carry a kernel that walks
-//! the buffer once, testing as it goes. These five need no kernel: a variance
-//! is a mean of squared deviations, a product with NaN skipped is a product
-//! with NaN replaced by the identity, and an index of the largest non-NaN is an
-//! index of the largest once NaN has been pushed to the bottom. Writing them as
-//! those arrangements is one definition rather than two, and it is what makes
-//! their gradients the gradients of the ops underneath.
+//! the buffer once, testing as it goes. These need no kernel of their own: a
+//! variance is a mean of squared deviations, and a product with NaN skipped is
+//! a product with NaN replaced by the identity. Writing them as those
+//! arrangements is one definition rather than two, and it is what makes their
+//! gradients the gradients of the ops underneath.
+//!
+//! `nanargmax` and `nanargmin` used to be here on the same grounds -- an index
+//! of the largest non-NaN read as an index of the largest once NaN had been
+//! pushed to the bottom -- and they are the counter-example. The substitution
+//! was six passes of setup around a one-pass reduction, and it could not tell
+//! a NaN pushed to `-inf` from an `-inf` that was there all along. They now
+//! ask the NaN-skipping extremum directly, which is both the faster and the
+//! only correct way to spell it.
 
 use crate::{
     error::{MinitensorError, Result},
@@ -21,7 +28,11 @@ use crate::{
         arithmetic::{div, mul, sub},
         comparison::eq,
         minmax::maximum,
-        reduction::{any, argmax, argmin, count_nonzero, nanmean, prod, sum},
+        reduction::{
+            any, argmax, argmin, checked_reduction_dim, count_nonzero, nanargmax_all,
+            nanargmin_all, nanmax_along_dim_with_indices, nanmean, nanmin_along_dim_with_indices,
+            prod, sum,
+        },
         selection::where_op,
         util::create_scalar_tensor,
     },
@@ -136,28 +147,20 @@ fn without_nan_replaced_by(tensor: &Tensor, replacement: f64) -> Result<Tensor> 
     where_op(&tensor.isnan()?, &filler, tensor)
 }
 
-/// Pushes every NaN to one end so an index reduction skips it, and reports
-/// whether a slice was left with nothing but pushed-aside values.
-fn without_nan(tensor: &Tensor, replacement: f64) -> Result<Tensor> {
-    let filler = create_scalar_tensor(replacement, tensor.dtype(), tensor.device())?;
-    where_op(&tensor.isnan()?, &filler, tensor)
-}
-
 /// Rejects a reduction that would have to name an index among NaN alone.
 ///
-/// `nanamax` answers NaN for such a slice, which an index reduction cannot do:
-/// every index it could return points at a NaN. NumPy raises here, and so does
-/// this.
-fn reject_all_nan(tensor: &Tensor, dim: Option<isize>, name: &str) -> Result<()> {
-    let count = non_nan_count(tensor, dim.map(|d| vec![d]), false)?;
-    let zero = create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?;
-    let empty = eq(&count, &zero)?;
-    if any(&empty, None, false)?
+/// `values` is what the NaN-skipping extremum reported for each slice, which
+/// is NaN exactly when the slice held nothing else -- the reduction has
+/// already looked, so this only has to read its answer. That answer is
+/// `dim_size` times smaller than the input a separate count would re-walk.
+fn reject_all_nan_slices(values: &Tensor, name: &str) -> Result<()> {
+    let empty = any(&values.isnan()?, None, false)?;
+    let is_empty = empty
         .data()
         .as_bool_slice()
-        .map(|slice| slice.first().copied().unwrap_or(false))
-        .unwrap_or(false)
-    {
+        .and_then(|slice| slice.first().copied())
+        .unwrap_or(false);
+    if is_empty {
         return Err(MinitensorError::invalid_operation(format!(
             "{name}: a slice of all-NaN values has no index to report"
         )));
@@ -166,21 +169,47 @@ fn reject_all_nan(tensor: &Tensor, dim: Option<isize>, name: &str) -> Result<()>
 }
 
 /// Index of the largest non-NaN entry along `dim`.
+///
+/// Both halves ask a NaN-skipping extremum that was already there. Over the
+/// whole tensor the lane fold skips NaN by itself -- no comparison against one
+/// is true -- and along a `dim` the indexed reduction seeds with NaN and only
+/// moves off it for a real value, which is the same rule.
+///
+/// This was `argmax(where(isnan(x), -inf, x))` behind an all-NaN check built
+/// from a second full-size count: seven passes and two full-size temporaries
+/// where the reduction itself is one pass. It also answered differently. The
+/// substitution cannot tell a NaN that became `-inf` from an `-inf` that was
+/// always there, so `nanargmax([nan, -inf])` named index 0 -- a NaN, from the
+/// reduction whose whole job is to skip them. NumPy does the same thing for
+/// the same reason. Skipping instead of substituting answers 1, and is the
+/// only one of the two that honours the name.
 pub fn nanargmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return argmax(tensor, dim, keepdim);
     }
-    reject_all_nan(tensor, dim, "nanargmax")?;
-    argmax(&without_nan(tensor, f64::NEG_INFINITY)?, dim, keepdim)
+    match checked_reduction_dim(tensor, dim, "nanargmax")? {
+        None => nanargmax_all(tensor, keepdim),
+        Some(d) => {
+            let (values, indices) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
+            reject_all_nan_slices(&values, "nanargmax")?;
+            Ok(indices)
+        }
+    }
 }
 
-/// Index of the smallest non-NaN entry along `dim`.
+/// Index of the smallest non-NaN entry along `dim`. See [`nanargmax`].
 pub fn nanargmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return argmin(tensor, dim, keepdim);
     }
-    reject_all_nan(tensor, dim, "nanargmin")?;
-    argmin(&without_nan(tensor, f64::INFINITY)?, dim, keepdim)
+    match checked_reduction_dim(tensor, dim, "nanargmin")? {
+        None => nanargmin_all(tensor, keepdim),
+        Some(d) => {
+            let (values, indices) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
+            reject_all_nan_slices(&values, "nanargmin")?;
+            Ok(indices)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +346,38 @@ mod tests {
         let t = tensor(vec![f64::INFINITY, 1.0, NAN], vec![3]);
         assert_eq!(indices(&nanargmax(&t, None, false).unwrap()), vec![0]);
         assert_eq!(indices(&nanargmin(&t, None, false).unwrap()), vec![1]);
+    }
+
+    #[test]
+    fn a_nan_is_never_the_index_reported() {
+        // The substitution this used to do pushed NaN to -inf, which made it
+        // indistinguishable from an -inf that was there: `nanargmax` then
+        // named index 0, a NaN. NumPy still does. Skipping answers 1, the
+        // first index that holds a number.
+        let t = tensor(
+            vec![NAN, f64::NEG_INFINITY, NAN, f64::NEG_INFINITY],
+            vec![4],
+        );
+        assert_eq!(indices(&nanargmax(&t, None, false).unwrap()), vec![1]);
+
+        let t = tensor(vec![NAN, f64::INFINITY, NAN, f64::INFINITY], vec![4]);
+        assert_eq!(indices(&nanargmin(&t, None, false).unwrap()), vec![1]);
+
+        // The same data reduced along a dim has to agree with it: one library
+        // giving two answers for one question is worse than either answer.
+        let rows = tensor(
+            vec![NAN, f64::NEG_INFINITY, NAN, f64::NEG_INFINITY],
+            vec![2, 2],
+        );
+        assert_eq!(
+            indices(&nanargmax(&rows, Some(1), false).unwrap()),
+            vec![1, 1]
+        );
+        let rows = tensor(vec![NAN, f64::INFINITY, NAN, f64::INFINITY], vec![2, 2]);
+        assert_eq!(
+            indices(&nanargmin(&rows, Some(1), false).unwrap()),
+            vec![1, 1]
+        );
     }
 
     #[test]
