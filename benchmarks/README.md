@@ -271,52 +271,53 @@ rather than answered in advance:
   linear `cos` shows when the thread pool happens to turn on between the two
   probes.
 
-308 cases survive that, and on this container the script reports **1.69x**
-overall: 218 ahead of NumPy, 81 behind, 9 level. Per dtype, leaving out the two
-rows per dtype that read 0.00 because they are answers rather than measurements
-(`empty_like` and `flipud`, both explained below):
+308 cases survive that, and on this container the script reports **1.89x**
+overall: 224 ahead of NumPy, 73 behind, 11 level. Per dtype, leaving out the
+two rows per dtype that read 0.00 because they are answers rather than
+measurements (`empty_like` and `flipud`, both explained below):
 
 ```
-float64  1.95x    int64  1.55x
-float32  1.92x    int32  1.37x
+float64  2.10x    int64  1.79x
+float32  2.19x    int32  1.59x
 ```
 
 ### What it found the first time it ran
 
-Thirteen operations were behind by more than the kernels they are built from,
+Fourteen operations were behind by more than the kernels they are built from,
 and in every case the reason was work being done *around* the kernel rather
 than in it.
 
 The columns are the ratio against NumPy, not milliseconds, and that is not
-cosmetic. Between two runs of this script a fortnight apart, the absolute times
-of the 106 float64 operations none of this work touched moved by a median of
-11% -- the machine is a shared container -- while their *ratios* moved by 2%,
-because both sides of a ratio are measured in the same run and drift together.
-Comparing before against after in milliseconds would have credited this work
-with that 11%.
+cosmetic. Between the first of these sweeps and the last, the 106 float64
+operations none of this work touched got a median of 16% faster in our column
+and 6% in NumPy's -- it is a shared container -- while their *ratios* moved by
+8%, because both sides of a ratio are measured in the same run. The ratio
+drifts less, not none: a gain under about 1.2x here is not distinguishable
+from the machine, which is worth remembering for the bottom two rows and for
+nothing above them.
 
 | | before | after | |
 |---|---|---|---|
-| `delete` | 0.02× | 0.78× | 39× |
-| `compress` | 0.44× | 3.42× | 7.8× |
-| `partition` | 0.13× | 0.58× | 4.5× |
-| `take` | 0.21× | 0.88× | 4.2× |
-| `argpartition` | 0.13× | 0.46× | 3.5× |
-| `isin` | 0.24× | 0.82× | 3.4× |
-| `argwhere` | 0.60× | 2.03× | 3.4× |
-| `flatnonzero` | 0.46× | 1.43× | 3.1× |
-| `cov` | 0.23× | 0.61× | 2.7× |
-| `vecdot` | 0.34× | 0.74× | 2.2× |
-| `setxor1d` | 0.22× | 0.48× | 2.2× |
-| `intersect1d` | 0.46× | 0.92× | 2.0× |
-| `setdiff1d` | 0.56× | 1.06× | 1.9× |
+| `delete` | 0.02× | 0.80× | 40× |
+| `signbit` | 0.28× | 2.52× | 9.0× |
+| `compress` | 0.44× | 3.62× | 8.2× |
+| `cov` | 0.23× | 1.16× | 5.0× |
+| `take` | 0.21× | 1.01× | 4.8× |
+| `partition` | 0.13× | 0.61× | 4.7× |
+| `argpartition` | 0.13× | 0.59× | 4.5× |
+| `isin` | 0.24× | 0.95× | 4.0× |
+| `flatnonzero` | 0.46× | 1.66× | 3.6× |
+| `argwhere` | 0.60× | 2.00× | 3.3× |
+| `vecdot` | 0.34× | 0.94× | 2.8× |
+| `setdiff1d` | 0.56× | 1.01× | 1.8× |
+| `setxor1d` | 0.22× | 0.37× | 1.7× |
+| `intersect1d` | 0.46× | 0.73× | 1.6× |
 
-Four of them are now ahead of NumPy rather than behind it -- `compress`,
-`argwhere`, `flatnonzero` and `setdiff1d` -- and `take` and `isin` are within a
-fifth of it. In absolute terms the largest was `delete`, which went from 148 ms
-to under 3 on a million elements.
+Seven of them are ahead of NumPy now rather than behind it, and `isin` is
+within a twentieth of it. In absolute terms the largest was `delete`, which
+went from 148 ms to under 3 on a million elements.
 
-Five causes, none of which the deep families could have shown, because each
+Six causes, none of which the deep families could have shown, because each
 only appears at a size they do not reach with an argument they do not have:
 
 - **A million positions taken one at a time.** `delete` and `partition` built
@@ -335,9 +336,11 @@ only appears at a size they do not reach with an argument they do not have:
 - **A full-size temporary.** `vecdot` multiplied and then summed, writing eight
   megabytes to produce eight bytes. It folds each run in place now, the way
   `dot` and `norm` already did.
+- **A question asked the long way round.** `signbit` built a float carrying the
+  sign and compared it against zero, to recover a bit that was already in the
+  input.
 - **Work to prepare for work.** `take` rewrote its whole index to wrap negative
-  positions that were not there; `signbit` wrote a million ones to read a
-  million sign bits off them; `cov` transposed a `(1, n)` matrix into an
+  positions that were not there; `cov` transposed a `(1, n)` matrix into an
   `(n, 1)` one, which is eight megabytes copied to produce the bytes it already
   had.
 
@@ -354,17 +357,17 @@ had been 0.77x with NumPy's column unmoved.
 
 Four groups, and only the first is a surprise:
 
-- **float64 transcendentals**, which is the `tanh` story below applied to the
-  rest of the family: `asinh` 0.29×, `cbrt` 0.32, `sinh` 0.35, `log1p` 0.38,
-  `log10` 0.49, `expm1` 0.54, `tan` 0.56, `atan` 0.57, `atan2` 0.68, `cosh`
-  0.77. `ops::simd::transcendental` is float32-only by design — it computes in
+- **Transcendentals**, which is the `tanh` story below applied to the rest of
+  the family: `asinh` 0.13–0.24×, `cbrt` 0.22–0.28, `log10` 0.22–0.41, `atan2`
+  0.14–0.46, `sinh` 0.30, `log1p` 0.34. `ops::simd::transcendental` is
+  float32-only by design — it computes in
   float64 and rounds once, which is exactly the headroom a float64 output does
   not have — so these fall through to scalar libm while NumPy vectorises them.
   The section below says why that is a different algorithm rather than a better
   polynomial. It is a real gap and it is the largest one left.
-- **Sorting and selection.** `setxor1d` 0.34–0.48×, `argpartition` 0.46–0.51,
-  `unique` 0.48–0.60, `union1d` 0.49–0.65, `partition` 0.51–0.58, `percentile`
-  0.57–0.59. Every one of them is a comparison sort or a selection underneath,
+- **Sorting and selection.** `setxor1d` 0.25–0.37×, `unique` 0.40–0.57,
+  `union1d` 0.45–0.62, `percentile` 0.48, `intersect1d` 0.49–0.73,
+  `argpartition` 0.52–0.59, `partition` 0.61. Every one of them is a comparison sort or a selection underneath,
   and ours is a portable one where NumPy's is vectorised per microarchitecture.
   This is the group with the most operations in it and the one a single change
   would move furthest.
@@ -380,14 +383,13 @@ Four groups, and only the first is a surprise:
   in `sort` and `topk`, where the position has to be carried alongside the
   value anyway and the packing is what makes that free. They do not pay here.
   What is left is the algorithm, and matching it means a vectorised quicksort.
-- **Compositions where NumPy has a kernel.** `signbit` 0.31–0.40× reads a sign
-  bit with a `copysign` and a comparison; `fmax`/`fmin` 0.43–0.71 are five
+- **Compositions where NumPy has a kernel.** `fmax`/`fmin` 0.58–0.77× are five
   passes (two `isnan`, an extremum, two `where`) against one, and a `where`
   whose mask the branch predictor cannot guess costs six times one it can;
-  `nanmax`/`nanmin` 0.43–0.78 pay for the NaN test a plain extremum does not
-  make. `vecdot` and `cov` were in this group until they were fused, and they
-  are the pattern for the rest of it: what costs is the intermediate, not the
-  arithmetic.
+  `nanmax`/`nanmin` 0.33–0.67 and `nanargmax`/`nanargmin` 0.38–0.67 pay for a
+  NaN test the plain extremum does not make. `vecdot`, `cov` and `signbit` were
+  in this group until each got the one pass it needed, and they are the pattern
+  for the rest of it: what costs is the intermediate, not the arithmetic.
 - **Two that are answers rather than problems.** `empty_like` reads 0.00×
   because it zeroes: the kernels take `&mut [T]`, and reading uninitialised
   floats is undefined behaviour, so an "uninitialised" buffer here is a zeroed
@@ -409,8 +411,8 @@ operation. The per-family geometric mean at the bottom is the summary worth
 watching after a change. As of the run these tables come from:
 
 ```
-elementwise  1.32x     gemm  0.87x     reduction  1.77x
-shape        1.19x     unary 1.41x     surface    1.69x
+elementwise  1.47x     gemm  0.90x     reduction  1.87x
+shape        1.57x     unary 1.36x     surface    1.86x
 ```
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
