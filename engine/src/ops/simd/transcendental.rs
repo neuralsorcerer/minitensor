@@ -215,6 +215,15 @@
 //! 416,909 of the 2^32 inputs (0.0097%). `log1p` misses exactly one input by
 //! one ulp.
 //!
+//! `log2` is bit-identical as well. It is the same kernel scaled by `1/ln 2`
+//! before the single rounding, which is why it can be: the scale happens in
+//! float64, so nothing rounds twice. `log2f`, which it replaces, misrounds
+//! 313,550. `log10` is the same construction and misses **2** of the 2^32 by
+//! one ulp -- `ln(x) * (1/ln 10)` and float64 `log10` differ in the last
+//! float64 bit often enough that twice it survives the narrowing. Against
+//! `log10f`'s 29,787,059 misroundings (0.693%, up to two ulp) that is an
+//! accuracy gain of seven orders of magnitude, and it is also 4.7x faster.
+//!
 //! `erf` and `erfc` are within one ulp of the correctly rounded result
 //! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
 //! of the 2^32 inputs respectively. The routines they replace misround
@@ -901,6 +910,27 @@ fn log_one<const FMA: bool>(x: f32) -> f32 {
     log_core::<FMA, false>(x as f64, 0.0) as f32
 }
 
+/// `log(x) / ln(base)`, for the fixed-base logarithms.
+///
+/// `log2` and `log10` are this curve times a constant, and were reaching
+/// scalar `log2f`/`log10f` while `log` ran through the kernel above -- 0.48x
+/// and 0.23x of NumPy in float32 where `log` is 1.14x.
+///
+/// The scale is applied in float64, before the single rounding to float32.
+/// That is the whole reason this is a kernel rather than a `log` followed by a
+/// `mul`: rounding to float32 first and scaling after would round twice, and
+/// the second rounding is what these kernels exist to avoid.
+///
+/// The base arrives as `1/ln(base)` so the loop multiplies rather than
+/// divides, and as a parameter rather than a const generic so one instantiation
+/// serves both bases.
+#[inline(always)]
+fn log_scaled_one<const FMA: bool>(x: f32, inv_ln_base: f64, _unused: f64) -> f32 {
+    // `log_core` answers -inf, +inf and NaN for the arguments that have no
+    // logarithm, and a positive scale carries all three through unchanged.
+    (log_core::<FMA, false>(x as f64, 0.0) * inv_ln_base) as f32
+}
+
 #[inline(always)]
 fn log1p_one<const FMA: bool>(x: f32) -> f32 {
     let xd = x as f64;
@@ -1495,6 +1525,12 @@ block_kernel_param!(
     exp_shifted_block_avx512,
     exp_shifted_block_avx2
 );
+block_kernel_param!(
+    log_scaled_block,
+    log_scaled_one,
+    log_scaled_block_avx512,
+    log_scaled_block_avx2
+);
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
 block_kernel!(atan_block, atan_one, atan_block_avx512, atan_block_avx2);
 block_kernel!(asin_block, asin_one, asin_block_avx512, asin_block_avx2);
@@ -1804,6 +1840,24 @@ impl F32Kernel {
         )
     }
 
+    /// Write `log(input[i]) * inv_ln_base` into every element of `out`.
+    ///
+    /// `inv_ln_base` is `1/ln(base)`: `LOG2_E` for `log2`, `LOG10_E` for
+    /// `log10`.
+    #[inline]
+    pub(crate) fn log_scaled(self, input: &[f32], out: &mut [MaybeUninit<f32>], inv_ln_base: f64) {
+        dispatch_param!(
+            self,
+            input,
+            out,
+            inv_ln_base,
+            0.0,
+            log_scaled_block,
+            log_scaled_block_avx512,
+            log_scaled_block_avx2
+        )
+    }
+
     /// Write `log1p(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn log1p(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1974,6 +2028,8 @@ mod tests {
         Cosh,
         Erfc,
         Log,
+        Log2,
+        Log10,
         Log1p,
         Sigmoid,
         Silu,
@@ -1998,6 +2054,8 @@ mod tests {
             Op::Erfc => k.erfc(input, out),
             Op::Exp => k.exp(input, out),
             Op::Log => k.log(input, out),
+            Op::Log2 => k.log_scaled(input, out, std::f64::consts::LOG2_E),
+            Op::Log10 => k.log_scaled(input, out, std::f64::consts::LOG10_E),
             Op::Log1p => k.log1p(input, out),
             Op::Sigmoid => k.sigmoid(input, out),
             Op::Silu => k.silu(input, out),
@@ -2233,6 +2291,8 @@ mod tests {
             Op::Erfc => libm::erfc(xd) as f32,
             Op::Exp => xd.exp() as f32,
             Op::Log => xd.ln() as f32,
+            Op::Log2 => xd.log2() as f32,
+            Op::Log10 => xd.log10() as f32,
             Op::Log1p => xd.ln_1p() as f32,
             // Written the stable way: `1/(1 + exp(-x))` overflows for large
             // negative x, which is the bug these kernels fix.
@@ -2262,7 +2322,7 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 10] {
+    fn bit_exact_ops() -> [Op; 11] {
         [
             Op::Tanh,
             Op::Exp,
@@ -2270,6 +2330,7 @@ mod tests {
             Op::Sinh,
             Op::Cosh,
             Op::Log,
+            Op::Log2,
             Op::Sin,
             Op::Cos,
             Op::Tan,
@@ -2354,6 +2415,7 @@ mod tests {
             Op::Erfc,
             Op::GeluErf,
             Op::GeluTanh,
+            Op::Log10,
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
@@ -2574,6 +2636,63 @@ mod tests {
                             (worst.max(ulps_apart(got, want)), n + 1)
                         }
                     })
+            })
+            .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1))
+    }
+
+    /// `log10`'s claim is one ulp rather than bit-exact, and stated as a
+    /// number.
+    ///
+    /// It cannot be bit-exact the way `log2` turned out to be: the kernel
+    /// forms `ln(x) * (1/ln 10)` in float64 where the reference calls float64
+    /// `log10` directly, and the two differ in the last float64 bit often
+    /// enough that twice it survives the rounding to float32. The bound is
+    /// loose enough not to be a rounding-mode tripwire, and the comparison
+    /// against the scalar routine is the one that matters: `log10f` misrounds
+    /// 29,787,059 by up to two ulp, so this is an accuracy gain of seven
+    /// orders of magnitude as well as a speedup.
+    #[test]
+    #[ignore = "sweeps all 2^32 float32 inputs per op; takes a few minutes"]
+    fn log10_is_almost_always_the_promoted_reference_exhaustively() {
+        for (op, scalar) in [(Op::Log10, f32::log10 as fn(f32) -> f32)] {
+            let (scalar_worst, scalar_differing) = sweep_scalar(op, scalar);
+            println!(
+                "  {op:?}/scalar (replaced): {scalar_differing} of 2^32 differ, worst {scalar_worst} ulp"
+            );
+            for backend in available() {
+                let (worst, differing) = sweep(op, backend);
+                println!("  {op:?}/{backend:?}: {differing} of 2^32 differ, worst {worst} ulp");
+                assert!(
+                    worst <= 1,
+                    "{op:?}/{backend:?}: worst {worst} ulp, {differing} differ"
+                );
+                // The point of the kernel is that it is not *less* accurate
+                // than the scalar routine it took over from.
+                assert!(
+                    differing <= scalar_differing,
+                    "{op:?}/{backend:?}: {differing} differ against the replaced \
+                     routine's {scalar_differing}"
+                );
+            }
+        }
+    }
+
+    /// [`sweep`] for the scalar routine a kernel replaced, so its accuracy is a
+    /// measured baseline rather than a remembered one.
+    fn sweep_scalar(op: Op, scalar: fn(f32) -> f32) -> (i64, u64) {
+        use rayon::prelude::*;
+        (0..(1u64 << 32) / 8192)
+            .into_par_iter()
+            .map(|b| {
+                (0..8192).fold((0i64, 0u64), |(worst, n), k| {
+                    let x = f32::from_bits((b * 8192 + k) as u32);
+                    let (got, want) = (scalar(x), reference(op, x));
+                    if got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()) {
+                        (worst, n)
+                    } else {
+                        (worst.max(ulps_apart(got, want)), n + 1)
+                    }
+                })
             })
             .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1))
     }

@@ -324,11 +324,20 @@ macro_rules! float_unary_kernel_param {
 
 // Which float32 routines stay on the scalar libm, and why.
 //
-// `tanh`, `sinh`, `cosh`, `expm1`, `log`, `log1p`, `erf`, `erfc` and both GELUs
-// now run through `ops::simd::transcendental`, which computes each in float64
-// and rounds once -- the accuracy the old promoted scalars bought, at several
-// times the speed. Nothing is left promoted; promotion was a way of getting the
-// float64 rounding cheaply, and the vectorized kernels get it for less.
+// `tanh`, `sinh`, `cosh`, `expm1`, `log`, `log2`, `log10`, `log1p`, `erf`,
+// `erfc` and both GELUs now run through `ops::simd::transcendental`, which
+// computes each in float64 and rounds once -- the accuracy the old promoted
+// scalars bought, at several times the speed. Nothing is left promoted;
+// promotion was a way of getting the float64 rounding cheaply, and the
+// vectorized kernels get it for less.
+//
+// `log2` and `log10` joined that list last, and they cost nothing to add:
+// both are `log` scaled by a constant, so they are the same kernel with the
+// scale applied before the rounding rather than after. They had been the
+// clearest case of a name sitting next to a kernel it could have been using --
+// `log` measured 1.14x of NumPy in float32 while `log10`, the same curve times
+// 1/ln(10), measured 0.23x. Both now measure 1.07x, and both got more accurate
+// doing it.
 //
 // The rest stay scalar deliberately. `expf`, `sinf`, `cosf` and `cbrtf` are
 // substantially faster than promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at
@@ -411,11 +420,36 @@ float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
     }
 });
 
-float_unary_kernel!(log2_f32, as_f32_slice, f32, Float32, "f32", f32::log2);
+/// Vectorized, through the same `log` kernel scaled by `1/ln(base)` before its
+/// single rounding. `log2f` and `log10f` are scalar, which left them at 0.48x
+/// and 0.23x of NumPy in float32 while the natural `log` beside them ran 1.14x.
+fn log_scaled_f32(tensor: &Tensor, inv_ln_base: f64) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `log_scaled` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.log_scaled(src, dst, inv_ln_base)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
+pub(crate) fn log2_f32(tensor: &Tensor) -> Result<TensorData> {
+    log_scaled_f32(tensor, std::f64::consts::LOG2_E)
+}
 
 float_unary_kernel!(log2_f64, as_f64_slice, f64, Float64, "f64", f64::log2);
 
-float_unary_kernel!(log10_f32, as_f32_slice, f32, Float32, "f32", f32::log10);
+pub(crate) fn log10_f32(tensor: &Tensor) -> Result<TensorData> {
+    log_scaled_f32(tensor, std::f64::consts::LOG10_E)
+}
 
 float_unary_kernel!(log10_f64, as_f64_slice, f64, Float64, "f64", f64::log10);
 

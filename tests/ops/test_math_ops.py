@@ -1312,3 +1312,60 @@ def test_elementwise_math_available_as_free_functions(name):
         getattr(F, name)(t).numpy(), getattr(t, name)().numpy(), rtol=1e-6
     )
     assert hasattr(mt, name)
+
+
+# `log2` and `log10` in float32 are the natural `log` kernel scaled by
+# `1/ln(base)` before its single rounding, rather than scalar `log2f`/`log10f`.
+# The scale has to happen in float64: rounding to float32 first and scaling
+# after would round twice, which is the whole thing those kernels avoid.
+@pytest.mark.parametrize("name", ["log2", "log10"])
+def test_float32_log_bases_round_once(name):
+    # The reference every kernel in this file is held to: computed in float64,
+    # narrowed once. `log2f` misses 313,550 of the 2^32 float32 inputs and
+    # `log10f` 29,787,059; these miss 0 and 2. Over a spread this wide the
+    # scalar routines would be visible and these are not.
+    rng = np.random.default_rng(3)
+    values = np.concatenate(
+        [
+            rng.uniform(1e-30, 1e30, 60_000),
+            rng.uniform(0.5, 2.0, 30_000),  # where log -> 0 and relative error bites
+            np.float32(2.0) ** np.arange(-140, 128, dtype=np.float32),
+            np.float32(10.0) ** np.arange(-37, 38, dtype=np.float32),
+            [np.finfo(np.float32).tiny, np.finfo(np.float32).max, 1.0],
+        ]
+    ).astype(np.float32)
+
+    got = getattr(mt.from_numpy(values), name)().numpy()
+    want = getattr(np, name)(values.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("name", ["log2", "log10"])
+def test_the_exact_powers_come_back_exact(name):
+    # `log2(2**k)` is an integer and must be that integer, not a neighbour:
+    # the scale is applied to a float64 log, so the error has three orders of
+    # magnitude of room before it can reach the float32 result.
+    base = 2 if name == "log2" else 10
+    limit = 128 if base == 2 else 39
+    powers = np.array(
+        [float(base) ** k for k in range(-(limit - 1), limit) if float(base) ** k != 0],
+        dtype=np.float32,
+    )
+    powers = powers[np.isfinite(powers) & (powers > 0)]
+    got = getattr(mt.from_numpy(powers), name)().numpy()
+    want = np.round(getattr(np, name)(powers.astype(np.float64))).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("name", ["log2", "log10"])
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_float32_log_bases_are_the_same_at_every_length(name, size):
+    # The kernel runs a vectorized block loop with a scalar tail and a parallel
+    # threshold; a length that lands in the tail, or past the threshold, must
+    # not answer differently.
+    values = np.abs(np.random.default_rng(size).standard_normal(size)).astype(
+        "float32"
+    ) + np.float32(0.25)
+    got = getattr(mt.from_numpy(values), name)().numpy()
+    want = getattr(np, name)(values.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
