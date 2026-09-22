@@ -655,9 +655,19 @@ fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
     // running total beside them. Summed separately it is a serial chain, and
     // for an input shorter than one block that is the *whole* sum -- which is
     // how widening the kernel made short slices less accurate rather than
-    // more, until this loop was written this way.
-    for (lane, x) in rest.iter().enumerate() {
-        sums[lane] = sums[lane].add(x.mul(*x));
+    // more, until this was written as a merge.
+    //
+    // It is padded to a full block and folded in as one more, rather than
+    // added into `sums` at a runtime index: the padding squares to zero and so
+    // changes nothing, and the lanes stay in registers. Indexing an
+    // accumulator at a position the compiler cannot see forces the whole array
+    // to memory and takes the loop above out of registers with it.
+    if !rest.is_empty() {
+        let mut block = [T::ZERO; LANES];
+        block[..rest.len()].copy_from_slice(rest);
+        for lane in 0..LANES {
+            sums[lane] = sums[lane].add(block[lane].mul(block[lane]));
+        }
     }
     // Only now do the lanes meet, and pairwise: adding them up in order would
     // put `LANES` more roundings on the deepest value. The same reason
