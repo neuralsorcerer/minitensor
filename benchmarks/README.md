@@ -21,8 +21,8 @@ each library's own container, so no conversion is charged to either side. Timing
 is min-of-repeats: for a deterministic kernel the spread is scheduler noise, and
 the minimum has least of it.
 
-All numbers below are from one 4-core x86-64 container, NumPy 2.4.6 against
-OpenBLAS 0.3.31, float32 unless stated. **They are not portable.** The shape of
+All numbers below are from one 4-core x86-64 container, NumPy 2.5.3 against
+OpenBLAS 0.3.34, float32 unless stated. **They are not portable.** The shape of
 the result should hold anywhere; the crossovers will not.
 
 ## A note on the harness itself
@@ -453,32 +453,52 @@ had been 0.77x with NumPy's column unmoved.
 
 ### What it still says is behind
 
-Five groups, and the first has two names left in it:
+Five groups. The first is down to one name and the fourth is empty, so what
+is left is really three:
 
-- **Transcendentals with no vectorised kernel at all.** `cbrt` 0.19–0.28×,
-  `pow` 0.53–0.79. Behind in *both* dtypes, which is what separates them from
-  the group below: the fix is a kernel, not an algorithm.
+- **Transcendentals with no vectorised kernel at all.** `cbrt` 0.34–0.66×.
+  Behind in *both* dtypes, which is what separates it from the group below:
+  the fix is a kernel, not an algorithm.
+
+  `pow` was the other name here at 0.53–0.79 and is no longer behind in
+  float32. Built out of the `exp` and `log` kernels rather than left on
+  `powf`, it reads 1.21; its float64 0.73 is the ordinary float64 gap and it
+  has moved to that bullet. `cbrt` halved the same way — four passes became
+  one kernel, 0.19 to 0.66 — without reaching parity, which is the honest
+  reason it is still here: the remaining distance is a dedicated kernel worth
+  about thirty float64 operations to beat 0.67ns an element, and that lands
+  near parity rather than past it.
 
   This bullet held six names two re-takings ago and called itself the cheapest
   gap in the file. It was. `log2`, `log10` and `exp2` were `log` and `exp`
   times a constant and were reaching scalar `log2f`/`log10f`/`exp2f` anyway;
-  scaling inside the kernel, before its single rounding, moved them to
-  1.08, 1.15 and 1.52. `asinh` was the slowest routine in the crate at 8.1ms
-  over a million float32 and reads 0.99; `acosh` came along as the same
-  construction and reads 11.32. `atan2` was the last and the most stubborn --
-  monomorphizing its call did nothing, because the call was to `atan2f` -- and
-  it took a kernel of its own to go 5.555ms to 0.574, 0.15× to 1.41.
-- **Transcendentals in float64.** `sinh` 0.32×, `log1p` 0.34, `tan` 0.40,
-  `asinh` 0.41, `expm1` 0.42, `log10` 0.47, `atan2` 0.52, `atan` 0.53, `cosh`
-  0.55, `tanh` 0.55, `exp2` 0.70, `log2` 0.90 — every one of them at or above
-  1.0 in float32, most of them well above. `ops::simd::transcendental` is
-  float32-only by design: it computes in float64 and rounds once, which is
-  exactly the headroom a float64 output does not have. The section above says
-  why that is a different algorithm rather than a better polynomial. It is the
-  largest gap left, and the one with no cheap version.
-- **Sorting and selection.** `setxor1d` 0.22–0.37×, `unique` 0.39–0.60,
-  `argpartition` 0.41–0.55, `union1d` 0.45–0.49, `intersect1d` 0.49–0.74,
-  `partition` 0.58–0.62. Every one of them is a comparison sort or a selection
+  scaling inside the kernel, before its single rounding, moved `exp2` to 1.42
+  and the two logarithms to parity — 1.05 and 0.92 in the run these tables
+  come from, and 1.07/0.99/0.89 and 0.96/0.98/1.01 over three more. An earlier
+  re-taking recorded 1.08 and 1.15 and read them as a lead; they are one run's
+  end of a spread that straddles 1.0. What is real is that NumPy's `log2` and
+  `log10` are about 28% quicker than its `log` where ours are about 10% slower
+  than ours, so the same kernel that puts `log` at 1.44–1.51 puts these two
+  level.
+
+  `asinh` was the slowest routine in the crate at 8.1ms over a million
+  float32 and reads 0.99; `acosh` came along as the same construction and
+  reads 11.32. `atan2` was the last and the most stubborn -- monomorphizing
+  its call did nothing, because the call was to `atan2f` -- and it took a
+  kernel of its own to go 5.555ms to 0.574, 0.15× to 1.41.
+- **Transcendentals in float64.** `log1p` 0.30×, `sinh` 0.31, `tan` 0.39,
+  `asinh` 0.39, `expm1` 0.40, `log10` 0.44, `cosh` 0.48, `atan2` 0.48, `atan`
+  0.52, `tanh` 0.57, `exp2` 0.66, `pow` 0.73, `log2` 0.84 — all but one of
+  them at or above 1.0 in float32, most well above, and the exception is
+  `log10` level at 0.92.
+  `ops::simd::transcendental` is float32-only by design: it computes in
+  float64 and rounds once, which is exactly the headroom a float64 output does
+  not have. The section above says why that is a different algorithm rather
+  than a better polynomial. It is the largest gap left, and the one with no
+  cheap version.
+- **Sorting and selection.** `setxor1d` 0.23–0.32×, `unique` 0.41–0.58,
+  `union1d` 0.46–0.49, `argpartition` 0.49–0.60, `intersect1d` 0.53–0.67,
+  `partition` 0.63–0.65. Every one of them is a comparison sort or a selection
   underneath, and ours is a portable one where NumPy's is vectorised per
   microarchitecture. This is the group with the most operations in it and the
   one a single change would move furthest.
@@ -505,23 +525,39 @@ Five groups, and the first has two names left in it:
 
   What is left in both cases is the algorithm, and matching it means a
   vectorised quicksort.
-- **Compositions where NumPy has a kernel.** `histogram_bin_edges` 0.37–0.76×
-  is a min and a max and then a `linspace` over the answer. It is what is left
-  of a group that used to hold most of this list: `fmax`/`fmin` were five
-  passes and are 2.28–3.12 now, `nanmax`/`nanmin` and `nanargmax`/`nanargmin`
-  are 1.9–2.7 and 6.3–7.7, and `vecdot`, `cov` and `signbit` left the same way.
-  They are the pattern for the rest: what costs is the intermediate, not the
-  arithmetic.
+- **Compositions where NumPy has a kernel.** This group is empty, and it is
+  the only one that has emptied. It held most of this list once: `fmax`/`fmin`
+  were five passes and are 2.28–3.12 now, `nanmax`/`nanmin` and
+  `nanargmax`/`nanargmin` are 1.9–2.7 and 6.3–7.7, and `vecdot`, `cov` and
+  `signbit` left the same way.
+
+  `histogram_bin_edges` was the last of them at 0.37–0.76× and reads
+  3.21–5.47. It is a min, a max and a `linspace` over the answer, and
+  essentially all of it was the scan: a per-element rayon chain that widened
+  every value to float64 on the way past and kept one running pair, which
+  makes the compare-and-replace a serial dependency nothing can vectorize.
+  0.846ms over a million float32, where `min` and `max` through the value
+  reductions cost 0.134 between them. It is now the same chunked, lane-blocked
+  fold those use.
+
+  They are the pattern, and the pattern is that what costs is the
+  intermediate, not the arithmetic — and that a composition is worth checking
+  against the kernels it is made of before it is worth optimising at all.
 - **Two that are answers rather than problems.** `empty_like` reads 0.00×
   because it zeroes: the kernels take `&mut [T]`, and reading uninitialised
   floats is undefined behaviour, so an "uninitialised" buffer here is a zeroed
   one. `flipud` reads 0.00× because NumPy returns a view with a negative stride
   and a tensor here is always contiguous, so a flip is a copy.
 
-`inner` 0.87–0.92× and `squeeze` 0.93 sit just under the dead band rather than
-in a group. Sixteen of the 166 names measured here are below 0.95, down from
-twenty-two, and every name that left did so by reaching a kernel rather than by
-getting a better one.
+`inner` 0.87–0.98× sits just under the dead band rather than in a group;
+`squeeze` was next to it at 0.93 and is now 1.04–1.05, which is inside it.
+Fifteen of the 166 names measured here are below 0.95 in both dtypes, down
+from sixteen and from twenty-two before that, and every name that left did so
+by reaching a kernel rather than by getting a better one. Fourteen is the
+fairer figure: `log10` is on the list because this run put its float32 at
+0.92, and re-timing it gives 0.96, 0.98 and 1.01. A threshold counted against
+a single run will do that, which is the argument for watching the family mean
+rather than the membership of a list.
 
 ### One row that is measuring the wrong question
 
@@ -561,9 +597,14 @@ operation. The per-family geometric mean at the bottom is the summary worth
 watching after a change. As of the run these tables come from:
 
 ```
-elementwise  1.40x     gemm  0.90x     reduction  2.13x
-shape        1.64x     unary 1.38x     surface    2.10x
+elementwise  1.42x     gemm  0.90x     reduction  1.98x
+shape        1.67x     unary 1.32x     surface    2.13x
 ```
+
+Four of those moved by less than the 8% a ratio drifts between runs on a
+shared container, which is the point of watching the family rather than the
+row: `reduction` reading 1.98 where it read 2.13 is not a regression anybody
+introduced, and neither is `surface` reading 2.13 where it read 2.10.
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
 what the crossing costs.
