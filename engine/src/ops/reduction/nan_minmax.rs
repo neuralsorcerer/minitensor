@@ -326,6 +326,61 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
 macro_rules! nan_extremum_all_entry {
     ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            const LANES: usize = $lanes;
+
+            /// One chunk's extremum and whether it saw a real value. See
+            /// `super::sum_prod`'s `float_extremum_all!` for why the body is
+            /// written once and inlined into a second compilation.
+            #[inline(always)]
+            fn body(chunk: &[$ty]) -> ($ty, bool) {
+                let mut bests = [$identity; LANES];
+                let mut reals = [0u32; LANES];
+                let mut blocks = chunk.chunks_exact(LANES);
+                for block in &mut blocks {
+                    for lane in 0..LANES {
+                        let v = block[lane];
+                        if v $better bests[lane] {
+                            bests[lane] = v;
+                        }
+                        // `as u32` rather than a bool `|=`: keeps the lane
+                        // update branch-free so it vectorizes with the
+                        // comparison above.
+                        reals[lane] |= (v == v) as u32;
+                    }
+                }
+                let mut best: $ty = $identity;
+                let mut real = 0u32;
+                for lane in 0..LANES {
+                    if bests[lane] $better best {
+                        best = bests[lane];
+                    }
+                    real |= reals[lane];
+                }
+                for &v in blocks.remainder() {
+                    if v $better best {
+                        best = v;
+                    }
+                    real |= (v == v) as u32;
+                }
+                (best, real != 0)
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx")]
+            fn body_avx(chunk: &[$ty]) -> ($ty, bool) {
+                body(chunk)
+            }
+
+            #[inline]
+            fn fold_chunk(chunk: &[$ty]) -> ($ty, bool) {
+                #[cfg(target_arch = "x86_64")]
+                if crate::ops::simd::simd_capabilities().avx {
+                    // SAFETY: `detect` confirmed avx on this CPU.
+                    return unsafe { body_avx(chunk) };
+                }
+                body(chunk)
+            }
+
             let data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -334,39 +389,7 @@ macro_rules! nan_extremum_all_entry {
                 data,
                 MINMAX_CHUNK,
                 ($identity, false),
-                &|_, chunk| {
-                    const LANES: usize = $lanes;
-                    let mut bests = [$identity; LANES];
-                    let mut reals = [0u32; LANES];
-                    let mut blocks = chunk.chunks_exact(LANES);
-                    for block in &mut blocks {
-                        for lane in 0..LANES {
-                            let v = block[lane];
-                            if v $better bests[lane] {
-                                bests[lane] = v;
-                            }
-                            // `as u32` rather than a bool `|=`: keeps the lane
-                            // update branch-free so it vectorizes with the
-                            // comparison above.
-                            reals[lane] |= (v == v) as u32;
-                        }
-                    }
-                    let mut best: $ty = $identity;
-                    let mut real = 0u32;
-                    for lane in 0..LANES {
-                        if bests[lane] $better best {
-                            best = bests[lane];
-                        }
-                        real |= reals[lane];
-                    }
-                    for &v in blocks.remainder() {
-                        if v $better best {
-                            best = v;
-                        }
-                        real |= (v == v) as u32;
-                    }
-                    (best, real != 0)
-                },
+                &|_, chunk| fold_chunk(chunk),
                 &|a, b| (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1),
             );
 
@@ -385,16 +408,16 @@ macro_rules! nan_extremum_all_entry {
 }
 
 nan_extremum_all_entry!(
-    nanmax_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::NEG_INFINITY, >, 8
+    nanmax_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::NEG_INFINITY, >, 16
 );
 nan_extremum_all_entry!(
-    nanmax_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::NEG_INFINITY, >, 4
+    nanmax_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::NEG_INFINITY, >, 8
 );
 nan_extremum_all_entry!(
-    nanmin_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::INFINITY, <, 8
+    nanmin_all_f32, as_f32_slice, as_f32_slice_mut, f32, "f32", f32::INFINITY, <, 16
 );
 nan_extremum_all_entry!(
-    nanmin_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::INFINITY, <, 4
+    nanmin_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::INFINITY, <, 8
 );
 /// The chunked lane fold both index reductions below share: `(nan_at, best,
 /// best_at)` over `data`, with positions absolute.

@@ -561,9 +561,91 @@ pub(crate) const MINMAX_CHUNK: usize = 8 * 1024;
 /// over 2M elements, single-threaded), with identical results including the NaN
 /// flag. That gap was visible from Python: `max` was the one f32 reduction
 /// lagging the others, while `sum` was already four times quicker.
+///
+/// Eight was not enough of them. `sum` stayed twice as quick over the same
+/// buffer long after that split, and the reason is arithmetic rather than
+/// anything about the kernels: `maxps` has a four-cycle latency with two
+/// issuing per cycle, so eight chains are needed to keep the unit fed -- and
+/// eight `f32` *lanes* is two SSE vectors, so two chains. Per element over one
+/// chunk, single-threaded:
+///
+/// ```text
+///   lanes       f32+NaN       f64+NaN
+///       4      0.363 ns      0.357 ns
+///       8      0.175         0.232
+///      16      0.128         0.275
+///      32      0.635              -
+/// ```
+///
+/// The NaN flag is what caps it: it is a second array, so the registers run
+/// out an octave sooner than they would for a bare extremum, which kept
+/// improving to 32 lanes and 0.055 ns -- level with `sum`. Carrying the flag
+/// costs about a tenth at the right width and the whole win at the wrong one,
+/// which is why these numbers are per fold shape and not one constant.
 macro_rules! float_extremum_all {
     ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            const LANES: usize = $lanes;
+
+            /// One chunk's extremum and NaN flag.
+            ///
+            /// `#[inline(always)]` is what makes the wrapper below a second
+            /// compilation rather than a call to this one: inlining into a
+            /// `#[target_feature]` function rebuilds the body with that
+            /// function's registers available. The same arrangement the binary
+            /// kernels in `ops::simd` use.
+            #[inline(always)]
+            fn body(chunk: &[$ty]) -> ($ty, bool) {
+                let mut bests = [$identity; LANES];
+                let mut nans = [0u32; LANES];
+                let mut blocks = chunk.chunks_exact(LANES);
+                for block in &mut blocks {
+                    for lane in 0..LANES {
+                        let v = block[lane];
+                        if v $better bests[lane] {
+                            bests[lane] = v;
+                        }
+                        // `as u32` rather than a bool `|=`: keeps the lane
+                        // update branch-free so it vectorizes with the
+                        // comparison above.
+                        nans[lane] |= (v != v) as u32;
+                    }
+                }
+                let mut best: $ty = $identity;
+                let mut nan = 0u32;
+                for lane in 0..LANES {
+                    if bests[lane] $better best {
+                        best = bests[lane];
+                    }
+                    nan |= nans[lane];
+                }
+                for &v in blocks.remainder() {
+                    if v $better best {
+                        best = v;
+                    }
+                    nan |= (v != v) as u32;
+                }
+                (best, nan != 0)
+            }
+
+            // `avx`, not `avx2`: the comparison and select are float
+            // operations and 256-bit `maxps`/`maxpd` arrived with AVX.
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx")]
+            fn body_avx(chunk: &[$ty]) -> ($ty, bool) {
+                body(chunk)
+            }
+
+            #[inline]
+            fn fold_chunk(chunk: &[$ty]) -> ($ty, bool) {
+                #[cfg(target_arch = "x86_64")]
+                if crate::ops::simd::simd_capabilities().avx {
+                    // SAFETY: `detect` confirmed avx on this CPU.
+                    return unsafe { body_avx(chunk) };
+                }
+                body(chunk)
+            }
+
             let data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -572,39 +654,7 @@ macro_rules! float_extremum_all {
                 data,
                 MINMAX_CHUNK,
                 ($identity, false),
-                &|_, chunk| {
-                    const LANES: usize = $lanes;
-                    let mut bests = [$identity; LANES];
-                    let mut nans = [0u32; LANES];
-                    let mut blocks = chunk.chunks_exact(LANES);
-                    for block in &mut blocks {
-                        for lane in 0..LANES {
-                            let v = block[lane];
-                            if v $better bests[lane] {
-                                bests[lane] = v;
-                            }
-                            // `as u32` rather than a bool `|=`: keeps the lane
-                            // update branch-free so it vectorizes with the
-                            // comparison above.
-                            nans[lane] |= (v != v) as u32;
-                        }
-                    }
-                    let mut best: $ty = $identity;
-                    let mut nan = 0u32;
-                    for lane in 0..LANES {
-                        if bests[lane] $better best {
-                            best = bests[lane];
-                        }
-                        nan |= nans[lane];
-                    }
-                    for &v in blocks.remainder() {
-                        if v $better best {
-                            best = v;
-                        }
-                        nan |= (v != v) as u32;
-                    }
-                    (best, nan != 0)
-                },
+                &|_, chunk| fold_chunk(chunk),
                 &|a, b| (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1),
             );
 
@@ -625,9 +675,80 @@ macro_rules! float_extremum_all {
 /// Integer min/max over the same chunked fold; no NaN to consider.
 /// Integer min/max, split across `$lanes` accumulators for the same reason as
 /// the float version above: one `best` serializes the compare-and-select.
+///
+/// These carry one array rather than two, so they keep improving past where
+/// the float ones stop. Per element over one chunk, single-threaded:
+///
+/// ```text
+///   lanes         i32           i64
+///       4            -      0.247 ns
+///       8      0.183 ns      0.246
+///      16      0.134         0.322
+///      32      0.126         0.318
+///      64      0.124              -
+/// ```
+///
+/// `i32` takes 32 -- 64 is another 2% and spends every vector register to get
+/// it. `i64` is left at 4: eight measured the same to within the noise, and a
+/// count is not worth changing without a reason to.
 macro_rules! int_extremum_all {
-    ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr) => {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $wide:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            const LANES: usize = $lanes;
+
+            /// One chunk's extremum. See the float version for why the body is
+            /// written once and inlined into a second compilation.
+            #[inline(always)]
+            fn body(chunk: &[$ty]) -> $ty {
+                let mut bests = [$identity; LANES];
+                let mut blocks = chunk.chunks_exact(LANES);
+                for block in &mut blocks {
+                    for lane in 0..LANES {
+                        if block[lane] $better bests[lane] {
+                            bests[lane] = block[lane];
+                        }
+                    }
+                }
+                let mut best: $ty = $identity;
+                for lane in 0..LANES {
+                    if bests[lane] $better best {
+                        best = bests[lane];
+                    }
+                }
+                for &v in blocks.remainder() {
+                    if v $better best {
+                        best = v;
+                    }
+                }
+                best
+            }
+
+            // `avx2`, not `avx`: these are integer compares, and the 256-bit
+            // `vpmaxsd` that serves them is an AVX2 instruction.
+            //
+            // `$wide` is false for `i64`, which is the one type that does not
+            // want it. There is no packed 64-bit integer maximum before
+            // AVX-512, so the wide body has to synthesise one from a compare
+            // and a blend, and that measured slower than the baseline it
+            // replaced -- 0.291 ns an element against 0.247. A second
+            // compilation is only worth having where it is faster.
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2")]
+            #[allow(dead_code)]
+            fn body_avx2(chunk: &[$ty]) -> $ty {
+                body(chunk)
+            }
+
+            #[inline]
+            fn fold_chunk(chunk: &[$ty]) -> $ty {
+                #[cfg(target_arch = "x86_64")]
+                if $wide && crate::ops::simd::simd_capabilities().avx2 {
+                    // SAFETY: `detect` confirmed avx2 on this CPU.
+                    return unsafe { body_avx2(chunk) };
+                }
+                body(chunk)
+            }
+
             let data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -636,30 +757,7 @@ macro_rules! int_extremum_all {
                 data,
                 MINMAX_CHUNK,
                 $identity,
-                &|_, chunk| {
-                    const LANES: usize = $lanes;
-                    let mut bests = [$identity; LANES];
-                    let mut blocks = chunk.chunks_exact(LANES);
-                    for block in &mut blocks {
-                        for lane in 0..LANES {
-                            if block[lane] $better bests[lane] {
-                                bests[lane] = block[lane];
-                            }
-                        }
-                    }
-                    let mut best: $ty = $identity;
-                    for lane in 0..LANES {
-                        if bests[lane] $better best {
-                            best = bests[lane];
-                        }
-                    }
-                    for &v in blocks.remainder() {
-                        if v $better best {
-                            best = v;
-                        }
-                    }
-                    best
-                },
+                &|_, chunk| fold_chunk(chunk),
                 &|a, b| if b $better a { b } else { a },
             );
 
@@ -685,7 +783,7 @@ float_extremum_all!(
     "f32",
     f32::NEG_INFINITY,
     >,
-    8
+    16
 );
 float_extremum_all!(
     max_all_f64,
@@ -695,7 +793,7 @@ float_extremum_all!(
     "f64",
     f64::NEG_INFINITY,
     >,
-    4
+    8
 );
 int_extremum_all!(
     max_all_i32,
@@ -705,7 +803,8 @@ int_extremum_all!(
     "i32",
     i32::MIN,
     >,
-    8
+    32,
+    true
 );
 int_extremum_all!(
     max_all_i64,
@@ -715,7 +814,8 @@ int_extremum_all!(
     "i64",
     i64::MIN,
     >,
-    4
+    4,
+    false
 );
 
 pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
@@ -743,7 +843,7 @@ float_extremum_all!(
     "f32",
     f32::INFINITY,
     <,
-    8
+    16
 );
 float_extremum_all!(
     min_all_f64,
@@ -753,7 +853,7 @@ float_extremum_all!(
     "f64",
     f64::INFINITY,
     <,
-    4
+    8
 );
 int_extremum_all!(
     min_all_i32,
@@ -763,7 +863,8 @@ int_extremum_all!(
     "i32",
     i32::MAX,
     <,
-    8
+    32,
+    true
 );
 int_extremum_all!(
     min_all_i64,
@@ -773,7 +874,8 @@ int_extremum_all!(
     "i64",
     i64::MAX,
     <,
-    4
+    4,
+    false
 );
 
 pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
