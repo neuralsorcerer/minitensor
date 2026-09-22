@@ -419,105 +419,160 @@ nan_extremum_all_entry!(
 nan_extremum_all_entry!(
     nanmin_all_f64, as_f64_slice, as_f64_slice_mut, f64, "f64", f64::INFINITY, <, 8
 );
-/// The chunked lane fold both index reductions below share: `(nan_at, best,
-/// best_at)` over `data`, with positions absolute.
+/// The first position in `data` where `test` holds, asked a block at a time.
 ///
-/// Written with one accumulator and an `Option` it did not vectorise --
-/// `argmax` over a million float32 took 0.34ms where `max` over the same data,
-/// the same scan without the index, takes 0.065. Lane-blocked it takes 0.134.
+/// The per-lane test accumulates into one flag rather than branching, which is
+/// the shape the NaN flags in the folds above already use and vectorizes the
+/// same way; the branch is once per block, and predicted not-taken until the
+/// block that holds the answer. Only that block is then walked in order, which
+/// is what makes the answer the *first* match rather than any of them.
 ///
-/// Four things the lanes make delicate, and each is why the body is shaped the
-/// way it is:
+/// Spelled as `iter().position(..)` this is a scalar loop, and for an extremum
+/// sitting at the end of the data it cost more than the fold it was saving:
+/// over one chunk, 0.667 ns an element against 0.214 for this.
 ///
-/// * Lane `l` walks positions `l, l + LANES, l + 2 * LANES, ...`, so a later
-///   lane holds *earlier* positions than an earlier lane's second block. The
-///   comparison inside a lane can stay strict -- it meets its own positions in
-///   order, so an equal value never displaces the one it already has -- but
-///   folding the lanes together has to break ties on the index explicitly.
-/// * The remainder comes after every lane block, so its positions are later
-///   than all of them, and a strict comparison is again all it needs.
-/// * A NaN satisfies no comparison, so it can never become a lane's best and
-///   the tie-break never sees one. That is why the tie-break reads `==` rather
-///   than a negated comparison: with no NaN on either side, "neither is
-///   better" *is* equality, and the two candidates for a tie -- equal values,
-///   and `+0.0` against `-0.0` -- both want the lower index.
-/// * `$nan` decides whether NaN is noticed at all, and when it is the loop
-///   only *flags* it, per lane and branch-free, the way the value fold in
-///   `sum_prod` does; a chunk that raised its flag then locates the first NaN
-///   with a short-circuiting scan. Carrying the position instead costs more
-///   than everything else put together: a `usize` min and select per element,
-///   which for f32 is two 64-bit-lane vectors against the one the values
-///   occupy. Carried, f32 `argmax` sat at 0.297ms over a million elements;
-///   flagged and located it is 0.134, and f64 went 0.363 to 0.199.
-///   `nanarg{min,max}` and the integer instantiations pass `false`, which
-///   compiles the flag, the locate and the branch that reads them away.
+/// The block is far wider than the folds above use, and deliberately: they
+/// carry two accumulator arrays and stop wanting more chains once the
+/// registers fill, while this carries one flag and is a plain scan, so it
+/// keeps gaining. Sharing the fold's count is what left float64 `argmax` at
+/// 2.5x its own `max` where float32 sat at 1.34x. With the target at the end,
+/// so the whole scan runs:
 ///
-/// Positions inside the loop are `u32` and relative to the chunk, which
-/// `par_fold_chunks` caps at `MINMAX_CHUNK` -- 8192, so they cannot overflow.
-/// That is what makes the index lanes the same width as the value lanes for a
-/// 32-bit type, rather than twice it.
+/// ```text
+///   lanes      f32       f64
+///       8   0.147 ns  0.297 ns
+///      16   0.078     0.288
+///      32   0.082     0.138
+///      64   0.049     0.092
+/// ```
+#[inline(always)]
+fn locate_first<T: Copy>(data: &[T], test: impl Fn(T) -> bool) -> Option<usize> {
+    const LANES: usize = 64;
+    let mut base = 0usize;
+    let mut blocks = data.chunks_exact(LANES);
+    for block in &mut blocks {
+        let mut hit = 0u32;
+        for lane in 0..LANES {
+            hit |= test(block[lane]) as u32;
+        }
+        if hit != 0 {
+            for lane in 0..LANES {
+                if test(block[lane]) {
+                    return Some(base + lane);
+                }
+            }
+        }
+        base += LANES;
+    }
+    for (step, &v) in blocks.remainder().iter().enumerate() {
+        if test(v) {
+            return Some(base + step);
+        }
+    }
+    None
+}
+
+/// The chunked fold both index reductions share: `(nan_at, best, best_at)`
+/// over `data`, with positions absolute.
+///
+/// Two passes over each chunk rather than one, which is the opposite of what
+/// it looks like it should want. Carrying the positions alongside the values
+/// is a third accumulator array, and three arrays run out of registers where
+/// two do not -- `argmax` sat at 0.424 ns an element against `max`'s 0.101 for
+/// the same scan. Dropping them leaves pass one *as* `max`, at `max`'s width
+/// and with `max`'s second compilation, and pass two is a search for a value
+/// already known. A chunk is 32KB and is still in cache when the second pass
+/// reads it.
+///
+/// Measured over one chunk, against carrying the positions, with the extremum
+/// placed at a quarter, half and the end of the data -- the last being the
+/// worst case for a search that stops at its first match:
+///
+/// ```text
+///   0.407 -> 0.120     0.430 -> 0.157     0.510 -> 0.214
+/// ```
+///
+/// The first match is also the tie-break the one-pass form spelled out: equal
+/// values go to the lower index, which is what a forward search returns
+/// without being asked. Signed zeros fall out of it too, `-0.0 == 0.0` being
+/// true, so whichever came first is found first.
 macro_rules! arg_lane_fold {
-    ($data:expr, $ty:ty, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
+    ($data:expr, $ty:ty, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {{
+        const LANES: usize = $lanes;
+
+        /// Pass one: the extremum and whether a NaN is present, with no
+        /// positions. This is `sum_prod`'s `float_extremum_all!` body.
+        #[inline(always)]
+        fn body(chunk: &[$ty]) -> ($ty, bool) {
+            let mut bests = [$identity; LANES];
+            let mut nans = [0u32; LANES];
+            let mut blocks = chunk.chunks_exact(LANES);
+            for block in &mut blocks {
+                for lane in 0..LANES {
+                    let v = block[lane];
+                    if v $better bests[lane] {
+                        bests[lane] = v;
+                    }
+                    if $nan {
+                        nans[lane] |= (v != v) as u32;
+                    }
+                }
+            }
+            let mut best: $ty = $identity;
+            let mut nan = 0u32;
+            for lane in 0..LANES {
+                if bests[lane] $better best {
+                    best = bests[lane];
+                }
+                nan |= nans[lane];
+            }
+            for &v in blocks.remainder() {
+                if v $better best {
+                    best = v;
+                }
+                if $nan {
+                    nan |= (v != v) as u32;
+                }
+            }
+            (best, nan != 0)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx")]
+        fn body_avx(chunk: &[$ty]) -> ($ty, bool) {
+            body(chunk)
+        }
+
+        #[inline]
+        fn fold_chunk(chunk: &[$ty]) -> ($ty, bool) {
+            #[cfg(target_arch = "x86_64")]
+            if crate::ops::simd::simd_capabilities().avx {
+                // SAFETY: `detect` confirmed avx on this CPU.
+                return unsafe { body_avx(chunk) };
+            }
+            body(chunk)
+        }
+
         par_fold_chunks(
             $data,
             MINMAX_CHUNK,
             (usize::MAX, $identity, usize::MAX),
             &|offset, chunk| {
-                const LANES: usize = $lanes;
-                let mut bests = [$identity; LANES];
-                let mut wheres = [u32::MAX; LANES];
-                let mut nans = [0u32; LANES];
-                let mut blocks = chunk.chunks_exact(LANES);
-                let mut base = 0u32;
-                for block in &mut blocks {
-                    for lane in 0..LANES {
-                        let v = block[lane];
-                        if v $better bests[lane] {
-                            bests[lane] = v;
-                            wheres[lane] = base + lane as u32;
-                        }
-                        if $nan {
-                            nans[lane] |= (v != v) as u32;
-                        }
-                    }
-                    base += LANES as u32;
-                }
-
-                let mut best: $ty = $identity;
-                let mut best_at = u32::MAX;
-                let mut nan = 0u32;
-                for lane in 0..LANES {
-                    nan |= nans[lane];
-                    if bests[lane] $better best
-                        || (bests[lane] == best && wheres[lane] < best_at)
-                    {
-                        best = bests[lane];
-                        best_at = wheres[lane];
-                    }
-                }
-                for (step, &v) in blocks.remainder().iter().enumerate() {
-                    let at = base + step as u32;
-                    if v $better best {
-                        best = v;
-                        best_at = at;
-                    }
-                    if $nan {
-                        nan |= (v != v) as u32;
-                    }
-                }
-
-                let nan_at = if nan != 0 {
-                    chunk
-                        .iter()
-                        .position(|v| v != v)
+                let (best, nan) = fold_chunk(chunk);
+                let nan_at = if nan {
+                    locate_first(chunk, |v: $ty| v != v)
                         .map_or(usize::MAX, |at| offset + at)
                 } else {
                     usize::MAX
                 };
-                let best_at = if best_at == u32::MAX {
+                // A NaN anywhere outranks every value, so once this chunk has
+                // one its extremum's position cannot be the answer and the
+                // second pass is not run at all.
+                let best_at = if nan_at != usize::MAX {
                     usize::MAX
                 } else {
-                    offset + best_at as usize
+                    locate_first(chunk, |v: $ty| v == best)
+                        .map_or(usize::MAX, |at| offset + at)
                 };
                 (nan_at, best, best_at)
             },
@@ -529,8 +584,8 @@ macro_rules! arg_lane_fold {
                     (nan, a.1, a.2)
                 }
             },
-            )
-    };
+        )
+    }};
 }
 
 /// `arg{min,max}_all_*`: the index of the global extremum.
@@ -637,29 +692,29 @@ macro_rules! arg_extremum_all_bool {
     };
 }
 
-arg_extremum_all_lanes!(argmax_all_f32, as_f32_slice, f32, "f32", f32::NEG_INFINITY, >, 8, true);
-arg_extremum_all_lanes!(argmax_all_f64, as_f64_slice, f64, "f64", f64::NEG_INFINITY, >, 4, true);
-arg_extremum_all_lanes!(argmax_all_i32, as_i32_slice, i32, "i32", i32::MIN, >, 8, false);
-arg_extremum_all_lanes!(argmax_all_i64, as_i64_slice, i64, "i64", i64::MIN, >, 4, false);
+arg_extremum_all_lanes!(argmax_all_f32, as_f32_slice, f32, "f32", f32::NEG_INFINITY, >, 16, true);
+arg_extremum_all_lanes!(argmax_all_f64, as_f64_slice, f64, "f64", f64::NEG_INFINITY, >, 8, true);
+arg_extremum_all_lanes!(argmax_all_i32, as_i32_slice, i32, "i32", i32::MIN, >, 16, false);
+arg_extremum_all_lanes!(argmax_all_i64, as_i64_slice, i64, "i64", i64::MIN, >, 8, false);
 arg_extremum_all_bool!(argmax_all_bool, true);
 
-arg_extremum_all_lanes!(argmin_all_f32, as_f32_slice, f32, "f32", f32::INFINITY, <, 8, true);
-arg_extremum_all_lanes!(argmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY, <, 4, true);
-arg_extremum_all_lanes!(argmin_all_i32, as_i32_slice, i32, "i32", i32::MAX, <, 8, false);
-arg_extremum_all_lanes!(argmin_all_i64, as_i64_slice, i64, "i64", i64::MAX, <, 4, false);
+arg_extremum_all_lanes!(argmin_all_f32, as_f32_slice, f32, "f32", f32::INFINITY, <, 16, true);
+arg_extremum_all_lanes!(argmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY, <, 8, true);
+arg_extremum_all_lanes!(argmin_all_i32, as_i32_slice, i32, "i32", i32::MAX, <, 16, false);
+arg_extremum_all_lanes!(argmin_all_i64, as_i64_slice, i64, "i64", i64::MAX, <, 8, false);
 arg_extremum_all_bool!(argmin_all_bool, false);
 
 nanarg_extremum_all_lanes!(
-    nanargmax_all_f32, as_f32_slice, f32, "f32", f32::NEG_INFINITY, >, 8, "nanargmax"
+    nanargmax_all_f32, as_f32_slice, f32, "f32", f32::NEG_INFINITY, >, 16, "nanargmax"
 );
 nanarg_extremum_all_lanes!(
-    nanargmax_all_f64, as_f64_slice, f64, "f64", f64::NEG_INFINITY, >, 4, "nanargmax"
+    nanargmax_all_f64, as_f64_slice, f64, "f64", f64::NEG_INFINITY, >, 8, "nanargmax"
 );
 nanarg_extremum_all_lanes!(
-    nanargmin_all_f32, as_f32_slice, f32, "f32", f32::INFINITY, <, 8, "nanargmin"
+    nanargmin_all_f32, as_f32_slice, f32, "f32", f32::INFINITY, <, 16, "nanargmin"
 );
 nanarg_extremum_all_lanes!(
-    nanargmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY, <, 4, "nanargmin"
+    nanargmin_all_f64, as_f64_slice, f64, "f64", f64::INFINITY, <, 8, "nanargmin"
 );
 
 /// Fold one contiguous float row to its extremum, propagating NaN.
