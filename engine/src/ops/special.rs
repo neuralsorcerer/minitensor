@@ -79,6 +79,50 @@ macro_rules! wide_grad_kernel {
     };
 }
 
+// --- cbrt ------------------------------------------------------------------
+
+unit_kernel!(
+    /// The real cube root. Float32 goes through the vectorized kernel and
+    /// never reaches this arm; see [`cbrt`].
+    CBRT, |x, _p| x.cbrt()
+);
+unit_grad_kernel!(
+    /// `d/dx x^(1/3) = 1 / (3 x^(2/3))`, written through the root rather than
+    /// through a second fractional power so it is defined for a negative `x`
+    /// -- and infinite at zero, where the curve is vertical and that is the
+    /// honest answer.
+    CBRT_D, |x, g, _p| {
+        let root = x.cbrt();
+        g / (3.0 * root * root)
+    }
+);
+
+/// The real cube root, element-wise.
+///
+/// Not `x ** (1 / 3)`, which is NaN for every negative value: no real branch
+/// of a fractional power exists there. This takes the root of the magnitude
+/// and puts the sign back, which is the real root every real number has.
+///
+/// That used to be four passes of Python -- a `sign`, an `abs`, a `pow` and a
+/// multiply, with three full-size temporaries -- and it is one kernel now.
+/// Float32 composes it from `log` and `exp` in float64 the way `pow` does,
+/// which costs the same as one logarithm and is accurate to 3e-15 against the
+/// 6e-8 a float32 can see.
+///
+/// Float64 keeps `f64::cbrt`, which has no kernel to borrow.
+pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return cbrt(&widened);
+    }
+    if tensor.dtype() == DataType::Float32 {
+        let values = crate::ops::activation::cbrt_f32(tensor)?;
+        return unary_unit_from_data(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
+    }
+    unary_unit(tensor, "cbrt", CBRT, CBRT_D, [0.0; 2])
+}
+
 // --- exp2 ------------------------------------------------------------------
 
 unit_kernel!(

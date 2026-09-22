@@ -441,6 +441,26 @@ fn log_scaled_f32(tensor: &Tensor, inv_ln_base: f64) -> Result<TensorData> {
     ))
 }
 
+/// Vectorized. The real cube root as `exp(log|x| / 3)` with the sign put
+/// back -- see `ops::special::cbrt`.
+pub(crate) fn cbrt_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `cbrt` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.cbrt(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
 /// Vectorized. `2^x` as `exp(x * ln 2)` with the product formed in float64 --
 /// see `ops::special::exp2` for why that is the accurate spelling and not the
 /// naive one.

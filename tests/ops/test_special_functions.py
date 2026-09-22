@@ -371,3 +371,94 @@ def test_float32_exp2_is_the_same_at_every_length(size):
         mt.exp2(mt.from_numpy(values)).numpy(),
         np.exp2(values.astype(np.float64)).astype(np.float32),
     )
+
+
+# `cbrt` was four passes of Python -- a `sign`, an `abs`, a `pow` and a
+# multiply -- and is one kernel now, composed from `log` and `exp` in float64.
+# It is odd, so only the magnitude goes through the logarithm and the sign is
+# put back; that is also what separates it from `x ** (1/3)`, which has no real
+# value at all for a negative input.
+CBRT_EDGES = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    8.0,
+    -8.0,
+    27.0,
+    -27.0,
+    np.inf,
+    -np.inf,
+    np.nan,
+    np.finfo("float32").max,
+    -np.finfo("float32").max,
+    np.finfo("float32").tiny,
+    -np.finfo("float32").tiny,
+    1e-45,
+    -1e-45,
+]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_cbrt_at_the_edges(dtype):
+    # None of these needs a fallback pass and each is worth checking rather
+    # than assuming: a zero takes the logarithm to -inf, which the
+    # exponential's own clamp turns back into a zero, and `copysign` restores
+    # the sign a cube root keeps.
+    values = np.array(CBRT_EDGES, dtype=dtype)
+    got = mt.cbrt(mt.from_numpy(values)).numpy()
+    want = np.cbrt(values.astype(np.float64)).astype(dtype)
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+
+
+@pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])
+def test_float32_cbrt_is_the_correctly_rounded_answer(size):
+    # The reference is the one the rest of these kernels are held to. Against
+    # it over four million values this kernel differs on none and `np.cbrt` on
+    # about a third, so comparing to NumPy at the same width would be
+    # comparing to the less accurate of the two.
+    rng = np.random.default_rng(size)
+    values = (
+        np.sign(rng.standard_normal(size)) * 10.0 ** rng.uniform(-38, 38, size)
+    ).astype("float32")
+    np.testing.assert_array_equal(
+        mt.cbrt(mt.from_numpy(values)).numpy(),
+        np.cbrt(values.astype(np.float64)).astype("float32"),
+    )
+
+
+def test_cbrt_of_an_exact_cube_is_exact():
+    # `cbrt(k**3)` has to be `k` and not a neighbour, in both signs, across the
+    # whole range where `k**3` is representable.
+    roots = np.concatenate([np.arange(1, 1000), 10.0 ** np.arange(0, 12)]).astype(
+        "float64"
+    )
+    roots = np.concatenate([roots, -roots])
+    cubes = (roots**3).astype("float32")
+    keep = np.isfinite(cubes) & (cubes != 0)
+    np.testing.assert_array_equal(
+        mt.cbrt(mt.from_numpy(cubes[keep])).numpy(),
+        np.cbrt(cubes[keep].astype(np.float64)).astype("float32"),
+    )
+
+
+def test_cbrt_is_defined_where_a_fractional_power_is_not():
+    # The whole reason it is not `x ** (1/3)`.
+    negatives = np.array([-1.0, -8.0, -2.5, -1e20], dtype="float64")
+    assert np.all(np.isnan(mt.pow(mt.from_numpy(negatives), 1.0 / 3.0).numpy()))
+    np.testing.assert_allclose(
+        mt.cbrt(mt.from_numpy(negatives)).numpy(), np.cbrt(negatives), rtol=1e-15
+    )
+
+
+def test_cbrt_gradient_matches_the_derivative():
+    # `d/dx x**(1/3) = 1/(3 x**(2/3))`, written through the root so it is
+    # defined for a negative `x` too.
+    values = np.array([1.0, 8.0, -27.0, 0.5, -0.5], dtype="float64")
+    tensor = mt.Tensor(values, dtype="float64", requires_grad=True)
+    mt.cbrt(tensor).sum().backward()
+    root = np.cbrt(values)
+    np.testing.assert_allclose(
+        tensor.grad.numpy(), 1.0 / (3.0 * root * root), rtol=1e-12
+    )

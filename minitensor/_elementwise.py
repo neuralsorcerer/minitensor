@@ -281,7 +281,6 @@ _ELEMENTWISE = (
     "add",
     "addcdiv",
     "addcmul",
-    "cbrt",
     "deg2rad",
     "divmod",
     "frexp",
@@ -335,21 +334,6 @@ def positive(input: object) -> Tensor:
     """
 
     return _atleast_tensor(input) * 1
-
-
-def cbrt(input: object) -> Tensor:
-    """The real cube root, element-wise.
-
-    Not `x ** (1 / 3)`, which is NaN for every negative value: a fractional
-    power is undefined there. The sign is taken out, the root taken of the
-    magnitude, and the sign put back, which is the real root that exists for
-    every real number.
-    """
-
-    tensor = _atleast_tensor(input)
-    if "float" not in str(tensor.dtype):
-        tensor = tensor.astype("float64")
-    return _F.sign(tensor) * _F.pow(_F.abs(tensor), 1.0 / 3.0)
 
 
 def divmod(input: object, other: object) -> tuple[Tensor, Tensor]:

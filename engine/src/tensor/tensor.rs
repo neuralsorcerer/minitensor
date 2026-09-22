@@ -2662,6 +2662,11 @@ impl Tensor {
         crate::ops::binary_math::atan2(self, other)
     }
 
+    /// The real cube root, element-wise.
+    pub fn cbrt(&self) -> Result<Self> {
+        crate::ops::special::cbrt(self)
+    }
+
     /// Element-wise larger of two tensors, ignoring a NaN in either.
     pub fn fmax(&self, other: &Self) -> Result<Self> {
         crate::ops::binary_math::fmax(self, other)

@@ -396,6 +396,8 @@ unary_forwarders!(
     erfinv => "Element-wise inverse error function on `[-1, 1]`, infinite at the endpoints and NaN outside them.",
     erfcx => "`exp(x**2) * erfc(x)`, which stays finite where `erfc` has underflowed.",
     exp => "Element-wise `e ** x`.",
+    cbrt => "The real cube root, element-wise. Unlike `x ** (1/3)` it is defined for negative values."
+        ,
     exp2 => "Element-wise `2 ** x`, from the hardware's base-2 exponential rather than `exp(x * ln 2)`.",
     expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
     floor => "Round towards negative infinity.",
@@ -2196,6 +2198,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(erf, parent)?)?;
     parent.add_function(wrap_pyfunction!(erfc, parent)?)?;
     parent.add_function(wrap_pyfunction!(erfinv, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cbrt, parent)?)?;
     parent.add_function(wrap_pyfunction!(exp2, parent)?)?;
     parent.add_function(wrap_pyfunction!(sinc, parent)?)?;
     parent.add_function(wrap_pyfunction!(lgamma, parent)?)?;

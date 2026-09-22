@@ -1368,6 +1368,28 @@ fn atan2_one<const FMA: bool>(y: f32, x: f32) -> f32 {
     folded as f32
 }
 
+/// The real cube root, as `exp(log|x| / 3)` with the sign put back.
+///
+/// Odd, so only the magnitude goes through the logarithm -- which is also the
+/// difference between this and `x ** (1/3)`, a fractional power that is NaN
+/// for every negative input because no real branch of it exists there.
+///
+/// Accurate for the same reason [`pow_one`] is: the error is about
+/// `|log x| / 3` times float64's epsilon, at most 30 times it for any float32
+/// input, which is 3e-15 against the 6e-8 a float32 needs.
+///
+/// No input needs a fallback, and each of the three that might is worth
+/// checking rather than assuming. A zero takes `log` to `-inf`, which the
+/// exponential's own clamp turns back into a zero, and `copysign` restores
+/// the sign a cube root keeps. An infinity survives both. A NaN fails every
+/// comparison in both and stays one.
+#[inline(always)]
+fn cbrt_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let root = exp_core::<FMA>(log_core::<FMA, false>(xd.abs(), 0.0) * (1.0 / 3.0));
+    root.copysign(xd) as f32
+}
+
 /// `x^y` as `exp(y * log(x))`, for the operands where that is what it means.
 ///
 /// `powf` is a `libm` call per element, 1.8ms over a million float32 where the
@@ -1757,6 +1779,7 @@ block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
 block_kernel!(asinh_block, asinh_one, asinh_block_avx512, asinh_block_avx2);
+block_kernel!(cbrt_block, cbrt_one, cbrt_block_avx512, cbrt_block_avx2);
 block_kernel_param_fallback!(
     pow_const_block,
     pow_const_one,
@@ -2217,6 +2240,19 @@ impl F32Kernel {
         )
     }
 
+    /// Write `cbrt(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn cbrt(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            cbrt_block,
+            cbrt_block_avx512,
+            cbrt_block_avx2
+        )
+    }
+
     /// Write `acosh(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn acosh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -2414,6 +2450,7 @@ mod tests {
         Erfc,
         Acosh,
         Asinh,
+        Cbrt,
         Exp2,
         Log,
         Log2,
@@ -2442,6 +2479,7 @@ mod tests {
             Op::Erfc => k.erfc(input, out),
             Op::Exp => k.exp(input, out),
             Op::Acosh => k.acosh(input, out),
+            Op::Cbrt => k.cbrt(input, out),
             Op::Asinh => k.asinh(input, out),
             Op::Exp2 => k.exp_scaled(input, out, std::f64::consts::LN_2),
             Op::Log => k.log(input, out),
@@ -2682,6 +2720,7 @@ mod tests {
             Op::Erfc => libm::erfc(xd) as f32,
             Op::Exp => xd.exp() as f32,
             Op::Acosh => xd.acosh() as f32,
+            Op::Cbrt => xd.cbrt() as f32,
             Op::Asinh => xd.asinh() as f32,
             Op::Exp2 => xd.exp2() as f32,
             Op::Log => xd.ln() as f32,
@@ -3129,6 +3168,7 @@ mod tests {
         for (op, scalar) in [
             (Op::Log10, f32::log10 as fn(f32) -> f32),
             (Op::Exp2, f32::exp2 as fn(f32) -> f32),
+            (Op::Cbrt, f32::cbrt as fn(f32) -> f32),
         ] {
             let (scalar_worst, scalar_differing) = sweep_scalar(op, scalar);
             println!(

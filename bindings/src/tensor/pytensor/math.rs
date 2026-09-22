@@ -100,6 +100,12 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The real cube root, element-wise. Unlike `x ** (1/3)` it is defined for negative values.
+    pub fn cbrt(&self) -> PyResult<Self> {
+        let result = self.inner.cbrt().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise `2 ** x`, from the hardware's base-2 exponential rather than `exp(x * ln 2)`.
     pub fn exp2(&self) -> PyResult<Self> {
         let result = self.inner.exp2().map_err(_convert_error)?;
