@@ -128,12 +128,12 @@ Reductions, where the win is parallelism plus a single pass:
 
 | op | 16M elements |
 |---|---|
-| `mean` | 8.0× |
-| `sum` | 5.6× |
-| `sum(axis=0)` | 3.4× |
-| `norm` | 3.3× |
-| `max` | 3.3× |
-| `argmax` | 1.1× |
+| `sum` | 4.7× |
+| `mean` | 4.7× |
+| `norm` | 2.9× |
+| `max` | 2.8× |
+| `sum(axis=0)` | 2.5× |
+| `argmax` | 1.2× |
 
 `norm` was on the wrong side of this table until the sweep found it: 0.33× at
 16M, while `sum` over the same data was 5.6×. It was not an accuracy tax — the
@@ -159,6 +159,30 @@ the values occupy — took 4000×4000 float32 from 4.55 ms to 1.90, and float64
 from 4.93 to 2.82. The one input that loses by locating the NaN instead of
 carrying it is an array whose first element is NaN, where NumPy returns
 immediately and this still scans.
+
+What the fold wants and what it was given turned out to be two different
+numbers. `sum` stayed twice as quick as `max` over the same buffer long after
+both were lane-blocked, which is odd for two kernels that each do one
+operation per element -- and it is not the NaN flag, which costs about a
+tenth. `maxps` has a four-cycle latency with two issuing per cycle, so eight
+independent chains are needed to keep the unit fed, and eight float32 *lanes*
+is two SSE vectors. Widening to the count each fold shape actually wants, and
+compiling each a second time with `avx` enabled the way the binary kernels in
+`ops::simd` already are, took one chunk's float32 `max` from 0.181 ns an
+element to 0.101, float64 from 0.357 to 0.214, and int32 from 0.183 to 0.045.
+
+Two things there are deliberately left on the table. AVX-512 measured *worse*
+than AVX, 0.099 against 0.088, which is the frequency penalty the binary
+kernels already record; and `int64` declines the wide body altogether, because
+there is no packed 64-bit integer maximum before AVX-512 and synthesising one
+from a compare and a blend measured slower than the baseline it would replace.
+
+`argmax` is the row that did not move, and now it is clear why rather than
+merely observed. It carries three accumulator arrays where `max` carries two,
+so it runs out of registers an octave sooner -- 8 lanes measured 0.424 ns an
+element against 16's 0.495 -- and is already at its best count. The distance
+between it and `max` is the positions, and closing it means not carrying them
+rather than carrying them faster.
 
 `nanargmax` and `nanargmin` were the same story with a worse multiplier. They
 were `argmax(where(isnan(x), -inf, x))` behind an all-NaN check built from a
@@ -612,16 +636,16 @@ operation. The per-family geometric mean at the bottom is the summary worth
 watching after a change. As of the run these tables come from:
 
 ```
-elementwise  1.63x     gemm  0.91x     reduction  2.06x
-shape        1.63x     unary 1.30x     surface    2.12x
+elementwise  1.63x     gemm  0.90x     reduction  2.27x
+shape        1.56x     unary 1.32x     surface    2.14x
 ```
 
-`elementwise` is the one that moved for a reason: 1.42x and nine rows behind
-NumPy one run earlier, against one row now, all of it the call overhead the
-table above describes. The rest moved by less than the 8% a ratio drifts
-between runs on a shared container, which is the point of watching the family
-rather than the row -- `reduction` reading 2.06 where it read 2.13 two runs
-ago is not a regression anybody introduced.
+Two of those moved for a reason and the rest did not. `elementwise` went 1.42x
+to 1.63x, and nine rows behind NumPy to two, all of it the call overhead the
+elementwise table describes. `reduction` went 1.98x to 2.27x on the extremum
+kernels getting the accumulator count and the second compilation they wanted.
+The others moved by less than the 8% a ratio drifts between runs on a shared
+container, which is the point of watching the family rather than the row.
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
 what the crossing costs.
