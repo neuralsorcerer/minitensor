@@ -29,7 +29,8 @@
 
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::{par_map_indexed, par_out_chunks},
+    ops::map::{par_all_chunk, par_any_chunk, par_fold_chunks, par_map_indexed, par_out_chunks},
+    ops::reduction::MINMAX_CHUNK,
     ops::util::pairwise_fold_vectors,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -544,50 +545,278 @@ pub fn histogram_edges(
     doubles_to_tensor(edges, input.device())
 }
 
+/// One value type's part in [`finite_extremes`].
+///
+/// The fold runs in the values' own width rather than in `f64`. Widening each
+/// element first cost 0.477ms over a million float32 against 0.431 for the
+/// same count of float64 -- the same work on half the bytes, which is the
+/// shape of a loop paying for a conversion rather than for memory.
+trait Extremes: Copy + Send + Sync {
+    /// Accumulators to run in parallel. A single running extremum makes the
+    /// compare-and-replace a serial dependency across the whole slice, which
+    /// is the thing the vectorizer cannot break; several independent ones let
+    /// it fill a register instead. The counts are measured rather than
+    /// derived -- eight for `f32`, four for the rest -- and on this toolchain
+    /// picking four for `f32` instead cost it about a third.
+    const LANES: usize;
+    /// Whether to find the two extremes in separate loops over each chunk
+    /// rather than in one loop carrying both.
+    ///
+    /// One loop is the better shape when it vectorizes: it reads the data
+    /// once, and for `f64` it emits `minpd`/`maxpd` and runs at memory speed.
+    /// But two accumulator arrays are twice the live chains, and for `f32`
+    /// that was over whatever budget makes the vectorizer try -- it emitted
+    /// scalar `minss` and cost 0.30ns an element, against 0.12 for `f64`
+    /// doing the same work on twice the bytes. Split into two loops, `f32`
+    /// takes the single-accumulator shape `min_all_f32` already proves
+    /// vectorizes, and the second read is nearly free because a chunk is 32KB
+    /// and stays in cache: 0.11ns an element. `f64` splits the other way,
+    /// 0.12 fused against 0.21 split, because its chunk is 64KB and the
+    /// second read leaves cache. Each takes the one it measured faster.
+    ///
+    /// Both are the same reduction and must stay so; only the loop nest
+    /// differs. Nothing here is portable -- it is one toolchain's
+    /// vectorizer -- but a measured constant beats picking the shape that
+    /// happens to be slower for the library's default dtype.
+    const SPLIT: bool;
+    /// Below every value, so folding it in changes nothing.
+    fn low_identity() -> Self;
+    /// Above every value.
+    fn high_identity() -> Self;
+    /// Whether this value belongs in the answer. Only the floats can say no.
+    fn keep(self) -> bool;
+    /// Strictly past the incumbent, which is what decides whether it is
+    /// replaced. A comparison against a NaN is false either way, so writing
+    /// the test in this direction discards a NaN rather than adopting it --
+    /// that is what lets the cheap pass ignore the question entirely.
+    fn below(self, other: Self) -> bool;
+    fn above(self, other: Self) -> bool;
+    fn widen(self) -> f64;
+}
+
+/// Declares [`Extremes`] for a type that is always finite, so `keep` is a
+/// constant the loop compiles away.
+macro_rules! exact_extremes {
+    ($ty:ty, $low:expr, $high:expr, $lanes:expr, $split:expr) => {
+        impl Extremes for $ty {
+            const LANES: usize = $lanes;
+            const SPLIT: bool = $split;
+            fn low_identity() -> Self {
+                $high
+            }
+            fn high_identity() -> Self {
+                $low
+            }
+            fn keep(self) -> bool {
+                true
+            }
+            fn below(self, other: Self) -> bool {
+                self < other
+            }
+            fn above(self, other: Self) -> bool {
+                self > other
+            }
+            fn widen(self) -> f64 {
+                self as f64
+            }
+        }
+    };
+}
+
+/// Declares [`Extremes`] for a float, where `keep` is the finiteness test and
+/// the identities are the infinities.
+macro_rules! float_extremes {
+    ($ty:ty, $lanes:expr, $split:expr) => {
+        impl Extremes for $ty {
+            const LANES: usize = $lanes;
+            const SPLIT: bool = $split;
+            fn low_identity() -> Self {
+                <$ty>::INFINITY
+            }
+            fn high_identity() -> Self {
+                <$ty>::NEG_INFINITY
+            }
+            fn keep(self) -> bool {
+                self.is_finite()
+            }
+            fn below(self, other: Self) -> bool {
+                self < other
+            }
+            fn above(self, other: Self) -> bool {
+                self > other
+            }
+            fn widen(self) -> f64 {
+                self as f64
+            }
+        }
+    };
+}
+
+float_extremes!(f32, 8, true);
+float_extremes!(f64, 4, false);
+exact_extremes!(i32, i32::MIN, i32::MAX, 4, false);
+exact_extremes!(i64, i64::MIN, i64::MAX, 4, false);
+
 /// The finite minimum and maximum in one pass, in parallel.
 ///
 /// Non-finite values are skipped rather than propagated: the edges have to be
 /// finite and increasing, and a NaN in the data is not a reason to refuse to
-/// bin the rest of it.
+/// bin the rest of it. This is a deliberate divergence -- NumPy takes a plain
+/// min and max, so one NaN makes its range `[nan, nan]` and it raises
+/// "autodetected range is not finite" rather than binning anything. A tensor
+/// with no finite value at all comes back as an empty range for the caller to
+/// substitute, which is the one case where there is nothing better to do.
 ///
 /// Read from the tensor's own buffer rather than from a `float64` copy of it.
 /// The copy is what the counting pass needs and it is not free -- 32MB for
 /// four million values, which cost more than the scan it was feeding.
+///
+/// Chunked and lane-blocked, for the two reasons the value reductions in
+/// `ops::reduction` are. A `par_iter().map().filter().fold()` hands rayon one
+/// work item per element and a closure chain it cannot see through, and a
+/// single running pair makes the compare-and-select a serial dependency that
+/// cannot vectorize either. Together they cost 0.846ms over a million float32
+/// where `min` and `max` through those reductions cost 0.134 between them --
+/// which was most of `histogram_bin_edges`, an op that is otherwise a
+/// `linspace` over two numbers.
 fn finite_extremes(tensor: &Tensor) -> Result<(f64, f64)> {
-    fn fold<T: Copy + Send + Sync>(
-        values: &[T],
-        to_double: impl Fn(T) -> f64 + Sync,
-    ) -> (f64, f64) {
-        values
-            .par_iter()
-            .map(|value| to_double(*value))
-            .filter(|value| value.is_finite())
-            .fold(
-                || (f64::INFINITY, f64::NEG_INFINITY),
-                |(low, high), value| (low.min(value), high.max(value)),
-            )
-            .reduce(
-                || (f64::INFINITY, f64::NEG_INFINITY),
-                |a, b| (a.0.min(b.0), a.1.max(b.1)),
-            )
+    /// The widest [`Extremes::LANES`], so one array type serves every dtype.
+    /// Only the first `T::LANES` of it are ever touched.
+    const MAX_LANES: usize = 8;
+
+    /// One pass of the lane-blocked fold. `SKIP` decides whether a value is
+    /// tested before it is folded in; both instances are monomorphised, so the
+    /// cheap one carries no trace of the test.
+    fn pass<T: Extremes, const SKIP: bool>(values: &[T]) -> (T, T) {
+        par_fold_chunks(
+            values,
+            MINMAX_CHUNK,
+            (T::low_identity(), T::high_identity()),
+            &|_, chunk| {
+                let lanes = T::LANES;
+                let mut lows = [T::low_identity(); MAX_LANES];
+                let mut highs = [T::high_identity(); MAX_LANES];
+                // See `Extremes::SPLIT` for why this is two shapes and not
+                // one. Both leave `lows` and `highs` holding the same values;
+                // only the order the elements are visited in differs, and an
+                // extremum does not care.
+                if T::SPLIT {
+                    for block in chunk.chunks_exact(lanes) {
+                        for lane in 0..lanes {
+                            let value = block[lane];
+                            if SKIP && !value.keep() {
+                                continue;
+                            }
+                            if value.below(lows[lane]) {
+                                lows[lane] = value;
+                            }
+                        }
+                    }
+                    for block in chunk.chunks_exact(lanes) {
+                        for lane in 0..lanes {
+                            let value = block[lane];
+                            if SKIP && !value.keep() {
+                                continue;
+                            }
+                            if value.above(highs[lane]) {
+                                highs[lane] = value;
+                            }
+                        }
+                    }
+                } else {
+                    for block in chunk.chunks_exact(lanes) {
+                        for lane in 0..lanes {
+                            let value = block[lane];
+                            if SKIP && !value.keep() {
+                                continue;
+                            }
+                            if value.below(lows[lane]) {
+                                lows[lane] = value;
+                            }
+                            if value.above(highs[lane]) {
+                                highs[lane] = value;
+                            }
+                        }
+                    }
+                }
+                let blocks = chunk.chunks_exact(lanes);
+                let mut low = T::low_identity();
+                let mut high = T::high_identity();
+                for lane in 0..lanes {
+                    if lows[lane].below(low) {
+                        low = lows[lane];
+                    }
+                    if highs[lane].above(high) {
+                        high = highs[lane];
+                    }
+                }
+                for &value in blocks.remainder() {
+                    if SKIP && !value.keep() {
+                        continue;
+                    }
+                    if value.below(low) {
+                        low = value;
+                    }
+                    if value.above(high) {
+                        high = value;
+                    }
+                }
+                (low, high)
+            },
+            &|a, b| {
+                (
+                    if b.0.below(a.0) { b.0 } else { a.0 },
+                    if b.1.above(a.1) { b.1 } else { a.1 },
+                )
+            },
+        )
+    }
+
+    /// The pair for one dtype, taking the skipping pass only when it can
+    /// change the answer.
+    ///
+    /// The first pass asks nothing about the values, and for the dtypes that
+    /// are always finite there is nothing to ask. For the floats it is still
+    /// almost always enough: a comparison against a NaN is false either way,
+    /// so a NaN never displaces a real value and is skipped at no cost, and
+    /// only an actual infinity can reach the result. Testing every element for
+    /// that cost 0.385ns each against a plain extremum's 0.062 -- six passes'
+    /// worth of arithmetic to find something that is usually not there. So it
+    /// is asked once, of the answer, instead of a billion times of the input.
+    fn fold<T: Extremes>(values: &[T]) -> (f64, f64) {
+        let (low, high) = pass::<T, false>(values);
+        if low.keep() && high.keep() {
+            return (low.widen(), high.widen());
+        }
+        // An infinity got through, or there was no value to find at all. The
+        // second pass settles which: it returns the identities for an input
+        // with nothing finite in it, and those widen to an empty range that
+        // `bin_edges` reads as `low > high` and substitutes.
+        let (low, high) = pass::<T, true>(values);
+        (low.widen(), high.widen())
     }
 
     let contiguous = tensor.contiguous()?;
     let data = contiguous.data();
     Ok(match tensor.dtype() {
-        DataType::Float32 => fold(data.as_f32_slice().ok_or_else(dtype_mismatch)?, |v| {
-            v as f64
-        }),
-        DataType::Float64 => fold(data.as_f64_slice().ok_or_else(dtype_mismatch)?, |v| v),
-        DataType::Int32 => fold(data.as_i32_slice().ok_or_else(dtype_mismatch)?, |v| {
-            v as f64
-        }),
-        DataType::Int64 => fold(data.as_i64_slice().ok_or_else(dtype_mismatch)?, |v| {
-            v as f64
-        }),
-        DataType::Bool => fold(data.as_bool_slice().ok_or_else(dtype_mismatch)?, |v| {
-            if v { 1.0 } else { 0.0 }
-        }),
+        DataType::Float32 => fold(data.as_f32_slice().ok_or_else(dtype_mismatch)?),
+        DataType::Float64 => fold(data.as_f64_slice().ok_or_else(dtype_mismatch)?),
+        DataType::Int32 => fold(data.as_i32_slice().ok_or_else(dtype_mismatch)?),
+        DataType::Int64 => fold(data.as_i64_slice().ok_or_else(dtype_mismatch)?),
+        // A boolean's extremes are decidable without folding at all: the
+        // maximum is `true` exactly when some value is, and the minimum
+        // `false` exactly when some value is not. Both scans short-circuit, so
+        // a mixed tensor usually answers inside its first chunk where the fold
+        // read every element of it -- 0.23ns each, the worst of any dtype,
+        // because eight one-byte lanes do not fill a register.
+        DataType::Bool => {
+            let values = data.as_bool_slice().ok_or_else(dtype_mismatch)?;
+            let any = par_any_chunk(values, MINMAX_CHUNK, &|chunk| chunk.contains(&true));
+            let all = par_all_chunk(values, MINMAX_CHUNK, &|chunk| !chunk.contains(&false));
+            // An empty tensor is `all` and not `any`, which comes out as the
+            // empty range the callers already substitute for.
+            (if all { 1.0 } else { 0.0 }, if any { 1.0 } else { 0.0 })
+        }
     })
 }
 

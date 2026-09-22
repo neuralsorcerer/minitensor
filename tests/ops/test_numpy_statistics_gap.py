@@ -306,3 +306,117 @@ def test_ediff1d_flattens_and_can_be_bracketed(values):
     # One element has no differences, and none is not an error.
     assert mt.ediff1d(mt.from_numpy(np.array([5.0]))).numpy().size == 0
     assert mt.ediff1d(mt.from_numpy(np.array([], dtype=np.float64))).numpy().size == 0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("length", [1, 7, 8, 9, 16, 17, 8191, 8192, 8193, 20_000])
+def test_bin_edges_skip_the_non_finite_at_every_lane_and_chunk_seam(dtype, length):
+    """The scan that finds the range folds several lanes at once and hands
+    rayon fixed-size chunks, so a value's fate depends on where in a block and
+    in a chunk it lands. These lengths straddle both seams.
+
+    Skipping them is a divergence from NumPy, which raises on a non-finite
+    range instead, so each case also pins that NumPy still refuses -- if a
+    later NumPy starts skipping, the reason this test computes its own
+    reference has gone away and should be revisited.
+
+    It also takes two shapes: a cheap pass that asks nothing about the values,
+    and a skipping pass taken only when the cheap one returns something
+    non-finite. That is safe because a comparison against a NaN is false
+    either way, so the cheap pass discards NaN without testing for it -- but
+    only if the comparison is written with the candidate on the left. Written
+    the other way it adopts the NaN and every edge becomes NaN, which is what
+    this pins.
+    """
+    rng = np.random.default_rng(11)
+    base = rng.standard_normal(length) * 3
+    places = {
+        "clean": [],
+        "nan first": [(0, np.nan)],
+        "nan last": [(length - 1, np.nan)],
+        "inf first": [(0, np.inf)],
+        "-inf last": [(length - 1, -np.inf)],
+        "both ends": [(0, np.inf), (length - 1, -np.inf)],
+        "inf and nan": [(0, np.inf), (length // 2, np.nan), (length - 1, -np.inf)],
+    }
+    for name, spec in places.items():
+        data = base.copy()
+        for index, value in spec:
+            data[index] = value
+        data = data.astype(dtype)
+        got = mt.histogram_bin_edges(mt.from_numpy(data), 8).numpy()
+        # There is no NumPy answer to compare against: it takes a plain min
+        # and max, so one NaN makes its range [nan, nan] and it raises rather
+        # than binning anything. The reference is the range of what is left
+        # once the non-finite are dropped, which is what skipping them means.
+        finite = data[np.isfinite(data)]
+        low, high = (
+            (0.0, 1.0)
+            if finite.size == 0
+            else (float(finite.min()), float(finite.max()))
+        )
+        # A range of no width -- one finite value, or all of them equal --
+        # is opened half a unit either side, the rule NumPy uses too.
+        if low == high:
+            low, high = low - 0.5, high + 0.5
+        want = np.linspace(low, high, 9)
+        want[-1] = high
+        np.testing.assert_allclose(
+            got, want, rtol=1e-6 if dtype == "float32" else 1e-12, err_msg=name
+        )
+        assert np.all(np.isfinite(got)), name
+        with pytest.raises(ValueError, match="not finite"):
+            np.histogram_bin_edges(np.append(data, np.nan), 8)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_bin_edges_substitute_a_range_when_nothing_is_finite(dtype):
+    """With no finite value there is no range to take, and the skipping pass
+    returns its identities -- an empty range the caller replaces with the unit
+    one rather than propagating an infinity into every edge.
+    """
+    for fill in (np.nan, np.inf, -np.inf):
+        data = np.full(1000, fill, dtype=dtype)
+        edges = mt.histogram_bin_edges(mt.from_numpy(data), 4).numpy()
+        np.testing.assert_allclose(edges, np.linspace(0.0, 1.0, 5))
+    mixed = np.array([np.nan, np.inf, -np.inf] * 400, dtype=dtype)
+    np.testing.assert_allclose(
+        mt.histogram_bin_edges(mt.from_numpy(mixed), 4).numpy(),
+        np.linspace(0.0, 1.0, 5),
+    )
+
+
+@pytest.mark.parametrize("length", [1, 8, 9, 8193])
+@pytest.mark.parametrize("content", ["all false", "all true", "mixed"])
+def test_bin_edges_over_booleans(length, content):
+    """A boolean's extremes are answered by two short-circuiting scans rather
+    than by the fold, so they are a separate implementation and get their own
+    check -- including the constant cases, where the range has no width and is
+    opened half a unit either side.
+    """
+    if content == "all false":
+        data = np.zeros(length, dtype=bool)
+    elif content == "all true":
+        data = np.ones(length, dtype=bool)
+    else:
+        data = (np.arange(length) % 2).astype(bool)
+    low, high = float(data.min()), float(data.max())
+    if low == high:
+        low, high = low - 0.5, high + 0.5
+    want = np.linspace(low, high, 5)
+    want[-1] = high
+    np.testing.assert_allclose(
+        mt.histogram_bin_edges(mt.from_numpy(data), 4).numpy(), want
+    )
+
+
+def test_bin_edges_over_integers_wider_than_float64_can_hold():
+    """The fold compares in the values' own width and widens only the answer,
+    so two int64 that round to the same float64 are still ordered correctly.
+    Folding in float64 -- which is what this used to do, one conversion per
+    element -- compared them after rounding and could return either.
+    """
+    data = np.array([2**62 + 1, 2**62 + 3, -(2**62)], dtype=np.int64)
+    edges = mt.histogram_bin_edges(mt.from_numpy(data), 2).numpy()
+    assert edges[0] == float(-(2**62))
+    assert edges[-1] == float(2**62 + 3)
