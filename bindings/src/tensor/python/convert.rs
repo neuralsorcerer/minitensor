@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use numpy::PyUntypedArray;
+use numpy::{PyArrayDescrMethods, PyUntypedArray};
 use pyo3::types::PyFloat;
 
 /// Build a tensor from a Python object, then mark it trainable.
@@ -289,19 +289,13 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
     // every call, and this runs for every operand that is not a tensor --
     // including every `x + 1.0`, where the answer is always no. `x + 1.0` cost
     // 2.5us against 0.47 for a tensor operand, nearly all of it here.
-    if value.cast::<PyUntypedArray>().is_ok() {
-        if let Ok(dtype_obj) = value.getattr("dtype") {
-            let dtype_str = dtype_obj.str()?.to_str()?.to_ascii_lowercase();
-            if let Ok(array_dtype) = dtype::parse_dtype(&dtype_str) {
-                return convert_python_data_to_tensor(
-                    value,
-                    array_dtype,
-                    reference.device(),
-                    false,
-                );
-            }
-        }
-        return convert_python_data_to_tensor(value, reference.dtype(), reference.device(), false);
+    if let Ok(array) = value.cast::<PyUntypedArray>() {
+        // The array's own width, read off its dtype descriptor. A dtype NumPy
+        // has and the engine does not falls back to the tensor's, which is
+        // what the conversion would have to narrow to anyway.
+        let array_dtype = crate::share::dtype_from_type_num(array.dtype().num())
+            .unwrap_or_else(|| reference.dtype());
+        return convert_python_data_to_tensor(value, array_dtype, reference.device(), false);
     }
 
     // The dtype is resolved *before* the tensor is built. Building first and

@@ -62,6 +62,7 @@ use engine::random;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
+
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{
     PyIndexError, PyMemoryError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,

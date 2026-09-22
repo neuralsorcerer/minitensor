@@ -34,7 +34,14 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 
 /// Our dtype for a NumPy type number, if we have one.
-fn dtype_from_type_num(num: c_int) -> Option<DataType> {
+/// The `DataType` a NumPy array of this type number holds, if it is one of
+/// the five the engine stores.
+///
+/// By type number rather than by the dtype's printed name. Reading the name
+/// costs a Python attribute lookup, a `str()`, a UTF-8 conversion and a
+/// lowercased `String`, all to recognise one of five constants -- and that is
+/// what every `x + array` used to pay to find its operand's width.
+pub(crate) fn dtype_from_type_num(num: c_int) -> Option<DataType> {
     use numpy::npyffi::NPY_TYPES;
     // `NPY_LONG` is 32-bit on Windows and 64-bit elsewhere, so it is resolved
     // by width rather than by name.

@@ -147,3 +147,45 @@ def test_bool_is_not_swallowed_by_the_int_branch():
     np.testing.assert_array_equal(
         mt.minimum(flags, True).numpy(), np.array([True, False, True])
     )
+
+
+@pytest.mark.parametrize(
+    "array_dtype,expected",
+    [
+        ("float32", "float32"),
+        ("float64", "float64"),
+        ("int32", "float32"),
+        ("int64", "float32"),
+        ("bool", "float32"),
+        # Widths NumPy has and the engine does not fall back to the tensor's.
+        ("int16", "float32"),
+        ("uint8", "float32"),
+        ("float16", "float32"),
+    ],
+)
+def test_an_ndarray_operand_keeps_its_own_width(array_dtype, expected):
+    """An array operand carries a width, unlike a bare Python float, and it
+    is read off the dtype descriptor by type number rather than by parsing
+    the dtype's printed name. The two have to agree on every dtype NumPy can
+    hand over, including the ones the engine does not store -- those take the
+    tensor's width, which is what the conversion would narrow to anyway.
+    """
+    narrow = mt.from_numpy(np.arange(1, 4, dtype=np.float32))
+    operand = np.ones(3, dtype=array_dtype)
+    result = narrow + operand
+    assert str(result.dtype) == expected
+    np.testing.assert_allclose(
+        result.numpy().astype(np.float64), np.arange(2, 5, dtype=np.float64)
+    )
+
+
+def test_a_float64_array_operand_is_not_narrowed():
+    """The reason the width is read at all: a float64 array added to a
+    float32 tensor widens the result, so the array's digits survive. Reading
+    the tensor's width instead would round them away.
+    """
+    narrow = mt.from_numpy(np.zeros(3, dtype=np.float32))
+    operand = np.full(3, 0.1, dtype=np.float64)
+    result = narrow + operand
+    assert str(result.dtype) == "float64"
+    np.testing.assert_array_equal(result.numpy(), operand)
