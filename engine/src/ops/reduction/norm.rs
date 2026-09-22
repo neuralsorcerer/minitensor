@@ -423,7 +423,7 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
     let outer = input.numel() / run;
 
     macro_rules! fuse {
-        ($accessor:ident, $from_vec:path, $zero:expr, $dot:path, $ty:ty) => {{
+        ($accessor:ident, $from_vec:path, $zero:expr, $square_sum:path, $ty:ty) => {{
             let data = input.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("norm: tensor data did not match its dtype")
             })?;
@@ -431,7 +431,7 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
             if outer == 1 {
                 // One run over everything; `accurate_pair_sum` spreads it
                 // across the pool itself.
-                out[0] = crate::ops::util::accurate_pair_sum(data, data, $zero, $dot);
+                out[0] = crate::ops::util::accurate_self_sum(data, $zero, $square_sum);
             } else {
                 // Many independent runs, so the outer axis is the one to
                 // split; each run then folds on a single thread.
@@ -439,7 +439,7 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
                     for (offset, slot) in block.iter_mut().enumerate() {
                         let base = (start + offset) * run;
                         let slice = &data[base..base + run];
-                        *slot = crate::ops::util::accurate_pair_sum(slice, slice, $zero, $dot);
+                        *slot = crate::ops::util::accurate_self_sum(slice, $zero, $square_sum);
                     }
                 });
             }
@@ -452,14 +452,14 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
             as_f32_slice,
             TensorData::from_vec_f32,
             0.0_f32,
-            crate::ops::simd::simd_dot_f32,
+            crate::ops::simd::simd_square_sum_f32,
             f32
         ),
         DataType::Float64 => fuse!(
             as_f64_slice,
             TensorData::from_vec_f64,
             0.0_f64,
-            crate::ops::simd::simd_dot_f64,
+            crate::ops::simd::simd_square_sum_f64,
             f64
         ),
         _ => return Ok(None),

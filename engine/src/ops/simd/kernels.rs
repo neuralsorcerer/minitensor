@@ -539,6 +539,55 @@ pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
     total
 }
 
+/// The sum of the squares of `data`.
+///
+/// Accumulated exactly as `simd_dot_f32(data, data)` accumulates it -- same
+/// eight lanes, same block order, same remainder -- so the two agree bit for
+/// bit and this is a cost change and not a numerical one.
+///
+/// It has to exist separately because the paired spelling reads every element
+/// twice. `a` and `b` are two `&[f32]` and shared references are allowed to
+/// alias, so nothing may assume `a[i]` and `b[i]` are one load even when the
+/// caller passed the same slice for both. `norm` spelled its sum of squares
+/// that way and ran at 73GB/s where `sum` over the same buffer reached 100.
+pub fn simd_square_sum_f32(data: &[f32]) -> f32 {
+    let mut sums = [0f32; 8];
+    let (chunks, rest) = data.as_chunks::<8>();
+    for x in chunks {
+        sums[0] += x[0] * x[0];
+        sums[1] += x[1] * x[1];
+        sums[2] += x[2] * x[2];
+        sums[3] += x[3] * x[3];
+        sums[4] += x[4] * x[4];
+        sums[5] += x[5] * x[5];
+        sums[6] += x[6] * x[6];
+        sums[7] += x[7] * x[7];
+    }
+    let mut total: f32 = sums.iter().sum();
+    for x in rest {
+        total += x * x;
+    }
+    total
+}
+
+/// [`simd_square_sum_f32`] in double precision; four lanes rather than eight,
+/// matching [`simd_dot_f64`] so the two agree bit for bit.
+pub fn simd_square_sum_f64(data: &[f64]) -> f64 {
+    let mut sums = [0f64; 4];
+    let (chunks, rest) = data.as_chunks::<4>();
+    for x in chunks {
+        sums[0] += x[0] * x[0];
+        sums[1] += x[1] * x[1];
+        sums[2] += x[2] * x[2];
+        sums[3] += x[3] * x[3];
+    }
+    let mut total: f64 = sums.iter().sum();
+    for x in rest {
+        total += x * x;
+    }
+    total
+}
+
 /// [`simd_dot_f32`] accumulating in double precision.
 ///
 /// The product of two `f32`s is exact in `f64`, so every rounding this kernel
@@ -967,5 +1016,35 @@ mod tests {
         assert!(!can_use_simd_fast_path(&same, &different, &same));
         assert!(!can_use_simd_fast_path(&same, &same, &different));
         assert!(!can_use_simd_fast_path(&too_small, &too_small, &too_small));
+    }
+
+    /// The point of the square-sum kernels is that they cost less, not that
+    /// they answer differently, so the claim to pin is that they answer the
+    /// same -- bit for bit, not approximately. Lengths straddle the lane
+    /// count and the block boundary in both widths, and the values are spread
+    /// over enough magnitudes that a different accumulation order would show.
+    #[test]
+    fn square_sum_matches_a_dot_of_the_slice_with_itself_bit_for_bit() {
+        for len in [
+            0usize, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 1000, 8191, 8192, 8193,
+        ] {
+            let wide: Vec<f64> = (0..len)
+                .map(|i| {
+                    let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
+                    sign * (i as f64 + 0.5) * 10f64.powi((i % 17) as i32 - 8)
+                })
+                .collect();
+            let narrow: Vec<f32> = wide.iter().map(|&v| v as f32).collect();
+            assert_eq!(
+                simd_square_sum_f64(&wide).to_bits(),
+                simd_dot_f64(&wide, &wide).to_bits(),
+                "f64 len {len}"
+            );
+            assert_eq!(
+                simd_square_sum_f32(&narrow).to_bits(),
+                simd_dot_f32(&narrow, &narrow).to_bits(),
+                "f32 len {len}"
+            );
+        }
     }
 }

@@ -507,6 +507,22 @@ where
     pairwise_fold(partials, zero, |p, q| p.acc_add(q))
 }
 
+/// [`accurate_pair_sum`] where both runs are the same slice.
+///
+/// A sum of squares is a dot product of a slice with itself, and spelling it
+/// that way costs a second load of every element: the two `&[T]` are allowed
+/// to alias, so nothing may assume the two reads are one. This keeps the
+/// chunking and the pairwise fold exactly as the paired form has them -- the
+/// answer is bit-identical -- and hands the kernel a single slice to read.
+pub(crate) fn accurate_self_sum<T, U, F>(data: &[T], zero: U, run: F) -> U
+where
+    T: Sync,
+    U: Copy + Send + Accumulate,
+    F: Fn(&[T]) -> U + Send + Sync,
+{
+    accurate_pair_sum(data, data, zero, |block, _| run(block))
+}
+
 pub(crate) fn pairwise_fold<U, F>(mut values: Vec<U>, identity: U, combine: F) -> U
 where
     U: Copy,
