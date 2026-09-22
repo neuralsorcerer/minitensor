@@ -61,6 +61,30 @@ pub(crate) const PAR_THRESHOLD: usize = 1 << 17; // 131072 elements
 /// ```
 pub(crate) const EXPENSIVE_PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
+/// Element count above which [`par_fold_chunks`] hands its chunks to the pool.
+///
+/// The fold had no threshold at all and paid for the pool at every length,
+/// which is the mistake [`PAR_THRESHOLD`] above records having fixed for the
+/// unary kernels. Measured on a lane-blocked `f32` extremum -- the cheapest
+/// thing anything asks of this fold, and so the case where the setup is
+/// hardest to repay:
+///
+/// ```text
+///        N   serial   parallel
+///    16384   2.8 us    24.0 us   <- 8.5x slower parallel
+///    32768   5.7 us    12.0 us
+///    65536  11.3 us    11.0 us   <- level
+///   131072  22.4 us    17.2 us
+///  1048576 188.3 us    59.7 us
+/// ```
+///
+/// Lower than [`PAR_THRESHOLD`] because the work per chunk is larger here: a
+/// chunk is thousands of elements reduced to one value, so the pool sees far
+/// fewer, larger items than a per-element unary map hands it. Taking
+/// `PAR_THRESHOLD` instead measured 18.2us over 100K where the pool does it
+/// in 14.4 -- the band between the two is real and belongs to the pool.
+pub(crate) const FOLD_PAR_THRESHOLD: usize = 1 << 16; // 65536 elements
+
 /// Element count above which the vectorized float32 kernels in
 /// `ops::simd::transcendental` parallelize -- `tanh`, `erf` and both GELU
 /// variants.
@@ -600,6 +624,16 @@ where
     A: Copy + Send + Sync,
 {
     let chunk = chunk.max(1);
+    // The serial arm folds the same chunks in the same order. `reduce` already
+    // requires the combine to be associative -- rayon picks its own tree -- so
+    // a left fold over them cannot answer differently.
+    if data.len() < FOLD_PAR_THRESHOLD {
+        return data
+            .chunks(chunk)
+            .enumerate()
+            .map(|(nth, block)| fold(nth * chunk, block))
+            .fold(identity, combine);
+    }
     data.par_chunks(chunk)
         .enumerate()
         .map(|(nth, block)| fold(nth * chunk, block))
