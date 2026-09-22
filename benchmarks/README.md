@@ -268,8 +268,8 @@ which is why the names in this paragraph are all unary.
 
 Those thresholds carry their own measurements in that file, taken on a
 different machine; re-tuning them to this container would improve these
-numbers and regress that one, so they are left alone. If you are tuning for a specific host, that file is where to look and
-this script is how to check.
+numbers and regress that one, so they are left alone. If you are tuning for a
+specific host, that file is where to look and this script is how to check.
 
 ### Two of them were not slow. They were wrong.
 
