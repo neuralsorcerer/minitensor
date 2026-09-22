@@ -172,14 +172,26 @@ always there, so `nanargmax([nan, -inf])` named index 0, a NaN, from the
 reduction whose whole job is to skip them. NumPy still does. This deliberately
 does not.
 
-Elementwise arithmetic, where the win is only parallelism and a fused output:
+Elementwise arithmetic, where the win is only parallelism and a fused output.
+Four sizes rather than two, because the small end is a different measurement
+from the large one -- at 1000 elements the kernel is a few hundred nanoseconds
+and what is being timed is the call:
 
-| op | 1M elements | 16M elements |
-|---|---|---|
-| `add` | 2.1× | 1.5× |
-| `mul` | 2.1× | 2.0× |
-| `div` | 1.9× | 1.7× |
-| `maximum` | 1.8× | 1.6× |
+| op | 1000 | 100K | 1M | 16M |
+|---|---|---|---|---|
+| `add` | 1.10× | 1.18× | 3.37× | 1.20× |
+| `mul` | 1.10× | 1.38× | 3.07× | 1.28× |
+| `div` | 1.04× | 1.13× | 3.81× | 1.34× |
+| `maximum` | 0.99× | 0.78× | 3.37× | 1.17× |
+
+The 1000-element column read 0.52-0.74 until recently, and none of it was the
+arithmetic. Getting from a Python binary op to the engine cost four `Tensor`
+clones where one or two were needed -- a clone allocates twice, for the shape
+and the strides -- and a scalar operand cost two more Python exceptions,
+raised and discarded by `extract` attempts made in the wrong order. Removing
+those moved the whole column across 1.0 and left the unary ops, which never
+had the redundant clones, unmoved at every size: that they did not move is
+what says the measurement was of the binary path and not of the machine.
 
 ## What still loses
 
@@ -248,12 +260,15 @@ next paragraph gives, but close as the array grows and are ahead or level by
 these tables `tanh` is the only one that stays behind at every size, which is
 why it is the one described here.
 
-Below 16M the remaining losses are small ones at small sizes, where a few
-microseconds of call overhead is the whole measurement, and in the band the
-parallel thresholds in `ops::map` govern. Those thresholds carry their own
-measurements in that file, taken on a different machine; re-tuning them to this
-container would improve these numbers and regress that one, so they are left
-alone. If you are tuning for a specific host, that file is where to look and
+Below 16M the remaining losses are small ones at small sizes, and in the band
+the parallel thresholds in `ops::map` govern. The call overhead that used to
+dominate the small end has been taken out for the binary ops -- see the
+elementwise table above -- so what is left there is the transcendental itself,
+which is why the names in this paragraph are all unary.
+
+Those thresholds carry their own measurements in that file, taken on a
+different machine; re-tuning them to this container would improve these
+numbers and regress that one, so they are left alone. If you are tuning for a specific host, that file is where to look and
 this script is how to check.
 
 ### Two of them were not slow. They were wrong.
@@ -597,14 +612,16 @@ operation. The per-family geometric mean at the bottom is the summary worth
 watching after a change. As of the run these tables come from:
 
 ```
-elementwise  1.42x     gemm  0.90x     reduction  1.98x
-shape        1.67x     unary 1.32x     surface    2.13x
+elementwise  1.63x     gemm  0.91x     reduction  2.06x
+shape        1.63x     unary 1.30x     surface    2.12x
 ```
 
-Four of those moved by less than the 8% a ratio drifts between runs on a
-shared container, which is the point of watching the family rather than the
-row: `reduction` reading 1.98 where it read 2.13 is not a regression anybody
-introduced, and neither is `surface` reading 2.13 where it read 2.10.
+`elementwise` is the one that moved for a reason: 1.42x and nine rows behind
+NumPy one run earlier, against one row now, all of it the call overhead the
+table above describes. The rest moved by less than the 8% a ratio drifts
+between runs on a shared container, which is the point of watching the family
+rather than the row -- `reduction` reading 2.06 where it read 2.13 two runs
+ago is not a regression anybody introduced.
 
 `gemm` sits below 1.0 by design — those products are NumPy's, and the number is
 what the crossing costs.
