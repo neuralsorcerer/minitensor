@@ -146,10 +146,32 @@ fn numpy_scalar_dtype(value: &Bound<'_, PyAny>) -> PyResult<Option<DataType>> {
 }
 
 pub fn resolve_scalar_dtype(value: &Bound<'_, PyAny>, context: DataType) -> PyResult<DataType> {
+    // The three builtin scalars first, and by *exact* type. These are what
+    // `x + 1.0` and `x * 2` hand over, and an exact check is a pointer
+    // comparison against the type object, where asking numpy whether it owns
+    // the type costs two Python attribute lookups and a lowercased string --
+    // paid on every scalar operand to learn that `float` lives in `builtins`.
+    //
+    // Exact rather than `is_instance_of` because `np.float64` subclasses
+    // `float`. It has to keep falling through to the numpy branch below, which
+    // reads the dtype off the value instead of taking the context's width; an
+    // `is_instance_of` here would silently narrow `x + np.float64(0.1)` on a
+    // float32 tensor to the float32 nearest 0.1.
+    if value.is_exact_instance_of::<PyBool>() {
+        return Ok(DataType::Bool);
+    }
+    if value.is_exact_instance_of::<PyFloat>() {
+        return Ok(float_like_dtype_for_context(context));
+    }
+    if value.is_exact_instance_of::<PyInt>() {
+        return Ok(integer_like_dtype_for_context(context));
+    }
+
     if let Some(dtype) = numpy_scalar_dtype(value)? {
         return Ok(dtype);
     }
 
+    // The same three again, now for subclasses that are not numpy's.
     if value.is_instance_of::<PyBool>() {
         return Ok(DataType::Bool);
     }

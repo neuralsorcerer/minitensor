@@ -6,6 +6,7 @@
 
 use super::*;
 use numpy::PyUntypedArray;
+use pyo3::types::PyFloat;
 
 /// Build a tensor from a Python object, then mark it trainable.
 ///
@@ -41,11 +42,11 @@ fn build_tensor_from_python(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    // First try NumPy array conversion for any supported dtype
-    if let Ok(numpy_module) = PyModule::import(data.py(), "numpy")
-        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
-        && data.is_instance(&ndarray_type)?
-    {
+    // First try NumPy array conversion for any supported dtype. A direct type
+    // check, for the reason given in `tensor_from_py_value`: the Python
+    // `isinstance` spelling costs a module import and an attribute lookup on
+    // every call, and every scalar operand reaches here to be told no.
+    if data.cast::<PyUntypedArray>().is_ok() {
         let maybe_tensor = panic::catch_unwind(AssertUnwindSafe(|| {
             convert_numpy_to_tensor(data, requires_grad)
         }));
@@ -98,8 +99,21 @@ fn build_tensor_from_python(
         return build_tensor_from_python(list.as_any(), dtype, device, requires_grad);
     }
 
-    // Handle scalars
-    if let Ok(value_bool) = data.extract::<bool>() {
+    // Handle scalars.
+    //
+    // Each extract is guarded by an exact-type test because `extract` reports
+    // failure by *raising*: on a Python float, the bool and int attempts each
+    // built and discarded a Python exception before the float attempt got the
+    // value, so `x + 1.0` paid for two exceptions nothing ever saw. Anything
+    // that is not exactly one of the three -- a subclass, or an object that
+    // merely converts -- still reaches every branch in the old order.
+    let inexact = !(data.is_exact_instance_of::<PyBool>()
+        || data.is_exact_instance_of::<PyInt>()
+        || data.is_exact_instance_of::<PyFloat>());
+
+    if (data.is_exact_instance_of::<PyBool>() || inexact)
+        && let Ok(value_bool) = data.extract::<bool>()
+    {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_bool(vec![value_bool], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Bool, device, requires_grad);
@@ -109,7 +123,9 @@ fn build_tensor_from_python(
         return Ok(tensor);
     }
 
-    if let Ok(value_int) = data.extract::<i64>() {
+    if (data.is_exact_instance_of::<PyInt>() || inexact)
+        && let Ok(value_int) = data.extract::<i64>()
+    {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_i64(vec![value_int], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
@@ -119,7 +135,9 @@ fn build_tensor_from_python(
         return Ok(tensor);
     }
 
-    if let Ok(value_float) = data.extract::<f64>() {
+    if (data.is_exact_instance_of::<PyFloat>() || inexact)
+        && let Ok(value_float) = data.extract::<f64>()
+    {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_f64(vec![value_float], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);
