@@ -533,3 +533,72 @@ def test_fmax_and_fmin_broadcast_and_promote(name):
     result = getattr(mt, name)(mt.from_numpy(left), mt.from_numpy(right))
     assert "int64" in str(result.dtype)
     np.testing.assert_array_equal(result.numpy(), getattr(np, name)(left, right))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_maximum_and_minimum_keep_their_rule_on_the_vectorised_path(dtype):
+    """`maximum` and `minimum` reach the same-shape SIMD kernel that every
+    other float binary op reaches, and the branchy NaN test that used to sit
+    in the loop became two selects to get there.
+
+    The rule that has to survive is not just "propagates NaN". It is which
+    operand comes back when both are NaN, and which comes back on a tie --
+    `a`, in both cases, which for signed zeros is observable. So this compares
+    bit patterns rather than values, over every pair of the interesting
+    floats, and at a length past the parallel threshold so the blocked path is
+    the one under test.
+    """
+    specials = [np.nan, np.inf, -np.inf, 0.0, -0.0, 1.0, -1.0, 3.5, -2.25]
+    pairs = [(a, b) for a in specials for b in specials]
+    reps = -(-70_000 // len(pairs))
+    left = np.array([a for a, _ in pairs] * reps, dtype=dtype)
+    right = np.array([b for _, b in pairs] * reps, dtype=dtype)
+    bits = np.uint32 if dtype == "float32" else np.uint64
+
+    for name, ahead in (("maximum", True), ("minimum", False)):
+        got = getattr(mt, name)(mt.from_numpy(left), mt.from_numpy(right)).numpy()
+        want = np.empty_like(got)
+        for i, (a, b) in enumerate(zip(left, right)):
+            if np.isnan(a):
+                want[i] = a
+            elif np.isnan(b):
+                want[i] = b
+            elif (a >= b) if ahead else (a <= b):
+                want[i] = a
+            else:
+                want[i] = b
+        np.testing.assert_array_equal(
+            got.view(bits), want.view(bits), err_msg=f"{name} {dtype}"
+        )
+
+        # NumPy agrees everywhere a NaN is not the answer, and agrees on
+        # where the NaNs are.
+        reference = getattr(np, name)(left, right)
+        finite = ~(np.isnan(reference) & np.isnan(got))
+        np.testing.assert_array_equal(reference[finite], got[finite])
+        np.testing.assert_array_equal(np.isnan(reference), np.isnan(got))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_maximum_and_minimum_agree_between_the_two_paths(dtype):
+    """Only same-shape operands take the vectorised kernel; a broadcast falls
+    through to the elementwise map. Both spell the rule with the same
+    function, and this is what says so -- the broadcast result against the
+    same product materialised first.
+    """
+    rng = np.random.default_rng(3)
+    column = rng.standard_normal((257, 1)).astype(dtype)
+    row = rng.standard_normal((1, 129)).astype(dtype)
+    column[0, 0] = np.nan
+    row[0, 1] = np.nan
+    wide_column = np.repeat(column, 129, axis=1)
+    wide_row = np.repeat(row, 257, axis=0)
+    bits = np.uint32 if dtype == "float32" else np.uint64
+
+    for name in ("maximum", "minimum"):
+        op = getattr(mt, name)
+        broadcast = op(mt.from_numpy(column), mt.from_numpy(row)).numpy()
+        same_shape = op(mt.from_numpy(wide_column), mt.from_numpy(wide_row)).numpy()
+        np.testing.assert_array_equal(
+            broadcast.view(bits), same_shape.view(bits), err_msg=name
+        )

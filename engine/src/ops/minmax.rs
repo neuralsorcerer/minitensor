@@ -11,7 +11,10 @@ use crate::{
     ops::{
         binary::{BinaryOpKind, coerce_binary_operands},
         comparison,
-        kernels::broadcast_binary_map,
+        kernels::{
+            broadcast_binary_map, maximum_f32_direct, maximum_f64_direct, minimum_f32_direct,
+            minimum_f64_direct,
+        },
         selection,
     },
     tensor::{DataType, Tensor, TensorData},
@@ -87,54 +90,19 @@ fn binary_minmax(lhs: &Tensor, rhs: &Tensor, op: BinaryOpKind) -> Result<Tensor>
     // NaN-propagating comparisons for floats (matching the previous
     // hand-written kernels); plain ordering for ints, OR/AND for bool.
     let output_data = match result_dtype {
-        DataType::Float32 => minmax_arm!(
-            as_f32_slice,
-            f32,
-            Float32,
-            "f32",
-            |a: f32, b: f32| {
-                if a.is_nan() || b.is_nan() {
-                    if a.is_nan() { a } else { b }
-                } else if a >= b {
-                    a
-                } else {
-                    b
-                }
-            },
-            |a: f32, b: f32| {
-                if a.is_nan() || b.is_nan() {
-                    if a.is_nan() { a } else { b }
-                } else if a <= b {
-                    a
-                } else {
-                    b
-                }
-            }
-        ),
-        DataType::Float64 => minmax_arm!(
-            as_f64_slice,
-            f64,
-            Float64,
-            "f64",
-            |a: f64, b: f64| {
-                if a.is_nan() || b.is_nan() {
-                    if a.is_nan() { a } else { b }
-                } else if a >= b {
-                    a
-                } else {
-                    b
-                }
-            },
-            |a: f64, b: f64| {
-                if a.is_nan() || b.is_nan() {
-                    if a.is_nan() { a } else { b }
-                } else if a <= b {
-                    a
-                } else {
-                    b
-                }
-            }
-        ),
+        // The floats go through `ops::kernels::binary`, which gives them the
+        // same-shape SIMD fast path every other float binary op has; the arm
+        // below is for the dtypes that have no such kernel.
+        DataType::Float32 => match op {
+            BinaryOpKind::Maximum => maximum_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+            BinaryOpKind::Minimum => minimum_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+            _ => unreachable!(),
+        },
+        DataType::Float64 => match op {
+            BinaryOpKind::Maximum => maximum_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+            BinaryOpKind::Minimum => minimum_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+            _ => unreachable!(),
+        },
         DataType::Int32 => minmax_arm!(
             as_i32_slice,
             i32,

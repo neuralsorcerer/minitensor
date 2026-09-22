@@ -277,6 +277,49 @@ binary_kernel_simd!(
     |a, b| a / b
 );
 
+// NaN-propagating maximum and minimum. These are `ops::minmax`'s float arms,
+// and they are here rather than there so they get the same same-shape fast
+// path every other float binary op gets. Written in `ops::minmax` as a closure
+// handed straight to `broadcast_binary_map`, `maximum` cost 14-76% more than
+// `add` over identical operands at every size -- one elementwise pass paying
+// for a kernel it was not reaching.
+binary_kernel_simd!(
+    maximum_f32_direct,
+    as_f32_slice,
+    f32,
+    Float32,
+    "f32",
+    maximum_f32_blocks,
+    nan_maximum
+);
+binary_kernel_simd!(
+    maximum_f64_direct,
+    as_f64_slice,
+    f64,
+    Float64,
+    "f64",
+    maximum_f64_blocks,
+    nan_maximum
+);
+binary_kernel_simd!(
+    minimum_f32_direct,
+    as_f32_slice,
+    f32,
+    Float32,
+    "f32",
+    minimum_f32_blocks,
+    nan_minimum
+);
+binary_kernel_simd!(
+    minimum_f64_direct,
+    as_f64_slice,
+    f64,
+    Float64,
+    "f64",
+    minimum_f64_blocks,
+    nan_minimum
+);
+
 // Floor division: quotient rounded toward negative infinity (Python
 // semantics). Integer closures use wrapping division so `MIN / -1` wraps
 // instead of panicking inside the parallel loops; the op layer rejects zero

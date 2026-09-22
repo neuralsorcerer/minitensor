@@ -112,7 +112,17 @@ pub fn simd_capabilities() -> SimdCapabilities {
 /// AVX loses to the baseline, which is what makes the parallel split in
 /// `ops::kernels::binary` matter far more here than the register width does.
 macro_rules! binary_elementwise {
+    // The operator spelling, which is what most of these are. It delegates so
+    // the loop and its multiversioning exist once.
     ($(#[$meta:meta])* $entry:ident, $core:ident, $ty:ty, $op:tt) => {
+        binary_elementwise!($(#[$meta])* $entry, $core, $ty, rule |a: $ty, b: $ty| a $op b);
+    };
+    // The general form, for a pair rule that is not one operator -- `maximum`
+    // and `minimum`, whose NaN handling is a pair of selects. The `rule`
+    // keyword is what tells the two apart: a bare function name is a single
+    // token tree, so without it a rule spelled `nan_maximum` matches the
+    // operator arm above and expands to `a nan_maximum b`.
+    ($(#[$meta:meta])* $entry:ident, $core:ident, $ty:ty, rule $rule:expr) => {
         /// The dispatching loop, with the length agreement taken on trust.
         ///
         /// `out.len()` sets the length and both inputs are reborrowed to it, so
@@ -135,8 +145,9 @@ macro_rules! binary_elementwise {
                 // slices, so nothing in the loop can trap.
                 let n = out.len();
                 let (lhs, rhs) = (&lhs[..n], &rhs[..n]);
+                #[allow(clippy::redundant_closure_call)]
                 for i in 0..n {
-                    out[i].write(lhs[i] $op rhs[i]);
+                    out[i].write(($rule)(lhs[i], rhs[i]));
                 }
             }
 
@@ -210,6 +221,57 @@ binary_elementwise!(
     /// Element-wise `lhs * rhs` for equal-length f64 slices.
     simd_mul_f64, mul_f64_blocks, f64, *
 );
+/// The NaN-propagating pairwise maximum, written as two selects.
+///
+/// `maximum` is not `a.max(b)`: the standard library's returns the operand
+/// that is *not* NaN, and a tensor `maximum` has to carry the NaN through, the
+/// way NumPy's does. Spelled the obvious way that is
+/// `if a.is_nan() || b.is_nan() { .. } else if a >= b { .. }`, and the `||`
+/// short-circuits, which is a branch in the middle of an elementwise loop.
+///
+/// This is the same function without one. `a >= b` is already false whenever
+/// either side is NaN, so the first select lands on `b` for every NaN case and
+/// only a NaN in `a` is left to fix. It keeps the tie-break the branchy form
+/// had, `a` winning when the two compare equal, signed zeros included.
+///
+/// It lives here as a function rather than in the loop so the blocked kernel
+/// and the broadcasting fallback in `ops::kernels::binary` are the same rule
+/// and cannot drift apart.
+// `a == a` is the NaN test. The generic parameter is only `PartialOrd`, so
+// `is_nan` is not available; self-comparison is the definition it would have
+// called anyway, and it is the form that stays a bare `cmpss`.
+#[allow(clippy::eq_op)]
+#[inline(always)]
+pub(crate) fn nan_maximum<T: PartialOrd + Copy>(a: T, b: T) -> T {
+    let m = if a >= b { a } else { b };
+    if a == a { m } else { a }
+}
+
+/// [`nan_maximum`] with the comparison turned around.
+#[allow(clippy::eq_op)]
+#[inline(always)]
+pub(crate) fn nan_minimum<T: PartialOrd + Copy>(a: T, b: T) -> T {
+    let m = if a <= b { a } else { b };
+    if a == a { m } else { a }
+}
+
+binary_elementwise!(
+    /// Element-wise NaN-propagating maximum for equal-length f32 slices.
+    simd_maximum_f32, maximum_f32_blocks, f32, rule nan_maximum
+);
+binary_elementwise!(
+    /// Element-wise NaN-propagating minimum for equal-length f32 slices.
+    simd_minimum_f32, minimum_f32_blocks, f32, rule nan_minimum
+);
+binary_elementwise!(
+    /// Element-wise NaN-propagating maximum for equal-length f64 slices.
+    simd_maximum_f64, maximum_f64_blocks, f64, rule nan_maximum
+);
+binary_elementwise!(
+    /// Element-wise NaN-propagating minimum for equal-length f64 slices.
+    simd_minimum_f64, minimum_f64_blocks, f64, rule nan_minimum
+);
+
 binary_elementwise!(
     /// Element-wise `lhs / rhs` for equal-length f64 slices. IEEE semantics:
     /// a zero divisor yields ±inf, or NaN for `0 / 0`.
