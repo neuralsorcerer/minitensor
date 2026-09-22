@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use numpy::PyUntypedArray;
 
 /// Build a tensor from a Python object, then mark it trainable.
 ///
@@ -258,14 +259,19 @@ pub(crate) fn ensure_backward_gradient_compatible(
 }
 
 pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {
-    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
+    if let Some(py_tensor) = borrow_wrapped_tensor(value) {
+        // One clone, from a borrow. Extracting the class by value would have
+        // cloned it first and made this a clone of a clone, and a `Tensor`
+        // clone allocates twice -- once for the shape, once for the strides.
         return Ok(py_tensor.inner.clone());
     }
 
-    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy")
-        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
-        && value.is_instance(&ndarray_type)?
-    {
+    // A direct type check, not `isinstance(value, numpy.ndarray)`. The Python
+    // spelling needed the module and its `ndarray` attribute looked up on
+    // every call, and this runs for every operand that is not a tensor --
+    // including every `x + 1.0`, where the answer is always no. `x + 1.0` cost
+    // 2.5us against 0.47 for a tensor operand, nearly all of it here.
+    if value.cast::<PyUntypedArray>().is_ok() {
         if let Ok(dtype_obj) = value.getattr("dtype") {
             let dtype_str = dtype_obj.str()?.to_str()?.to_ascii_lowercase();
             if let Ok(array_dtype) = dtype::parse_dtype(&dtype_str) {
@@ -340,7 +346,7 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
 }
 
 pub(crate) fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor> {
-    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
+    if let Some(py_tensor) = borrow_wrapped_tensor(value) {
         let mut tensor = py_tensor.inner.clone();
         if tensor.dtype() != DataType::Bool {
             return Err(PyTypeError::new_err("mask must be a bool tensor"));
@@ -382,7 +388,7 @@ fn promote_dtypes(a: DataType, b: DataType) -> DataType {
 }
 
 pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
-    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
+    if let Some(py_tensor) = borrow_wrapped_tensor(value) {
         return Some(py_tensor.inner.dtype());
     }
 
@@ -492,18 +498,27 @@ pub(crate) fn prepare_binary_operands_from_py(
         tensor_from_py_value(reference, other)?
     };
 
+    // Both `Cow`s are taken apart before either input is moved out, which is
+    // what ends their borrows. Spelled the other way round -- matching on one
+    // `Cow` and cloning the input in its `Borrowed` arm -- it cost a second
+    // clone of each operand in the ordinary case where the two dtypes already
+    // agree and the coercion had nothing to do. A `Tensor` clone allocates
+    // twice, so that was four allocations per binary op that reached Python.
     let (lhs_cast, rhs_cast, _) =
         coerce_binary_operands(&lhs_input, &rhs_input, kind).map_err(_convert_error)?;
-    let lhs_tensor = match lhs_cast {
-        Cow::Borrowed(_) => lhs_input.clone(),
-        Cow::Owned(tensor) => tensor,
+    let lhs_owned = match lhs_cast {
+        Cow::Owned(tensor) => Some(tensor),
+        Cow::Borrowed(_) => None,
     };
-    let rhs_tensor = match rhs_cast {
-        Cow::Borrowed(_) => rhs_input.clone(),
-        Cow::Owned(tensor) => tensor,
+    let rhs_owned = match rhs_cast {
+        Cow::Owned(tensor) => Some(tensor),
+        Cow::Borrowed(_) => None,
     };
 
-    Ok((lhs_tensor, rhs_tensor))
+    Ok((
+        lhs_owned.unwrap_or(lhs_input),
+        rhs_owned.unwrap_or(rhs_input),
+    ))
 }
 
 fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<ScalarValue>)> {
@@ -757,7 +772,7 @@ pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i
     if item.is_instance_of::<pyo3::types::PyBool>() || item.extract::<i64>().is_ok() {
         return Ok(None);
     }
-    if let Some(pt) = extract_wrapped_pytensor(item) {
+    if let Some(pt) = borrow_wrapped_tensor(item) {
         let t = pt.tensor();
         if !matches!(t.dtype(), DataType::Int32 | DataType::Int64) || t.ndim() == 0 {
             return Ok(None);
@@ -856,9 +871,9 @@ fn resolve_index_values(values: &[i64], axis: usize, dim_size: usize) -> PyResul
 /// Extract a boolean mask tensor from a `__getitem__`/`__setitem__` key when
 /// the key is a bool tensor, a bool ndarray, or a (nested) list of bools.
 pub(crate) fn try_bool_mask_key(key: &Bound<PyAny>) -> PyResult<Option<Tensor>> {
-    if let Some(pt) = extract_wrapped_pytensor(key) {
+    if let Some(pt) = borrow_wrapped_tensor(key) {
         if pt.tensor().dtype() == DataType::Bool {
-            return Ok(Some(pt.tensor().clone()));
+            return Ok(Some(pt.inner.clone()));
         }
         return Ok(None);
     }
@@ -889,7 +904,7 @@ pub(crate) fn try_fancy_index_tensor(
             .map_err(_convert_error);
     }
 
-    if let Some(pt) = extract_wrapped_pytensor(key) {
+    if let Some(pt) = borrow_wrapped_tensor(key) {
         let t = pt.tensor();
         if matches!(t.dtype(), DataType::Int32 | DataType::Int64) && t.ndim() == 1 {
             let t = t.contiguous().map_err(_convert_error)?;

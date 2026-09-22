@@ -86,15 +86,28 @@ fn register_leaf_tensor(tensor: &Tensor) {
     }
 }
 
-fn extract_wrapped_pytensor(value: &Bound<PyAny>) -> Option<PyTensor> {
-    if let Ok(py_tensor) = value.extract::<PyTensor>() {
+/// The `PyTensor` behind a value that is one, or that wraps one as `_tensor`.
+///
+/// A `PyRef` rather than an owned `PyTensor`, because extracting the class by
+/// value clones it, and a `Tensor` clone allocates twice -- once for the shape
+/// and once for the strides. Most callers only read, and the ones that need to
+/// own clone once from here instead of cloning a clone.
+///
+/// `hasattr` and not `getattr` for the wrapper case: the miss is the common
+/// case -- every scalar operand of every binary op reaches here -- and a
+/// failed `getattr` raises, which means building and discarding a Python
+/// exception on a path that is only asking a question.
+pub(crate) fn borrow_wrapped_tensor<'py>(
+    value: &'py Bound<'py, PyAny>,
+) -> Option<PyRef<'py, PyTensor>> {
+    if let Ok(py_tensor) = value.extract::<PyRef<PyTensor>>() {
         return Some(py_tensor);
     }
 
     let attr_name = intern!(value.py(), "_tensor");
     if value.hasattr(attr_name).ok()?
         && let Ok(inner_attr) = value.getattr(attr_name)
-        && let Ok(py_tensor) = inner_attr.extract::<PyTensor>()
+        && let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>()
     {
         return Some(py_tensor);
     }
@@ -114,7 +127,7 @@ fn with_index_vector<R>(
     indices: &Bound<PyAny>,
     body: impl FnOnce(&[i64]) -> PyResult<R>,
 ) -> PyResult<R> {
-    let Some(py_tensor) = extract_wrapped_pytensor(indices) else {
+    let Some(py_tensor) = borrow_wrapped_tensor(indices) else {
         return body(&indices.extract::<Vec<i64>>()?);
     };
     let tensor = py_tensor.inner.contiguous().map_err(_convert_error)?;
@@ -352,8 +365,8 @@ impl PyTensor {
     }
 
     pub fn from_python_value_with_dtype(value: &Bound<PyAny>, dtype: DataType) -> PyResult<Self> {
-        if let Some(py_tensor) = extract_wrapped_pytensor(value) {
-            return Ok(py_tensor);
+        if let Some(py_tensor) = borrow_wrapped_tensor(value) {
+            return Ok(Self::from_tensor(py_tensor.inner.clone()));
         }
 
         let tensor = convert_python_data_to_tensor(value, dtype, Device::cpu(), false)?;

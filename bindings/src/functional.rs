@@ -6,26 +6,21 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use crate::tensor::borrow_wrapped_tensor;
 use crate::tensor::{normalize_indexed_axis, normalize_optional_axes};
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor};
 use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
-use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PyTuple};
 use std::sync::Arc;
 
+/// [`borrow_wrapped_tensor`] with a message, for the free functions that want
+/// a `TypeError` rather than an option. The extraction rule lives in one place
+/// so the two spellings cannot drift apart.
 pub(crate) fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
-    if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
-        return Ok(tensor);
-    }
-
-    let py = value.py();
-    let inner = value
-        .getattr(intern!(py, "_tensor"))
-        .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor"))?;
-    Ok(inner.extract::<PyRef<PyTensor>>()?)
+    borrow_wrapped_tensor(value).ok_or_else(|| PyTypeError::new_err("expected a minitensor Tensor"))
 }
 
 fn borrow_optional_tensor<'py>(
