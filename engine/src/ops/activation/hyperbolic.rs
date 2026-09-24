@@ -7,6 +7,7 @@
 use super::*;
 use crate::autograd::MaskedLogSoftmaxBackward;
 use crate::autograd::SoftmaxBackward;
+use crate::ops::simd::F32Kernel;
 use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
@@ -14,6 +15,7 @@ use crate::{
     tensor::{DataType, Tensor, TensorData},
 };
 use libm::{erf, erfc};
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 /// Masked softmax activation function with gradient support.
@@ -322,93 +324,81 @@ macro_rules! float_unary_kernel_param {
     };
 }
 
-// Which float32 routines stay on the scalar libm, and why.
-//
-// `tanh`, `sinh`, `cosh`, `expm1`, `log`, `log2`, `log10`, `log1p`, `erf`,
-// `erfc` and both GELUs now run through `ops::simd::transcendental`, which
-// computes each in float64 and rounds once -- the accuracy the old promoted
-// scalars bought, at several times the speed. Nothing is left promoted;
-// promotion was a way of getting the float64 rounding cheaply, and the
-// vectorized kernels get it for less.
-//
-// `log2` and `log10` joined that list last, and they cost nothing to add:
-// both are `log` scaled by a constant, so they are the same kernel with the
-// scale applied before the rounding rather than after. They had been the
-// clearest case of a name sitting next to a kernel it could have been using --
-// `log` measured 1.14x of NumPy in float32 while `log10`, the same curve times
-// 1/ln(10), measured 0.23x. Both now measure 1.07x, and both got more accurate
-// doing it.
-//
-// The rest stay scalar deliberately. `expf`, `sinf`, `cosf` and `cbrtf` are
-// substantially faster than promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at
-// equal accuracy, so promoting them would be a regression for nothing, and none
-// has yet been worth a vectorized kernel of its own: `exp` already measures
-// within 1.6x of a hand-vectorized baseline, against the 12x that `sinh` and
-// `expm1` started from. `sin` and `cos` are the strongest remaining
-// candidates at about 3.7x, and
-// they need an argument reduction none of the existing kernels provide.
+/// A float32 tensor mapped through vectorized [`F32Kernel`] methods into fresh
+/// storage, split across the pool above [`VECTOR_F32_PAR_THRESHOLD`].
+///
+/// # Safety
+///
+/// `op` must initialize every element of the output block it is handed. A
+/// closure that is a call to one `F32Kernel` method does: each asserts that
+/// its input and output blocks agree in length and writes the output in full.
+pub(crate) unsafe fn map_f32_kernel(
+    tensor: &Tensor,
+    op: impl Fn(F32Kernel, &[f32], &mut [MaybeUninit<f32>]) + Send + Sync,
+) -> Result<TensorData> {
+    let input = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = F32Kernel::select();
+    // SAFETY: forwarded to the caller by this function's contract.
+    let out = unsafe {
+        unary_map_blocks_threshold(input, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            op(kernel, src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
+/// A float32 op that is exactly one [`F32Kernel`] method over the whole
+/// tensor. The body can only be that call, which is what discharges
+/// [`map_f32_kernel`]'s contract once here rather than at every op.
+macro_rules! vector_f32 {
+    ($(#[$meta:meta])* $name:ident, $method:ident $(, $arg:expr)*) => {
+        $(#[$meta])*
+        pub(crate) fn $name(tensor: &Tensor) -> Result<TensorData> {
+            // SAFETY: one `F32Kernel` method call; see `map_f32_kernel`.
+            unsafe {
+                map_f32_kernel(tensor, |kernel, src, dst| kernel.$method(src, dst $(, $arg)*))
+            }
+        }
+    };
+}
+
+// Every float32 routine in this file runs through `ops::simd::transcendental`,
+// which computes in float64 and rounds once: the accuracy promoting to float64
+// used to buy, at several times the speed, and in most cases bit-identical to
+// the correctly rounded result on all 2^32 inputs (the module docs there list
+// which, and by how much the scalar routines they replaced missed). Float64
+// has nothing wider to promote to, so its routines stay scalar, each written
+// against the ranges where the textbook identity loses digits.
 
 float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);
 
-/// Vectorized. Bit-identical to `(x as f64).ln() as f32` on all 2^32 float32
-/// inputs, where the `f32::ln` it replaces misrounds 416,909 of them.
-pub(crate) fn exp_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `exp` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.exp(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to `(x as f64).exp() as f32` on all 2^32 inputs.
+    exp_f32,
+    exp
+);
 
-pub(crate) fn log_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `log` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.log(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. Bit-identical to `(x as f64).ln() as f32` on all 2^32 float32
+    /// inputs, where the `f32::ln` it replaces misrounds 416,909 of them.
+    log_f32,
+    log
+);
 
 float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln);
 
-/// Vectorized. The kernel handles `x <= -1` itself: `1 + x` is zero or
-/// negative there and `log_core` maps those to -inf and NaN.
-pub(crate) fn log1p_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `log1p` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.log1p(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. The kernel handles `x <= -1` itself: `1 + x` is zero or
+    /// negative there and `log_core` maps those to -inf and NaN.
+    log1p_f32,
+    log1p
+);
 
 float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
     if val == -1.0 {
@@ -420,100 +410,48 @@ float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
     }
 });
 
-/// Vectorized, through the same `log` kernel scaled by `1/ln(base)` before its
-/// single rounding. `log2f` and `log10f` are scalar, which left them at 0.48x
-/// and 0.23x of NumPy in float32 while the natural `log` beside them ran 1.14x.
-fn log_scaled_f32(tensor: &Tensor, inv_ln_base: f64) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `log_scaled` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.log_scaled(src, dst, inv_ln_base)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. The real cube root as `exp(log|x| / 3)` with the sign put
+    /// back -- see `ops::special::cbrt`.
+    cbrt_f32,
+    cbrt
+);
 
-/// Vectorized. The real cube root as `exp(log|x| / 3)` with the sign put
-/// back -- see `ops::special::cbrt`.
-pub(crate) fn cbrt_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `cbrt` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.cbrt(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. `2^x` as `exp(x * ln 2)` with the product formed in float64 --
+    /// see `ops::special::exp2` for why that is the accurate spelling and not the
+    /// naive one.
+    exp2_f32,
+    exp_scaled, std::f64::consts::LN_2
+);
 
-/// Vectorized. `2^x` as `exp(x * ln 2)` with the product formed in float64 --
-/// see `ops::special::exp2` for why that is the accurate spelling and not the
-/// naive one.
-pub(crate) fn exp2_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `exp_scaled` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.exp_scaled(src, dst, std::f64::consts::LN_2)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
-
-pub(crate) fn log2_f32(tensor: &Tensor) -> Result<TensorData> {
-    log_scaled_f32(tensor, std::f64::consts::LOG2_E)
-}
+vector_f32!(
+    /// Vectorized, through the same `log` kernel scaled by `1/ln(base)` before its
+    /// single rounding. `log2f` and `log10f` are scalar, which left them at 0.48x
+    /// and 0.23x of NumPy in float32 while the natural `log` beside them ran 1.14x.
+    log2_f32,
+    log_scaled,
+    std::f64::consts::LOG2_E
+);
 
 float_unary_kernel!(log2_f64, as_f64_slice, f64, Float64, "f64", f64::log2);
 
-pub(crate) fn log10_f32(tensor: &Tensor) -> Result<TensorData> {
-    log_scaled_f32(tensor, std::f64::consts::LOG10_E)
-}
+vector_f32!(
+    /// `log` scaled by `1/ln 10`; see `log2_f32`.
+    log10_f32,
+    log_scaled,
+    std::f64::consts::LOG10_E
+);
 
 float_unary_kernel!(log10_f64, as_f64_slice, f64, Float64, "f64", f64::log10);
 
-/// Vectorized -- see `ops::simd::transcendental`. Replaces `libm::erff`, which
-/// it beats on both counts: 9.1x faster, and 68 of the 2^32 float32 inputs
-/// misrounded by one ulp against `erff`'s 127.6 million.
-pub(crate) fn erf_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `erf` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.erf(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized -- see `ops::simd::transcendental`. Replaces `libm::erff`, which
+    /// it beats on both counts: 9.1x faster, and 68 of the 2^32 float32 inputs
+    /// misrounded by one ulp against `erff`'s 127.6 million.
+    erf_f32,
+    erf
+);
 
 float_unary_kernel!(erf_f64, as_f64_slice, f64, Float64, "f64", erf);
 
@@ -521,174 +459,67 @@ float_unary_kernel!(erf_f64, as_f64_slice, f64, Float64, "f64", erf);
 // significant digit. The vectorized kernel does not form that subtraction --
 // above |x| = 2 it reads the erfc branch of `erf_parts` directly -- so it keeps
 // them for the same reason libm's dedicated routine does.
-pub(crate) fn erfc_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `erfc` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.erfc(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(erfc_f32, erfc);
 
 float_unary_kernel!(erfc_f64, as_f64_slice, f64, Float64, "f64", erfc);
 
-/// Vectorized; bit-identical to the `expm1_promoted_f32` it replaces.
-pub(crate) fn expm1_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `expm1` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.expm1(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to the `expm1_promoted_f32` it replaces.
+    expm1_f32,
+    expm1
+);
 
 float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1);
 
-/// Vectorized; bit-identical to `(x as f64).sin() as f32` on all 2^32 inputs.
-pub(crate) fn sin_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `sin` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.sin(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to `(x as f64).sin() as f32` on all 2^32 inputs.
+    sin_f32,
+    sin
+);
 
 float_unary_kernel!(sin_f64, as_f64_slice, f64, Float64, "f64", f64::sin);
 
-/// Vectorized; bit-identical to `(x as f64).cos() as f32` on all 2^32 inputs.
-pub(crate) fn cos_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `cos` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.cos(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to `(x as f64).cos() as f32` on all 2^32 inputs.
+    cos_f32,
+    cos
+);
 
 float_unary_kernel!(cos_f64, as_f64_slice, f64, Float64, "f64", f64::cos);
 
-/// Vectorized; bit-identical to `(x as f64).tan() as f32` on all 2^32 inputs.
-/// Shares the reduction with `sin` and `cos`, so it costs a division more.
-pub(crate) fn tan_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `tan` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.tan(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to `(x as f64).tan() as f32` on all 2^32 inputs.
+    /// Shares the reduction with `sin` and `cos`, so it costs a division more.
+    tan_f32,
+    tan
+);
 
 float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan);
 
-/// Vectorized, sharing its reduction with `acos_f32`.
-pub(crate) fn asin_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `asin` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.asin(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized, sharing its reduction with `acos_f32`.
+    asin_f32,
+    asin
+);
 
 float_unary_kernel!(asin_f64, as_f64_slice, f64, Float64, "f64", f64::asin);
 
-/// Vectorized. Taken from `asin`'s reduction rather than as `pi/2 - asin(x)`,
-/// which cancels near `x = 1`.
-pub(crate) fn acos_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `acos` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.acos(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. Taken from `asin`'s reduction rather than as `pi/2 - asin(x)`,
+    /// which cancels near `x = 1`.
+    acos_f32,
+    acos
+);
 
 float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos);
 
-/// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
-/// was the one arc function left running a lane at a time: `atan` measured
-/// 2.75x NumPy's while `tan` -- the harder direction -- measured 0.85x.
-pub(crate) fn atan_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `atan` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.atan(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
+    /// was the one arc function left running a lane at a time: `atan` measured
+    /// 2.75x NumPy's while `tan` -- the harder direction -- measured 0.85x.
+    atan_f32,
+    atan
+);
 
 float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan);
 
@@ -756,47 +587,21 @@ mod atanh_tests {
     }
 }
 
-/// Vectorized; bit-identical to the `sinh_promoted_f32` it replaces.
-pub(crate) fn sinh_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `sinh` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.sinh(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized; bit-identical to the `sinh_promoted_f32` it replaces.
+    sinh_f32,
+    sinh
+);
 
 float_unary_kernel!(sinh_f64, as_f64_slice, f64, Float64, "f64", f64::sinh);
 
-/// Vectorized. Unlike its neighbours this replaces glibc's `coshf` rather
-/// than a promoted scalar, so it is an accuracy gain as well: see the module
-/// docs in `ops::simd::transcendental`.
-pub(crate) fn cosh_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `cosh` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.cosh(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. Unlike its neighbours this replaces glibc's `coshf` rather
+    /// than a promoted scalar, so it is an accuracy gain as well: see the module
+    /// docs in `ops::simd::transcendental`.
+    cosh_f32,
+    cosh
+);
 
 float_unary_kernel!(cosh_f64, as_f64_slice, f64, Float64, "f64", f64::cosh);
 
@@ -811,24 +616,11 @@ const INVERSE_HYPERBOLIC_LARGE: f64 = 268_435_456.0; // 2^28
 /// the comparison has no rounding of its own.
 const ACOSH_SHIFTED_BELOW: f64 = 1.125;
 
-/// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
-pub(crate) fn asinh_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `asinh` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.asinh(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
+    asinh_f32,
+    asinh
+);
 
 // `f64::asinh` forms `2x`, which is infinity for every `x > f64::MAX/2`, so it
 // answers infinity where `asinh(f64::MAX)` is 710.5. Float64 has nothing wider
@@ -858,24 +650,11 @@ float_unary_kernel!(asinh_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     y.copysign(x)
 });
 
-/// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
-pub(crate) fn acosh_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `acosh` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.acosh(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
+    acosh_f32,
+    acosh
+);
 
 // `f64::acosh` overflows the same way and at the same place. The domain is
 // `[1, inf)` and the last arm is what enforces it: below `-2^26` the `- 1` is
@@ -954,21 +733,13 @@ float_unary_kernel!(atanh_f64, as_f64_slice, f64, Float64, "f64", atanh_stable);
 /// Vectorized. `log1p(exp(beta*x))/beta`, with the linear tail above
 /// `threshold` selected per block rather than per element.
 pub(crate) fn softplus_f32(tensor: &Tensor, beta: f32, threshold: f32) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `softplus` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.softplus(src, dst, beta as f64, threshold as f64)
+    let (beta, threshold) = (beta as f64, threshold as f64);
+    // SAFETY: one `F32Kernel` method call; see `map_f32_kernel`.
+    unsafe {
+        map_f32_kernel(tensor, |kernel, src, dst| {
+            kernel.softplus(src, dst, beta, threshold)
         })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+    }
 }
 
 float_unary_kernel_param!(
@@ -989,31 +760,21 @@ float_unary_kernel_param!(
 );
 
 pub(crate) fn gelu_f32(tensor: &Tensor, approximate: bool) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
     // Both variants are vectorized (`ops::simd::transcendental`); the
-    // `approximate` branch is still selected outside the element loop. Each
-    // now keeps the whole expression in float64 rather than rounding its
+    // `approximate` branch is selected once per block, not per element. Each
+    // keeps the whole expression in float64 rather than rounding its
     // `erf`/`tanh` to float32 first, so both are more accurate than the scalar
     // `erff`/`tanhf` they replace as well as several times faster.
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: both block kernels write every element of each block.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+    // SAFETY: each arm is one `F32Kernel` method call; see `map_f32_kernel`.
+    unsafe {
+        map_f32_kernel(tensor, |kernel, src, dst| {
             if approximate {
                 kernel.gelu_tanh(src, dst)
             } else {
                 kernel.gelu_erf(src, dst)
             }
         })
-    };
-    Ok(TensorData::from_vec(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+    }
 }
 
 pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData> {
@@ -1092,26 +853,13 @@ float_unary_kernel!(selu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     }
 });
 
-/// Vectorized. Also fixes the negative tail: the scalar form was
-/// `x / (1 + exp(-x))`, and `exp(-x)` overflows float32 below about x = -89, so
-/// `silu(-100)` returned -0 where -3.72e-42 is representable.
-pub(crate) fn silu_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `silu` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.silu(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+vector_f32!(
+    /// Vectorized. Also fixes the negative tail: the scalar form was
+    /// `x / (1 + exp(-x))`, and `exp(-x)` overflows float32 below about x = -89, so
+    /// `silu(-100)` returned -0 where -3.72e-42 is representable.
+    silu_f32,
+    silu
+);
 
 float_unary_kernel!(silu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     // `1/(1 + exp(-x))` overflows for large negative x and loses the tail; the

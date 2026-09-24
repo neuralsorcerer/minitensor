@@ -114,25 +114,10 @@ pub(crate) fn logaddexp_f64(
 }
 
 pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
     // Vectorized, and bit-for-bit what `tanh_promoted_f32` produced -- see
-    // `ops::simd::transcendental`. Dispatch is resolved once here rather than
-    // per block.
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `apply` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.tanh(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+    // `ops::simd::transcendental`.
+    // SAFETY: one `F32Kernel` method call; see `map_f32_kernel`.
+    unsafe { map_f32_kernel(tensor, |kernel, src, dst| kernel.tanh(src, dst)) }
 }
 
 pub(crate) fn tanh_f64(tensor: &Tensor) -> Result<TensorData> {
@@ -149,24 +134,10 @@ pub(crate) fn tanh_f64(tensor: &Tensor) -> Result<TensorData> {
 }
 
 pub(crate) fn sigmoid_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
     // Vectorized -- see `ops::simd::transcendental`. `e/(e+1)` rather than the
     // branchy stable form, which needed a sign test per element.
-    let kernel = crate::ops::simd::F32Kernel::select();
-    // SAFETY: `sigmoid` writes every element of each block it is given.
-    let out = unsafe {
-        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.sigmoid(src, dst)
-        })
-    };
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+    // SAFETY: one `F32Kernel` method call; see `map_f32_kernel`.
+    unsafe { map_f32_kernel(tensor, |kernel, src, dst| kernel.sigmoid(src, dst)) }
 }
 
 pub(crate) fn sigmoid_f64(tensor: &Tensor) -> Result<TensorData> {

@@ -1666,7 +1666,12 @@ macro_rules! block_kernel_param_fallback {
 /// Dispatch for [`block_kernel_param!`].
 macro_rules! dispatch_param {
     ($self:expr, $input:expr, $out:expr, $a:expr, $b:expr,
-     $block:ident, $avx512:ident, $avx2:ident) => {
+     $block:ident, $avx512:ident, $avx2:ident) => {{
+        // Every block writes through `zip`, so an output longer than its input
+        // would keep uninitialized elements that the caller then takes as
+        // written. The combinators never pass one; this makes that a checked
+        // fact rather than a debug-build one, at one compare per block.
+        assert_eq!($input.len(), $out.len(), "kernel block length mismatch");
         match $self.0 {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `select` returned this variant only after
@@ -1679,7 +1684,7 @@ macro_rules! dispatch_param {
             Backend::NativeFma => $block::<true>($input, $out, $a, $b),
             Backend::Portable => $block::<false>($input, $out, $a, $b),
         }
-    };
+    }};
 }
 
 /// The two-input form, for gradient kernels: saved input and incoming
@@ -1757,7 +1762,15 @@ macro_rules! block_kernel2_fallback {
 
 /// Dispatch for [`block_kernel2!`].
 macro_rules! dispatch2 {
-    ($self:expr, $lhs:expr, $rhs:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {
+    ($self:expr, $lhs:expr, $rhs:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {{
+        // Every block writes through `zip`, so an output longer than its input
+        // would keep uninitialized elements that the caller then takes as
+        // written. The combinators never pass one; this makes that a checked
+        // fact rather than a debug-build one, at one compare per block.
+        assert!(
+            $lhs.len() == $out.len() && $rhs.len() == $out.len(),
+            "kernel block length mismatch"
+        );
         match $self.0 {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `select` returned this variant only after
@@ -1770,7 +1783,7 @@ macro_rules! dispatch2 {
             Backend::NativeFma => $block::<true>($lhs, $rhs, $out),
             Backend::Portable => $block::<false>($lhs, $rhs, $out),
         }
-    };
+    }};
 }
 
 block_kernel!(tanh_block, tanh_one, tanh_block_avx512, tanh_block_avx2);
@@ -1903,7 +1916,12 @@ block_kernel2!(
 
 /// Dispatch one selected backend to the right compilation of a kernel.
 macro_rules! dispatch {
-    ($self:expr, $input:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {
+    ($self:expr, $input:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {{
+        // Every block writes through `zip`, so an output longer than its input
+        // would keep uninitialized elements that the caller then takes as
+        // written. The combinators never pass one; this makes that a checked
+        // fact rather than a debug-build one, at one compare per block.
+        assert_eq!($input.len(), $out.len(), "kernel block length mismatch");
         match $self.0 {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `select` returned this variant only after
@@ -1916,7 +1934,7 @@ macro_rules! dispatch {
             Backend::NativeFma => $block::<true>($input, $out),
             Backend::Portable => $block::<false>($input, $out),
         }
-    };
+    }};
 }
 
 /// Which compilation of the block kernels this CPU gets. Resolved once per
