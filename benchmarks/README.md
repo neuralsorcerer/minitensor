@@ -570,8 +570,8 @@ is left is really three:
   microarchitecture. This is the group with the most operations in it and the
   one a single change would move furthest.
 
-  Two plausible changes are not that change, and both are worth writing down
-  so the next person does not spend the afternoon on either.
+  Three plausible changes are not that change, and all are worth writing down
+  so the next person does not spend the afternoon on any of them.
 
   `unique` sorts with a comparator closure, while `ops::order` holds
   order-preserving integer keys whose header records comparisons falling from
@@ -590,7 +590,24 @@ is left is really three:
   10.58, and the values alone 9.21. A values-only path is worth about 1.3x,
   not the 3x the API shape suggests.
 
-  What is left in both cases is the algorithm, and matching it means a
+  And an LSD radix sort does not beat it either -- not on the host this was
+  tried on, and the reason it did not is itself worth knowing. The packed entry
+  is what makes radix look free: the entries are built in position order, so a
+  stable sort on the key bits alone reproduces the comparison sort's total
+  order exactly, positions and all. Written properly -- `u64` digits, every
+  histogram in one read, passes skipped when one bucket holds everything,
+  parallel per-block histograms and scatters -- a million float32 took 23.6 ms
+  serially and 16.9 ms in parallel against 10.9 for the comparison sort. The
+  serial passes cost about 5.8 ns an element, which is *slower than a fully
+  random scatter* on the same machine (4.4 ns), while plain copying ran at a
+  normal 24 GB/s. That pattern points at the host rather than at the
+  algorithm -- a VM whose nested page tables make each TLB miss expensive, and
+  a 256-way scatter is a steady stream of them -- so on bare metal the answer
+  may differ. It was not shipped because it could not be measured as faster
+  where it was measured at all; whoever retries it should time a random
+  scatter first, because that number decides the result before the sort does.
+
+  What is left in every case is the algorithm, and matching it means a
   vectorised quicksort.
 - **Compositions where NumPy has a kernel.** This group is empty, and it is
   the only one that has emptied. It held most of this list once: `fmax`/`fmin`
