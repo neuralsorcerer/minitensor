@@ -104,6 +104,22 @@ pub struct LinearBackward {
     pub weight_requires_grad: bool,
 }
 
+/// Refuse a GEMM operand whose storage does not cover its shape.
+///
+/// The backward's GEMMs read their operands through raw pointers sized by the
+/// shapes, and the incoming gradient is whatever the node downstream produced
+/// -- a plugin's gradient function included -- so its extent is checked here
+/// rather than trusted.
+fn check_extents(grad: usize, grad_needs: usize, other: usize, other_needs: usize) -> Result<()> {
+    if grad != grad_needs || other != other_needs {
+        return Err(MinitensorError::invalid_operation(format!(
+            "linear backward: operands hold {grad} and {other} elements where the shapes need \
+             {grad_needs} and {other_needs}"
+        )));
+    }
+    Ok(())
+}
+
 impl GradientFunction for LinearBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         use crate::ops::linalg::{
@@ -138,6 +154,12 @@ impl GradientFunction for LinearBackward {
                         let w = self.weight.data().$accessor().ok_or_else(|| {
                             MinitensorError::internal_error("linear backward: weight dtype")
                         })?;
+                        check_extents(
+                            g.len(),
+                            rows * out_features,
+                            w.len(),
+                            out_features * in_features,
+                        )?;
                         let out = data.$mut_accessor().unwrap();
                         let delegated = $offer(Gemm {
                             batch: 1,
@@ -203,6 +225,7 @@ impl GradientFunction for LinearBackward {
                         let x = self.input.data().$accessor().ok_or_else(|| {
                             MinitensorError::internal_error("linear backward: input dtype")
                         })?;
+                        check_extents(g.len(), rows * out_features, x.len(), rows * in_features)?;
                         let out = data.$mut_accessor().unwrap();
                         // `grad` holds the logical `(out, rows)` operand as
                         // `(rows, out)`, and goes over that way rather than

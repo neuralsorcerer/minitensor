@@ -407,7 +407,12 @@ where
 /// are float32 and already the output shape, which is where a block exists to
 /// hand it. Everything else, broadcasts and float64 included, falls through to
 /// the element-wise path.
-fn float_binary_blocked<N, W, B>(
+///
+/// # Safety
+///
+/// `blocks` must initialize every element of the output block it is handed;
+/// a call to one [`crate::ops::simd::F32Kernel`] method does.
+unsafe fn float_binary_blocked<N, W, B>(
     lhs: &Tensor,
     rhs: &Tensor,
     narrow: N,
@@ -434,8 +439,8 @@ where
         rhs_tensor.data().as_f32_slice(),
     ) {
         (true, Some(left), Some(right)) => {
-            // SAFETY: the kernel writes every element of each block it is
-            // given, and the blocks tile the output.
+            // SAFETY: `blocks` writes every element of each block it is given,
+            // by this function's contract, and the blocks tile the output.
             let out = unsafe {
                 crate::ops::map::binary_map_blocks_threshold(
                     left,
@@ -581,14 +586,18 @@ macro_rules! float_binary_op {
 /// this file behind NumPy, at 5.5ms over a million elements where the `atan`
 /// kernel it is one division away from costs 0.32.
 pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
-    float_binary_blocked(
-        lhs,
-        rhs,
-        atan2_f32,
-        atan2_f64,
-        |y, x, out| crate::ops::simd::F32Kernel::select().atan2(y, x, out),
-        [ATAN2_D_Y, ATAN2_D_X],
-    )
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: the block closure is one `F32Kernel` method call.
+    unsafe {
+        float_binary_blocked(
+            lhs,
+            rhs,
+            atan2_f32,
+            atan2_f64,
+            move |y, x, out| kernel.atan2(y, x, out),
+            [ATAN2_D_Y, ATAN2_D_X],
+        )
+    }
 }
 /// Element-wise larger of two tensors, ignoring a NaN in either operand. NaN
 /// only where both are.

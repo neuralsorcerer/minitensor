@@ -94,6 +94,12 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
                 let b = weight.data().$accessor().ok_or_else(|| {
                     MinitensorError::internal_error("linear: unexpected weight dtype")
                 })?;
+                // The GEMM reads both through raw pointers sized by the shapes,
+                // so the storage is checked against them rather than trusted.
+                assert!(
+                    a.len() == rows * in_features && b.len() == out_features * in_features,
+                    "linear operands do not match their shapes"
+                );
                 let c = output_data.$mut_accessor().unwrap();
                 // `weight` holds the logical `(in, out)` operand as `(out, in)`.
                 // The provider is offered it that way round rather than being
