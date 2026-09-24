@@ -99,12 +99,12 @@ impl MemoryPool {
 
     /// Return memory to the pool for future reuse.
     ///
-    /// The pointer must have been produced by [`Self::allocate`] with the
-    /// same `size`; the fn stays safe for API-compat with the allocator
-    /// stack (see `Allocator::deallocate`).
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    /// # Safety
+    ///
+    /// `ptr` must have come from [`Self::allocate`] with the same `size`, and
+    /// must not be used or freed again afterwards.
     #[inline]
-    pub fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+    pub unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {
             return Ok(());
         }
@@ -124,7 +124,10 @@ impl MemoryPool {
         for (idx, list) in self.free_lists.iter_mut().enumerate() {
             let size = 1usize << idx;
             for ptr in list.drain(..) {
-                let _ = self.base_allocator.deallocate(ptr.as_ptr(), size);
+                // SAFETY: a free-list block of bucket `idx` came from the base
+                // allocator at exactly `1 << idx` bytes, and draining it here is
+                // the only place it is freed.
+                let _ = unsafe { self.base_allocator.deallocate(ptr.as_ptr(), size) };
             }
         }
         self.free_blocks = 0;
@@ -179,8 +182,9 @@ impl Allocator for PooledAllocator {
     }
 
     #[inline(always)]
-    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
-        self.pool.deallocate(ptr, size)
+    unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+        // SAFETY: forwarded to the caller by the trait's contract.
+        unsafe { self.pool.deallocate(ptr, size) }
     }
 
     #[inline(always)]
@@ -200,24 +204,24 @@ mod tests {
     fn test_pool_reuse() {
         let mut pool = MemoryPool::new(Device::cpu());
         let ptr1 = pool.allocate(100).unwrap();
-        pool.deallocate(ptr1, 100).unwrap();
+        unsafe { pool.deallocate(ptr1, 100) }.unwrap();
         let ptr2 = pool.allocate(80).unwrap();
         assert_eq!(ptr1, ptr2);
-        pool.deallocate(ptr2, 80).unwrap();
+        unsafe { pool.deallocate(ptr2, 80) }.unwrap();
     }
 
     #[test]
     fn test_pool_clear() {
         let mut pool = MemoryPool::new(Device::cpu());
         let ptr = pool.allocate(256).unwrap();
-        pool.deallocate(ptr, 256).unwrap();
+        unsafe { pool.deallocate(ptr, 256) }.unwrap();
         assert!(pool.stats().free_blocks > 0);
         pool.clear();
         assert_eq!(pool.stats().free_blocks, 0);
         // allocating again still works
         let new_ptr = pool.allocate(256).unwrap();
         assert!(!new_ptr.is_null());
-        pool.deallocate(new_ptr, 256).unwrap();
+        unsafe { pool.deallocate(new_ptr, 256) }.unwrap();
     }
 
     #[test]
@@ -225,14 +229,14 @@ mod tests {
         let mut pool = MemoryPool::new(Device::cpu());
         let ptr = pool.allocate(0).unwrap();
         assert!(ptr.is_null());
-        pool.deallocate(ptr, 0).unwrap();
+        unsafe { pool.deallocate(ptr, 0) }.unwrap();
     }
 
     #[test]
     fn test_pooled_allocator_reuse() {
         let mut alloc = PooledAllocator::new(Device::cpu());
         let ptr1 = alloc.allocate(100).unwrap();
-        alloc.deallocate(ptr1, 100).unwrap();
+        unsafe { alloc.deallocate(ptr1, 100) }.unwrap();
         // 100 and 80 both round up to 128 bytes
         let ptr2 = alloc.allocate(80).unwrap();
         assert_eq!(ptr1, ptr2);
@@ -248,7 +252,7 @@ mod tests {
                     for _ in 0..100 {
                         let mut pool = pool.lock();
                         let ptr = pool.allocate(128).unwrap();
-                        pool.deallocate(ptr, 128).unwrap();
+                        unsafe { pool.deallocate(ptr, 128) }.unwrap();
                     }
                 })
             })
@@ -263,8 +267,8 @@ mod tests {
         let mut pool = MemoryPool::new(Device::cpu());
         let a = pool.allocate(64).unwrap();
         let b = pool.allocate(128).unwrap();
-        pool.deallocate(a, 64).unwrap();
-        pool.deallocate(b, 128).unwrap();
+        unsafe { pool.deallocate(a, 64) }.unwrap();
+        unsafe { pool.deallocate(b, 128) }.unwrap();
         let stats = pool.stats();
         assert_eq!(stats.free_blocks, 2);
         assert_eq!(stats.total_free_memory, 192);
@@ -276,7 +280,7 @@ mod tests {
         let stats2 = pool.stats();
         assert_eq!(stats2.free_blocks, 1);
         assert_eq!(stats2.total_free_memory, 64);
-        pool.deallocate(c, 100).unwrap();
+        unsafe { pool.deallocate(c, 100) }.unwrap();
     }
 
     #[test]

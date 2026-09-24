@@ -345,7 +345,7 @@ impl Backend for MetalBackend {
     }
 
     #[inline(always)]
-    fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
+    unsafe fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
         }
@@ -364,7 +364,7 @@ impl Backend for MetalBackend {
     }
 
     #[inline(always)]
-    fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+    unsafe fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if src.is_empty() {
             return Ok(());
         }
@@ -378,6 +378,15 @@ impl Backend for MetalBackend {
         let buffer_id = dst as usize;
         let buffers = self.buffers.read();
         if let Some(metal_buffer) = buffers.get(&buffer_id) {
+            if src.len() > metal_buffer.size_bytes {
+                return Err(crate::error::MinitensorError::memory_error(format!(
+                    "Host copy of {} bytes exceeds Metal buffer of {} bytes",
+                    src.len(),
+                    metal_buffer.size_bytes
+                )));
+            }
+            // SAFETY: the buffer's contents are `size_bytes` long, which the
+            // check above makes at least `src.len()`.
             unsafe {
                 let contents = metal_buffer.buffer.contents() as *mut u8;
                 std::ptr::copy_nonoverlapping(src.as_ptr(), contents, src.len());
@@ -392,7 +401,7 @@ impl Backend for MetalBackend {
     }
 
     #[inline(always)]
-    fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+    unsafe fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if dst.is_empty() {
             return Ok(());
         }
@@ -406,6 +415,14 @@ impl Backend for MetalBackend {
         let buffer_id = src as usize;
         let buffers = self.buffers.read();
         if let Some(metal_buffer) = buffers.get(&buffer_id) {
+            if dst.len() > metal_buffer.size_bytes {
+                return Err(crate::error::MinitensorError::memory_error(format!(
+                    "Device copy of {} bytes exceeds Metal buffer of {} bytes",
+                    dst.len(),
+                    metal_buffer.size_bytes
+                )));
+            }
+            // SAFETY: as in `copy_from_host`, for `dst.len()`.
             unsafe {
                 let contents = metal_buffer.buffer.contents() as *const u8;
                 std::ptr::copy_nonoverlapping(contents, dst.as_mut_ptr(), dst.len());

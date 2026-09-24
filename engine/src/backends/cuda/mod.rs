@@ -226,7 +226,7 @@ impl Backend for CudaBackend {
     }
 
     #[inline(always)]
-    fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()> {
+    unsafe fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
         }
@@ -252,7 +252,7 @@ impl Backend for CudaBackend {
     }
 
     #[inline(always)]
-    fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+    unsafe fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if src.is_empty() {
             return Ok(());
         }
@@ -284,7 +284,7 @@ impl Backend for CudaBackend {
     }
 
     #[inline(always)]
-    fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+    unsafe fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if dst.is_empty() {
             return Ok(());
         }
@@ -724,10 +724,10 @@ mod tests {
         let ptr = backend.allocate(0).unwrap();
         assert!(ptr.is_null());
 
-        backend.copy_from_host(ptr, &[]).unwrap();
-        backend.copy_to_host(&mut [], ptr).unwrap();
+        unsafe { backend.copy_from_host(ptr, &[]) }.unwrap();
+        unsafe { backend.copy_to_host(&mut [], ptr) }.unwrap();
 
-        backend.deallocate(ptr, 0).unwrap();
+        unsafe { backend.deallocate(ptr, 0) }.unwrap();
     }
 
     #[test]
@@ -738,10 +738,10 @@ mod tests {
 
         let backend = CudaBackend::initialize().unwrap();
         let ptr = backend.allocate(8).unwrap();
-        backend.copy_from_host(ptr, &[]).unwrap();
+        unsafe { backend.copy_from_host(ptr, &[]) }.unwrap();
         let mut buf = [0u8; 0];
-        backend.copy_to_host(&mut buf, ptr).unwrap();
-        backend.deallocate(ptr, 8).unwrap();
+        unsafe { backend.copy_to_host(&mut buf, ptr) }.unwrap();
+        unsafe { backend.deallocate(ptr, 8) }.unwrap();
     }
 
     #[test]
@@ -751,13 +751,9 @@ mod tests {
         }
 
         let backend = CudaBackend::initialize().unwrap();
-        assert!(
-            backend
-                .copy_from_host(std::ptr::null_mut(), &[1u8])
-                .is_err()
-        );
+        assert!(unsafe { backend.copy_from_host(std::ptr::null_mut(), &[1u8]) }.is_err());
         let mut buf = [0u8; 1];
-        assert!(backend.copy_to_host(&mut buf, std::ptr::null()).is_err());
+        assert!(unsafe { backend.copy_to_host(&mut buf, std::ptr::null()) }.is_err());
     }
 
     #[test]
@@ -773,19 +769,19 @@ mod tests {
         let data1 = [1u8, 2, 3, 4];
         let data2 = [5u8, 6, 7, 8];
 
-        backend.copy_from_host(ptr1, &data1).unwrap();
-        backend.copy_from_host(ptr2, &data2).unwrap();
+        unsafe { backend.copy_from_host(ptr1, &data1) }.unwrap();
+        unsafe { backend.copy_from_host(ptr2, &data2) }.unwrap();
 
         let mut out1 = [0u8; 4];
         let mut out2 = [0u8; 4];
-        backend.copy_to_host(&mut out1, ptr1).unwrap();
-        backend.copy_to_host(&mut out2, ptr2).unwrap();
+        unsafe { backend.copy_to_host(&mut out1, ptr1) }.unwrap();
+        unsafe { backend.copy_to_host(&mut out2, ptr2) }.unwrap();
 
         assert_eq!(data1, out1);
         assert_eq!(data2, out2);
 
-        backend.deallocate(ptr1, 4).unwrap();
-        backend.deallocate(ptr2, 4).unwrap();
+        unsafe { backend.deallocate(ptr1, 4) }.unwrap();
+        unsafe { backend.deallocate(ptr2, 4) }.unwrap();
     }
 
     #[test]
@@ -795,7 +791,7 @@ mod tests {
         }
 
         let backend = CudaBackend::initialize().unwrap();
-        backend.deallocate(std::ptr::null_mut(), 128).unwrap();
+        unsafe { backend.deallocate(std::ptr::null_mut(), 128) }.unwrap();
     }
 
     #[test]
@@ -807,11 +803,11 @@ mod tests {
         let backend = CudaBackend::initialize().unwrap();
 
         let ptr1 = backend.allocate(256).unwrap();
-        backend.deallocate(ptr1, 256).unwrap();
+        unsafe { backend.deallocate(ptr1, 256) }.unwrap();
         let ptr2 = backend.allocate(256).unwrap();
 
         assert_eq!(ptr1, ptr2);
 
-        backend.deallocate(ptr2, 256).unwrap();
+        unsafe { backend.deallocate(ptr2, 256) }.unwrap();
     }
 }

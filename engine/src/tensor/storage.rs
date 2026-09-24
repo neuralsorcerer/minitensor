@@ -959,14 +959,20 @@ impl TensorData {
     ///
     /// # Safety
     ///
-    /// * `ptr` must point to `size` initialised, readable bytes, and stay
+    /// * `ptr` must point to `size` initialised bytes that are readable *and
+    ///   writable* -- in-place tensor operations write through it -- and stay
     ///   valid and un-reallocated for as long as `owner` is alive.
     /// * `size` must be exactly `numel * dtype.size_in_bytes()`, and `ptr`
     ///   aligned for `dtype`'s element type.
+    /// * Every element must be a valid value of that type for as long as the
+    ///   storage lives, which for `Bool` means every byte is 0 or 1.
     /// * The memory must be C-contiguous: the engine's kernels read tensor
     ///   storage in contiguous logical order.
-    /// * Nothing else may write to the buffer while tensors derived from it
-    ///   are readable, which for the Python bindings the GIL provides.
+    /// * Nothing else may write to the buffer while an engine operation reads
+    ///   or writes it. The GIL covers Python code, not NumPy's own kernels,
+    ///   which release it: a second thread running a NumPy operation on the
+    ///   shared array during a tensor operation on it is a data race, as it
+    ///   is between two NumPy views used that way.
     #[inline(always)]
     pub unsafe fn from_foreign(
         ptr: *mut u8,
@@ -1246,7 +1252,9 @@ impl Drop for TensorData {
         // `Foreign` needs nothing here: dropping the struct drops its `owner`,
         // which is what releases the borrow.
         if let TensorBuffer::Raw { ptr, size, device } = self.buffer.get_mut() {
-            let _ = global_deallocate(*ptr, *size, *device);
+            // SAFETY: every `Raw` buffer is built from `global_allocate(size,
+            // device)` with these values, and this drop is its only free.
+            let _ = unsafe { global_deallocate(*ptr, *size, *device) };
         }
     }
 }

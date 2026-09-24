@@ -54,17 +54,17 @@ mod tests {
 
             // Test host to device copy
             let data = vec![1u8; size];
-            backend.copy_from_host(ptr, &data).unwrap();
+            unsafe { backend.copy_from_host(ptr, &data) }.unwrap();
 
             // Test device to host copy
             let mut result = vec![0u8; size];
-            backend.copy_to_host(&mut result, ptr).unwrap();
+            unsafe { backend.copy_to_host(&mut result, ptr) }.unwrap();
 
             // Verify data integrity
             assert_eq!(data, result);
 
             // Test deallocation
-            backend.deallocate(ptr, size).unwrap();
+            unsafe { backend.deallocate(ptr, size) }.unwrap();
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -320,8 +320,8 @@ mod tests {
             assert_eq!(info2.unwrap().1, 2048);
 
             // Clean up
-            backend.deallocate(ptr1, 1024).unwrap();
-            backend.deallocate(ptr2, 2048).unwrap();
+            unsafe { backend.deallocate(ptr1, 1024) }.unwrap();
+            unsafe { backend.deallocate(ptr2, 2048) }.unwrap();
 
             assert_eq!(backend.buffer_count(), initial_count);
         }
@@ -345,10 +345,10 @@ mod tests {
             let ptr = backend.allocate(0).unwrap();
             assert!(ptr.is_null());
 
-            backend.copy_from_host(ptr, &[]).unwrap();
-            backend.copy_to_host(&mut [], ptr).unwrap();
+            unsafe { backend.copy_from_host(ptr, &[]) }.unwrap();
+            unsafe { backend.copy_to_host(&mut [], ptr) }.unwrap();
 
-            backend.deallocate(ptr, 0).unwrap();
+            unsafe { backend.deallocate(ptr, 0) }.unwrap();
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -368,10 +368,10 @@ mod tests {
 
             let backend = MetalBackend::initialize().unwrap();
             let ptr = backend.allocate(8).unwrap();
-            backend.copy_from_host(ptr, &[]).unwrap();
+            unsafe { backend.copy_from_host(ptr, &[]) }.unwrap();
             let mut buf = [0u8; 0];
-            backend.copy_to_host(&mut buf, ptr).unwrap();
-            backend.deallocate(ptr, 8).unwrap();
+            unsafe { backend.copy_to_host(&mut buf, ptr) }.unwrap();
+            unsafe { backend.deallocate(ptr, 8) }.unwrap();
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -389,13 +389,9 @@ mod tests {
             }
 
             let backend = MetalBackend::initialize().unwrap();
-            assert!(
-                backend
-                    .copy_from_host(std::ptr::null_mut(), &[1u8])
-                    .is_err()
-            );
+            assert!(unsafe { backend.copy_from_host(std::ptr::null_mut(), &[1u8]) }.is_err());
             let mut buf = [0u8; 1];
-            assert!(backend.copy_to_host(&mut buf, std::ptr::null()).is_err());
+            assert!(unsafe { backend.copy_to_host(&mut buf, std::ptr::null()) }.is_err());
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -419,19 +415,19 @@ mod tests {
             let data1 = [1u8, 2, 3, 4];
             let data2 = [5u8, 6, 7, 8];
 
-            backend.copy_from_host(ptr1, &data1).unwrap();
-            backend.copy_from_host(ptr2, &data2).unwrap();
+            unsafe { backend.copy_from_host(ptr1, &data1) }.unwrap();
+            unsafe { backend.copy_from_host(ptr2, &data2) }.unwrap();
 
             let mut out1 = [0u8; 4];
             let mut out2 = [0u8; 4];
-            backend.copy_to_host(&mut out1, ptr1).unwrap();
-            backend.copy_to_host(&mut out2, ptr2).unwrap();
+            unsafe { backend.copy_to_host(&mut out1, ptr1) }.unwrap();
+            unsafe { backend.copy_to_host(&mut out2, ptr2) }.unwrap();
 
             assert_eq!(data1, out1);
             assert_eq!(data2, out2);
 
-            backend.deallocate(ptr1, 4).unwrap();
-            backend.deallocate(ptr2, 4).unwrap();
+            unsafe { backend.deallocate(ptr1, 4) }.unwrap();
+            unsafe { backend.deallocate(ptr2, 4) }.unwrap();
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -449,7 +445,7 @@ mod tests {
             }
 
             let backend = MetalBackend::initialize().unwrap();
-            backend.deallocate(std::ptr::null_mut(), 128).unwrap();
+            unsafe { backend.deallocate(std::ptr::null_mut(), 128) }.unwrap();
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -468,10 +464,10 @@ mod tests {
 
             let backend = MetalBackend::initialize().unwrap();
             let ptr1 = backend.allocate(256).unwrap();
-            backend.deallocate(ptr1, 256).unwrap();
+            unsafe { backend.deallocate(ptr1, 256) }.unwrap();
             let ptr2 = backend.allocate(256).unwrap();
             assert_eq!(ptr1, ptr2);
-            backend.deallocate(ptr2, 256).unwrap();
+            unsafe { backend.deallocate(ptr2, 256) }.unwrap();
         }
         #[cfg(not(target_os = "macos"))]
         {

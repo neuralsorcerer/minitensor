@@ -203,17 +203,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Allocated 1024 bytes at pointer: {:p}", ptr);
 
     let test_data = vec![42u8; 1024];
-    backend.copy_from_host(ptr, &test_data)?;
+    unsafe { backend.copy_from_host(ptr, &test_data) }?;
     println!("Copied data to device");
 
     let mut read_back = vec![0u8; 1024];
-    backend.copy_to_host(&mut read_back, ptr)?;
+    unsafe { backend.copy_to_host(&mut read_back, ptr) }?;
     println!("Copied data from device");
 
     assert_eq!(test_data, read_back);
     println!("Data integrity verified");
 
-    backend.deallocate(ptr, 1024)?;
+    unsafe { backend.deallocate(ptr, 1024) }?;
     println!("Memory deallocated");
 
     // Apple Silicon specific features

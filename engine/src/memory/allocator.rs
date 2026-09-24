@@ -18,7 +18,12 @@ pub trait Allocator: Send + Sync {
     fn allocate(&mut self, _size: usize) -> Result<*mut u8>;
 
     /// Deallocate previously allocated memory
-    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()>;
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have come from this allocator's [`Allocator::allocate`] with
+    /// the same `size`, and must not be used or freed again afterwards.
+    unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()>;
 
     /// Get the device this allocator operates on
     fn device(&self) -> Device;
@@ -105,7 +110,7 @@ impl Allocator for CudaAllocator {
         Ok(ptr)
     }
 
-    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+    unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
         }
@@ -153,7 +158,7 @@ impl Allocator for MetalAllocator {
         ))
     }
 
-    fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
+    unsafe fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
         Err(crate::error::MinitensorError::backend_error(
             "Metal",
             "Metal deallocator not yet implemented",
@@ -184,7 +189,7 @@ impl Allocator for OpenCLAllocator {
         ))
     }
 
-    fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
+    unsafe fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
         Err(crate::error::MinitensorError::backend_error(
             "OpenCL",
             "OpenCL deallocator not yet implemented",
@@ -223,12 +228,8 @@ impl Allocator for CpuAllocator {
         }
     }
 
-    // The `Allocator` trait keeps `deallocate` a safe fn for API-compat; the
-    // caller contract (pointer must come from `allocate` with the same size)
-    // is documented on the trait. Same pattern as `backends::cpu`.
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[inline(always)]
-    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+    unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {
             return Ok(());
         }
@@ -261,7 +262,7 @@ mod tests {
         let mut alloc = CpuAllocator::new();
         let ptr = alloc.allocate(0).unwrap();
         assert!(ptr.is_null());
-        alloc.deallocate(ptr, 0).unwrap();
+        unsafe { alloc.deallocate(ptr, 0) }.unwrap();
     }
 
     #[test]

@@ -770,6 +770,12 @@ the array changes what every tensor derived from it reads, including operands a
 backward pass has saved. `from_numpy` is the one to reach for unless you have a
 reason.
 
+Sharing across threads needs the same care as sharing one NumPy buffer between
+threads. NumPy releases the GIL inside its own kernels, so a NumPy operation
+writing the array on one thread while a tensor operation reads it on another
+is a data race; keep writes to a shared array off threads that are using its
+tensors at the same time.
+
 The array must be C-contiguous, in native byte order, aligned, writeable, and
 float32, float64, int32 or int64. Anything else raises rather than quietly
 copying — a caller who asked to share should find out at the call, not later

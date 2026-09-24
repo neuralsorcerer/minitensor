@@ -53,13 +53,28 @@ pub trait Backend: Send + Sync {
     fn allocate(&self, size_bytes: usize) -> Result<*mut u8>;
 
     /// Deallocate memory on this backend
-    fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()>;
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have come from this backend's [`Backend::allocate`] with the
+    /// same `size_bytes`, and must not be used or freed again afterwards.
+    unsafe fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()>;
 
     /// Copy data to this backend
-    fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()>;
+    ///
+    /// # Safety
+    ///
+    /// `dst` must be an allocation of this backend with room for `src.len()`
+    /// bytes, not aliased by `src`.
+    unsafe fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()>;
 
     /// Copy data from this backend
-    fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()>;
+    ///
+    /// # Safety
+    ///
+    /// `src` must be an allocation of this backend holding at least
+    /// `dst.len()` initialised bytes, not aliased by `dst`.
+    unsafe fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()>;
 }
 
 /// Get the appropriate backend for a device

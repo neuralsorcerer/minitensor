@@ -282,6 +282,21 @@ impl OpenCLBackend {
     }
 }
 
+/// Refuse a host copy the `f32` buffer cannot take whole.
+///
+/// The bytes are moved as `f32`s, so a length that is not a multiple of four
+/// would lose its tail, and one longer than the buffer would be the driver's
+/// problem at best.
+fn check_float_extent(bytes: usize, capacity: usize) -> Result<()> {
+    if !bytes.is_multiple_of(std::mem::size_of::<f32>()) || bytes > capacity {
+        return Err(crate::error::MinitensorError::memory_error(format!(
+            "a host copy of {bytes} bytes does not fit an OpenCL buffer of {capacity} bytes \
+             as whole f32 elements"
+        )));
+    }
+    Ok(())
+}
+
 impl Backend for OpenCLBackend {
     #[inline(always)]
     fn device(&self) -> Device {
@@ -401,7 +416,7 @@ impl Backend for OpenCLBackend {
     }
 
     #[inline(always)]
-    fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
+    unsafe fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
         }
@@ -420,7 +435,7 @@ impl Backend for OpenCLBackend {
     }
 
     #[inline(always)]
-    fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+    unsafe fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if src.is_empty() {
             return Ok(());
         }
@@ -434,12 +449,21 @@ impl Backend for OpenCLBackend {
         let buffer_id = dst as usize;
         let mut buffers = self.buffers.write();
         if let Some(opencl_buffer) = buffers.get_mut(&buffer_id) {
-            // Convert bytes to f32 for OpenCL buffer
-            let src_floats = unsafe {
-                std::slice::from_raw_parts(
-                    src.as_ptr() as *const f32,
-                    src.len() / std::mem::size_of::<f32>(),
-                )
+            check_float_extent(src.len(), opencl_buffer.size_bytes)?;
+            // The buffer holds `f32`, and the bytes can only be viewed as
+            // those where they are aligned for it; otherwise they are copied.
+            // SAFETY: every bit pattern is a valid `f32`, and `align_to` only
+            // puts whole, aligned elements in the middle slice.
+            let (head, aligned, tail) = unsafe { src.align_to::<f32>() };
+            let copied: Vec<f32>;
+            let src_floats = if head.is_empty() && tail.is_empty() {
+                aligned
+            } else {
+                copied = src
+                    .chunks_exact(4)
+                    .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .collect();
+                &copied
             };
 
             unsafe {
@@ -467,7 +491,7 @@ impl Backend for OpenCLBackend {
     }
 
     #[inline(always)]
-    fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+    unsafe fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if dst.is_empty() {
             return Ok(());
         }
@@ -481,29 +505,39 @@ impl Backend for OpenCLBackend {
         let buffer_id = src as usize;
         let buffers = self.buffers.read();
         if let Some(opencl_buffer) = buffers.get(&buffer_id) {
-            // Convert bytes to f32 for OpenCL buffer
-            let dst_floats = unsafe {
-                std::slice::from_raw_parts_mut(
-                    dst.as_mut_ptr() as *mut f32,
-                    dst.len() / std::mem::size_of::<f32>(),
-                )
+            check_float_extent(dst.len(), opencl_buffer.size_bytes)?;
+            let read = |into: &mut [f32]| {
+                unsafe {
+                    self.command_queue.enqueue_read_buffer(
+                        &opencl_buffer.buffer,
+                        CL_BLOCKING,
+                        0,
+                        into,
+                        &[],
+                    )
+                }
+                .map(|_| ())
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "Failed to copy data from OpenCL buffer: {}",
+                        e
+                    ))
+                })
             };
-
-            unsafe {
-                self.command_queue.enqueue_read_buffer(
-                    &opencl_buffer.buffer,
-                    CL_BLOCKING,
-                    0,
-                    dst_floats,
-                    &[],
-                )
+            if dst.as_ptr().align_offset(std::mem::align_of::<f32>()) == 0 {
+                // SAFETY: aligned, a whole number of `f32`s (checked above),
+                // and every bit pattern is a valid `f32`.
+                let (_, aligned, _) = unsafe { dst.align_to_mut::<f32>() };
+                read(aligned)?;
+            } else {
+                // Not aligned for `f32`, so read into a buffer that is and
+                // copy the bytes across.
+                let mut floats = vec![0f32; dst.len() / 4];
+                read(&mut floats)?;
+                for (bytes, value) in dst.chunks_exact_mut(4).zip(floats) {
+                    bytes.copy_from_slice(&value.to_ne_bytes());
+                }
             }
-            .map_err(|e| {
-                crate::error::MinitensorError::memory_error(format!(
-                    "Failed to copy data from OpenCL buffer: {}",
-                    e
-                ))
-            })?;
         } else {
             return Err(crate::error::MinitensorError::memory_error(
                 "OpenCL buffer not found for pointer",

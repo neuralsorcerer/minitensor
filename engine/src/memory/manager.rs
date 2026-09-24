@@ -37,9 +37,15 @@ impl UnifiedMemoryManager {
     }
 
     /// Deallocate memory on the specified device.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have come from [`Self::allocate`] on the same `device` with
+    /// the same `size`, and must not be used or freed again afterwards.
     #[inline]
-    pub fn deallocate(&mut self, ptr: *mut u8, size: usize, device: Device) -> Result<()> {
-        self.pool_for(device).deallocate(ptr, size)
+    pub unsafe fn deallocate(&mut self, ptr: *mut u8, size: usize, device: Device) -> Result<()> {
+        // SAFETY: forwarded to the caller by this function's contract.
+        unsafe { self.pool_for(device).deallocate(ptr, size) }
     }
 
     /// Get statistics for a specific device.
@@ -101,10 +107,16 @@ pub fn global_allocate(size: usize, device: Device) -> Result<*mut u8> {
 }
 
 /// Deallocate memory using the global manager.
+///
+/// # Safety
+///
+/// `ptr` must have come from [`global_allocate`] on the same `device` with the
+/// same `size`, and must not be used or freed again afterwards.
 #[inline]
-pub fn global_deallocate(ptr: *mut u8, size: usize, device: Device) -> Result<()> {
+pub unsafe fn global_deallocate(ptr: *mut u8, size: usize, device: Device) -> Result<()> {
     let mut mgr = global_manager().lock();
-    mgr.deallocate(ptr, size, device)
+    // SAFETY: forwarded to the caller by this function's contract.
+    unsafe { mgr.deallocate(ptr, size, device) }
 }
 
 #[cfg(test)]
@@ -120,7 +132,7 @@ mod tests {
         let ptr = manager.allocate(1024, device).unwrap();
         assert!(!ptr.is_null());
 
-        manager.deallocate(ptr, 1024, device).unwrap();
+        unsafe { manager.deallocate(ptr, 1024, device) }.unwrap();
 
         // stats should track allocations
         let stats = manager.get_stats(device).unwrap();
@@ -137,12 +149,12 @@ mod tests {
         let ptr = global_allocate(512, device).unwrap();
         assert!(!ptr.is_null());
 
-        global_deallocate(ptr, 512, device).unwrap();
+        unsafe { global_deallocate(ptr, 512, device) }.unwrap();
 
         // Zero-sized allocations should be handled gracefully
         let ptr = global_allocate(0, device).unwrap();
         assert!(ptr.is_null());
-        global_deallocate(ptr, 0, device).unwrap();
+        unsafe { global_deallocate(ptr, 0, device) }.unwrap();
     }
 
     #[test]
@@ -154,7 +166,7 @@ mod tests {
                 thread::spawn(move || {
                     for _ in 0..100 {
                         let ptr = global_allocate(128, device).unwrap();
-                        global_deallocate(ptr, 128, device).unwrap();
+                        unsafe { global_deallocate(ptr, 128, device) }.unwrap();
                     }
                 })
             })
@@ -169,7 +181,7 @@ mod tests {
         let mut manager = UnifiedMemoryManager::new();
         let device = Device::cpu();
         let ptr = manager.allocate(128, device).unwrap();
-        manager.deallocate(ptr, 128, device).unwrap();
+        unsafe { manager.deallocate(ptr, 128, device) }.unwrap();
         let stats_before = manager.get_stats(device).unwrap();
         assert_eq!(stats_before.free_blocks, 1);
         manager.clear_device(device);
@@ -190,7 +202,7 @@ mod tests {
         let mut manager = UnifiedMemoryManager::new();
         let device = Device::cpu();
         let ptr = manager.allocate(64, device).unwrap();
-        manager.deallocate(ptr, 64, device).unwrap();
+        unsafe { manager.deallocate(ptr, 64, device) }.unwrap();
         let all = manager.get_all_stats();
         assert_eq!(all.len(), 1);
         assert_eq!(all.get(&device).unwrap().free_blocks, 1);
