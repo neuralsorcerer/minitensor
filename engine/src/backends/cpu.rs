@@ -55,8 +55,16 @@ impl Backend for CpuBackend {
             return Ok(ptr.as_ptr());
         }
 
-        let layout = unsafe { Layout::from_size_align_unchecked(size_bytes, 64) };
+        // Checked, not `from_size_align_unchecked`: a size within 63 bytes of
+        // `isize::MAX` is not a valid layout at this alignment, and building
+        // one anyway is undefined behavior rather than an error.
+        let layout = Layout::from_size_align(size_bytes, 64).map_err(|_| {
+            crate::error::MinitensorError::memory_error(format!(
+                "Invalid memory layout for size {size_bytes}"
+            ))
+        })?;
 
+        // SAFETY: `layout` has a non-zero size.
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
@@ -129,7 +137,11 @@ impl Drop for CpuBackend {
             if size == 0 {
                 continue;
             }
-            let layout = unsafe { Layout::from_size_align_unchecked(size, 64) };
+            // Every block in the pool came from `allocate` with this size, so
+            // the layout was valid when it was made.
+            let Ok(layout) = Layout::from_size_align(size, 64) else {
+                continue;
+            };
             for ptr in vec.drain(..) {
                 unsafe { dealloc(ptr.as_ptr(), layout) };
             }

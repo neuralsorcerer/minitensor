@@ -360,6 +360,12 @@ pub(crate) fn apply_block<T: Factorable>(
     blocks.second.clear();
     blocks.second.resize(nb * width, T::zero());
 
+    // `v` and `t` were built by another function for this panel; the GEMMs read
+    // them through raw pointers, so their extent is checked, not trusted.
+    assert!(
+        blocks.v.len() >= rows * nb && blocks.t.len() >= nb * nb,
+        "reflector block is smaller than the panel it is applied for"
+    );
     // SAFETY: `v` is `rows * nb`, `block` is `rows * width`, `t` is `nb * nb`
     // and both `first` and `second` are `nb * width`; every extent below is one
     // of those, and the three calls are the shapes documented on the trait.

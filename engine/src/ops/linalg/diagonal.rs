@@ -661,6 +661,14 @@ fn optimized_matmul_f32(
     }
 
     let batch = lhs_data.len() / (m * k);
+    // Every path below hands these buffers to a GEMM as raw pointers sized by
+    // the shapes, so the storage is checked against them rather than trusted.
+    assert!(
+        lhs_data.len() == batch * m * k
+            && rhs_data.len() == batch * k * n
+            && output_data.len() == batch * m * n,
+        "matmul buffers do not match their shapes"
+    );
     if batch == 1 {
         // A single whole product, offered to the provider, which sees the
         // dimensions and declines anything too small to pay for the call. The
@@ -751,6 +759,14 @@ fn optimized_matmul_f64(
     }
 
     let batch = lhs_data.len() / (m * k);
+    // Every path below hands these buffers to a GEMM as raw pointers sized by
+    // the shapes, so the storage is checked against them rather than trusted.
+    assert!(
+        lhs_data.len() == batch * m * k
+            && rhs_data.len() == batch * k * n
+            && output_data.len() == batch * m * n,
+        "matmul buffers do not match their shapes"
+    );
     if batch == 1 {
         // A single whole product, offered to the provider, which sees the
         // dimensions and declines anything too small to pay for the call. The

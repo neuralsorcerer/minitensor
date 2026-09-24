@@ -792,6 +792,12 @@ pub(crate) fn scatter_columns<T: ConvScalar>(
     let group_out = out_channels / groups;
     let group_k = (in_channels / groups) * kh_kw;
     let plane = in_h * in_w;
+    // The GEMM reads `weight` through a raw pointer, one group's row-block at a
+    // time, so its extent is checked rather than trusted.
+    assert!(
+        weight.len() >= groups * group_out * group_k,
+        "convolution weight is smaller than its geometry says"
+    );
 
     // A block of images at a time. Taking the whole batch at once meant a
     // `[k_dim, N*OH*OW]` intermediate -- 944MB for a 32x3x224x224 stem -- and

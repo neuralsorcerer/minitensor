@@ -81,6 +81,11 @@ const INPUT: usize = 0;
 const FORGET: usize = 1;
 const CANDIDATE: usize = 2;
 const OUTPUT: usize = 3;
+// The forward activates `INPUT..=FORGET` as one block of `2 * hidden` and
+// `OUTPUT` as the tail of the row, and the float64 block kernels fill their
+// output by zipping it with their input -- so a reordering here would leave
+// elements unwritten rather than fail. Checked at compile time instead.
+const _: () = assert!(FORGET == INPUT + 1 && CANDIDATE == FORGET + 1 && OUTPUT == 3);
 
 /// What the backward needs, kept as one buffer rather than four tensors.
 ///

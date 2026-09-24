@@ -481,6 +481,12 @@ fn back_substitute_lt<T: Factorable>(
     cols: usize,
     scratch: &mut BackwardScratch<T>,
 ) {
+    // The GEMM reads the rows of `b` below each panel through a raw pointer,
+    // so the extent is checked rather than trusted.
+    assert!(
+        l.len() >= n * n && b.len() >= n * cols,
+        "back substitution operands are smaller than n x n and n x cols"
+    );
     let mut i0 = n;
     while i0 > 0 {
         let nb = PANEL.min(i0);
@@ -601,6 +607,12 @@ pub(crate) fn cholesky_backward_block<T: Factorable>(
     scratch: &mut BackwardScratch<T>,
     n: usize,
 ) {
+    // The GEMM below reads `l` and `grad` through raw pointers, so their size
+    // is checked here rather than trusted: one compare per matrix.
+    assert!(
+        l.len() == n * n && grad.len() == n * n && out.len() == n * n,
+        "cholesky backward block is not n x n"
+    );
     let half = T::one() / (T::one() + T::one());
     ensure(&mut scratch.work, n * n);
 
