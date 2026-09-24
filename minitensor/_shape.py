@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import itertools as _itertools
 import math as _math
 import operator as _operator
 
@@ -509,9 +510,11 @@ def tensor_split(
                 f"tensor_split requires a positive number of sections, got {sections}"
             )
         base, extra = divmod(length, sections)
-        edges = [0]
-        for part in range(sections):
-            edges.append(edges[-1] + base + (1 if part < extra else 0))
+        # Built by list repetition, as NumPy builds its split points: a count
+        # no list can hold raises MemoryError at once, where appending one
+        # edge at a time ground on until the machine ran out of memory.
+        sizes = [base + 1] * extra + [base] * (sections - extra)
+        edges = list(_itertools.accumulate(sizes, initial=0))
 
     return tuple(
         _C.functional.narrow(tensor, axis, start, max(stop - start, 0))

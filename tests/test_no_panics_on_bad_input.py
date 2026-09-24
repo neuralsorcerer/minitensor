@@ -451,3 +451,27 @@ def test_repeat_and_repeat_interleave_decline_growth_they_cannot_hold():
     # The ordinary forms are untouched.
     assert tensor.repeat(2, 2).numel() == 24
     assert tensor.repeat_interleave(2).numel() == 12
+
+
+@pytest.mark.parametrize("name", ["histc", "histogram", "histogram_bin_edges"])
+def test_a_bin_count_no_memory_holds_is_declined(name):
+    # Building `bins + 1` edges overflowed a capacity and panicked.
+    values = _t(np.array([0.5], dtype=np.float32))
+    _assert_no_panic(name, lambda: getattr(mt, name)(values, 2**62))
+    with pytest.raises(Exception):
+        getattr(mt, name)(values, 2**62)
+
+
+@pytest.mark.parametrize("name", ["tensor_split", "array_split", "hsplit", "vsplit"])
+def test_a_section_count_no_list_holds_fails_at_once(name):
+    """The split points were appended one at a time, so an absurd count ground
+    on until memory ran out; built by repetition, it fails the way NumPy's
+    does, immediately."""
+
+    import time
+
+    values = _t(np.arange(6, dtype=np.float32).reshape(2, 3))
+    start = time.perf_counter()
+    with pytest.raises(MemoryError):
+        getattr(mt, name)(values, 2**62)
+    assert time.perf_counter() - start < 1.0

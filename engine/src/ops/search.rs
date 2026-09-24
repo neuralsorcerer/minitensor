@@ -847,6 +847,13 @@ fn bin_edges(input: &Tensor, bins: Bins<'_>, range: Option<(f64, f64)>) -> Resul
                     "histogram: at least one bin is needed",
                 ));
             }
+            // `count + 1` edges and `count` counts are about to be built, so a
+            // count no memory could hold is an error here rather than a
+            // capacity-overflow panic inside the allocation.
+            let edge_count = count
+                .checked_add(1)
+                .ok_or_else(|| MinitensorError::invalid_operation("histogram: too many bins"))?;
+            crate::tensor::TensorData::ensure_allocatable(edge_count, DataType::Float64)?;
             let (low, high) = match range {
                 // Given a range, the data is not read at all.
                 Some(pair) => pair,
