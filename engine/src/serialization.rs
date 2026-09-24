@@ -920,8 +920,15 @@ fn read_file<T: serde::de::DeserializeOwned>(
         .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
     let mut reader = BufReader::new(file);
-    let failed = |kind: &str, e: &dyn std::fmt::Display| {
-        MinitensorError::serialization_error(format!("{kind} deserialization failed: {e}"))
+    // The file opened, so this is its contents, not its permissions or the
+    // disk -- which is what the generic serialization hint suggests checking.
+    let failed = |kind: &str, e: &dyn std::fmt::Display| MinitensorError::SerializationError {
+        message: format!("{kind} deserialization failed: {e}"),
+        suggestion: Some(format!(
+            "The file is not a readable {kind} model: check that it was written by \
+             this library in that format and is complete"
+        )),
+        context: None,
     };
     match format {
         SerializationFormat::Json => {
