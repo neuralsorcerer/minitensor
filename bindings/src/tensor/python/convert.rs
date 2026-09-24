@@ -213,12 +213,7 @@ where
 }
 
 pub(crate) fn py_not_implemented(py: Python) -> PyResult<Py<PyAny>> {
-    unsafe {
-        Ok(
-            pyo3::Bound::<pyo3::PyAny>::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented())
-                .unbind(),
-        )
-    }
+    Ok(py.NotImplemented())
 }
 
 pub(crate) fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
@@ -773,6 +768,36 @@ fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
     engine::ops::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
 }
 
+/// The values of an `int64` or `int32` NumPy array in row-major order, widened
+/// to `i64`, with its shape; `None` for any other object.
+///
+/// Not `as_slice` alone. It hands back a Fortran-ordered buffer in memory
+/// order, which is column-major, so `t[np.asfortranarray(idx)]` gathered the
+/// transposed indices into the right shape -- wrong values, no error. And it
+/// refuses a strided array outright, so `t[idx[::2]]` raised an error about
+/// alignment. The slice is taken only when the array is C-contiguous, where
+/// memory order is row-major order; otherwise the array's own iterator walks
+/// it in logical order, strides and all, with no copy through Python.
+fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<usize>)>> {
+    macro_rules! read {
+        ($ty:ty) => {
+            if let Ok(array) = item.cast::<PyArrayDyn<$ty>>() {
+                let readonly = array.readonly();
+                let shape = readonly.shape().to_vec();
+                let values: Vec<i64> = if array.is_c_contiguous() {
+                    readonly.as_slice()?.iter().map(|&v| v as i64).collect()
+                } else {
+                    readonly.as_array().iter().map(|&v| v as i64).collect()
+                };
+                return Ok(Some((values, shape)));
+            }
+        };
+    }
+    read!(i64);
+    read!(i32);
+    Ok(None)
+}
+
 /// An integer index array from one entry of a subscript: its values, flattened,
 /// and the shape they came in.
 ///
@@ -807,20 +832,8 @@ pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i
         };
         return Ok(Some((values, shape)));
     }
-    if let Ok(arr) = item.cast::<PyArrayDyn<i64>>() {
-        let ro = arr.readonly();
-        if ro.ndim() == 0 {
-            return Ok(None);
-        }
-        return Ok(Some((ro.as_slice()?.to_vec(), ro.shape().to_vec())));
-    }
-    if let Ok(arr) = item.cast::<PyArrayDyn<i32>>() {
-        let ro = arr.readonly();
-        if ro.ndim() == 0 {
-            return Ok(None);
-        }
-        let values: Vec<i64> = ro.as_slice()?.iter().map(|&v| v as i64).collect();
-        return Ok(Some((values, ro.shape().to_vec())));
+    if let Some((values, shape)) = numpy_integer_values(item)? {
+        return Ok((!shape.is_empty()).then_some((values, shape)));
     }
     if let Ok(list) = item.cast::<PyList>() {
         // A bool leaf means a mask, and anything that is not an integer is not
@@ -939,18 +952,9 @@ pub(crate) fn try_fancy_index_tensor(
         return Ok(None);
     }
 
-    if let Ok(arr) = key.cast::<PyArrayDyn<i64>>() {
-        let ro = arr.readonly();
-        if ro.ndim() == 1 {
-            return select_rows(reference, ro.as_slice()?).map(Some);
-        }
-        return Ok(None);
-    }
-    if let Ok(arr) = key.cast::<PyArrayDyn<i32>>() {
-        let ro = arr.readonly();
-        if ro.ndim() == 1 {
-            let vals: Vec<i64> = ro.as_slice()?.iter().map(|&v| v as i64).collect();
-            return select_rows(reference, &vals).map(Some);
+    if let Some((values, shape)) = numpy_integer_values(key)? {
+        if shape.len() == 1 {
+            return select_rows(reference, &values).map(Some);
         }
         return Ok(None);
     }
@@ -1664,7 +1668,34 @@ pub(crate) fn convert_numpy_to_tensor(
     from_array!(f64, DataType::Float64);
     from_array!(i32, DataType::Int32);
     from_array!(i64, DataType::Int64);
-    from_array!(bool, DataType::Bool);
+    // Not through `from_array!`: that would read the array as `&[bool]`, and a
+    // NumPy bool array can hold any byte -- `np.array([2], np.uint8)
+    // .view(bool)` is an ordinary one, and prints `[ True]`. Every byte but 0
+    // and 1 is undefined behavior as a Rust `bool`, so the bytes are read as
+    // what they are and normalised the way NumPy reads them: not zero is true.
+    if let Ok(typed) = array.cast::<PyArrayDyn<bool>>() {
+        let readonly = typed.readonly();
+        let shape = Shape::new(readonly.shape().to_vec());
+        let len = readonly.len();
+        let bytes: &[u8] = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: the array is C-contiguous (`as_c_contiguous` above) with
+            // `len` one-byte elements, the read-only borrow keeps it from being
+            // written through Rust for as long as this lives, and any byte is
+            // a valid `u8`.
+            unsafe { std::slice::from_raw_parts(readonly.data().cast::<u8>(), len) }
+        };
+        let values: Vec<bool> = bytes.iter().map(|&byte| byte != 0).collect();
+        let data = TensorData::from_vec(values, DataType::Bool, Device::cpu());
+        return Ok(Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Bool,
+            Device::cpu(),
+            requires_grad,
+        ));
+    }
     {
         let described = numpy_dtype_parts(array)
             .map(|(kind, size)| format!("{kind}{}", size * 8))

@@ -59,7 +59,7 @@ Measured on 20k-element sequences and a 100k-element float32 tensor:
 the floor for a copy of that size.
 
 The floor for *not* copying is lower still. `numpy.asarray(tensor)` goes
-through `__array_interface__` and hands back an array pointing at the tensor's
+through the buffer protocol and hands back an array pointing at the tensor's
 own buffer, so it costs an array header whatever the size: 9us on a 64MB
 tensor against 15ms for `.numpy()`. The array is read-only, because several
 tensors can share one buffer and a write into it would change all of them; the

@@ -82,7 +82,7 @@ def test_contiguous_copy_detaches_from_the_array():
     assert float(np.asarray(owned)[0]) == 0.0
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
 def test_every_shareable_dtype_round_trips(dtype):
     source = np.array([[1, 0, 1], [0, 1, 0]]).astype(dtype)
     tensor = mt.Tensor.from_numpy_shared(source)
@@ -113,6 +113,48 @@ def test_a_byte_swapped_array_is_refused():
     source = np.arange(4, dtype=np.dtype(">f8" if sys.byteorder == "little" else "<f8"))
     with pytest.raises(ValueError, match="byte order"):
         mt.Tensor.from_numpy_shared(source)
+
+
+def test_a_bool_array_is_refused():
+    """NumPy bools may hold any byte, and Rust's may hold only 0 and 1.
+
+    `np.array([2], np.uint8).view(bool)` is an ordinary NumPy array, and the
+    `uint8` alias can write such a byte after any check made at sharing time.
+    """
+
+    with pytest.raises(ValueError, match="bool"):
+        mt.Tensor.from_numpy_shared(np.array([True, False]))
+
+
+def _over_immutable_bytes():
+    return np.frombuffer(b"\0" * 16, dtype=np.float32)
+
+
+def _with_the_flag_cleared():
+    source = np.arange(4, dtype=np.float64)
+    source.setflags(write=False)
+    return source
+
+
+@pytest.mark.parametrize("make", [_over_immutable_bytes, _with_the_flag_cleared])
+def test_a_read_only_array_is_refused(make):
+    """In-place tensor operations write the shared memory, which a read-only
+    array's owner -- an immutable `bytes`, a memory map opened `r` -- forbids."""
+
+    with pytest.raises(ValueError, match="writeable"):
+        mt.Tensor.from_numpy_shared(make())
+
+
+def test_from_numpy_normalises_bool_bytes():
+    """Copying reads each byte the way NumPy does: anything but zero is true."""
+
+    source = np.array([2, 0, 1, 255], dtype=np.uint8).view(bool)
+    tensor = mt.Tensor.from_numpy(source)
+    stored = np.asarray(tensor)
+    np.testing.assert_array_equal(stored.view(np.uint8), [1, 0, 1, 1])
+    np.testing.assert_array_equal(
+        np.asarray(mt.logical_not(tensor)), [False, True, False, False]
+    )
 
 
 def test_something_that_is_not_an_array_is_refused():

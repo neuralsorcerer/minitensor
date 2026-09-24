@@ -48,14 +48,23 @@ fn typestr(dtype: DataType) -> &'static str {
 
 #[pymethods]
 impl PyTensor {
-    /// The buffer itself, for a NumPy that would rather not be handed a copy.
+    /// The array interface, for consumers that read one rather than the
+    /// buffer protocol.
     ///
-    /// `numpy.asarray(tensor)` goes through this and comes back pointing at
-    /// the tensor's own memory: no copy, no allocation, whatever the size. The
-    /// engine keeps every tensor contiguous and row-major, which is exactly
-    /// what an array header describes, so there is nothing to rearrange on the
-    /// way out. NumPy holds a reference to the tensor for as long as the array
-    /// lives, so the buffer cannot be freed underneath it.
+    /// `numpy.asarray(tensor)` does not come through here: NumPy prefers the
+    /// buffer protocol below, and gets the same read-only, zero-copy view
+    /// either way. This is for the libraries that look for the interface by
+    /// name.
+    ///
+    /// `data` is a `memoryview` of the tensor rather than the `(address,
+    /// read_only)` pair the protocol also allows, and that is a lifetime
+    /// decision, not a style one. An array built from a bare address keeps
+    /// only this *tensor* alive, and a tensor does not keep its buffer: an
+    /// in-place write to a tensor whose storage is shared moves it to a fresh
+    /// buffer, and once the other holder goes the address points at freed
+    /// memory. The `memoryview` is an export that holds the storage itself
+    /// until it is released, so whatever is built from it cannot outlive the
+    /// bytes it reads. It is read-only, which makes the array read-only.
     ///
     /// **Read-only**, and not as a nicety. Several tensors can share one
     /// buffer -- `detach`, `reshape`, `astype` to the dtype it already has --
@@ -64,49 +73,40 @@ impl PyTensor {
     /// `numpy.array(tensor)` or `tensor.numpy()` when you want something to
     /// write into: both copy.
     ///
-    /// An in-place operation on the tensor is the other direction of the same
-    /// sharing. Writing to a buffer this tensor holds alone writes through the
-    /// array; writing to one it shares copies first, and the array is left on
-    /// the old buffer, still valid and still holding the values it had. So an
-    /// exported array is a stable read of the values as they were, and a
-    /// program that both exports and writes in place should not depend on
-    /// which of the two it gets.
+    /// Because a live view holds the storage, the tensor never holds it alone
+    /// while one exists, so an in-place write to the tensor copies first and
+    /// the view keeps the values it was taken with. The exception is a leaf
+    /// that requires a gradient -- a parameter -- whose in-place updates are
+    /// deliberately written into the shared buffer so that every handle to
+    /// the parameter sees them; a view of a parameter follows its updates.
     ///
     /// A tensor that is not on the CPU has no host buffer to point at, so it
     /// does not have this attribute at all -- which is the protocol's way of
     /// saying so, and leaves `numpy.asarray` to fall through to `__array__`
     /// and its message about calling `.cpu()` first.
     #[getter]
-    fn __array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        if self.inner.device() != Device::cpu() {
+    fn __array_interface__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let tensor = &this.inner;
+        if tensor.device() != Device::cpu() {
             return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
                 "__array_interface__",
             ));
         }
 
-        let data = self.inner.data();
-        let address = match self.inner.dtype() {
-            DataType::Float32 => data.as_f32_slice().map(|s| s.as_ptr() as usize),
-            DataType::Float64 => data.as_f64_slice().map(|s| s.as_ptr() as usize),
-            DataType::Int32 => data.as_i32_slice().map(|s| s.as_ptr() as usize),
-            DataType::Int64 => data.as_i64_slice().map(|s| s.as_ptr() as usize),
-            DataType::Bool => data.as_bool_slice().map(|s| s.as_ptr() as usize),
-        }
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "tensor buffer does not match its dtype",
-            )
-        })?;
-
         let interface = PyDict::new(py);
         interface.set_item(
             intern!(py, "shape"),
-            PyTuple::new(py, self.inner.shape().dims())?,
+            PyTuple::new(py, tensor.shape().dims())?,
         )?;
-        interface.set_item(intern!(py, "typestr"), typestr(self.inner.dtype()))?;
-        // `true` is the read-only flag, and `strides` is left out entirely:
-        // absent means C-contiguous, which every tensor is.
-        interface.set_item(intern!(py, "data"), (address, true))?;
+        interface.set_item(intern!(py, "typestr"), typestr(tensor.dtype()))?;
+        // `strides` is left out entirely: absent means C-contiguous, which
+        // every tensor is.
+        interface.set_item(
+            intern!(py, "data"),
+            pyo3::types::PyMemoryView::from(slf.as_any())?,
+        )?;
         interface.set_item(intern!(py, "version"), 3)?;
         Ok(interface)
     }
@@ -115,7 +115,7 @@ impl PyTensor {
     ///
     /// Always a copy, which is the point: the array is yours to write into and
     /// nothing flows back to the tensor through it. The non-copying spelling is
-    /// `numpy.asarray(tensor)`, which goes through `__array_interface__` and
+    /// `numpy.asarray(tensor)`, which goes through the buffer protocol and
     /// comes back read-only.
     fn numpy(&self, py: Python) -> PyResult<Py<PyAny>> {
         convert_tensor_to_numpy(&self.inner, py)
@@ -239,8 +239,8 @@ impl PyTensor {
         view: *mut pyo3::ffi::Py_buffer,
         flags: std::os::raw::c_int,
     ) -> PyResult<()> {
-        let tensor = slf.borrow().inner.clone();
-        unsafe { crate::share::fill_buffer_view(&tensor, slf.into_any(), view, flags) }
+        let owner = slf.as_any().clone();
+        unsafe { crate::share::fill_buffer_view(&slf.borrow().inner, owner, view, flags) }
     }
 
     /// # Safety

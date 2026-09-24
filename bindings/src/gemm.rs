@@ -192,8 +192,8 @@ unsafe fn header<'py, T: Element>(
 /// # Safety
 ///
 /// Nothing unsafe escapes: the three headers borrow the request's slices and
-/// are dropped inside this call. `PyArray_MatrixProduct2` writes only into
-/// `out`, whose header is the only writeable one.
+/// are dropped inside this call. `matmul` writes only into `out`, whose header
+/// is the only writeable one.
 fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
     if request.flops() < MIN_FLOPS.load(Ordering::Relaxed)
         || request.k < MIN_K.load(Ordering::Relaxed)
@@ -209,49 +209,50 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
             .ok()
         else {
             // No `numpy` to reach, which is not an error here -- the engine
-            // has its own kernel and this was only ever an offer.
-            unsafe { ffi::PyErr_Clear() };
+            // has its own kernel and this was only ever an offer. The failure
+            // was fetched into the `PyErr` that `ok()` dropped, so nothing is
+            // left pending.
             return false;
         };
 
-        let (Some(lhs), Some(rhs), Some(out)) = (
-            unsafe {
-                header(
-                    py,
-                    request.batch,
-                    request.m,
-                    request.k,
-                    request.lhs_storage,
-                    request.lhs.as_ptr().cast_mut(),
-                    false,
-                )
-            },
-            unsafe {
-                header(
-                    py,
-                    request.batch,
-                    request.k,
-                    request.n,
-                    request.rhs_storage,
-                    request.rhs.as_ptr().cast_mut(),
-                    false,
-                )
-            },
-            unsafe {
-                header(
-                    py,
-                    request.batch,
-                    request.m,
-                    request.n,
-                    Storage::RowMajor,
-                    request.out.as_mut_ptr(),
-                    true,
-                )
-            },
-        ) else {
-            // Only a header allocation can have failed here, which means the
-            // interpreter is out of memory. Leave the error for whatever asks
-            // Python next and let the engine's kernel produce the answer.
+        // One at a time, stopping at the first failure: only a header
+        // allocation can fail here, which means the interpreter is out of
+        // memory, and the C-API must not be called again with that error
+        // pending. It is cleared and the engine's kernel produces the answer.
+        let lhs = unsafe {
+            header(
+                py,
+                request.batch,
+                request.m,
+                request.k,
+                request.lhs_storage,
+                request.lhs.as_ptr().cast_mut(),
+                false,
+            )
+        };
+        let rhs = lhs.as_ref().and_then(|_| unsafe {
+            header(
+                py,
+                request.batch,
+                request.k,
+                request.n,
+                request.rhs_storage,
+                request.rhs.as_ptr().cast_mut(),
+                false,
+            )
+        });
+        let out = rhs.as_ref().and_then(|_| unsafe {
+            header(
+                py,
+                request.batch,
+                request.m,
+                request.n,
+                Storage::RowMajor,
+                request.out.as_mut_ptr(),
+                true,
+            )
+        });
+        let (Some(lhs), Some(rhs), Some(out)) = (lhs, rhs, out) else {
             unsafe { ffi::PyErr_Clear() };
             return false;
         };

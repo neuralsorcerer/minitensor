@@ -316,9 +316,8 @@ def test_a_relabelling_shares_its_bytes_and_still_lets_nothing_through(view):
 
     tensor = mt.from_numpy(source.copy())
     relabelled = view(tensor)
-    assert (
-        relabelled.__array_interface__["data"][0]
-        == tensor.__array_interface__["data"][0]
+    assert np.shares_memory(
+        np.asarray(relabelled), np.asarray(tensor)
     ), "the relabelling copied, so this test is no longer testing anything"
 
     for mutate in (
@@ -1166,3 +1165,52 @@ def test_the_scalar_flatten_still_carries_a_gradient_back_to_a_scalar():
     assert tuple(scalar.grad.shape) == ()
     assert scalar.grad.item() == 1.0
     mt.clear_autograd_graph()
+
+
+# --- NumPy index arrays in any memory layout ----------------------------------
+
+
+def _index_layouts():
+    """One set of indices, laid out every way NumPy can hold it."""
+
+    base = np.array([[0, 3], [2, 1], [3, 0]])
+    return {
+        "c_order": base,
+        "fortran_order": np.asfortranarray(base),
+        "strided": np.array([[0, 9, 3], [2, 9, 1], [3, 9, 0]])[:, ::2],
+        "transposed": np.ascontiguousarray(base.T).T,
+    }
+
+
+@pytest.mark.parametrize("layout", sorted(_index_layouts()))
+@pytest.mark.parametrize("index_dtype", [np.int64, np.int32])
+def test_an_index_array_is_read_in_row_major_order_whatever_its_layout(
+    layout, index_dtype
+):
+    """Memory order is not index order.
+
+    The indices were read straight from the buffer, which for a
+    Fortran-ordered array is column-major: `t[np.asfortranarray(idx)]` came back
+    in the right shape holding the transposed selection, with no error. A
+    strided array was refused outright.
+    """
+
+    index = _index_layouts()[layout].astype(index_dtype, copy=False)
+    values = np.arange(4.0, dtype=np.float32) * 10.0
+    matrix = np.arange(16.0, dtype=np.float32).reshape(4, 4)
+
+    np.testing.assert_array_equal(
+        np.asarray(mt.Tensor.from_numpy(values)[index]), values[index]
+    )
+    np.testing.assert_array_equal(
+        np.asarray(mt.Tensor.from_numpy(matrix)[index, 1]), matrix[index, 1]
+    )
+
+
+@pytest.mark.parametrize("index_dtype", [np.int64, np.int32])
+def test_a_strided_row_selection_is_taken_rather_than_refused(index_dtype):
+    rows = np.arange(8, dtype=index_dtype)[::-3]
+    matrix = np.arange(24.0, dtype=np.float32).reshape(8, 3)
+    np.testing.assert_array_equal(
+        np.asarray(mt.Tensor.from_numpy(matrix)[rows]), matrix[rows]
+    )

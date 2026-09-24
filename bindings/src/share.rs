@@ -7,9 +7,11 @@
 //! Importing a NumPy array's memory rather than a copy of it, and exporting
 //! tensor memory through the buffer protocol.
 //!
-//! The export side already had a path: `__array_interface__` hands out the
-//! address and NumPy builds a read-only view over it. This adds the other two
-//! halves of the same idea.
+//! The export side is one mechanism with two front doors: the buffer protocol
+//! here, which NumPy prefers, and `__array_interface__`, whose `data` is a
+//! `memoryview` of the tensor and so reaches the same export. Each export holds
+//! the tensor's storage until it is released -- see [`Bookkeeping`] for why the
+//! tensor alone is not enough.
 //!
 //! **Import.** `from_numpy_shared` copied, and said so in a comment that had
 //! outlived its excuse. Sharing needs somewhere to keep the array alive for as
@@ -33,7 +35,6 @@ use pyo3::prelude::*;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 
-/// Our dtype for a NumPy type number, if we have one.
 /// The `DataType` a NumPy array of this type number holds, if it is one of
 /// the five the engine stores.
 ///
@@ -90,6 +91,32 @@ pub(crate) fn tensor_from_array_shared(
              int32, int64 and bool. Use from_numpy to convert"
         ))
     })?;
+    // A NumPy `bool` is a byte NumPy reads as "not zero", and an array of them
+    // can hold any byte at all: `np.array([2], np.uint8).view(bool)` is an
+    // ordinary array that prints `[ True]`. The engine reads the same memory
+    // as Rust `bool`, for which every byte but 0 and 1 is undefined behavior,
+    // and no check made here would hold, because the `uint8` alias can write
+    // a 2 at any time afterwards. `from_numpy` copies, and normalises each
+    // byte on the way.
+    if dtype == DataType::Bool {
+        return Err(PyValueError::new_err(
+            "from_numpy_shared cannot share a bool array: NumPy bools may hold any byte, and \
+             the engine's may not. Use from_numpy, which copies and normalises them",
+        ));
+    }
+    // A read-only array is one whose memory may not be written -- an immutable
+    // `bytes` object under `np.frombuffer`, a memory map opened `r` -- and an
+    // in-place operation on a tensor sharing it would write it anyway: into
+    // an object Python promised was immutable, or into a page the kernel
+    // mapped read-only, which is a segfault.
+    // SAFETY: the header of a live array; `PyArray_FLAGS` reads this field.
+    let flags = unsafe { (*untyped.as_array_ptr()).flags };
+    if flags & numpy::npyffi::NPY_ARRAY_WRITEABLE == 0 {
+        return Err(PyValueError::new_err(
+            "from_numpy_shared needs a writeable array, because in-place tensor operations \
+             write the memory it shares; use from_numpy to copy",
+        ));
+    }
     // `None` means byte order does not apply -- a single-byte type -- which is
     // fine. `Some(false)` is a byte-swapped array: our element width, not our
     // element bytes.
@@ -152,10 +179,23 @@ fn buffer_format(dtype: DataType) -> &'static std::ffi::CStr {
     }
 }
 
-/// Shape and stride arrays owned for the lifetime of one exported buffer.
+/// What one exported buffer owns until it is released.
 struct Bookkeeping {
     shape: Box<[ffi::Py_ssize_t]>,
     strides: Box<[ffi::Py_ssize_t]>,
+    /// The memory `buf` points into.
+    ///
+    /// The view also holds the tensor object, but that is not enough: an
+    /// in-place write to a tensor whose storage is shared moves the tensor to
+    /// a fresh buffer, and the one the view points at then belongs only to
+    /// whatever else shared it. Once that is dropped the view reads freed
+    /// memory -- `np.asarray(t)` then `t.fill_(...)` on a `t` that shared its
+    /// storage with a detached copy, then deleting the copy, was a segfault.
+    /// Holding the storage itself makes the view's lifetime its own.
+    ///
+    /// Never read: its contribution is its `Drop`.
+    #[allow(dead_code)]
+    storage: Arc<TensorData>,
 }
 
 /// Fill in `view` for `tensor`, exporting its buffer read-only.
@@ -174,6 +214,10 @@ pub(crate) unsafe fn fill_buffer_view(
     if view.is_null() {
         return Err(PyBufferError::new_err("Py_buffer must not be null"));
     }
+    // The protocol asks a failed export to leave `obj` null, and pyo3 does not
+    // do it for us; every refusal below returns with this in place.
+    // SAFETY: `view` is valid per this function's contract.
+    unsafe { (*view).obj = std::ptr::null_mut() };
     if flags & ffi::PyBUF_WRITABLE == ffi::PyBUF_WRITABLE {
         return Err(PyBufferError::new_err(
             "minitensor tensors export read-only buffers, because several tensors can share one \
@@ -198,11 +242,12 @@ pub(crate) unsafe fn fill_buffer_view(
     // per element, turns it into an exception. No path in the library is known
     // to break it (the whole Python suite runs with the alignment and length
     // assertions in `TensorData` enabled and none fire); this is a guard on an
-    // assumption, not a fix for an observed bug. `__array_interface__` hands
-    // out the same pointer under the same assumption.
+    // assumption, not a fix for an observed bug. `__array_interface__` comes
+    // through here too, as a `memoryview`.
     if tensor.numel() != storage.numel() {
         return Err(PyBufferError::new_err(format!(
-            "tensor shape covers {} elements but its storage holds {}; refusing to export a              buffer that would read past the allocation",
+            "tensor shape covers {} elements but its storage holds {}; refusing to export a \
+             buffer that would read past the allocation",
             tensor.numel(),
             storage.numel(),
         )));
@@ -221,6 +266,7 @@ pub(crate) unsafe fn fill_buffer_view(
     let book = Box::new(Bookkeeping {
         shape,
         strides: strides.into_boxed_slice(),
+        storage: Arc::clone(storage),
     });
 
     // SAFETY: `view` is valid per this function's contract, and every field is

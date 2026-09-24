@@ -105,9 +105,7 @@ def test_detach_still_shares_the_buffer():
     """Identity is what changes; the memory is deliberately still shared."""
     source = _leaf()
     detached = source.detach()
-    assert (
-        detached.__array_interface__["data"][0] == source.__array_interface__["data"][0]
-    )
+    assert np.shares_memory(np.asarray(detached), np.asarray(source))
     np.testing.assert_allclose(np.asarray(detached), np.asarray(source))
 
 

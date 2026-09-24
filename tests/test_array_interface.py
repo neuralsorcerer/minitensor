@@ -32,7 +32,9 @@ _DTYPES = ["float32", "float64", "int32", "int64", "bool"]
 
 
 def _address(tensor):
-    return tensor.__array_interface__["data"][0]
+    """Where the tensor's bytes are, as its buffer export reports them."""
+    with memoryview(tensor) as view:
+        return np.frombuffer(view, dtype=np.uint8).ctypes.data
 
 
 # --- it is the same memory ---------------------------------------------------
@@ -104,10 +106,27 @@ def test_a_dtype_conversion_still_produces_a_copy_to_own():
 # --- the sharing goes both ways ----------------------------------------------
 
 
-def test_writing_the_tensor_in_place_writes_through_a_view_it_alone_holds():
+def test_an_in_place_write_leaves_a_live_view_on_the_values_it_was_taken_with():
+    """The view holds the buffer, so the tensor no longer holds it alone.
+
+    An in-place write therefore copies first, exactly as it does for a buffer
+    shared with another tensor, and the view keeps reading what it read.
+    """
+
     tensor = mt.Tensor([1.0, 2.0, 3.0], dtype="float32")
     array = np.asarray(tensor)
     tensor.fill_(9.0)
+    np.testing.assert_array_equal(array, [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(tensor.numpy(), [9.0, 9.0, 9.0])
+
+
+def test_a_view_of_a_parameter_follows_its_updates():
+    """The exception: a leaf that wants a gradient is updated where it lies,
+    so that every handle to the parameter sees the step -- a view included."""
+
+    parameter = mt.Tensor([1.0, 2.0, 3.0], dtype="float32", requires_grad=True)
+    array = np.asarray(parameter)
+    parameter.fill_(9.0)
     np.testing.assert_array_equal(array, [9.0, 9.0, 9.0])
 
 
@@ -132,6 +151,69 @@ def test_writing_a_shared_buffer_copies_and_leaves_the_view_on_the_old_one():
 
 
 # --- nothing is freed underneath it ------------------------------------------
+
+
+def _exporters():
+    """Every way a consumer can come away holding a tensor's buffer."""
+
+    class Interface:
+        # A consumer that reads the array interface by name rather than
+        # through NumPy's own preference for the buffer protocol.
+        def __init__(self, tensor):
+            self.__array_interface__ = tensor.__array_interface__
+
+    return {
+        "asarray": np.asarray,
+        "memoryview": lambda tensor: np.frombuffer(
+            memoryview(tensor), dtype=np.float32
+        ),
+        "array_interface": lambda tensor: np.asarray(Interface(tensor)),
+    }
+
+
+@pytest.mark.parametrize("export", sorted(_exporters()))
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda tensor: tensor.fill_(1.0),
+        lambda tensor: tensor.__setitem__(slice(0, 10), 5.0),
+        lambda tensor: tensor.copy_(mt.ones([1 << 20], dtype="float32")),
+    ],
+    ids=["fill_", "setitem", "copy_"],
+)
+def test_a_view_outlives_the_buffer_its_tensor_moves_off(export, write):
+    """A view pins the storage it points at, not merely the tensor.
+
+    `detach` shares the buffer, so the in-place write moves the tensor to a
+    fresh one and leaves the old buffer to the detached copy alone. When the
+    view pinned only the tensor, deleting that copy freed the buffer under the
+    view: this read freed memory, and segfaulted.
+    """
+
+    n = 1 << 20
+    tensor = mt.Tensor.from_numpy(np.zeros(n, dtype=np.float32))
+    detached = tensor.detach()
+    view = _exporters()[export](tensor)
+
+    write(tensor)
+    del detached
+    gc.collect()
+    # Reuse whatever was freed, so a dangling view would read these.
+    scribble = [np.full(n, 7.0, dtype=np.float32) for _ in range(4)]
+
+    assert not view.flags.writeable
+    assert view.shape == (n,)
+    assert float(view.sum()) == 0.0
+    del scribble
+
+
+def test_the_interface_data_is_a_read_only_export_of_the_same_bytes():
+    tensor = mt.Tensor([[1.0, 2.0, 3.0]], dtype="float64")
+    data = tensor.__array_interface__["data"]
+    assert isinstance(data, memoryview)
+    assert data.readonly
+    assert np.frombuffer(data, dtype=np.uint8).ctypes.data == _address(tensor)
+    data.release()
 
 
 def test_the_array_keeps_the_tensor_alive():
@@ -209,7 +291,11 @@ def test_the_interface_says_what_the_protocol_requires():
     assert interface["version"] == 3
     assert interface["shape"] == (1, 3)
     assert interface["typestr"] == np.dtype("float64").str
-    assert interface["data"] == (_address(tensor), True)
+    # A buffer export rather than an `(address, read_only)` pair, so an array
+    # built from it holds the storage alive and is read-only; see
+    # `test_a_view_outlives_the_buffer_its_tensor_moves_off`.
+    assert isinstance(interface["data"], memoryview)
+    assert interface["data"].readonly
     # Absent strides is the protocol's way of saying C-contiguous, which every
     # tensor is; spelling them out would only be a second place to be wrong.
     assert "strides" not in interface

@@ -770,10 +770,14 @@ the array changes what every tensor derived from it reads, including operands a
 backward pass has saved. `from_numpy` is the one to reach for unless you have a
 reason.
 
-The array must be C-contiguous, in native byte order, aligned, and of a dtype
-minitensor stores. Anything else raises rather than quietly copying — a caller
-who asked to share should find out at the call, not later through a write that
-went nowhere.
+The array must be C-contiguous, in native byte order, aligned, writeable, and
+float32, float64, int32 or int64. Anything else raises rather than quietly
+copying — a caller who asked to share should find out at the call, not later
+through a write that went nowhere. A read-only array is refused because in-place
+tensor operations write the memory it shares. A bool array is refused because
+NumPy bools may hold any byte (`np.array([2], np.uint8).view(bool)` is an
+ordinary array) and the engine's may hold only 0 and 1; `from_numpy` copies it
+and reads every non-zero byte as true, as NumPy does.
 
 #### The buffer protocol
 
@@ -832,15 +836,17 @@ Conversion helpers:
 `numpy.asarray(tensor)` comes back pointing at the tensor's own memory. Every
 tensor is contiguous and row-major, which is exactly what an array header
 describes, so there is nothing to rearrange and nothing to allocate: a 64MB
-tensor crosses in microseconds where `.numpy()` takes milliseconds. NumPy holds
-a reference to the tensor for as long as the array lives, so the buffer cannot
-be freed underneath it.
+tensor crosses in microseconds where `.numpy()` takes milliseconds. The array
+holds the tensor's *storage* for as long as it lives, not merely the tensor, so
+the buffer cannot be freed underneath it even if the tensor later moves to a
+different one.
 
 A tensor offers two protocols for this — `__array_interface__` and the buffer
 protocol — and NumPy picks the buffer one, so `view.base` is a `memoryview`
-whose `.obj` is the tensor rather than the tensor itself. One more link in the
-chain, the same buffer at the end of it, and the same guarantee: nothing is
-freed while the array is reachable.
+whose `.obj` is the tensor. `__array_interface__` is there for libraries that
+look for it by name, and its `data` entry is a read-only `memoryview` of the
+tensor rather than a bare address, so an array built from it holds the storage
+in the same way. Either route, nothing is freed while the array is reachable.
 
 ```python
 import numpy as np
@@ -884,11 +890,11 @@ writeable. Asking `numpy.asarray` for a different dtype also
 copies, because a conversion has to.
 
 An in-place operation on the tensor is the other direction of the same sharing.
-Writing to a buffer the tensor holds alone writes through the array; writing to
-one it shares copies first, and the array is left on the old buffer, still
-valid and still holding the values it had. So an exported array is a stable
-read of the values as they were, and a program that both exports a view and
-writes in place should not depend on which of the two it gets.
+A live view holds the buffer, so the tensor never holds it alone while one
+exists: an in-place write copies first, and the view keeps the values it was
+taken with. The exception is a leaf that requires a gradient — a parameter —
+whose in-place updates are written into the shared buffer on purpose so that
+every handle to it sees them; a view of a parameter follows its updates.
 
 Values only. Nothing flows back to the tensor through a NumPy array, which is
 what `.numpy()` has always meant too.
