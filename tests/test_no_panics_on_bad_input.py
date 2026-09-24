@@ -475,3 +475,60 @@ def test_a_section_count_no_list_holds_fails_at_once(name):
     with pytest.raises(MemoryError):
         getattr(mt, name)(values, 2**62)
     assert time.perf_counter() - start < 1.0
+
+
+@pytest.mark.parametrize(
+    "label, build",
+    [
+        ("DenseLayer(0, 0)", lambda: nn.DenseLayer(0, 0)),
+        ("DenseLayer(0, 5)", lambda: nn.DenseLayer(0, 5)),
+        ("Conv2d(0, 0, 0)", lambda: nn.Conv2d(0, 0, 0)),
+        ("ConvTranspose1d(0, 0, 0)", lambda: nn.ConvTranspose1d(0, 0, 0)),
+        ("ConvTranspose2d(0, 0, 0)", lambda: nn.ConvTranspose2d(0, 0, 0)),
+        ("ConvTranspose2d(0, 2**62, 3)", lambda: nn.ConvTranspose2d(0, 2**62, 3)),
+        ("GRU(1, 1, 2**62)", lambda: nn.GRU(1, 1, 2**62)),
+        ("LSTM(1, 1, 2**62)", lambda: nn.LSTM(1, 1, 2**62)),
+        ("LSTM(3, 2**62)", lambda: nn.LSTM(3, 2**62)),
+    ],
+)
+def test_layers_with_empty_or_absurd_sizes_decline_or_build(label, build):
+    """A layer with no inputs drew its bias from `U(-1/sqrt(0), 1/sqrt(0))`,
+    which the sampler refused by panicking; a recurrent stack's sizes wrapped
+    or overflowed a capacity; an empty weight's strides overflowed."""
+
+    _assert_no_panic(label, build)
+
+
+def test_a_layer_with_no_inputs_starts_from_a_zero_bias():
+    # PyTorch's rule for a fan-in of zero: the bound is zero, not infinite.
+    np.testing.assert_array_equal(nn.DenseLayer(0, 5).bias.numpy(), np.zeros(5))
+
+
+@pytest.mark.parametrize(
+    "label, run",
+    [
+        (
+            "AdaptiveAvgPool1d(2**62)",
+            lambda: nn.AdaptiveAvgPool1d(2**62)(mt.zeros([1, 2, 3])),
+        ),
+        (
+            "AdaptiveMaxPool1d(2**62)",
+            lambda: nn.AdaptiveMaxPool1d(2**62)(mt.zeros([1, 2, 3])),
+        ),
+        (
+            "AdaptiveAvgPool2d(2**62)",
+            lambda: nn.AdaptiveAvgPool2d(2**62)(mt.zeros([1, 1, 4, 4])),
+        ),
+        (
+            "AdaptiveMaxPool2d(2**62)",
+            lambda: nn.AdaptiveMaxPool2d(2**62)(mt.zeros([1, 1, 4, 4])),
+        ),
+        (
+            "Upsample(2**62) on no planes",
+            lambda: nn.Upsample(2**62)(mt.zeros([1, 0, 4])),
+        ),
+        ("BatchNorm1d(0)", lambda: nn.BatchNorm1d(0)(mt.zeros([1, 0, 4]))),
+    ],
+)
+def test_forwards_with_absurd_or_empty_extents_decline(label, run):
+    _assert_no_panic(label, run)

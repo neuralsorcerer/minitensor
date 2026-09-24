@@ -126,9 +126,17 @@ pub fn init_uniform(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
+    // An interval of no width is a constant, and `Uniform` refuses it; a
+    // layer with no inputs asks for exactly that, `[-0, 0]`, for its bias.
+    if a == b {
+        return init_constant(shape, a, dtype, device, requires_grad);
+    }
+    let bounds = |error: rand::distr::uniform::Error| {
+        MinitensorError::invalid_argument(format!("uniform bounds [{a}, {b}): {error}"))
+    };
     let data = match dtype {
         DataType::Float32 => {
-            let dist = Uniform::new(a as f32, b as f32).unwrap();
+            let dist = Uniform::new(a as f32, b as f32).map_err(bounds)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -136,7 +144,7 @@ pub fn init_uniform(
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
-            let dist = Uniform::new(a, b).unwrap();
+            let dist = Uniform::new(a, b).map_err(bounds)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -144,7 +152,7 @@ pub fn init_uniform(
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
-            let dist = Uniform::new(a as i32, b as i32).unwrap();
+            let dist = Uniform::new(a as i32, b as i32).map_err(bounds)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -152,7 +160,7 @@ pub fn init_uniform(
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
-            let dist = Uniform::new(a as i64, b as i64).unwrap();
+            let dist = Uniform::new(a as i64, b as i64).map_err(bounds)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -160,7 +168,7 @@ pub fn init_uniform(
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
-            let dist = Uniform::new(0.0, 1.0).unwrap();
+            let dist = Uniform::new(0.0, 1.0).map_err(bounds)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng) > 0.5));
@@ -187,9 +195,12 @@ pub fn init_normal(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
+    let spread = |error: rand_distr::NormalError| {
+        MinitensorError::invalid_argument(format!("normal(mean={mean}, std={std}): {error}"))
+    };
     let data = match dtype {
         DataType::Float32 => {
-            let dist = Normal::new(mean as f32, std as f32).unwrap();
+            let dist = Normal::new(mean as f32, std as f32).map_err(spread)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -197,7 +208,7 @@ pub fn init_normal(
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
-            let dist = Normal::new(mean, std).unwrap();
+            let dist = Normal::new(mean, std).map_err(spread)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng)));
@@ -205,7 +216,7 @@ pub fn init_normal(
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
-            let dist = Normal::new(mean, std).unwrap();
+            let dist = Normal::new(mean, std).map_err(spread)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng).round() as i32));
@@ -213,7 +224,7 @@ pub fn init_normal(
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
-            let dist = Normal::new(mean, std).unwrap();
+            let dist = Normal::new(mean, std).map_err(spread)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng).round() as i64));
@@ -221,7 +232,7 @@ pub fn init_normal(
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
-            let dist = Normal::new(mean, std).unwrap();
+            let dist = Normal::new(mean, std).map_err(spread)?;
             let mut vec = Vec::with_capacity(numel);
             random::with_rng(|rng| {
                 vec.extend((0..numel).map(|_| dist.sample(rng) > 0.0));
@@ -356,6 +367,19 @@ pub fn truncated_normal_init(
     ))
 }
 
+/// `sqrt(numerator / fan)`, and zero for a fan of zero.
+///
+/// PyTorch's rule. A layer with no inputs has a weight with no elements, but
+/// its bias still has some, and `1 / sqrt(0)` is not a bound: it made
+/// `DenseLayer(0, 5)` panic inside the sampler.
+fn fan_scale(numerator: f64, fan: usize) -> f64 {
+    if fan == 0 {
+        0.0
+    } else {
+        (numerator / fan as f64).sqrt()
+    }
+}
+
 /// Xavier/Glorot uniform initialization
 /// Uniform distribution with bounds: sqrt(6 / (fan_in + fan_out))
 pub fn xavier_uniform_init(
@@ -365,7 +389,7 @@ pub fn xavier_uniform_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, fan_out) = calculate_fan_in_fan_out(&shape)?;
-    let bound = (6.0 / (fan_in + fan_out) as f64).sqrt();
+    let bound = fan_scale(6.0, fan_in.saturating_add(fan_out));
     init_uniform(shape, -bound, bound, dtype, device, requires_grad)
 }
 
@@ -378,7 +402,7 @@ pub fn xavier_normal_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, fan_out) = calculate_fan_in_fan_out(&shape)?;
-    let std = (2.0 / (fan_in + fan_out) as f64).sqrt();
+    let std = fan_scale(2.0, fan_in.saturating_add(fan_out));
     init_normal(shape, 0.0, std, dtype, device, requires_grad)
 }
 
@@ -391,7 +415,7 @@ pub fn he_uniform_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, _) = calculate_fan_in_fan_out(&shape)?;
-    let bound = (6.0 / fan_in as f64).sqrt();
+    let bound = fan_scale(6.0, fan_in);
     init_uniform(shape, -bound, bound, dtype, device, requires_grad)
 }
 
@@ -404,7 +428,7 @@ pub fn he_normal_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, _) = calculate_fan_in_fan_out(&shape)?;
-    let std = (2.0 / fan_in as f64).sqrt();
+    let std = fan_scale(2.0, fan_in);
     init_normal(shape, 0.0, std, dtype, device, requires_grad)
 }
 
@@ -417,7 +441,7 @@ pub fn lecun_uniform_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, _) = calculate_fan_in_fan_out(&shape)?;
-    let bound = (3.0 / fan_in as f64).sqrt();
+    let bound = fan_scale(3.0, fan_in);
     init_uniform(shape, -bound, bound, dtype, device, requires_grad)
 }
 
@@ -430,7 +454,7 @@ pub fn lecun_normal_init(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let (fan_in, _) = calculate_fan_in_fan_out(&shape)?;
-    let std = (1.0 / fan_in as f64).sqrt();
+    let std = fan_scale(1.0, fan_in);
     init_normal(shape, 0.0, std, dtype, device, requires_grad)
 }
 
@@ -453,10 +477,15 @@ pub fn calculate_fan_in_fan_out(shape: &Shape) -> Result<(usize, usize)> {
             // For higher dimensional tensors (e.g., conv weights)
             let num_input_fmaps = dims[1];
             let num_output_fmaps = dims[0];
-            let receptive_field_size: usize = dims[2..].iter().product();
+            // Saturating: a shape with a zero in it may have fans past
+            // `usize` without having a single element, and the fans only
+            // scale a bound.
+            let receptive_field_size = dims[2..]
+                .iter()
+                .fold(1usize, |acc, &d| acc.saturating_mul(d));
 
-            let fan_in = num_input_fmaps * receptive_field_size;
-            let fan_out = num_output_fmaps * receptive_field_size;
+            let fan_in = num_input_fmaps.saturating_mul(receptive_field_size);
+            let fan_out = num_output_fmaps.saturating_mul(receptive_field_size);
 
             Ok((fan_in, fan_out))
         }

@@ -218,15 +218,22 @@ impl Strides {
     pub fn from_shape(shape: &Shape) -> Self {
         let mut strides = Vec::with_capacity(shape.ndim());
         let mut stride = 1usize;
+        // A shape with a zero in it has no elements for a stride to address,
+        // so the products are allowed to saturate there: `[0, 2**62, 3, 3]`
+        // is a legitimate empty weight, and overflowing on its unused strides
+        // was a panic.
+        let empty = shape.dims().contains(&0);
 
         for &dim in shape.dims().iter().rev() {
             strides.push(stride);
-            stride = stride.checked_mul(dim).unwrap_or_else(|| {
-                panic!(
+            stride = match stride.checked_mul(dim) {
+                Some(next) => next,
+                None if empty => usize::MAX,
+                None => panic!(
                     "tensor shape {:?} has more elements than usize can represent",
                     shape.dims()
-                )
-            });
+                ),
+            };
         }
 
         strides.reverse();

@@ -338,6 +338,11 @@ fn adaptive_geometry(
             "{name} cannot pool an empty spatial axis into a non-empty one"
         )));
     }
+    // The output extent is the caller's to choose, so the result it implies is
+    // checked before any of it is built: `AdaptiveAvgPool2d(2**62)` made a
+    // shape whose element count overflowed, which panicked.
+    let out_numel = Shape::new(vec![batch, channels, output_size.0, output_size.1]).try_numel()?;
+    TensorData::ensure_allocatable(out_numel, input.dtype())?;
     Ok(PoolGeometry {
         batch,
         channels,
@@ -643,7 +648,6 @@ where
 ///
 /// Returns the pooled values; the winning positions are retained internally for
 /// the backward pass.
-/// Max pooling over a 4-D `[N, C, H, W]` input.
 pub fn max_pool2d(
     input: &Tensor,
     kernel: (usize, usize),

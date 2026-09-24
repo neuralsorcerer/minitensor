@@ -177,7 +177,8 @@ pub fn batch_norm(
         // the eval-time statistics are the unbiased ones. `n` is the number of
         // elements reduced per channel; the degenerate n == 1 case has no
         // unbiased variance, so it is left uncorrected.
-        let count = input.numel() / num_features;
+        // No channels means no elements; there is nothing to correct.
+        let count = input.numel().checked_div(num_features).unwrap_or(0);
         let var_flat = if count > 1 {
             let correction = count as f64 / (count as f64 - 1.0);
             let corr_tensor = scalar_tensor(correction, input.dtype(), input.device())?;

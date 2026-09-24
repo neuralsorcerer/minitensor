@@ -185,18 +185,44 @@ impl Recurrent {
             b: bound,
         };
         let gates = kind.gates();
-
         let directions = if bidirectional { 2 } else { 1 };
+
+        // Every size below is a product of caller-chosen numbers, and in a
+        // release build an unchecked one wraps: `4 * 2**62` hidden units came
+        // out as a weight with zero rows. The whole stack's parameter count is
+        // taken in checked arithmetic and measured against what can be
+        // allocated before any of it is, so an impossible layer is refused
+        // here rather than by a panic, a wrong shape, or a loop over 2**62
+        // small layers that runs until memory does.
+        let too_large = || {
+            MinitensorError::invalid_argument(format!(
+                "{} with input_size={input_size}, hidden_size={hidden_size} and \
+                 num_layers={num_layers} has more parameters than can be addressed",
+                kind.name()
+            ))
+        };
+        let gate_rows = gates.checked_mul(hidden_size).ok_or_else(too_large)?;
+        let wide_input = hidden_size.checked_mul(directions).ok_or_else(too_large)?;
+        let biases = if bias { 2 } else { 0 };
+        let per_layer = |layer_input: usize| -> Option<usize> {
+            gate_rows.checked_mul(layer_input.checked_add(hidden_size)?.checked_add(biases)?)
+        };
+        let first = per_layer(input_size).ok_or_else(too_large)?;
+        let rest = per_layer(wide_input)
+            .and_then(|each| each.checked_mul(num_layers - 1))
+            .ok_or_else(too_large)?;
+        let total = first
+            .checked_add(rest)
+            .and_then(|sum| sum.checked_mul(directions))
+            .ok_or_else(too_large)?;
+        crate::tensor::TensorData::ensure_allocatable(total, dtype)?;
+
         let mut layers = Vec::with_capacity(num_layers * directions);
         for layer in 0..num_layers {
             // Only the first layer sees the raw input; the rest consume the
             // layer below, which is twice as wide when bidirectional because
             // the two directions are concatenated.
-            let layer_input = if layer == 0 {
-                input_size
-            } else {
-                hidden_size * directions
-            };
+            let layer_input = if layer == 0 { input_size } else { wide_input };
             // Directions are adjacent within a layer, so the flat order is
             // layer0-forward, layer0-reverse, layer1-forward, ... matching the
             // `*_l{k}` and `*_l{k}_reverse` names.
@@ -204,15 +230,15 @@ impl Recurrent {
                 let make =
                     |shape: Vec<usize>| uniform.init_tensor(Shape::new(shape), dtype, device, true);
                 layers.push(LayerWeights {
-                    w_ih: make(vec![gates * hidden_size, layer_input])?,
-                    w_hh: make(vec![gates * hidden_size, hidden_size])?,
+                    w_ih: make(vec![gate_rows, layer_input])?,
+                    w_hh: make(vec![gate_rows, hidden_size])?,
                     b_ih: if bias {
-                        Some(make(vec![gates * hidden_size])?)
+                        Some(make(vec![gate_rows])?)
                     } else {
                         None
                     },
                     b_hh: if bias {
-                        Some(make(vec![gates * hidden_size])?)
+                        Some(make(vec![gate_rows])?)
                     } else {
                         None
                     },

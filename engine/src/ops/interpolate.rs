@@ -326,6 +326,14 @@ pub fn interpolate(
             .unwrap_or(usize::MAX),
         input.dtype(),
     )?;
+    // The index maps are built at the output extent whatever the plane count,
+    // three eight-byte entries a position: with no planes the check above
+    // passes for any size, and `Upsample(2**62)` on an empty batch overflowed
+    // a capacity building them.
+    TensorData::ensure_allocatable(
+        out_h.saturating_add(out_w).saturating_mul(3),
+        DataType::Float64,
+    )?;
     let rows = axis_map(in_h, out_h, mode, align_corners);
     let cols = axis_map(in_w, out_w, mode, align_corners);
 
