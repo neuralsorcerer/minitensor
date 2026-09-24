@@ -589,7 +589,7 @@ impl PyDeploymentModel {
     }
 }
 
-/// Register serialization module with Python
+/// Write `model` to `path`, in `format` or else the one its extension names.
 #[pyfunction]
 #[pyo3(signature = (model, path, format=None))]
 fn save_model(model: &PySerializedModel, path: &str, format: Option<&str>) -> PyResult<()> {

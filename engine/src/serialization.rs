@@ -373,7 +373,9 @@ impl SerializedTensor {
     /// Deserialize to tensor
     pub fn to_tensor(&self, target_device: Option<Device>) -> Result<Tensor> {
         let device = target_device.unwrap_or(self.device);
-        let numel = self.shape.numel();
+        // The shape comes from the file, so an element count past `usize` is a
+        // corrupt or hostile file to report, not a panic.
+        let numel = self.shape.try_numel()?;
 
         /// One numeric dtype's worth of little-endian decoding.
         ///
@@ -639,32 +641,7 @@ impl OptimizerState {
 
     /// Read a state back from `path`.
     pub fn load<P: AsRef<Path>>(path: P, format: SerializationFormat) -> Result<Self> {
-        let file = File::open(path).map_err(|e| {
-            MinitensorError::serialization_error(format!("Failed to open file: {}", e))
-        })?;
-        let mut reader = BufReader::new(file);
-        match format {
-            SerializationFormat::Json => serde_json::from_reader(&mut reader).map_err(|e| {
-                MinitensorError::serialization_error(format!("JSON deserialization failed: {}", e))
-            }),
-            SerializationFormat::Binary => {
-                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .map_err(|e| {
-                        MinitensorError::serialization_error(format!(
-                            "Binary deserialization failed: {}",
-                            e
-                        ))
-                    })
-            }
-            SerializationFormat::MessagePack => {
-                rmp_serde::decode::from_read(&mut reader).map_err(|e| {
-                    MinitensorError::serialization_error(format!(
-                        "MessagePack deserialization failed: {}",
-                        e
-                    ))
-                })
-            }
-        }
+        read_file(path.as_ref(), format)
     }
 }
 
@@ -790,39 +767,7 @@ impl ModelSerializer {
 
     /// Load model from file
     pub fn load<P: AsRef<Path>>(path: P, format: SerializationFormat) -> Result<SerializedModel> {
-        let file = File::open(path).map_err(|e| {
-            MinitensorError::serialization_error(format!("Failed to open file: {}", e))
-        })?;
-        let mut reader = BufReader::new(file);
-
-        let model = match format {
-            SerializationFormat::Json => serde_json::from_reader::<_, SerializedModel>(&mut reader)
-                .map_err(|e| {
-                    MinitensorError::serialization_error(format!(
-                        "JSON deserialization failed: {}",
-                        e
-                    ))
-                })?,
-            SerializationFormat::Binary => {
-                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .map_err(|e| {
-                        MinitensorError::serialization_error(format!(
-                            "Binary deserialization failed: {}",
-                            e
-                        ))
-                    })?
-            }
-            SerializationFormat::MessagePack => {
-                rmp_serde::decode::from_read::<_, SerializedModel>(&mut reader).map_err(|e| {
-                    MinitensorError::serialization_error(format!(
-                        "MessagePack deserialization failed: {}",
-                        e
-                    ))
-                })?
-            }
-        };
-
-        Ok(model)
+        read_file(path.as_ref(), format)
     }
 
     /// Save model with automatic format detection from extension
@@ -946,6 +891,76 @@ impl DeploymentModel {
                 ))
             },
         )
+    }
+}
+
+/// Decode a value of any serializable type from the file at `path`.
+///
+/// One reader for every format and every type saved here, so the defences
+/// below apply to all of them.
+///
+/// `bincode` trusts the length prefix of a string or byte buffer and allocates
+/// that much before reading any of it, and its only guard is a compile-time
+/// read limit that the standard configuration leaves off. A flipped byte in a
+/// saved model asked for 3.6e18 bytes, which is not an error but an abort: the
+/// interpreter died on a corrupt file. The limit counts every byte decoded, so
+/// no one constant serves a kilobyte checkpoint and a ten-gigabyte one -- but
+/// the file's size is known before decoding starts, and nothing legitimate in
+/// it decodes to much more than that. The smallest rung of a ladder that
+/// covers it with room to spare is used, which bounds what a hostile file can
+/// make the decoder allocate to at most 128 times its own size. Five rungs, a
+/// factor of 64 apart, because each is another compilation of the decoder for
+/// every type read: seven measured 100KB of extension for a tighter bound that
+/// buys nothing an allocator's overcommit does not already absorb.
+fn read_file<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    format: SerializationFormat,
+) -> Result<T> {
+    let file = File::open(path)
+        .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+    let mut reader = BufReader::new(file);
+    let failed = |kind: &str, e: &dyn std::fmt::Display| {
+        MinitensorError::serialization_error(format!("{kind} deserialization failed: {e}"))
+    };
+    match format {
+        SerializationFormat::Json => {
+            serde_json::from_reader(&mut reader).map_err(|e| failed("JSON", &e))
+        }
+        SerializationFormat::MessagePack => {
+            rmp_serde::decode::from_read(&mut reader).map_err(|e| failed("MessagePack", &e))
+        }
+        SerializationFormat::Binary => {
+            // Twice the file, for the transient claim a container of wide
+            // integers makes against its narrow varint encoding.
+            let need = size.saturating_mul(2);
+            // `1 << bits` in `u64`, clamped to what `usize` holds, so the
+            // ladder compiles on a 32-bit target as well.
+            const fn rung(bits: u32) -> usize {
+                let wide = 1u64 << bits;
+                if wide > usize::MAX as u64 {
+                    usize::MAX
+                } else {
+                    wide as usize
+                }
+            }
+            macro_rules! within {
+                ($($bits:literal),+) => {
+                    $(
+                        if need <= 1u64 << $bits {
+                            let config = bincode::config::standard()
+                                .with_limit::<{ rung($bits) }>();
+                            return bincode::serde::decode_from_std_read(&mut reader, config)
+                                .map_err(|e| failed("Binary", &e));
+                        }
+                    )+
+                };
+            }
+            within!(20, 26, 32, 38, 44);
+            Err(MinitensorError::serialization_error(format!(
+                "a {size}-byte binary model is past the 8 TiB this reader decodes"
+            )))
+        }
     }
 }
 
@@ -1105,6 +1120,18 @@ mod tests {
             requires_grad: false,
         };
         assert!(bad.to_tensor(None).is_err());
+    }
+
+    #[test]
+    fn to_tensor_reports_a_shape_whose_element_count_overflows() {
+        let serialized = SerializedTensor {
+            shape: Shape::new(vec![1usize << 40, 1usize << 40]),
+            dtype: DataType::Float32,
+            device: Device::cpu(),
+            requires_grad: false,
+            data: Vec::new(),
+        };
+        assert!(serialized.to_tensor(None).is_err());
     }
 
     #[test]

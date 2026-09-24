@@ -281,3 +281,32 @@ def test_a_checkpoint_stored_out_of_order_still_loads(tmp_path):
     assert loaded.keys() == reference.keys()
     for name in reference.keys():
         np.testing.assert_array_equal(loaded[name].numpy(), reference[name].numpy())
+
+
+# --- a corrupt binary file is an error, not an abort -------------------------
+
+
+def test_a_binary_model_claiming_an_absurd_length_is_refused(tmp_path):
+    """bincode allocates a string's declared length before reading it.
+
+    The first thing in a binary model is its name, so a file whose first eight
+    bytes claim a 2**62-byte name asked the allocator for that and aborted the
+    interpreter -- not an exception anything could catch. Run in a subprocess
+    so that a regression fails this test rather than killing the test run.
+    """
+
+    path = tmp_path / "corrupt.bin"
+    path.write_bytes(bytes([253]) + (1 << 62).to_bytes(8, "little") + b"\0" * 16)
+    script = (
+        "import sys, minitensor.serialization as S\n"
+        "try:\n"
+        f"    S.ModelSerializer.load({str(path)!r}, S.SerializationFormat('binary'))\n"
+        "except Exception as error:\n"
+        "    print(type(error).__name__)\n"
+        "    sys.exit(0)\n"
+        "sys.exit(3)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
