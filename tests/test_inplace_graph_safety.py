@@ -207,3 +207,25 @@ def test_no_tensor_method_can_corrupt_a_pending_backward():
         "these operations rewrote a tensor a pending backward still needed: "
         + "; ".join(corrupted)
     )
+
+
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_copying_a_tensor_into_itself_is_a_no_op(requires_grad):
+    """`t.copy_(t)` raised "Already mutably borrowed": the binding borrowed
+    `t` mutably and then tried to borrow the source to read it, and the source
+    was `t`. The source is resolved first now.
+
+    The engine had the matching hazard one layer down. A leaf that requires
+    grad is written through its shared buffer rather than detached, so the
+    copy would have read and written the same memory; it returns early when
+    the storage is the same, which is exactly when the copy changes nothing.
+    """
+    values = np.array([1.5, -2.0, 3.25, 0.0], dtype=np.float32)
+    t = mt.tensor(values, requires_grad=requires_grad)
+    assert t.copy_(t) is t
+    np.testing.assert_array_equal(t.detach().numpy(), values)
+
+    # A tensor sharing the storage without being the same object takes the
+    # engine's early return rather than the binding's ordering.
+    t.copy_(t.detach())
+    np.testing.assert_array_equal(t.detach().numpy(), values)

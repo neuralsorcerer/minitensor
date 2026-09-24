@@ -74,21 +74,28 @@ impl PyTensor {
 
     #[pyo3(signature = (source, *, non_blocking=false))]
     fn copy_<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: Bound<'py, Self>,
         source: &Bound<PyAny>,
         non_blocking: Option<bool>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         if non_blocking.unwrap_or(false) {
             return Err(PyNotImplementedError::new_err(
                 "non_blocking copy_ is not implemented",
             ));
         }
 
+        // The source is resolved before `self` is borrowed mutably, not after.
+        // Resolving it borrows the source, and `t.copy_(t)` makes the source
+        // `self`: taken the other way round, that borrow found `self` already
+        // held mutably and a copy that changes nothing raised instead.
         let reference = PyTensor::from_python_value(source)?;
-        slf.inner
-            .copy_(reference.tensor())
-            .map_err(_convert_error)?;
-        register_leaf_tensor(&slf.inner);
+        {
+            let mut this = slf.borrow_mut();
+            this.inner
+                .copy_(reference.tensor())
+                .map_err(_convert_error)?;
+            register_leaf_tensor(&this.inner);
+        }
         Ok(slf)
     }
 

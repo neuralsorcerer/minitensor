@@ -2987,6 +2987,19 @@ impl Tensor {
             ));
         }
 
+        // A tensor copied onto its own storage is already what it would become,
+        // and it has to be answered here rather than by the copy below. For a
+        // leaf that requires grad, `data_mut` writes through the shared buffer
+        // instead of detaching it, so the source slice and the destination
+        // slice would be the same memory -- a `&mut` and a `&` to one buffer,
+        // which `copy_from_slice` is entitled to assume cannot happen. Equal
+        // shapes over one buffer mean the same elements in the same order,
+        // because a tensor's storage is always its contiguous layout, so this is
+        // exactly the case where the copy changes nothing.
+        if Arc::ptr_eq(&self.data, &source.data) {
+            return Ok(());
+        }
+
         let mut prepared: Cow<'_, Tensor> = Cow::Borrowed(source);
 
         if prepared.dtype() != self.dtype {
@@ -4108,5 +4121,26 @@ mod float_predicate_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// `copy_` from a tensor over the same storage. For a leaf that requires
+    /// grad `data_mut` writes through the shared buffer rather than detaching
+    /// it, so without the early return the destination and source slices
+    /// handed to `copy_from_slice` would be one buffer. The answer is the
+    /// values unchanged, in both the shared-storage case and the ordinary one.
+    #[test]
+    fn copying_a_tensor_onto_its_own_storage_changes_nothing() {
+        for requires_grad in [false, true] {
+            let mut target = tensor_f32(vec![1.5, -2.0, 3.25, 0.0]);
+            target.requires_grad = requires_grad;
+            let source = target.clone();
+            assert!(Arc::ptr_eq(&target.data, &source.data));
+            target.copy_(&source).unwrap();
+            assert_eq!(
+                target.data().as_f32_slice().unwrap(),
+                &[1.5, -2.0, 3.25, 0.0],
+                "requires_grad = {requires_grad}"
+            );
+        }
     }
 }
