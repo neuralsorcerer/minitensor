@@ -1204,6 +1204,9 @@ mod tests {
     /// quarter marks where the two forms meet and reaching both ends, where
     /// the identity the middle uses would have lost everything.
     #[test]
+    // The bound is four parts in 1e16 of the platform's `ln` and `ln_1p`,
+    // whose precision Rust leaves unspecified and Miri perturbs on purpose.
+    #[cfg_attr(miri, ignore = "Miri adds error to ln and ln_1p")]
     fn logit_matches_a_high_precision_reference_on_both_forms() {
         const CASES: [(f64, f64); 12] = [
             (1e-12, -27.63102111592755),

@@ -1488,8 +1488,10 @@ mod var_layout_tests {
         );
 
         // Exactly representable shifts, so the answer must not change at all.
-        for exponent in [10i32, 20, 30] {
-            let offset = (2.0f64).powi(exponent);
+        for exponent in [10u32, 20, 30] {
+            // A shift, not `powi`: its precision is unspecified, and a power of
+            // two that is not exactly one is not an exact shift.
+            let offset = (1u64 << exponent) as f64;
             let shifted: Vec<f64> = base.iter().map(|v| v + offset).collect();
             assert!(
                 shifted.iter().zip(&base).all(|(s, b)| s - offset == *b),
@@ -1506,7 +1508,7 @@ mod var_layout_tests {
         // At `2^40` the sum is near `2^52` and the mean carries a rounding of
         // its own, which squares into the answer. That floor is 1.1e-8 here,
         // and NumPy sits on it too.
-        let shifted: Vec<f64> = base.iter().map(|v| v + (2.0f64).powi(40)).collect();
+        let shifted: Vec<f64> = base.iter().map(|v| v + (1u64 << 40) as f64).collect();
         let got = variance(shifted);
         let relative = ((got - reference) / reference).abs();
         assert!(
