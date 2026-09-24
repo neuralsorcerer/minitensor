@@ -54,6 +54,23 @@ whole column moving together is a fact about the harness, not about the code.
 like: calls back to back on a pool that is already awake. Every number below is
 from after the fix.
 
+The same tell caught something else later, and it is worth having next to the
+first because it looks like a regression and is not one. A container restart
+between two sweeps put every family down at once -- `surface` 2.14x to 1.71x,
+`shape` 1.56x to 1.17x -- including operations no change in between had
+touched. Our median time was 18% slower and NumPy's was not, which reads like
+our code. It was the host. A parallel call doing no work at all cost 41-48 µs
+there, against roughly 25 on the host before it, and 227 µs after a 200 µs
+idle gap; NumPy's own per-call floor had moved too, `np.sqrt` on one element
+going 369 ns to 479. The wake cost is paid only by parallel calls and NumPy's
+kernels are single-threaded, so the new host charged this library alone, and
+most heavily in the 50-500 µs band where the wake is a large share of the call.
+
+So: numbers from two sweeps are comparable only if one host produced both.
+Before believing a drift across a restart, time a parallel no-op and a
+one-element NumPy call against the last host's figures. Every table below comes
+from the host before that restart.
+
 ## What is delegated
 
 Dense products, single and batched. `--native` against delegated, and NumPy for
@@ -132,8 +149,8 @@ Reductions, where the win is parallelism plus a single pass:
 | `mean` | 4.7× |
 | `norm` | 2.9× |
 | `max` | 2.8× |
+| `argmax` | 2.8× |
 | `sum(axis=0)` | 2.5× |
-| `argmax` | 1.2× |
 
 `norm` was on the wrong side of this table until the sweep found it: 0.33× at
 16M, while `sum` over the same data was 5.6×. It was not an accuracy tax — the
@@ -177,12 +194,23 @@ kernels already record; and `int64` declines the wide body altogether, because
 there is no packed 64-bit integer maximum before AVX-512 and synthesising one
 from a compare and a blend measured slower than the baseline it would replace.
 
-`argmax` is the row that did not move, and now it is clear why rather than
-merely observed. It carries three accumulator arrays where `max` carries two,
-so it runs out of registers an octave sooner -- 8 lanes measured 0.424 ns an
-element against 16's 0.495 -- and is already at its best count. The distance
-between it and `max` is the positions, and closing it means not carrying them
-rather than carrying them faster.
+`argmax` did not move with them, and the reason was the fix. It carried three
+accumulator arrays where `max` carries two, so it ran out of registers an
+octave sooner -- 8 lanes measured 0.424 ns an element against 16's 0.495 -- and
+was already at its best count. The distance to `max` was the positions, so it
+no longer carries them: pass one *is* `max`, at `max`'s width and with its
+second compilation, and pass two searches a chunk that is still in cache for
+the value pass one found. The first match is the lowest index, which is the
+tie-break the one-pass form had to spell out, and a chunk holding a NaN skips
+pass two because a NaN outranks any value.
+
+The search wanted a different width from the fold -- it carries one flag, not
+two arrays, so it keeps gaining where the fold stops -- and sharing the fold's
+count left float64 at 2.5x its own `max`. At 64 lanes float32 `argmax` costs
+0.127 ns an element against `max`'s 0.088, float64 0.280 against 0.198, and
+the worst case, the extremum in the last position, reads the same as the
+average one. Against NumPy it went 0.97x to 1.62x at 1M and 1.18x to 2.79x at
+16M in float32.
 
 `nanargmax` and `nanargmin` were the same story with a worse multiplier. They
 were `argmax(where(isnan(x), -inf, x))` behind an all-NaN check built from a
