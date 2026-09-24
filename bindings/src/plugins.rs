@@ -142,7 +142,6 @@ pub struct PyCustomPlugin {
     info: PluginInfo,
     initialize_fn: Option<Py<PyAny>>,
     cleanup_fn: Option<Py<PyAny>>,
-    custom_operations_fn: Option<Py<PyAny>>,
 }
 
 impl Clone for PyCustomPlugin {
@@ -151,7 +150,6 @@ impl Clone for PyCustomPlugin {
             info: self.info.clone(),
             initialize_fn: self.initialize_fn.as_ref().map(|f| f.clone_ref(py)),
             cleanup_fn: self.cleanup_fn.as_ref().map(|f| f.clone_ref(py)),
-            custom_operations_fn: self.custom_operations_fn.as_ref().map(|f| f.clone_ref(py)),
         })
     }
 }
@@ -181,20 +179,18 @@ impl PyCustomPlugin {
             info,
             initialize_fn: None,
             cleanup_fn: None,
-            custom_operations_fn: None,
         }
     }
 
+    /// Called with the registry when the plugin is registered. If it raises,
+    /// the registration is undone and the error propagates.
     fn set_initialize_fn(&mut self, func: Py<PyAny>) {
         self.initialize_fn = Some(func);
     }
 
+    /// Called with the registry after the plugin is unregistered.
     fn set_cleanup_fn(&mut self, func: Py<PyAny>) {
         self.cleanup_fn = Some(func);
-    }
-
-    fn set_custom_operations_fn(&mut self, func: Py<PyAny>) {
-        self.custom_operations_fn = Some(func);
     }
 
     #[getter]
@@ -205,17 +201,21 @@ impl PyCustomPlugin {
     }
 }
 
-// Note: We can't directly implement the Plugin trait for PyCustomPlugin
-// because it requires Send + Sync, but PyObject is not Send + Sync.
-// Instead, we'll create a wrapper that handles the Python calls safely.
-
-/// Plugin system functions
+/// Load a native plugin library.
+///
+/// The library's code runs in this process with its full privileges, and it
+/// exchanges Rust values with the extension directly: it must be built by the
+/// same toolchain against the same checkout, or it crashes the interpreter
+/// rather than failing cleanly. Load only libraries you would `ctypes.CDLL`.
 #[pyfunction]
 #[cfg_attr(not(feature = "dynamic-loading"), allow(unused_variables))]
 fn load_plugin(path: &str) -> PyResult<()> {
     #[cfg(feature = "dynamic-loading")]
     {
-        engine_load_plugin(path).map_err(_convert_error)?;
+        // SAFETY: loading native code is the caller's call to make, as it is
+        // with `ctypes.CDLL`; the build requirements it has to meet are on
+        // `engine::load_plugin` and in the plugin documentation.
+        unsafe { engine_load_plugin(path) }.map_err(_convert_error)?;
         Ok(())
     }
     #[cfg(not(feature = "dynamic-loading"))]
@@ -273,27 +273,43 @@ impl PyPluginRegistry {
         }
     }
 
-    fn register(&mut self, plugin: &PyCustomPlugin) -> PyResult<()> {
+    /// Add `plugin`, then run its initialize callback with this registry.
+    ///
+    /// The callbacks used to be stored and never called, so a plugin's
+    /// initialize and cleanup code simply did not run. The registry borrow is
+    /// released before each callback, which is free to use the registry.
+    fn register(slf: &Bound<'_, Self>, plugin: &PyCustomPlugin) -> PyResult<()> {
         let name = plugin.info.name.clone();
-
-        // Check for duplicates
-        if self.plugins.contains_key(&name) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Plugin '{}' is already registered",
-                name
-            )));
+        {
+            let mut this = slf.borrow_mut();
+            if this.plugins.contains_key(&name) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Plugin '{}' is already registered",
+                    name
+                )));
+            }
+            this.plugins.insert(name.clone(), plugin.clone());
         }
-
-        self.plugins.insert(name, plugin.clone());
+        if let Some(initialize) = &plugin.initialize_fn
+            && let Err(error) = initialize.call1(slf.py(), (slf,))
+        {
+            slf.borrow_mut().plugins.remove(&name);
+            return Err(error);
+        }
         Ok(())
     }
 
-    fn unregister(&mut self, name: &str) -> PyResult<()> {
-        if self.plugins.remove(name).is_none() {
+    /// Remove the plugin named `name`, then run its cleanup callback with this
+    /// registry.
+    fn unregister(slf: &Bound<'_, Self>, name: &str) -> PyResult<()> {
+        let Some(plugin) = slf.borrow_mut().plugins.remove(name) else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Plugin '{}' is not registered",
                 name
             )));
+        };
+        if let Some(cleanup) = &plugin.cleanup_fn {
+            cleanup.call1(slf.py(), (slf,))?;
         }
         Ok(())
     }
@@ -317,10 +333,6 @@ impl PyPluginRegistry {
                         info: plugin.info.clone(),
                         initialize_fn: plugin.initialize_fn.as_ref().map(|f| f.clone_ref(py)),
                         cleanup_fn: plugin.cleanup_fn.as_ref().map(|f| f.clone_ref(py)),
-                        custom_operations_fn: plugin
-                            .custom_operations_fn
-                            .as_ref()
-                            .map(|f| f.clone_ref(py)),
                     },
                 )
             } else {
@@ -515,7 +527,6 @@ impl PyPluginBuilder {
             info,
             initialize_fn: None,
             cleanup_fn: None,
-            custom_operations_fn: None,
         })
     }
 }

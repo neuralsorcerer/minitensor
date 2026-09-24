@@ -81,22 +81,21 @@ def cleanup_plugin(registry):
     print("Plugin cleaned up")
 
 
-def get_custom_operations():
-    # The current Python API stores this callback but does not automatically
-    # convert Python callables into Rust-engine CustomOp registrations.
-    return []
-
-
 plugin.set_initialize_fn(initialize_plugin)
 plugin.set_cleanup_fn(cleanup_plugin)
-plugin.set_custom_operations_fn(get_custom_operations)
 
 registry = plugins.PluginRegistry()
-registry.register(plugin)
+registry.register(plugin)  # prints "Plugin initialized"
 assert registry.is_registered("example_plugin")
 print(registry.get_plugin("example_plugin").info)
-registry.unregister("example_plugin")
+registry.unregister("example_plugin")  # prints "Plugin cleaned up"
 ```
+
+`register` calls the initialize callback with the registry once the plugin is
+in it; if the callback raises, the registration is undone and the error
+propagates. `unregister` removes the plugin and then calls its cleanup
+callback. An initialize callback is also the place to register custom
+operations, since it runs with everything a plugin needs in scope.
 
 ## Custom layers in Python
 
@@ -246,8 +245,8 @@ minitensor-engine = { path = "../engine" }
   `is_compatible_with(...)`, and read-only `major`, `minor`, `patch` fields.
 - `PluginInfo` with `name`, `version`, `description`, `author`,
   `min_minitensor_version`, and optional `max_minitensor_version`.
-- `CustomPlugin` with `set_initialize_fn(...)`, `set_cleanup_fn(...)`,
-  `set_custom_operations_fn(...)`, and `info`.
+- `CustomPlugin` with `set_initialize_fn(...)`, `set_cleanup_fn(...)` and
+  `info`; `PluginRegistry.register` and `unregister` run those callbacks.
 - `PluginRegistry` with `register(...)`, `unregister(...)`, `list_plugins()`,
   `get_plugin(...)`, and `is_registered(...)`.
 - `CustomLayer` with `set_forward(...)`, `add_parameter(...)`,

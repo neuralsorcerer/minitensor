@@ -279,17 +279,18 @@ impl PluginManager {
     /// unmapped by [`unload_plugin`](Self::unload_plugin), so the plugin's code,
     /// vtables and custom operations remain valid for its whole lifetime.
     ///
-    /// # Safety and build requirements
+    /// # Safety
     ///
-    /// This is a safe function wrapping an inherently unchecked ABI. The plugin
-    /// must be built by the same Rust toolchain against the same version and
-    /// features of this crate, and must use the same global allocator, because
-    /// the plugin and the host exchange Rust values (`dyn Plugin` fat pointers,
-    /// `Arc<dyn CustomOp>`) that are allocated on one side and freed on the
-    /// other. Loading a library built differently is undefined behaviour that no
-    /// check here can detect.
+    /// Loading a library runs its initialisers, and its `create_plugin` symbol
+    /// is trusted to be `extern "C" fn() -> *mut dyn Plugin` returning a
+    /// `Box::into_raw`. The plugin must be built by the same Rust toolchain
+    /// against the same version and features of this crate, and must use the
+    /// same global allocator, because the plugin and the host exchange Rust
+    /// values (`dyn Plugin` fat pointers, `Arc<dyn CustomOp>`) that are
+    /// allocated on one side and freed on the other. Nothing here can check
+    /// any of that; a library built differently is undefined behaviour.
     #[cfg(feature = "dynamic-loading")]
-    pub fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    pub unsafe fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         use libloading::{Library, Symbol};
 
         let path = path.as_ref();
@@ -416,9 +417,14 @@ static GLOBAL_PLUGIN_MANAGER: std::sync::LazyLock<PluginManager> =
     std::sync::LazyLock::new(|| PluginManager::new(crate::custom_ops::global_registry()));
 
 /// Load a plugin globally
+///
+/// # Safety
+///
+/// As [`PluginManager::load_plugin`].
 #[cfg(feature = "dynamic-loading")]
-pub fn load_plugin<P: AsRef<Path>>(path: P) -> Result<()> {
-    GLOBAL_PLUGIN_MANAGER.load_plugin(path)
+pub unsafe fn load_plugin<P: AsRef<Path>>(path: P) -> Result<()> {
+    // SAFETY: forwarded to the caller by this function's contract.
+    unsafe { GLOBAL_PLUGIN_MANAGER.load_plugin(path) }
 }
 
 /// Register a plugin globally

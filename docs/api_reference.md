@@ -3707,8 +3707,8 @@ True
   A minimum supported version is mandatory -- `build()` raises `ValueError`
   without it.
 - `CustomPlugin` -- plugin object exposing an `info` property and the
-  `set_initialize_fn` / `set_cleanup_fn` / `set_custom_operations_fn` callback
-  hooks.
+  `set_initialize_fn` / `set_cleanup_fn` callback hooks, which
+  `PluginRegistry.register` and `unregister` call with the registry.
 - `PluginRegistry` -- `register(plugin)`, `unregister(name)`, `list_plugins()`,
   `is_registered(name)`, `get_plugin(name)`.
 - `CustomLayer` -- define custom layers in Python: `add_parameter(name, tensor)`,
