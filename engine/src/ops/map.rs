@@ -998,7 +998,10 @@ where
     U: Copy + Send + Sync,
     F: Fn(A, B) -> U + Send + Sync,
 {
-    debug_assert_eq!(lhs.len(), rhs.len());
+    // A real check, not a debug one: the output is sized by `lhs` and filled
+    // by zipping, which stops at the shorter input, so a mismatch would leave
+    // a tail marked initialized that nothing wrote.
+    assert_eq!(lhs.len(), rhs.len(), "binary_map inputs differ in length");
     let len = lhs.len();
     // SAFETY: both branches write every element of the spare slice.
     unsafe {
@@ -1048,7 +1051,14 @@ where
     U: Copy + Send + Sync,
     F: Fn(&[A], &[B], &mut [MaybeUninit<U>]) + Send + Sync,
 {
-    debug_assert_eq!(lhs.len(), rhs.len());
+    // A real check, not a debug one: the output is sized by `lhs` and filled
+    // by zipping, which stops at the shorter input, so a mismatch would leave
+    // a tail marked initialized that nothing wrote.
+    assert_eq!(
+        lhs.len(),
+        rhs.len(),
+        "binary_map_blocks inputs differ in length"
+    );
     debug_assert!(chunk > 0);
     let len = lhs.len();
     // SAFETY: forwarded to the caller by this function's own contract.
@@ -1079,8 +1089,13 @@ where
     U: Copy + Send + Sync,
     F: Fn(A, B, C) -> U + Send + Sync,
 {
-    debug_assert_eq!(a.len(), b.len());
-    debug_assert_eq!(a.len(), c.len());
+    // A real check, not a debug one: the output is sized by `a` and filled
+    // by zipping, which stops at the shorter input, so a mismatch would leave
+    // a tail marked initialized that nothing wrote.
+    assert!(
+        a.len() == b.len() && a.len() == c.len(),
+        "ternary_map inputs differ in length"
+    );
     let len = a.len();
     // SAFETY: both branches write every element of the spare slice.
     unsafe {
@@ -1168,6 +1183,35 @@ pub(crate) fn strided_gather<T: Copy + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "binary_map inputs differ in length")]
+    fn binary_map_refuses_inputs_of_different_lengths() {
+        // Without the check this would hand back a vector whose last two
+        // elements nothing wrote.
+        let _ = binary_map(&[1.0f32; 5], &[1.0f32; 3], |a, b| a + b);
+    }
+
+    #[test]
+    #[should_panic(expected = "ternary_map inputs differ in length")]
+    fn ternary_map_refuses_inputs_of_different_lengths() {
+        let _ = ternary_map(&[1.0f32; 4], &[1.0f32; 4], &[1.0f32; 2], |a, b, c| {
+            a + b + c
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "binary_map_blocks inputs differ in length")]
+    fn binary_map_blocks_refuses_inputs_of_different_lengths() {
+        // SAFETY: the op writes every element of each block it is given.
+        let _: Vec<f32> = unsafe {
+            binary_map_blocks_threshold(&[1.0f32; 5], &[1.0f32; 3], 1, 2, |l, r, out| {
+                for ((o, &x), &y) in out.iter_mut().zip(l).zip(r) {
+                    o.write(x + y);
+                }
+            })
+        };
+    }
 
     #[test]
     fn unary_map_matches_reference_sequential_and_parallel() {
