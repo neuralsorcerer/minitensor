@@ -170,13 +170,27 @@ impl ParamGroups {
 ///
 /// The graph is consulted first and `.grad` second: a backward pass leaves the
 /// gradient in the graph, and `.grad` is the copy that survives one being
-/// released. Every optimizer here opened its loop with these six lines.
+/// released.
+///
+/// A gradient can be the parameter's own storage. A backward seed is kept as
+/// given, and `add`, `reshape`, `clone` and `contiguous` hand their incoming
+/// gradient back unchanged, so `(p + 0).backward(p)` leaves `p`'s gradient
+/// sharing `p`'s buffer. An update writes the parameter through `&mut` while
+/// reading the gradient through `&`, and those two may not overlap, so that
+/// one case gets a copy -- a pointer compare on every other.
 pub fn parameter_gradient(param: &Tensor) -> Option<Tensor> {
-    if let Some(g) = crate::autograd::get_gradient(param) {
-        Some(g)
-    } else {
-        param.grad().map(|g| (**g).clone())
+    let grad =
+        crate::autograd::get_gradient(param).or_else(|| param.grad().map(|g| (**g).clone()))?;
+    if !std::sync::Arc::ptr_eq(grad.data(), param.data()) {
+        return Some(grad);
     }
+    Some(Tensor::new(
+        std::sync::Arc::new(grad.data().clone_data()),
+        grad.shape().clone(),
+        grad.dtype(),
+        grad.device(),
+        false,
+    ))
 }
 
 /// Reject a gradient that cannot be applied to its parameter elementwise.

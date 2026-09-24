@@ -246,3 +246,24 @@ def test_assigning_a_tensor_into_itself(requires_grad, key):
     with mt.no_grad():
         p[key] = p.detach()
     np.testing.assert_array_equal(p.detach().numpy(), want)
+
+
+@pytest.mark.parametrize(
+    "passthrough",
+    [
+        lambda p: p + 0.0,
+        lambda p: p.reshape([3]),
+        lambda p: p.clone(),
+        lambda p: p.contiguous(),
+    ],
+    ids=["add", "reshape", "clone", "contiguous"],
+)
+def test_a_step_on_a_gradient_that_is_the_parameter_reads_it_as_it_was(passthrough):
+    """These backwards hand the seed back unchanged, so seeding with the
+    parameter leaves its gradient sharing the parameter's buffer. The update
+    writes that buffer while reading the gradient, so it has to read a copy."""
+
+    p = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
+    passthrough(p).backward(p)
+    mt.optim.SGD([p], lr=0.5).step()
+    np.testing.assert_allclose(p.numpy(), [0.5, 1.0, 1.5])

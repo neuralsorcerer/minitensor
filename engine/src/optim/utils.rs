@@ -70,11 +70,6 @@ fn map_in_place<T: Copy + Send + Sync>(values: &mut [T], op: impl Fn(T) -> T + S
     }
 }
 
-/// The gradient `Optimizer::step` would use for this parameter, if any.
-fn resolve_gradient(param: &Tensor) -> Option<Tensor> {
-    autograd::get_gradient(param).or_else(|| param.grad().map(|g| (**g).clone()))
-}
-
 /// Read-modify-write a parameter's gradient in place, wherever it lives.
 ///
 /// A graph-stored gradient is taken out of the map before being mutated so
@@ -94,7 +89,7 @@ impl GradientUtils {
     fn compute_grad_norm_value(parameters: &[&Tensor]) -> f64 {
         let total_sq_norm: f64 = parameters
             .iter()
-            .filter_map(|param| resolve_gradient(param))
+            .filter_map(|param| super::optimizer::parameter_gradient(param))
             .map(|grad| match grad.dtype() {
                 crate::tensor::DataType::Float32 => {
                     sum_squares(grad.data().as_f32_slice().unwrap_or_default())
@@ -174,14 +169,14 @@ impl GradientUtils {
     pub fn has_gradients(parameters: &[&Tensor]) -> bool {
         parameters
             .iter()
-            .any(|param| resolve_gradient(param).is_some())
+            .any(|param| super::optimizer::parameter_gradient(param).is_some())
     }
 
     /// Count the number of parameters with gradients
     pub fn count_parameters_with_gradients(parameters: &[&Tensor]) -> usize {
         parameters
             .iter()
-            .filter(|param| resolve_gradient(param).is_some())
+            .filter(|param| super::optimizer::parameter_gradient(param).is_some())
             .count()
     }
 }

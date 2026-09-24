@@ -274,6 +274,32 @@ mod tests {
     }
 
     #[test]
+    fn a_gradient_sharing_its_parameters_storage_is_stepped_on_as_a_copy() {
+        // `(p + 0).backward(p)` leaves exactly this: the gradient *is* the
+        // parameter's buffer. The update writes that buffer through `&mut`
+        // while reading the gradient through `&`, so it must read a copy.
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let alias = tensor.detach();
+        assert!(std::sync::Arc::ptr_eq(alias.data(), tensor.data()));
+        tensor.set_grad(Some(alias));
+
+        let stepped_on = crate::optim::parameter_gradient(&tensor).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(stepped_on.data(), tensor.data()));
+        assert_eq!(stepped_on.data().as_f32_slice().unwrap(), &[1.0; 4]);
+
+        let mut sgd = SGD::new(0.25, None, None);
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        // 1 - 0.25 * 1, against the gradient as it was before the step.
+        assert_eq!(tensor.data().as_f32_slice().unwrap(), &[0.75; 4]);
+    }
+
+    #[test]
     fn test_adam_step_updates_parameters() {
         let mut adam = Adam::new(0.1, Some(0.9), Some(0.999), Some(1e-8), None);
         let mut tensor = Tensor::ones(
