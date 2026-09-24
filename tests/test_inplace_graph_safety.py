@@ -229,3 +229,20 @@ def test_copying_a_tensor_into_itself_is_a_no_op(requires_grad):
     # engine's early return rather than the binding's ordering.
     t.copy_(t.detach())
     np.testing.assert_array_equal(t.detach().numpy(), values)
+
+
+@pytest.mark.parametrize("requires_grad", [False, True])
+@pytest.mark.parametrize("key", [slice(None), [1, 0]], ids=["full", "rows-swapped"])
+def test_assigning_a_tensor_into_itself(requires_grad, key):
+    """The value shares the target's storage. A leaf that requires grad is
+    written through that storage, so the write and the read are one buffer;
+    both assignment paths copy the value first, and the row swap is the case
+    where not doing so would read rows already overwritten.
+    """
+    base = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    want = base.copy()
+    want[key] = base.copy()
+    p = mt.tensor(base.copy(), requires_grad=requires_grad)
+    with mt.no_grad():
+        p[key] = p.detach()
+    np.testing.assert_array_equal(p.detach().numpy(), want)

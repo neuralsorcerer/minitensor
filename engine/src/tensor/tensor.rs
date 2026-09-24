@@ -2096,6 +2096,22 @@ impl Tensor {
         // assignment to a tensor from `parameters()` silently updated a private
         // copy while the layer kept its old weights -- the write appeared to
         // succeed and changed nothing.
+        // A value over this tensor's own storage is copied before the write,
+        // for the reason `copy_` and the masked scatter in `ops::selection`
+        // give: for a leaf that requires grad `data_mut` writes through the
+        // shared buffer, and the loop below would then hold a `&mut` and a `&`
+        // to the same memory. With the broadcast rules checked above, such a
+        // value can only be the whole tensor in its own order, so the answer
+        // would come out right -- but it would come out of undefined
+        // behaviour, and the copy is only paid in this case.
+        let aliased;
+        let value = if Arc::ptr_eq(&self.data, &value.data) {
+            aliased = value.deep_clone()?;
+            &aliased
+        } else {
+            value
+        };
+
         let dtype = self.dtype;
         let data = self.data_mut();
 
@@ -4136,6 +4152,34 @@ mod float_predicate_tests {
             let source = target.clone();
             assert!(Arc::ptr_eq(&target.data, &source.data));
             target.copy_(&source).unwrap();
+            assert_eq!(
+                target.data().as_f32_slice().unwrap(),
+                &[1.5, -2.0, 3.25, 0.0],
+                "requires_grad = {requires_grad}"
+            );
+        }
+    }
+
+    /// `index_assign` from a value over the same storage: the whole tensor
+    /// into itself, which is the only shape such a value can take and still
+    /// pass the broadcast check. For a leaf that requires grad this is the
+    /// write-through path, where the value is now copied before the write.
+    #[test]
+    fn assigning_a_tensor_into_itself_changes_nothing() {
+        for requires_grad in [false, true] {
+            let mut target = tensor_f32(vec![1.5, -2.0, 3.25, 0.0]);
+            target.requires_grad = requires_grad;
+            let value = target.clone();
+            target
+                .index_assign(
+                    &[TensorIndex::Slice {
+                        start: 0,
+                        end: 4,
+                        step: 1,
+                    }],
+                    &value,
+                )
+                .unwrap();
             assert_eq!(
                 target.data().as_f32_slice().unwrap(),
                 &[1.5, -2.0, 3.25, 0.0],
