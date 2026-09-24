@@ -39,6 +39,190 @@ use std::cell::UnsafeCell;
 /// ```
 const PARALLEL_COPY_THRESHOLD: usize = 32 << 20;
 
+/// A heap block this crate allocated, freed with the layout it was allocated
+/// with.
+///
+/// This is what [`TensorBuffer::Owned`] holds instead of a `Vec<u8>`, and the
+/// difference is the alignment. `GlobalAlloc::dealloc` must be given the same
+/// layout as the matching `alloc`, and a `Vec<u8>` frees with alignment 1. A
+/// `Vec<f32>` reinterpreted as bytes -- which [`TensorData::from_vec`] does to
+/// avoid a copy -- was allocated with alignment 4, so freeing it through a
+/// `Vec<u8>` was undefined behavior that only went unnoticed because glibc's
+/// `free` takes no layout. Miri reports it on the first backward pass. The
+/// mirror case was a zeroed buffer allocated as `Vec<u8>` and then read as
+/// `&[f64]`, which was aligned only because the allocator happens to hand out
+/// 16-byte blocks. Recording `align` makes both exact: each block is aligned
+/// for its dtype because it was *asked* to be, and is freed as it was made.
+struct OwnedBytes {
+    ptr: std::ptr::NonNull<u8>,
+    /// Bytes in use: `numel * size_of::<T>()`.
+    len: usize,
+    /// Bytes in the allocation, which a `Vec<T>` handed over may have more of
+    /// than it uses. Zero means there is no allocation to free.
+    capacity: usize,
+    align: usize,
+}
+
+// SAFETY: an `OwnedBytes` uniquely owns its block, exactly as a `Vec<u8>` does.
+unsafe impl Send for OwnedBytes {}
+unsafe impl Sync for OwnedBytes {}
+
+impl OwnedBytes {
+    /// The alignment each dtype's elements need.
+    #[inline(always)]
+    fn align_for(dtype: DataType) -> usize {
+        match dtype {
+            DataType::Float32 => std::mem::align_of::<f32>(),
+            DataType::Float64 => std::mem::align_of::<f64>(),
+            DataType::Int32 => std::mem::align_of::<i32>(),
+            DataType::Int64 => std::mem::align_of::<i64>(),
+            DataType::Bool => std::mem::align_of::<bool>(),
+        }
+    }
+
+    #[inline(always)]
+    fn layout(size: usize, align: usize) -> std::alloc::Layout {
+        std::alloc::Layout::from_size_align(size, align).expect("tensor size overflow")
+    }
+
+    /// No allocation, with a pointer aligned for `align` as the typed
+    /// accessors require even of an empty slice.
+    #[inline(always)]
+    fn empty(align: usize) -> Self {
+        Self {
+            // SAFETY: `align` is a power of two, so not zero.
+            ptr: unsafe {
+                std::ptr::NonNull::new_unchecked(std::ptr::without_provenance_mut(align))
+            },
+            len: 0,
+            capacity: 0,
+            align,
+        }
+    }
+
+    /// Take over a `Vec<T>`'s allocation without copying it.
+    #[inline(always)]
+    fn from_vec<T: Copy>(data: Vec<T>) -> Self {
+        let mut data = std::mem::ManuallyDrop::new(data);
+        let size = std::mem::size_of::<T>();
+        Self {
+            // SAFETY: a `Vec`'s pointer is never null.
+            ptr: unsafe { std::ptr::NonNull::new_unchecked(data.as_mut_ptr().cast::<u8>()) },
+            len: data.len() * size,
+            capacity: data.capacity() * size,
+            align: std::mem::align_of::<T>(),
+        }
+    }
+
+    /// Allocate `len` bytes, running `init` over them before they are read.
+    ///
+    /// # Safety
+    /// `init` must write every byte it is given.
+    #[inline(always)]
+    unsafe fn allocate(
+        len: usize,
+        align: usize,
+        zeroed: bool,
+        init: impl FnOnce(&mut [std::mem::MaybeUninit<u8>]),
+    ) -> Self {
+        if len == 0 {
+            return Self::empty(align);
+        }
+        let layout = Self::layout(len, align);
+        // SAFETY: `layout` has a non-zero size.
+        let raw = unsafe {
+            if zeroed {
+                std::alloc::alloc_zeroed(layout)
+            } else {
+                std::alloc::alloc(layout)
+            }
+        };
+        let Some(ptr) = std::ptr::NonNull::new(raw) else {
+            std::alloc::handle_alloc_error(layout)
+        };
+        // SAFETY: `ptr` is a fresh block of `len` bytes that nothing else sees.
+        init(unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().cast(), len) });
+        Self {
+            ptr,
+            len,
+            capacity: len,
+            align,
+        }
+    }
+
+    /// `len` zero bytes (`alloc_zeroed`, so large blocks come straight from
+    /// fresh zero pages rather than a `memset`).
+    #[inline(always)]
+    fn zeroed(len: usize, align: usize) -> Self {
+        // SAFETY: the allocation is already all zeros.
+        unsafe { Self::allocate(len, align, true, |_| {}) }
+    }
+
+    /// A copy of `src`, split across rayon's workers once it is large enough
+    /// to be bound by page faults rather than by bandwidth. See
+    /// [`PARALLEL_COPY_THRESHOLD`] for where that point is and why it is
+    /// there.
+    fn copy_of(src: &[u8], align: usize) -> Self {
+        // SAFETY: both arms write the whole destination from `src`, which has
+        // its length.
+        unsafe {
+            Self::allocate(src.len(), align, false, |destination| {
+                if src.len() < PARALLEL_COPY_THRESHOLD {
+                    destination.write_copy_of_slice(src);
+                    return;
+                }
+                let chunk = (src.len() / rayon::current_num_threads().max(1)).max(1 << 16);
+                destination
+                    .par_chunks_mut(chunk)
+                    .zip(src.par_chunks(chunk))
+                    .for_each(|(destination, piece)| {
+                        destination.write_copy_of_slice(piece);
+                    });
+            })
+        }
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+
+    #[inline(always)]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    #[inline(always)]
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `len` bytes from `ptr` are owned and initialized; an empty
+        // block's pointer is non-null and aligned.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    #[inline(always)]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as `as_slice`, and `&mut self` makes the access exclusive.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for OwnedBytes {
+    fn drop(&mut self) {
+        if self.capacity != 0 {
+            // SAFETY: the block was allocated -- by us, or by the `Vec` handed
+            // to `from_vec` -- with exactly this size and alignment.
+            unsafe {
+                std::alloc::dealloc(self.ptr.as_ptr(), Self::layout(self.capacity, self.align))
+            };
+        }
+    }
+}
+
 /// Tensor data storage.
 ///
 /// Sharing is managed exclusively through `Arc<TensorData>`; the struct itself
@@ -72,8 +256,8 @@ impl std::fmt::Debug for TensorData {
 
 /// Buffer storage for tensor data
 enum TensorBuffer {
-    /// Owned vector buffer (for CPU)
-    Owned(Vec<u8>),
+    /// CPU memory this crate allocated (see [`OwnedBytes`]).
+    Owned(OwnedBytes),
     /// Raw pointer buffer (for GPU or custom allocators)
     Raw {
         ptr: *mut u8,
@@ -158,7 +342,7 @@ macro_rules! typed_slice_accessors {
                 concat!(
                     "tensor storage is not aligned for ",
                     stringify!($ty),
-                    "; see TensorData::from_vec on what the buffer allocation relies on"
+                    "; see OwnedBytes on how the buffer is allocated"
                 )
             );
             Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
@@ -247,31 +431,9 @@ impl TensorData {
         assert!(matches, "dtype/type mismatch in TensorData::from_vec");
     }
 
-    /// Allocate a zero-initialized byte buffer (`alloc_zeroed`).
-    #[inline(always)]
-    fn owned_zeroed_buffer(size_bytes: usize) -> Vec<u8> {
-        vec![0u8; size_bytes]
-    }
-
-    /// A copy of `src`, split across rayon's workers once it is large enough
-    /// to be bound by page faults rather than by bandwidth. See
-    /// [`PARALLEL_COPY_THRESHOLD`] for where that point is and why it is
-    /// there.
-    fn copied_bytes(src: &[u8]) -> Vec<u8> {
-        if src.len() < PARALLEL_COPY_THRESHOLD {
-            return src.to_vec();
-        }
-        let chunk = (src.len() / rayon::current_num_threads().max(1)).max(1 << 16);
-        let mut copy = Self::owned_zeroed_buffer(src.len());
-        copy.par_chunks_mut(chunk)
-            .zip(src.par_chunks(chunk))
-            .for_each(|(destination, piece)| destination.copy_from_slice(piece));
-        copy
-    }
-
     /// A copy of `src`, split across rayon's workers once it is large enough to
     /// be bound by page faults rather than by bandwidth -- the typed form of
-    /// [`Self::copied_bytes`], for callers that hold a slice rather than a
+    /// [`OwnedBytes::copy_of`], for callers that hold a slice rather than a
     /// tensor. Handing 64MB of float32 from NumPy took 63ms copied on one core
     /// and 25 split.
     pub fn copied_slice<T: Copy + Send + Sync>(src: &[T]) -> Vec<T> {
@@ -293,7 +455,8 @@ impl TensorData {
         }
     }
 
-    /// Allocate a CPU buffer for an operation output obtained through
+    /// Allocate a zeroed CPU buffer aligned for `dtype` -- for
+    /// [`Self::zeros_on_device`], and for an operation output obtained through
     /// [`Self::uninitialized_on_device`].
     ///
     /// **This buffer is zero-initialized and callers rely on that.** A kernel
@@ -320,8 +483,8 @@ impl TensorData {
     /// release): ~25–35% on the pure element-wise microbenchmark (bound by
     /// output write traffic), within noise on matmul-dominated training steps.
     #[inline(always)]
-    fn owned_buffer_for_dtype(size_bytes: usize, _dtype: DataType) -> Vec<u8> {
-        Self::owned_zeroed_buffer(size_bytes)
+    fn owned_zeroed(size_bytes: usize, dtype: DataType) -> TensorBuffer {
+        TensorBuffer::Owned(OwnedBytes::zeroed(size_bytes, OwnedBytes::align_for(dtype)))
     }
 
     #[inline(always)]
@@ -606,7 +769,7 @@ impl TensorData {
             .expect("tensor size overflow");
 
         let buffer = if device.is_cpu() {
-            TensorBuffer::Owned(Self::owned_zeroed_buffer(size_bytes))
+            Self::owned_zeroed(size_bytes, dtype)
         } else {
             // Use custom allocator for GPU
             match global_allocate(size_bytes, device) {
@@ -623,7 +786,7 @@ impl TensorData {
                 }
                 Err(_) => {
                     // Fallback to CPU if GPU allocation fails
-                    TensorBuffer::Owned(Self::owned_zeroed_buffer(size_bytes))
+                    Self::owned_zeroed(size_bytes, dtype)
                 }
             }
         };
@@ -651,7 +814,7 @@ impl TensorData {
     ///
     /// Historically this handed out genuinely uninitialized memory; CPU
     /// buffers are now zero-initialized via `alloc_zeroed` (see
-    /// [`Self::owned_zeroed_buffer`]), which keeps the fast allocation path
+    /// [`Self::owned_zeroed`]), which keeps the fast allocation path
     /// while making accidental reads defined. The name is kept for API
     /// stability; callers should still treat the contents as unspecified.
     #[inline(always)]
@@ -661,7 +824,7 @@ impl TensorData {
             .expect("tensor size overflow");
 
         let buffer = if device.is_cpu() {
-            TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype))
+            Self::owned_zeroed(size_bytes, dtype)
         } else {
             match global_allocate(size_bytes, device) {
                 Ok(ptr) => TensorBuffer::Raw {
@@ -671,7 +834,7 @@ impl TensorData {
                 },
                 Err(_) => {
                     // Fallback to CPU allocation if GPU allocation fails
-                    TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype))
+                    Self::owned_zeroed(size_bytes, dtype)
                 }
             }
         };
@@ -697,29 +860,12 @@ impl TensorData {
 
     /// Create tensor data from a vector of typed values.
     ///
-    /// # Allocation invariant
-    ///
-    /// The CPU path below reinterprets the `Vec<T>` as a `Vec<u8>` rather than
-    /// copying. That keeps the buffer aligned for `T` — which the typed
-    /// accessors require, since building a `&[f64]` from a misaligned pointer
-    /// is undefined behavior — but it means the block is *freed* through a
-    /// `Vec<u8>`, whose layout records alignment 1 rather than the
-    /// `align_of::<T>()` it was allocated with.
-    ///
-    /// `GlobalAlloc::dealloc` is specified to take the same layout as the
-    /// matching `alloc`, so this relies on the installed allocator ignoring the
-    /// alignment on free. Every mainstream one does — Rust's `System` allocator
-    /// forwards to `free`/`HeapFree`, neither of which takes a layout — but a
-    /// downstream crate installing a layout-sensitive `#[global_allocator]`
-    /// would be within its rights to object. Removing the reliance means
-    /// teaching [`TensorBuffer::Owned`] to carry its allocation's alignment and
-    /// freeing manually, rather than storing a `Vec<u8>`.
-    ///
-    /// The zeroed constructors have the mirror-image property: their buffer
-    /// really is a `Vec<u8>`, so the layouts match exactly, and the alignment
-    /// the accessors need comes from the allocator returning
-    /// suitably-aligned blocks for every size. The `debug_assert!` in each
-    /// accessor is what would catch either assumption breaking.
+    /// On the CPU the `Vec<T>`'s allocation becomes the tensor's buffer as
+    /// is, with no copy; [`OwnedBytes`] records `align_of::<T>()` so it is
+    /// freed with the layout it was allocated with. Viewing the elements as
+    /// bytes is sound for every supported type, `bool` included: its valid
+    /// representations (0x00/0x01) are valid `u8`s, and nothing reads bytes
+    /// back as `bool` without the dtype saying they came from one.
     #[inline(always)]
     pub fn from_vec<T: Copy + 'static>(data: Vec<T>, dtype: DataType, device: Device) -> Self {
         let numel = data.len();
@@ -735,23 +881,7 @@ impl TensorData {
 
         // Convert typed data to bytes
         let buffer = if device.is_cpu() {
-            // For CPU memory we avoid an extra allocation by reinterpreting
-            // the `Vec<T>` as a `Vec<u8>`. This is sound for every supported
-            // element type, including `bool`: a `bool` is one byte whose only
-            // valid representations (0x00/0x01) are also valid `u8`s. (Only
-            // the reverse u8-to-bool direction would need a copy with
-            // validation, and `from_vec` never goes that way.)
-            {
-                use std::mem::{ManuallyDrop, size_of};
-                let mut data = ManuallyDrop::new(data);
-                let ptr = data.as_mut_ptr() as *mut u8;
-                let len = size_bytes;
-                let capacity = data
-                    .capacity()
-                    .checked_mul(size_of::<T>())
-                    .expect("tensor size overflow");
-                unsafe { TensorBuffer::Owned(Vec::from_raw_parts(ptr, len, capacity)) }
-            }
+            TensorBuffer::Owned(OwnedBytes::from_vec(data))
         } else {
             // For GPU, allocate and copy
             match global_allocate(size_bytes, device) {
@@ -765,14 +895,8 @@ impl TensorData {
                         device,
                     }
                 }
-                Err(_) => {
-                    // Fallback to CPU. Byte-copying is sound for `bool` too:
-                    // its valid representations (0x00/0x01) are valid `u8`s.
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes).to_vec()
-                    };
-                    TensorBuffer::Owned(bytes)
-                }
+                // Fall back to the CPU, where the vector already is.
+                Err(_) => TensorBuffer::Owned(OwnedBytes::from_vec(data)),
             }
         };
         let actual_device = match &buffer {
@@ -990,13 +1114,16 @@ impl TensorData {
 
     /// Create a copy of the tensor data
     pub fn clone_data(&self) -> Self {
+        let align = OwnedBytes::align_for(self.layout.dtype);
         let new_buffer = match self.buffer_ref() {
-            TensorBuffer::Owned(vec) => TensorBuffer::Owned(Self::copied_bytes(vec)),
+            TensorBuffer::Owned(bytes) => {
+                TensorBuffer::Owned(OwnedBytes::copy_of(bytes.as_slice(), bytes.align))
+            }
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
                     // Raw CPU pointer: copy into a Vec for safety
                     let bytes = unsafe { std::slice::from_raw_parts(*ptr, *size) };
-                    TensorBuffer::Owned(Self::copied_bytes(bytes))
+                    TensorBuffer::Owned(OwnedBytes::copy_of(bytes, align))
                 } else {
                     // For GPU, allocate new memory and copy
                     match global_allocate(*size, *device) {
@@ -1013,7 +1140,7 @@ impl TensorData {
                         Err(_) => {
                             // Fallback to a zeroed CPU buffer to avoid
                             // failing the clone outright.
-                            TensorBuffer::Owned(Self::owned_zeroed_buffer(*size))
+                            Self::owned_zeroed(*size, self.layout.dtype)
                         }
                     }
                 }
@@ -1024,7 +1151,7 @@ impl TensorData {
             // tensor outliving the array it came from.
             TensorBuffer::Foreign { ptr, size, .. } => {
                 let bytes = unsafe { std::slice::from_raw_parts(*ptr, *size) };
-                TensorBuffer::Owned(Self::copied_bytes(bytes))
+                TensorBuffer::Owned(OwnedBytes::copy_of(bytes, align))
             }
         };
 
@@ -1277,8 +1404,8 @@ mod tests {
     fn test_storage_is_aligned_for_every_dtype_and_size() {
         // The typed accessors build slices straight out of the buffer, so the
         // pointer must be aligned for the element type. Both construction paths
-        // are covered: the zeroed one (a real `Vec<u8>`, aligned only by the
-        // allocator's practice) and `from_vec` (aligned by construction).
+        // are covered: the zeroed one (allocated at the dtype's alignment) and
+        // `from_vec` (the vector's own allocation).
         //
         // Sizes are chosen to straddle allocator size classes; an odd byte
         // count is what would expose a 1-aligned block.
