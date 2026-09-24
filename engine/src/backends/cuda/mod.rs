@@ -161,6 +161,17 @@ impl CudaBackend {
     }
 }
 
+/// Whether the CUDA driver library can be loaded at all.
+///
+/// `cudarc` loads it on first use and panics when it is missing, so asking
+/// `CudaContext::new` on a machine without a driver was a panic where
+/// `is_available` owes a `false` and `initialize` an error.
+pub(crate) fn driver_present() -> bool {
+    // SAFETY: loading the driver library runs its initialisers, which any use
+    // of CUDA runs anyway; nothing is called through it here.
+    unsafe { cudarc::driver::sys::is_culib_present() }
+}
+
 impl Backend for CudaBackend {
     #[inline(always)]
     fn device(&self) -> Device {
@@ -169,11 +180,17 @@ impl Backend for CudaBackend {
 
     #[inline(always)]
     fn is_available() -> bool {
-        CudaContext::new(0).is_ok()
+        driver_present() && CudaContext::new(0).is_ok()
     }
 
     #[inline(always)]
     fn initialize() -> Result<Self> {
+        if !driver_present() {
+            return Err(crate::error::MinitensorError::backend_error(
+                "CUDA",
+                "the CUDA driver library (libcuda) could not be loaded",
+            ));
+        }
         let device_id = 0; // Default to device 0, could be configurable
         let cuda_device = CudaContext::new(device_id).map_err(|e| {
             crate::error::MinitensorError::backend_error(

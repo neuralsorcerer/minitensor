@@ -193,9 +193,17 @@ mod tests {
     use super::*;
     use cudarc::driver::CudaContext;
 
+    /// Device 0, when this machine has a CUDA driver and a device to open.
+    fn test_device() -> Option<Arc<CudaContext>> {
+        if !crate::backends::cuda::driver_present() {
+            return None;
+        }
+        CudaContext::new(0).ok()
+    }
+
     #[test]
     fn test_stream_pool() {
-        if let Ok(device) = CudaContext::new(0) {
+        if let Some(device) = test_device() {
             let pool = CudaStreamPool::new(device, 4);
 
             // Test getting and returning streams
@@ -211,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_pooled_stream() {
-        if let Ok(device) = CudaContext::new(0) {
+        if let Some(device) = test_device() {
             let pool = Arc::new(CudaStreamPool::new(device, 4));
 
             {
@@ -225,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_execution_context() {
-        if let Ok(device) = CudaContext::new(0) {
+        if let Some(device) = test_device() {
             let mut context = CudaExecutionContext::new(device, 4);
 
             // Test getting a stream
