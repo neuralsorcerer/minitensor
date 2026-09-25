@@ -460,8 +460,10 @@ impl Backend for OpenCLBackend {
                 aligned
             } else {
                 copied = src
-                    .chunks_exact(4)
-                    .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&bytes| f32::from_ne_bytes(bytes))
                     .collect();
                 &copied
             };
@@ -534,7 +536,7 @@ impl Backend for OpenCLBackend {
                 // copy the bytes across.
                 let mut floats = vec![0f32; dst.len() / 4];
                 read(&mut floats)?;
-                for (bytes, value) in dst.chunks_exact_mut(4).zip(floats) {
+                for (bytes, value) in dst.as_chunks_mut::<4>().0.iter_mut().zip(floats) {
                     bytes.copy_from_slice(&value.to_ne_bytes());
                 }
             }

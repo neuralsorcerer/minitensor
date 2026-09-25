@@ -449,8 +449,8 @@ nan_extremum_all_entry!(
 fn locate_first<T: Copy>(data: &[T], test: impl Fn(T) -> bool) -> Option<usize> {
     const LANES: usize = 64;
     let mut base = 0usize;
-    let mut blocks = data.chunks_exact(LANES);
-    for block in &mut blocks {
+    let (blocks, remainder) = data.as_chunks::<LANES>();
+    for block in blocks {
         let mut hit = 0u32;
         for lane in 0..LANES {
             hit |= test(block[lane]) as u32;
@@ -464,7 +464,7 @@ fn locate_first<T: Copy>(data: &[T], test: impl Fn(T) -> bool) -> Option<usize> 
         }
         base += LANES;
     }
-    for (step, &v) in blocks.remainder().iter().enumerate() {
+    for (step, &v) in remainder.iter().enumerate() {
         if test(v) {
             return Some(base + step);
         }
