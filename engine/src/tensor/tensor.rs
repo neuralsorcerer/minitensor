@@ -69,6 +69,92 @@ pub struct Tensor {
     tensor_id: TensorId,
 }
 
+/// Releasing a gradient chain without recursing down it.
+///
+/// A tensor owns its `grad_fn`, the `grad_fn` owns the tensors it saved, and
+/// each of those owns its own `grad_fn`: a graph is a chain of ownership as
+/// long as the computation. Dropping the head dropped the whole chain
+/// recursively, one set of stack frames per operation, so a loop of a hundred
+/// thousand multiplies ran fine forward and backward and then crashed the
+/// interpreter when its result was released.
+///
+/// Instead, a dropped tensor hands its `grad_fn` to a per-thread queue, and
+/// the outermost drop on the thread empties it in a loop. Releasing one queued
+/// function drops the tensors it saved, which only queue their own functions
+/// and return, so the stack stays one level deep however long the chain is.
+/// Tensors with no `grad_fn` -- everything built outside recording -- never
+/// touch the queue.
+mod chain_release {
+    use crate::autograd::GradientFunction;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    struct Queue {
+        pending: RefCell<Vec<Arc<dyn GradientFunction>>>,
+        draining: Cell<bool>,
+    }
+
+    thread_local! {
+        static QUEUE: Queue = const {
+            Queue {
+                pending: RefCell::new(Vec::new()),
+                draining: Cell::new(false),
+            }
+        };
+    }
+
+    pub(super) fn release(grad_fn: Arc<dyn GradientFunction>) {
+        // During thread teardown the queue may already be gone. The closure is
+        // then dropped unrun, taking `grad_fn` with it: an ordinary drop, which
+        // is the only option left and still releases the chain.
+        let _ = QUEUE.try_with(move |queue| {
+            queue.pending.borrow_mut().push(grad_fn);
+            if queue.draining.replace(true) {
+                // An outer drop on this thread is emptying the queue already.
+                return;
+            }
+            loop {
+                // Popped in its own statement so the borrow has ended before
+                // the drop, which may push more.
+                let next = queue.pending.borrow_mut().pop();
+                match next {
+                    Some(function) => drop(function),
+                    None => break,
+                }
+            }
+            queue.draining.set(false);
+        });
+    }
+}
+
+#[cfg(test)]
+mod chain_release_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_gradient_chain_is_released_without_recursing_down_it() {
+        // Two hundred thousand multiplies, each saving the one before it. On a
+        // test thread's 2MB stack the recursive drop this replaces overflowed
+        // well before the end of the chain.
+        let leaf = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let scale = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        let mut head = leaf.clone();
+        for _ in 0..200_000 {
+            head = crate::ops::arithmetic::mul(&head, &scale).unwrap();
+        }
+        drop(head);
+        crate::autograd::clear_graph().unwrap();
+    }
+}
+
+impl Drop for Tensor {
+    fn drop(&mut self) {
+        if let Some(grad_fn) = self.grad_fn.take() {
+            chain_release::release(grad_fn);
+        }
+    }
+}
+
 /// Index specification for tensor slicing and indexing
 #[derive(Clone, Copy, Debug)]
 pub enum TensorIndex {

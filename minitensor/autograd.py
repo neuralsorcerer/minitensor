@@ -177,6 +177,13 @@ class Function:
             produced = cls.backward(ctx, grad_output)
             if _is_tensor(produced) or produced is None:
                 produced = (produced,)
+            elif not isinstance(produced, (tuple, list)):
+                # Checked rather than iterated: a string is iterable, and
+                # `return "oops"` was reported as four gradients.
+                raise TypeError(
+                    f"{cls.__name__}.backward must return a tensor, None, or a "
+                    f"tuple of them; got {type(produced).__name__}"
+                )
             gradients = tuple(produced)
             # A backward may answer for every argument, as it is written at the
             # call site, or for the tensors alone. Both are unambiguous.

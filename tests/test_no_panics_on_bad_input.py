@@ -547,6 +547,11 @@ _NESTING_CASES = {
         "t = (1,)\nfor _ in range(100000): t = (t,)\nassert tuple(mt.zeros(t).shape) == (1,)"
     ),
     "tolist of a 100000-dimensional tensor": "mt.zeros([1] * 100000).tolist()",
+    "releasing a 200000-operation gradient chain": (
+        "x = mt.Tensor([1.0], requires_grad=True)\ny = x\n"
+        "for _ in range(200000): y = y * 1.0\n"
+        "y.sum().backward()\ndel y"
+    ),
 }
 
 
@@ -579,3 +584,23 @@ def test_a_nesting_error_names_the_limit():
         mt.Tensor(rec)
     with pytest.raises(ValueError, match="at most 64 dimensions"):
         mt.zeros([1] * 65).tolist()
+
+
+def test_a_function_backward_returning_a_non_sequence_is_a_type_error():
+    """A string is iterable, so it used to be read as one gradient per
+    character; it is refused by type instead."""
+
+    from minitensor.autograd import Function
+
+    class Wrong(Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x * 1
+
+        @staticmethod
+        def backward(ctx, grad):
+            return "nope"
+
+    x = mt.Tensor([1.0], requires_grad=True)
+    with pytest.raises(Exception, match="must return a tensor, None, or a tuple"):
+        Wrong.apply(x).sum().backward()
