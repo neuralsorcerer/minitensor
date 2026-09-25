@@ -4116,6 +4116,19 @@ signals the problem. The same silence applies within a single thread after
 than an error. If gradients come back `None` when you expect values, check
 which thread built the graph and whether it was cleared in between.
 
+### Updating parameters while another thread reads them
+
+Every operation holds the GIL, so two Python threads never run tensor code at
+the same moment -- with one exception. A large `float32` or `float64` product
+is handed to `numpy.matmul`, which releases the GIL while its BLAS runs. During
+that window another thread can run, and if it updates a parameter the product
+is reading -- an optimizer `step()`, `copy_`, `fill_` or an item assignment on
+a tensor that requires a gradient, all of which write the parameter in place so
+every handle to it sees the update -- the product reads values that are being
+overwritten. The result is whatever mixture of old and new values the timing
+gives, the same race PyTorch has. Keep parameter updates off threads that are
+running forward passes on the same model at the same time.
+
 ## 13) Notes on devices & backends
 
 **Execution is CPU-only.** Every kernel in the engine reads host memory, so CPU
