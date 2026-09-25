@@ -19,6 +19,7 @@ a dependency, so its closed forms are checked directly.
 
 from __future__ import annotations
 
+import decimal
 import math
 
 import numpy as np
@@ -399,15 +400,30 @@ CBRT_EDGES = [
 ]
 
 
+def _exact_cbrt(value):
+    """`cbrt(value)` correctly rounded to float64, from 60 decimal digits."""
+
+    if value == 0 or not math.isfinite(value):
+        return value
+    with decimal.localcontext(decimal.Context(prec=60)):
+        root = (abs(decimal.Decimal(value)).ln() / 3).exp()
+    return math.copysign(float(root), value)
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_cbrt_at_the_edges(dtype):
     # None of these needs a fallback pass and each is worth checking rather
     # than assuming: a zero takes the logarithm to -inf, which the
     # exponential's own clamp turns back into a zero, and `copysign` restores
     # the sign a cube root keeps.
+    #
+    # The reference is computed exactly rather than taken from `np.cbrt`, whose
+    # float64 answer is not correctly rounded on every build: some return
+    # `3.0000000000000004` for `cbrt(27)` and miss `2**-42` for `cbrt(2**-126)`
+    # by an ulp, which would fail this kernel for being right.
     values = np.array(CBRT_EDGES, dtype=dtype)
     got = mt.cbrt(mt.from_numpy(values)).numpy()
-    want = np.cbrt(values.astype(np.float64)).astype(dtype)
+    want = np.array([_exact_cbrt(v) for v in values.tolist()]).astype(dtype)
     np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
 

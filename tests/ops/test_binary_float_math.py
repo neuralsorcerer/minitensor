@@ -206,18 +206,20 @@ ATAN2_SPECIAL = [
 ]
 
 
-def test_atan2_matches_numpy_on_every_pair_of_special_values():
+def test_atan2_is_exact_on_every_pair_of_special_values():
     # Every special against every other, which is where the quotient stops
-    # being a slope and the fallback has to take over. These all have answers
-    # both libraries agree on exactly -- the zeros, the infinities, the NaN,
-    # and the axis angles -- so this compares against NumPy directly.
+    # being a slope and the fallback has to take over. The answers are the
+    # zeros, the infinities, the NaN and the axis angles, taken from float64
+    # and narrowed once like the test below: float32 `np.arctan2` is not a
+    # reference for them everywhere, since Apple's gives `pi` as 3.1415925,
+    # an ulp under the correctly rounded 3.1415927.
     values = np.array(ATAN2_SPECIAL, dtype="float32")
     ys, xs = (a.ravel() for a in np.meshgrid(values, values))
     degenerate = (ys == 0) | (xs == 0) | ~np.isfinite(ys) | ~np.isfinite(xs)
     ys, xs = ys[degenerate], xs[degenerate]
 
     got = mt.atan2(mt.from_numpy(ys), mt.from_numpy(xs)).numpy()
-    want = np.arctan2(ys, xs)
+    want = np.arctan2(ys.astype(np.float64), xs.astype(np.float64)).astype("float32")
     np.testing.assert_array_equal(got, want)
     # The sign of a zero result is the whole point of keeping the quadrant.
     np.testing.assert_array_equal(np.signbit(got), np.signbit(want))

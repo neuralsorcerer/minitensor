@@ -360,7 +360,7 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// The values this returns are not bit-identical to the scaled route's, and are
 /// slightly closer to the true norm: `(|x| / s)^2 ... * s` rounds at the divide
 /// and again at the multiply, and this does neither.
-/// `sum(x^2)` over `dims` without ever writing the squares down.
+/// `sqrt(sum(x^2))` over `dims` without ever writing the squares down.
 ///
 /// `mul` then `sum` is two passes over the data and a temporary the size of the
 /// input: 64MB for a 16-million-element float32 tensor, allocated, written,
@@ -402,7 +402,7 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// reducing every axis (the flattened norm, and what gradient clipping asks
 /// for) and reducing the last (row norms), and both are one contiguous run per
 /// output element.
-fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>> {
+fn fused_euclidean_norm(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>> {
     let shape = input.shape().dims();
     let ndim = shape.len();
     // `dims` arrives sorted and deduplicated from `normalize_norm_dims`, so a
@@ -422,16 +422,18 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
     }
     let outer = input.numel() / run;
 
-    macro_rules! fuse {
-        ($accessor:ident, $from_vec:path, $zero:expr, $square_sum:path, $ty:ty) => {{
+    // Every run's sum of squares, in `f64` for both widths; see
+    // `simd_square_sum_f32` for why a float32 input accumulates wide.
+    macro_rules! sums_of_squares {
+        ($accessor:ident, $square_sum:path) => {{
             let data = input.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("norm: tensor data did not match its dtype")
             })?;
-            let mut out = vec![<$ty>::default(); outer];
+            let mut out = vec![0f64; outer];
             if outer == 1 {
                 // One run over everything; `accurate_pair_sum` spreads it
                 // across the pool itself.
-                out[0] = crate::ops::util::accurate_self_sum(data, $zero, $square_sum);
+                out[0] = crate::ops::util::accurate_self_sum(data, 0f64, $square_sum);
             } else {
                 // Many independent runs, so the outer axis is the one to
                 // split; each run then folds on a single thread.
@@ -439,29 +441,38 @@ fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
                     for (offset, slot) in block.iter_mut().enumerate() {
                         let base = (start + offset) * run;
                         let slice = &data[base..base + run];
-                        *slot = crate::ops::util::accurate_self_sum(slice, $zero, $square_sum);
+                        *slot = crate::ops::util::accurate_self_sum(slice, 0f64, $square_sum);
                     }
                 });
             }
-            $from_vec(out, input.device())
+            out
         }};
     }
 
     let data = match input.dtype() {
-        DataType::Float32 => fuse!(
-            as_f32_slice,
-            TensorData::from_vec_f32,
-            0.0_f32,
-            crate::ops::simd::simd_square_sum_f32,
-            f32
-        ),
-        DataType::Float64 => fuse!(
-            as_f64_slice,
-            TensorData::from_vec_f64,
-            0.0_f64,
-            crate::ops::simd::simd_square_sum_f64,
-            f64
-        ),
+        // Nothing a float32 input holds can take its squares out of `f64`'s
+        // range, so the root is taken straight away and rounded once, which
+        // is what makes it the correctly rounded norm. A zero sum is an
+        // all-zero run and an infinite one an infinite input: both are the
+        // answer, not a reason to rescale.
+        DataType::Float32 => {
+            let sums = sums_of_squares!(as_f32_slice, crate::ops::simd::simd_square_sum_f32);
+            TensorData::from_vec_f32(
+                sums.into_iter().map(|s| s.sqrt() as f32).collect(),
+                input.device(),
+            )
+        }
+        // A float64 sum of squares can leave the range where its root does
+        // not, and comes back `inf` or `0` when it has; either sends the whole
+        // reduction down the scaled route. A NaN is not a scaling failure -- it
+        // means the input held one -- so it propagates.
+        DataType::Float64 => {
+            let sums = sums_of_squares!(as_f64_slice, crate::ops::simd::simd_square_sum_f64);
+            if sums.iter().any(|s| s.is_infinite() || *s == 0.0) {
+                return Ok(None);
+            }
+            TensorData::from_vec_f64(sums.into_iter().map(f64::sqrt).collect(), input.device())
+        }
         _ => return Ok(None),
     };
 
@@ -479,14 +490,12 @@ fn euclidean_norm_unscaled(input: &Tensor, p: f64, dims: &[usize]) -> Result<Opt
         return Ok(None);
     }
 
-    let summed = match fused_sum_of_squares(input, dims)? {
-        Some(fused) => fused,
-        None => {
-            let squared = arithmetic::mul(input, input)?;
-            let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
-            reduction::sum(&squared, Some(dims_isize), true)?
-        }
-    };
+    if let Some(fused) = fused_euclidean_norm(input, dims)? {
+        return Ok(Some(fused));
+    }
+    let squared = arithmetic::mul(input, input)?;
+    let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+    let summed = reduction::sum(&squared, Some(dims_isize), true)?;
 
     // One element out of range is enough to fall back for the whole reduction:
     // the scaled path is per-slice, so it costs nothing extra to take it for
@@ -785,14 +794,14 @@ mod tests {
         assert!(norm(&t, 2.0, Some(vec![5]), false).is_err());
     }
 
-    /// The fused sum of squares has to answer what `mul` then `sum` answered.
+    /// The fused norm has to answer what `mul`, `sum` and `sqrt` answered.
     ///
     /// It replaced that route for the trailing-axis reductions, so the two are
     /// compared directly rather than both against a reference: a shared error
     /// in the definition would pass a reference check and this is what catches
     /// a fused path that reduced over the wrong extent.
     #[test]
-    fn the_fused_sum_of_squares_agrees_with_mul_then_sum() {
+    fn the_fused_norm_agrees_with_mul_then_sum_then_sqrt() {
         let values: Vec<f64> = (0..(3 * 4 * 5)).map(|i| (i as f64) * 0.37 - 8.0).collect();
         let t = tensor_f64(values, vec![3, 4, 5], false);
 
@@ -801,13 +810,14 @@ mod tests {
             vec![2],            // the last: one run per row
             vec![1, 2],         // a trailing block of two
         ] {
-            let fused = fused_sum_of_squares(&t, &dims)
+            let fused = fused_euclidean_norm(&t, &dims)
                 .unwrap()
                 .expect("a trailing block should take the fused path");
 
             let squared = arithmetic::mul(&t, &t).unwrap();
             let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
-            let composed = reduction::sum(&squared, Some(dims_isize), true).unwrap();
+            let summed = reduction::sum(&squared, Some(dims_isize), true).unwrap();
+            let composed = activation::sqrt(&summed).unwrap();
 
             assert_eq!(fused.shape().dims(), composed.shape().dims(), "{dims:?}");
             let a = fused.data().as_f64_slice().unwrap();
@@ -821,17 +831,60 @@ mod tests {
         }
     }
 
+    /// A float32 norm accumulates in `f64` and rounds once, so it is the
+    /// correctly rounded answer -- here on lengths and magnitudes where the
+    /// single-precision accumulator it replaced landed an ulp off -- and it
+    /// needs no scaling at the ends of the range, where squaring in `f32`
+    /// overflows or underflows.
+    #[test]
+    fn a_float32_norm_is_the_correctly_rounded_one() {
+        fn float32(values: Vec<f32>) -> Tensor {
+            let shape = vec![values.len()];
+            Tensor::new(
+                Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+                Shape::new(shape),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            )
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        for len in [1usize, 17, 1000, 100_000, 2_000_000] {
+            for scale in [10.0f32, 1e20, 1e-25] {
+                let values: Vec<f32> = (0..len).map(|_| next() * scale).collect();
+                let exact = values
+                    .iter()
+                    .map(|&v| (v as f64) * (v as f64))
+                    .sum::<f64>()
+                    .sqrt();
+                let t = float32(values);
+                let got = fused_euclidean_norm(&t, &[0]).unwrap().unwrap();
+                assert_eq!(
+                    got.data().as_f32_slice().unwrap()[0],
+                    exact as f32,
+                    "len {len}, scale {scale:e}"
+                );
+            }
+        }
+    }
+
     /// Axes that are not a trailing block leave a reduced slice strided rather
     /// than contiguous, so the fused walk does not apply and must say so.
     #[test]
     fn a_non_trailing_reduction_declines_the_fused_path() {
         let t = tensor_f64(vec![1.0; 24], vec![2, 3, 4], false);
-        assert!(fused_sum_of_squares(&t, &[0]).unwrap().is_none());
-        assert!(fused_sum_of_squares(&t, &[1]).unwrap().is_none());
-        assert!(fused_sum_of_squares(&t, &[0, 2]).unwrap().is_none());
+        assert!(fused_euclidean_norm(&t, &[0]).unwrap().is_none());
+        assert!(fused_euclidean_norm(&t, &[1]).unwrap().is_none());
+        assert!(fused_euclidean_norm(&t, &[0, 2]).unwrap().is_none());
         // ... and the ones that are a trailing block do apply.
-        assert!(fused_sum_of_squares(&t, &[2]).unwrap().is_some());
-        assert!(fused_sum_of_squares(&t, &[1, 2]).unwrap().is_some());
+        assert!(fused_euclidean_norm(&t, &[2]).unwrap().is_some());
+        assert!(fused_euclidean_norm(&t, &[1, 2]).unwrap().is_some());
     }
 
     /// The whole point of the scaled route is that it still catches what the

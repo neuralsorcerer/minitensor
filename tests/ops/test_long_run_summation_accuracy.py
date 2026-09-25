@@ -91,17 +91,22 @@ def test_the_long_run_sum_beats_a_naive_accumulator(n):
 
 
 @pytest.mark.parametrize("n", [100_000, 2_000_000])
-def test_norm_is_at_least_as_accurate_as_numpy(n):
-    """`norm` inherits the run accumulation, and it used to be far worse than
-    NumPy here: 2.3e-5 against 8.1e-7 at 2M elements, because it summed the
-    scaled squares with the same lane accumulator."""
+def test_float32_norm_is_the_correctly_rounded_one(n):
+    """`norm` used to be far worse than NumPy here: 2.3e-5 against 8.1e-7 at 2M
+    elements, because it summed the scaled squares with the same lane
+    accumulator. Then it was an ulp either side of the right answer, which
+    Accelerate's `snrm2` beat on macOS. It accumulates in float64 now, where
+    the squares are exact, and rounds once -- so the answer is the float32
+    nearest the true norm, which no library can improve on."""
     rng = np.random.default_rng(7)
     values = ((rng.random(n) - 0.5) * 10).astype(np.float32)
     exact = float(np.linalg.norm(values.astype(np.float64)))
 
-    ours = _relative_error(mt.Tensor(values, dtype="float32").norm().item(), exact)
-    theirs = _relative_error(np.linalg.norm(values), exact)
-    assert ours <= theirs, f"ours {ours:.3e} vs numpy {theirs:.3e}"
+    ours = mt.Tensor(values, dtype="float32").norm().numpy()
+    assert ours == np.float32(exact), f"{ours!r} vs {np.float32(exact)!r}"
+    ours_error = _relative_error(float(ours), exact)
+    numpy_error = _relative_error(np.linalg.norm(values), exact)
+    assert ours_error <= numpy_error
 
 
 @pytest.mark.parametrize("n", [100_000, 1_000_000])

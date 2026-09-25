@@ -627,7 +627,21 @@ pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
 /// was when it replaced that spelling. That equality was what made the
 /// replacement provably a cost change and nothing else; now that it has
 /// landed, the kernel is free to be better than what it replaced.
-pub fn simd_square_sum_f32(data: &[f32]) -> f32 {
+///
+/// The accumulator is `f64`. A square of an `f32` is exact in `f64` -- 24
+/// significant bits squared is 48, inside 53 -- so the only roundings left are
+/// in the sum, each about `2^-53` relative, and the root the caller takes of
+/// this comes out correctly rounded to `f32` rather than an ulp either side of
+/// it, which is where the single-precision accumulator landed at 100k and 2M
+/// elements. It also leaves nothing to overflow or underflow: `f32::MAX^2` is
+/// about `1e77` and the smallest subnormal's square about `2e-90`, both deep
+/// inside `f64`'s range, so a float32 `norm` never needs the scaled fallback.
+/// It costs half the lanes per register: 0.084 ns an element against 0.044 on
+/// 8192 in cache, 0.092 against 0.066 on 65536, and nothing once the input
+/// streams from memory. Thirty-two lanes measured slower than sixteen, and an
+/// FMA build only 7% quicker -- the same bits, since the square is exact --
+/// which is not worth a third compilation.
+pub fn simd_square_sum_f32(data: &[f32]) -> f64 {
     square_sum_dispatch::<f32, 16>(data)
 }
 
@@ -643,12 +657,12 @@ pub fn simd_square_sum_f64(data: &[f64]) -> f64 {
 /// only rebuilds what it inlines, so calling a separately compiled kernel from
 /// inside one measures the baseline twice.
 #[inline(always)]
-fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
-    let mut sums = [T::ZERO; LANES];
+fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> f64 {
+    let mut sums = [0f64; LANES];
     let (chunks, rest) = data.as_chunks::<LANES>();
     for x in chunks {
         for lane in 0..LANES {
-            sums[lane] = sums[lane].add(x[lane].mul(x[lane]));
+            sums[lane] += x[lane].wide_square();
         }
     }
     // The tail goes into the lanes it would have landed in, not into a
@@ -666,7 +680,7 @@ fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
         let mut block = [T::ZERO; LANES];
         block[..rest.len()].copy_from_slice(rest);
         for lane in 0..LANES {
-            sums[lane] = sums[lane].add(block[lane].mul(block[lane]));
+            sums[lane] += block[lane].wide_square();
         }
     }
     // Only now do the lanes meet, and pairwise: adding them up in order would
@@ -676,7 +690,7 @@ fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
     while width > 1 {
         width /= 2;
         for lane in 0..width {
-            sums[lane] = sums[lane].add(sums[lane + width]);
+            sums[lane] += sums[lane + width];
         }
     }
     sums[0]
@@ -684,12 +698,12 @@ fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
-fn square_sum_avx<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
+fn square_sum_avx<T: SquareSummable, const LANES: usize>(data: &[T]) -> f64 {
     square_sum_body::<T, LANES>(data)
 }
 
 #[inline]
-fn square_sum_dispatch<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
+fn square_sum_dispatch<T: SquareSummable, const LANES: usize>(data: &[T]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if simd_capabilities().avx {
         // SAFETY: `detect` confirmed avx on this CPU.
@@ -698,32 +712,30 @@ fn square_sum_dispatch<T: SquareSummable, const LANES: usize>(data: &[T]) -> T {
     square_sum_body::<T, LANES>(data)
 }
 
-/// The arithmetic [`square_sum_body`] needs, so the loop is written once for
-/// both widths. Spelled as methods rather than as `std::ops` bounds because
-/// the body has to stay free of anything that could reorder it.
+/// What [`square_sum_body`] needs of an element: zero for the padding, and its
+/// square in `f64`, which is exact for both widths' inputs up to the rounding
+/// `f64` itself makes.
 trait SquareSummable: Copy {
     const ZERO: Self;
-    fn add(self, other: Self) -> Self;
-    fn mul(self, other: Self) -> Self;
+    fn wide_square(self) -> f64;
 }
 
-macro_rules! square_summable {
-    ($ty:ty) => {
-        impl SquareSummable for $ty {
-            const ZERO: Self = 0.0;
-            #[inline(always)]
-            fn add(self, other: Self) -> Self {
-                self + other
-            }
-            #[inline(always)]
-            fn mul(self, other: Self) -> Self {
-                self * other
-            }
-        }
-    };
+impl SquareSummable for f32 {
+    const ZERO: Self = 0.0;
+    #[inline(always)]
+    fn wide_square(self) -> f64 {
+        let wide = self as f64;
+        wide * wide
+    }
 }
-square_summable!(f32);
-square_summable!(f64);
+
+impl SquareSummable for f64 {
+    const ZERO: Self = 0.0;
+    #[inline(always)]
+    fn wide_square(self) -> f64 {
+        self * self
+    }
+}
 
 /// [`simd_dot_f32`] accumulating in double precision.
 ///
@@ -1200,7 +1212,7 @@ mod tests {
 
             let fresh = error(simd_square_sum_f64(&wide), wide_reference);
             let replaced = error(simd_dot_f64(&wide, &wide), wide_reference);
-            let fresh32 = error(simd_square_sum_f32(&narrow) as f64, narrow_reference);
+            let fresh32 = error(simd_square_sum_f32(&narrow), narrow_reference);
             let replaced32 = error(simd_dot_f32(&narrow, &narrow) as f64, narrow_reference);
 
             if len >= 8191 {
