@@ -162,3 +162,48 @@ def test_logsumexp_still_reports_the_max_for_non_finite_rows():
     assert got[0] == np.inf
     assert got[1] == -np.inf
     assert np.isnan(got[2])
+
+
+# One case per route the fused `logsumexp` can take: a long contiguous run
+# spread across the pool, many short runs, a slab spread across the pool, and
+# many slabs, narrow and wide.
+LOGSUMEXP_ROUTES = [
+    ((300_000,), 0),
+    ((64, 4096), 1),
+    ((4096, 64), 0),
+    ((16, 3000, 3), 1),
+    ((6, 300, 200), 1),
+]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("shape,dim", LOGSUMEXP_ROUTES)
+def test_logsumexp_non_finite_values_mean_the_same_on_both_paths(shape, dim, dtype):
+    # A NaN anywhere in a slice makes it NaN, a `+inf` makes it `+inf`, and a
+    # slice that is all `-inf` is `-inf`; everything else is finite. The fused
+    # kernel records a NaN beside each lane rather than branching on it, so
+    # this pins that the record reaches the answer on every route.
+    rng = np.random.default_rng(len(shape) * 7 + dim)
+    values = rng.standard_normal(shape).astype(dtype)
+    moved = np.moveaxis(values, dim, -1).reshape(-1, shape[dim])
+    rows = moved.shape[0]
+    moved[0, rng.integers(shape[dim])] = np.nan
+    moved[1 % rows, rng.integers(shape[dim])] = np.inf
+    moved[2 % rows, :] = -np.inf
+    moved[3 % rows, rng.integers(shape[dim])] = -np.inf
+    values = np.moveaxis(moved.reshape(np.moveaxis(values, dim, -1).shape), -1, dim)
+    values = np.ascontiguousarray(values)
+
+    fused = mt.Tensor(values, dtype=dtype).logsumexp(dim).numpy()
+    composed = (
+        mt.Tensor(values, dtype=dtype, requires_grad=True)
+        .logsumexp(dim)
+        .detach()
+        .numpy()
+    )
+    np.testing.assert_array_equal(np.isnan(fused), np.isnan(composed))
+    np.testing.assert_array_equal(np.isposinf(fused), np.isposinf(composed))
+    np.testing.assert_array_equal(np.isneginf(fused), np.isneginf(composed))
+    finite = np.isfinite(composed)
+    atol = 1e-5 if dtype == "float32" else 1e-12
+    np.testing.assert_allclose(fused[finite], composed[finite], rtol=atol, atol=atol)

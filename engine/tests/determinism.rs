@@ -526,3 +526,40 @@ fn a_middle_axis_sum_is_bitwise_stable_across_thread_counts() {
         });
     }
 }
+
+/// The fused `logsumexp` cuts a long run into fixed chunks and a slab into
+/// fixed bands of rows, and spreads them across the pool only when there are
+/// few slabs; the cut never comes from the pool, so the answer must not either.
+#[test]
+fn logsumexp_is_bitwise_stable_across_thread_counts() {
+    for dims in [
+        vec![300_000usize], // one run, spread
+        vec![3, 70_000],    // few long runs
+        vec![64, 4096],     // many runs
+        vec![4096, 64],     // one slab, spread
+        vec![16, 3000, 3],  // many narrow slabs
+    ] {
+        let numel: usize = dims.iter().product();
+        let values = moderate_tensor(numel, 1, 0x5EED)
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .to_vec();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let axis = if dims.len() == 3 {
+            1
+        } else {
+            dims.len() as isize - 1
+        };
+        let axis = if dims == [4096, 64] { 0 } else { axis };
+        assert_thread_invariant(&format!("logsumexp(dim={axis}) on {dims:?}"), || {
+            reduction::logsumexp(&tensor, Some(vec![axis]), false).unwrap()
+        });
+    }
+}

@@ -36,6 +36,12 @@ pub(crate) trait ShiftedExp: Float {
     ///
     /// `input` and `out` are the same length and are different buffers.
     fn exp_shifted_into(input: &[Self], shift: Self, out: &mut [Self]);
+
+    /// `out[i] = exp(input[i] - shift[i])`, for every element of `out`: a shift
+    /// per element rather than one for the slice, which is what reducing a
+    /// non-last axis needs, where each column has its own maximum. `scratch`
+    /// is working space; all four are the same length.
+    fn exp_diff_into(input: &[Self], shift: &[Self], scratch: &mut [Self], out: &mut [Self]);
 }
 
 impl ShiftedExp for f32 {
@@ -49,12 +55,30 @@ impl ShiftedExp for f32 {
         };
         crate::ops::simd::F32Kernel::select().exp_shifted(input, uninit, shift as f64);
     }
+
+    fn exp_diff_into(input: &[f32], shift: &[f32], scratch: &mut [f32], out: &mut [f32]) {
+        for ((d, &x), &m) in scratch.iter_mut().zip(input).zip(shift) {
+            *d = x - m;
+        }
+        // SAFETY: as in `exp_shifted_into`; `out` is initialized and the
+        // kernel only writes it.
+        let uninit = unsafe {
+            std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f32>, out.len())
+        };
+        crate::ops::simd::F32Kernel::select().exp(scratch, uninit);
+    }
 }
 
 impl ShiftedExp for f64 {
     fn exp_shifted_into(input: &[f64], shift: f64, out: &mut [f64]) {
         for (o, &v) in out.iter_mut().zip(input.iter()) {
             *o = (v - shift).exp();
+        }
+    }
+
+    fn exp_diff_into(input: &[f64], shift: &[f64], _scratch: &mut [f64], out: &mut [f64]) {
+        for ((o, &x), &m) in out.iter_mut().zip(input).zip(shift) {
+            *o = (x - m).exp();
         }
     }
 }

@@ -9,9 +9,10 @@ use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
-use crate::ops::map::{par_out_chunks, reduction_band};
+use crate::ops::activation::ShiftedExp;
+use crate::ops::map::{par_map_indexed, par_out_chunks};
 use crate::ops::util::check_dim;
-use crate::ops::util::{accumulating_dtype, accurate_indexed_sum, accurate_slab_sum};
+use crate::ops::util::{RUN_SUM_CHUNK, accumulating_dtype, pairwise_fold, pairwise_fold_vectors};
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
     autograd::with_grad_fn,
@@ -134,22 +135,28 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
 
 /// Fused single-axis log-sum-exp for tensors that do not require gradients.
 ///
-/// Two cache-friendly slab passes per outer block (column max with NaN
-/// propagation, then the sum of `exp(x - max)`), parallel over the outer index.
-/// Reproduces the autograd composition including its non-finite-max limit: a
-/// column whose max is +/-inf or NaN reduces to that max itself.
+/// The input is `outer` slabs of `(len, inner)` rows, and each column of each
+/// slab reduces to `max + ln(sum(exp(x - max)))`, with the maximum propagating
+/// NaN and a non-finite maximum being the answer itself: `+inf` columns reduce
+/// to `+inf`, all-`-inf` columns to `-inf`. See [`lse_columns`] for how one
+/// slab is done.
+///
+/// With at least `LSE_MIN_SPREAD` slabs, each is done whole on one thread;
+/// with fewer, each is spread across the pool in bands of rows. Both compute
+/// the same bands folded the same way, so which one runs changes the time and
+/// not the answer.
 fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> Result<Tensor> {
     let dims = tensor.shape().dims();
-    let dim_size = dims[axis];
+    let len = dims[axis];
     let inner: usize = dims[axis + 1..].iter().product();
     let outer: usize = dims[..axis].iter().product();
-    let outer_stride = dim_size * inner;
-    let out_numel = outer * inner;
+    let slab = len * inner;
 
-    let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
+    let mut result_data =
+        TensorData::zeros_on_device(outer * inner, tensor.dtype(), tensor.device());
 
     macro_rules! fill {
-        ($accessor:ident, $accessor_mut:ident, $ty:ty) => {{
+        ($accessor:ident, $accessor_mut:ident) => {{
             let input = tensor
                 .data()
                 .$accessor()
@@ -158,91 +165,29 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                 .$accessor_mut()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             if inner != 0 {
-                // A band of columns rather than all of one outer position's:
-                // reducing the first axis has one outer position, so cutting
-                // only there leaves the pool idle. See `reduction_band`.
-                let band = reduction_band(outer, inner);
-                par_out_chunks(out, band, &|start, out_chunk| {
-                    let block_base = (start / inner) * outer_stride + start % inner;
-                    let width = out_chunk.len();
-                    if width == 1 {
-                        // One output for the whole axis, which is every
-                        // reduction of a last dimension. The slab form below
-                        // then carries a one-element accumulator *vector* and
-                        // zips three iterators to add a single number: two
-                        // million elements cost 13.2ms against 1.8 for
-                        // `exp(x - max).sum()` spelled out with this library's
-                        // own operators.
-                        let mut top = <$ty>::NEG_INFINITY;
-                        for k in 0..dim_size {
-                            let v = input[block_base + k * inner];
-                            if v.is_nan() {
-                                top = v;
-                            } else if v > top {
-                                top = v;
-                            }
-                        }
-                        out_chunk[0] = if top.is_finite() {
-                            // The summation `softmax` uses down a contiguous
-                            // axis: eight lanes over short blocks, where the
-                            // slab form carries one lane over long ones. More
-                            // accurate, and the accuracy is the reason the
-                            // fused path blocks at all.
-                            let total = accurate_indexed_sum(dim_size, 0.0 as $ty, |k| {
-                                (input[block_base + k * inner] - top).exp()
-                            });
-                            top + total.ln()
-                        } else {
-                            // A non-finite maximum is the answer: `+inf` rows
-                            // reduce to `+inf`, all-`-inf` rows to `-inf`, and
-                            // NaN propagates.
-                            top
-                        };
-                        return;
-                    }
-                    // Column max with NaN propagation (matches max_along_dim).
-                    let mut col_max = vec![<$ty>::NEG_INFINITY; width];
-                    for k in 0..dim_size {
-                        let base = block_base + k * inner;
-                        let slab = &input[base..base + width];
-                        for (m, &v) in col_max.iter_mut().zip(slab) {
-                            if v.is_nan() {
-                                *m = v;
-                            } else if v > *m {
-                                *m = v;
-                            }
-                        }
-                    }
-                    // Sum of exp(x - max), skipping non-finite-max columns
-                    // (their result is the max itself). Blocked, because this
-                    // is the path taken only when the tensor does not require
-                    // gradients: a running total over a million-step axis left
-                    // `logsumexp` answering differently depending on whether it
-                    // was being trained through, and the untrained answer was
-                    // the worse one by three orders of magnitude.
-                    let col_sum =
-                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + width];
-                            for ((s, &v), &m) in acc.iter_mut().zip(slab).zip(col_max.iter()) {
-                                if m.is_finite() {
-                                    *s += (v - m).exp();
-                                }
-                            }
-                        });
-                    for ((dst, &m), &s) in
-                        out_chunk.iter_mut().zip(col_max.iter()).zip(col_sum.iter())
+                if outer < LSE_MIN_SPREAD {
+                    for (source, target) in
+                        input.chunks_exact(slab).zip(out.chunks_exact_mut(inner))
                     {
-                        *dst = if m.is_finite() { m + s.ln() } else { m };
+                        target.copy_from_slice(&lse_columns(source, inner, true));
                     }
-                });
+                } else {
+                    par_out_chunks(out, inner, &|start, target| {
+                        let first = start / inner * slab;
+                        target.copy_from_slice(&lse_columns(
+                            &input[first..first + slab],
+                            inner,
+                            false,
+                        ));
+                    });
+                }
             }
         }};
     }
 
     match tensor.dtype() {
-        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32),
-        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64),
+        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut),
         _ => unreachable!("logsumexp dtype checked above"),
     }
 
@@ -270,6 +215,242 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
         tensor.device(),
         false,
     ))
+}
+
+/// Fewer slabs than this are each spread across the pool rather than handed
+/// one to a thread.
+const LSE_MIN_SPREAD: usize = 4;
+/// Bands a slab's rows are cut into, and the fewest elements a band may hold,
+/// so what a band costs to set up is spread over enough work to vanish. Both
+/// are fixed: band boundaries follow from the shape alone.
+const LSE_TARGET_BANDS: usize = 64;
+const LSE_MIN_BAND: usize = 1 << 16;
+/// The rounding chain each accumulator lane is held to.
+const LSE_BLOCK_ROWS: usize = 128;
+/// The fewest elements one call of the exponential kernel is given: narrow
+/// rows are batched until a group is at least this wide.
+const LSE_MIN_GROUP: usize = 512;
+
+/// `max(a, b)` that lets a NaN through from either side, which is what makes
+/// a column holding a NaN reduce to NaN.
+#[inline(always)]
+fn nan_max<T: num_traits::Float>(a: T, b: T) -> T {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() || b > a {
+        b
+    } else {
+        a
+    }
+}
+
+/// Log-sum-exp of one contiguous run: every last-axis reduction, one output
+/// at a time.
+///
+/// [`lse_columns`] would do this as a one-column slab, but it sizes its
+/// buffers to a group of rows and folds them back to columns, which a row of
+/// a few thousand elements cannot pay for: 16384 rows of 256 took 67ms on one
+/// thread. Here the lanes live on the stack and the exponentials land in a
+/// stack buffer straight from the kernel, so a run of up to `RUN_SUM_CHUNK`
+/// allocates nothing. Longer runs split into chunks of that length -- fixed,
+/// so the split is the same on any pool -- whose partials fold pairwise.
+fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
+    const LANES: usize = 16;
+    const PIECE: usize = 1024;
+
+    fn chunk_max<T: num_traits::Float>(chunk: &[T]) -> T {
+        let mut top = [T::neg_infinity(); LANES];
+        let mut nan = [false; LANES];
+        let (blocks, rest) = chunk.as_chunks::<LANES>();
+        for block in blocks {
+            for lane in 0..LANES {
+                let v = block[lane];
+                nan[lane] |= v.is_nan();
+                if v > top[lane] {
+                    top[lane] = v;
+                }
+            }
+        }
+        let mut best = T::neg_infinity();
+        for (lane, &t) in top.iter().enumerate() {
+            if nan[lane] {
+                return T::nan();
+            }
+            best = nan_max(best, t);
+        }
+        rest.iter().fold(best, |m, &v| nan_max(m, v))
+    }
+
+    fn chunk_sum<T: ShiftedExp>(chunk: &[T], top: T) -> T {
+        let mut buffer = [T::zero(); PIECE];
+        let mut sums = [T::zero(); LANES];
+        for piece in chunk.chunks(PIECE) {
+            let terms = &mut buffer[..piece.len()];
+            T::exp_shifted_into(piece, top, terms);
+            let (blocks, rest) = terms.as_chunks::<LANES>();
+            for block in blocks {
+                for lane in 0..LANES {
+                    sums[lane] = sums[lane] + block[lane];
+                }
+            }
+            for (lane, &v) in rest.iter().enumerate() {
+                sums[lane] = sums[lane] + v;
+            }
+        }
+        let mut width = LANES;
+        while width > 1 {
+            width /= 2;
+            for lane in 0..width {
+                sums[lane] = sums[lane] + sums[lane + width];
+            }
+        }
+        sums[0]
+    }
+
+    let chunks = run.len().div_ceil(RUN_SUM_CHUNK).max(1);
+    let chunk =
+        |index: usize| &run[index * RUN_SUM_CHUNK..((index + 1) * RUN_SUM_CHUNK).min(run.len())];
+    let over_chunks = |work: &(dyn Fn(usize) -> T + Sync)| -> Vec<T> {
+        if spread && chunks > 1 {
+            par_map_indexed(chunks, work)
+        } else {
+            (0..chunks).map(work).collect()
+        }
+    };
+    let top = over_chunks(&|index| chunk_max(chunk(index)))
+        .into_iter()
+        .fold(T::neg_infinity(), nan_max);
+    if !top.is_finite() {
+        // `+inf` runs reduce to `+inf`, all-`-inf` runs to `-inf`, and a NaN
+        // propagates.
+        return top;
+    }
+    let total = pairwise_fold(
+        over_chunks(&|index| chunk_sum(chunk(index), top)),
+        T::zero(),
+        |a, b| a + b,
+    );
+    top + total.ln()
+}
+
+/// Fold lanes laid out `cols` to a row back down to one value per column.
+#[inline(always)]
+fn lanes_to_columns<T: Copy>(lanes: &[T], cols: usize, merge: impl Fn(T, T) -> T) -> Vec<T> {
+    let mut columns = lanes[..cols].to_vec();
+    for tile in lanes[cols..].chunks_exact(cols) {
+        for (c, &v) in columns.iter_mut().zip(tile) {
+            *c = merge(*c, v);
+        }
+    }
+    columns
+}
+
+/// Log-sum-exp down each column of a row-major `(rows, cols)` slab; a single
+/// column is a contiguous run and goes to [`lse_run`].
+///
+/// Two passes over bands of rows: the column maxima, then the column sums of
+/// `exp(x - max)`. The exponentials go through the vectorized kernel a group
+/// of rows at a time -- a narrow row is batched with the ones after it until
+/// the group is `LSE_MIN_GROUP` wide, against a shift vector tiled to match --
+/// and never land in memory beyond that group. Each accumulator lane runs
+/// `LSE_BLOCK_ROWS` additions; blocks and then bands fold pairwise.
+///
+/// Together with [`lse_run`] this replaced a loop calling scalar `exp` per
+/// element that, for a last-axis reduction, walked the whole axis on one
+/// thread. float32 on four cores, before -> after, against NumPy's
+/// `log(exp(x - max).sum()) + max`:
+///
+/// ```text
+///   (4194304,)        13.6ms -> 1.42     NumPy 7.6
+///   (1024, 4096) d1    4.30  -> 1.27           6.4
+///   (4096, 1024) d0    4.38  -> 2.50           6.2
+///   (16, 100000, 2) d1 3.64  -> 1.70          65.6
+/// ```
+///
+/// `spread` runs the bands on the pool; it does not change how they are cut
+/// or folded, so it cannot change the result.
+fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: bool) -> Vec<T> {
+    if cols == 1 {
+        return vec![lse_run(slab, spread)];
+    }
+    let rows = slab.len() / cols;
+    let band_rows = rows
+        .div_ceil(LSE_TARGET_BANDS)
+        .max(LSE_MIN_BAND.div_ceil(cols));
+    let bands = rows.div_ceil(band_rows).max(1);
+    let band =
+        |index: usize| &slab[index * band_rows * cols..((index + 1) * band_rows).min(rows) * cols];
+    let over_bands = |work: &(dyn Fn(usize) -> Vec<T> + Sync)| -> Vec<Vec<T>> {
+        if spread && bands > 1 {
+            par_map_indexed(bands, work)
+        } else {
+            (0..bands).map(work).collect()
+        }
+    };
+    // Both passes take rows a group at a time, `per_group` of them, into
+    // `group` lanes; lane `j` belongs to column `j % cols`.
+    let per_group = LSE_MIN_GROUP.div_ceil(cols);
+    let group = per_group * cols;
+
+    // A NaN is recorded beside the lane rather than branched on, which is what
+    // lets the comparison loop vectorize.
+    let maxima = pairwise_fold_vectors(
+        over_bands(&|index| {
+            let mut top = vec![T::neg_infinity(); group];
+            let mut nan = vec![false; group];
+            for part in band(index).chunks(group) {
+                for ((t, seen), &v) in top.iter_mut().zip(nan.iter_mut()).zip(part) {
+                    *seen |= v.is_nan();
+                    if v > *t {
+                        *t = v;
+                    }
+                }
+            }
+            for (t, &seen) in top.iter_mut().zip(&nan) {
+                if seen {
+                    *t = T::nan();
+                }
+            }
+            lanes_to_columns(&top, cols, nan_max)
+        }),
+        nan_max,
+    );
+
+    // The maxima tiled across a group's rows.
+    let shift: Vec<T> = maxima.iter().copied().cycle().take(group).collect();
+    let sums = pairwise_fold_vectors(
+        over_bands(&|index| {
+            let rows_here = band(index);
+            let mut scratch = vec![T::zero(); group];
+            let mut terms = vec![T::zero(); group];
+            let blocks: Vec<Vec<T>> = rows_here
+                .chunks(group * LSE_BLOCK_ROWS)
+                .map(|block| {
+                    let mut lanes = vec![T::zero(); group];
+                    for part in block.chunks(group) {
+                        let n = part.len();
+                        T::exp_diff_into(part, &shift[..n], &mut scratch[..n], &mut terms[..n]);
+                        for (lane, &term) in lanes.iter_mut().zip(&terms[..n]) {
+                            *lane = *lane + term;
+                        }
+                    }
+                    lanes_to_columns(&lanes, cols, |a, b| a + b)
+                })
+                .collect();
+            if blocks.is_empty() {
+                vec![T::zero(); cols]
+            } else {
+                pairwise_fold_vectors(blocks, |a, b| a + b)
+            }
+        }),
+        |a, b| a + b,
+    );
+
+    maxima
+        .iter()
+        .zip(&sums)
+        .map(|(&m, &s)| if m.is_finite() { m + s.ln() } else { m })
+        .collect()
 }
 
 /// Product reduction along specified dimensions
