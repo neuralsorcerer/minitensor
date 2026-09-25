@@ -105,20 +105,7 @@ fn reduce_along_dim0<I, A, F, M>(
         let partials: Vec<Vec<A>> = par_map_indexed(bands, &|index| {
             let start = index * band;
             let end = ((index + 1) * band).min(rows);
-            let blocks: Vec<Vec<A>> = (start..end)
-                .step_by(RUN_SUM_CHUNK)
-                .map(|from| {
-                    let to = (from + RUN_SUM_CHUNK).min(end);
-                    let mut acc = vec![init; cols];
-                    for row in input[from * cols..to * cols].chunks_exact(cols) {
-                        for (slot, &value) in acc.iter_mut().zip(row) {
-                            *slot = combine(*slot, value);
-                        }
-                    }
-                    acc
-                })
-                .collect();
-            pairwise_fold_vectors(blocks, merge)
+            fold_rows(&input[start * cols..end * cols], cols, init, combine, merge)
         });
 
         // The bands merge pairwise too; a running fold over them was a second,
@@ -145,6 +132,142 @@ fn reduce_along_dim0<I, A, F, M>(
             for (slot, &value) in out_block.iter_mut().zip(segment) {
                 *slot = combine(*slot, value);
             }
+        }
+    });
+}
+
+/// Reduce the rows of a row-major `(rows, cols)` slice on one thread: blocks
+/// of rows each run into their own accumulator row, and the blocks fold
+/// pairwise. A block is `FOLD_ROWS` rows, or `RUN_SUM_CHUNK` elements when
+/// the rows are narrow enough that that is more; either way each accumulator
+/// lane sees a chain of about `FOLD_ROWS` additions. Blocking by
+/// `RUN_SUM_CHUNK` rows instead left a 512-row slab one 512-long chain per
+/// column, 17 ulps from the exact sum.
+///
+/// This is a band of [`reduce_along_dim0`], and a whole slab of
+/// [`reduce_axis`] when there are enough slabs to go around.
+fn fold_rows<I, A, F, M>(input: &[I], cols: usize, init: A, combine: F, merge: M) -> Vec<A>
+where
+    I: Copy,
+    A: Copy,
+    F: Fn(A, I) -> A + Copy,
+    M: Fn(A, A) -> A + Copy,
+{
+    // A narrow row leaves the accumulate loop a few elements long, too short
+    // to vectorize, so narrow rows are taken `k` at a time into an accumulator
+    // `k` rows wide and its lanes merged down to one row at the end of the
+    // block. Summing `(16, 100000, 2)` over its middle axis went from 1.06ms
+    // to 0.22ms this way, and a `(1000000, 2)` matrix over its rows from 0.65
+    // to 0.14 -- and both closer to the exact answer, since `k` accumulators
+    // per column is `k` shorter rounding chains.
+    let span = if cols < NARROW_ROW {
+        NARROW_ROW.div_ceil(cols) * cols
+    } else {
+        cols
+    };
+    let blocks: Vec<Vec<A>> = input
+        .chunks((RUN_SUM_CHUNK / cols).max(FOLD_ROWS) * cols)
+        .map(|block| {
+            let mut wide = vec![init; span];
+            let mut spans = block.chunks_exact(span);
+            for group in &mut spans {
+                for (slot, &value) in wide.iter_mut().zip(group) {
+                    *slot = combine(*slot, value);
+                }
+            }
+            let mut acc = vec![init; cols];
+            for row in spans.remainder().chunks_exact(cols) {
+                for (slot, &value) in acc.iter_mut().zip(row) {
+                    *slot = combine(*slot, value);
+                }
+            }
+            if span == cols {
+                for (slot, &value) in acc.iter_mut().zip(&wide) {
+                    *slot = merge(*slot, value);
+                }
+            } else {
+                for lanes in wide.chunks_exact(cols) {
+                    for (slot, &value) in acc.iter_mut().zip(lanes) {
+                        *slot = merge(*slot, value);
+                    }
+                }
+            }
+            acc
+        })
+        .collect();
+    pairwise_fold_vectors(blocks, merge)
+}
+
+/// Rows narrower than this many elements are accumulated several at a time;
+/// see [`fold_rows`].
+const NARROW_ROW: usize = 64;
+
+/// The rounding chain each accumulator lane in [`fold_rows`] is held to.
+const FOLD_ROWS: usize = RUN_SUM_CHUNK / NARROW_ROW;
+
+/// Reduce the middle axis of a row-major `(outer, len, inner)` slice, one value
+/// per `(outer, inner)` position, for any rank: a 1-D input is `(1, len, 1)`,
+/// and a 2-D one reduced along `dim` is `(1, rows, cols)` or `(rows, cols, 1)`.
+///
+/// An axis with nothing after it is `outer` contiguous runs, each summed by
+/// `run` -- [`accurate_run_sum`] over the dtype's SIMD kernel. Anything else is
+/// `outer` slabs of `(len, inner)` rows, reduced as [`reduce_along_dim0`]
+/// reduces one: the rows streamed in memory order and blocked, the blocks
+/// folded pairwise.
+///
+/// Before this, a rank-3 or higher input walked each output's `len` terms one
+/// at a time `inner` apart: a single rounding chain as long as the axis, and a
+/// strided read. Summing a `(4, 1000000, 1)` float32 tensor over its middle
+/// axis landed 188 ulps from the correctly rounded answer where NumPy, which
+/// sees a contiguous run there, lands one; this lands one too.
+///
+/// Which route a slab takes follows from the shape alone -- with at least
+/// `DIM0_MIN_BANDS` slabs each is folded whole on one thread, otherwise each
+/// is spread across the pool by `reduce_along_dim0` -- so, like everything
+/// here, the answer does not depend on the thread count.
+#[allow(clippy::too_many_arguments)]
+fn reduce_axis<I, A, F, M, R>(
+    input: &[I],
+    out: &mut [A],
+    len: usize,
+    inner: usize,
+    init: A,
+    combine: F,
+    merge: M,
+    run: R,
+) where
+    I: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    F: Fn(A, I) -> A + Send + Sync + Copy,
+    M: Fn(A, A) -> A + Send + Sync + Copy,
+    R: Fn(&[I]) -> A + Send + Sync,
+{
+    if out.is_empty() {
+        return;
+    }
+    if inner == 1 {
+        par_out_chunks(out, outputs_per_task(len), &|start, chunk| {
+            for (offset, slot) in chunk.iter_mut().enumerate() {
+                let base = (start + offset) * len;
+                *slot = run(&input[base..base + len]);
+            }
+        });
+        return;
+    }
+    let outer = out.len() / inner;
+    let slab = len * inner;
+    if outer < DIM0_MIN_BANDS {
+        for (source, target) in input.chunks_exact(slab).zip(out.chunks_exact_mut(inner)) {
+            reduce_along_dim0(source, target, inner, init, combine, merge);
+        }
+        return;
+    }
+    let slabs_per_task = outputs_per_task(slab).div_ceil(inner).max(1);
+    par_out_chunks(out, slabs_per_task * inner, &|start, chunk| {
+        let first = start / inner;
+        for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
+            let source = &input[(first + index) * slab..(first + index + 1) * slab];
+            target.copy_from_slice(&fold_rows(source, inner, init, combine, merge));
         }
     });
 }
@@ -181,61 +304,23 @@ macro_rules! sum_along_dim_kernel {
                 result_slice.fill($zero);
                 return Ok(());
             }
-            if tensor.ndim() == 1 {
-                if dim != 0 {
-                    return Err(MinitensorError::dim_out_of_range(
-                        dim as isize,
-                        tensor.ndim(),
-                    ));
-                }
-                result_slice[0] = accurate_run_sum(input_data, $simd_sum);
-            } else if tensor.ndim() == 2 {
-                let cols = input_shape[1];
-                match dim {
-                    0 => {
-                        reduce_along_dim0(
-                            input_data,
-                            result_slice,
-                            cols,
-                            $zero,
-                            |a: $acc, v| a.acc_add(v as $acc),
-                            |a: $acc, b| a.acc_add(b),
-                        );
-                    }
-                    1 => {
-                        par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
-                            for (offset, out) in chunk.iter_mut().enumerate() {
-                                let base = (start + offset) * cols;
-                                *out = accurate_run_sum(&input_data[base..base + cols], $simd_sum);
-                            }
-                        });
-                    }
-                    _ => {
-                        return Err(MinitensorError::dim_out_of_range(
-                            dim as isize,
-                            tensor.ndim(),
-                        ));
-                    }
-                }
-            } else {
-                let dim_size = input_shape[dim];
-                let inner = input_shape[dim + 1..].iter().product::<usize>();
-                let outer_stride = dim_size * inner;
-                par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
-                    for (offset, out) in chunk.iter_mut().enumerate() {
-                        let idx = start + offset;
-                        let o = idx / inner;
-                        let r = idx % inner;
-                        let mut sum_val: $acc = $zero;
-                        let mut base = o * outer_stride + r;
-                        for _ in 0..dim_size {
-                            sum_val = sum_val.acc_add(input_data[base] as $acc);
-                            base += inner;
-                        }
-                        *out = sum_val;
-                    }
-                });
-            }
+            let Some(&len) = input_shape.get(dim) else {
+                return Err(MinitensorError::dim_out_of_range(
+                    dim as isize,
+                    tensor.ndim(),
+                ));
+            };
+            let inner = input_shape[dim + 1..].iter().product::<usize>();
+            reduce_axis(
+                input_data,
+                result_slice,
+                len,
+                inner,
+                $zero,
+                |a: $acc, v| a.acc_add(v as $acc),
+                |a: $acc, b| a.acc_add(b),
+                |run| accurate_run_sum(run, $simd_sum),
+            );
             Ok(())
         }
     };
@@ -269,65 +354,23 @@ macro_rules! nansum_along_dim_kernel {
                 result_slice.fill($zero);
                 return Ok(());
             }
-            if tensor.ndim() == 1 {
-                if dim != 0 {
-                    return Err(MinitensorError::dim_out_of_range(
-                        dim as isize,
-                        tensor.ndim(),
-                    ));
-                }
-                result_slice[0] = accurate_run_sum(input_data, $simd_nansum);
-            } else if tensor.ndim() == 2 {
-                let cols = input_shape[1];
-                match dim {
-                    0 => {
-                        reduce_along_dim0(
-                            input_data,
-                            result_slice,
-                            cols,
-                            $zero,
-                            |a, v| if v.is_nan() { a } else { a + v },
-                            |a, b| a + b,
-                        );
-                    }
-                    1 => {
-                        par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
-                            for (offset, out) in chunk.iter_mut().enumerate() {
-                                let base = (start + offset) * cols;
-                                *out =
-                                    accurate_run_sum(&input_data[base..base + cols], $simd_nansum);
-                            }
-                        });
-                    }
-                    _ => {
-                        return Err(MinitensorError::dim_out_of_range(
-                            dim as isize,
-                            tensor.ndim(),
-                        ));
-                    }
-                }
-            } else {
-                let dim_size = input_shape[dim];
-                let inner = input_shape[dim + 1..].iter().product::<usize>();
-                let outer_stride = dim_size * inner;
-                par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
-                    for (offset, out) in chunk.iter_mut().enumerate() {
-                        let idx = start + offset;
-                        let o = idx / inner;
-                        let r = idx % inner;
-                        let mut sum_val = $zero;
-                        let mut base = o * outer_stride + r;
-                        for _ in 0..dim_size {
-                            let value = input_data[base];
-                            if !value.is_nan() {
-                                sum_val += value;
-                            }
-                            base += inner;
-                        }
-                        *out = sum_val;
-                    }
-                });
-            }
+            let Some(&len) = input_shape.get(dim) else {
+                return Err(MinitensorError::dim_out_of_range(
+                    dim as isize,
+                    tensor.ndim(),
+                ));
+            };
+            let inner = input_shape[dim + 1..].iter().product::<usize>();
+            reduce_axis(
+                input_data,
+                result_slice,
+                len,
+                inner,
+                $zero,
+                |a: $ty, v: $ty| if v.is_nan() { a } else { a + v },
+                |a: $ty, b| a + b,
+                |run| accurate_run_sum(run, $simd_nansum),
+            );
             Ok(())
         }
     };

@@ -479,3 +479,50 @@ fn the_parallel_kernels_are_bitwise_stable_across_thread_counts() {
         });
     }
 }
+
+/// A middle-axis `sum` and `nansum` take one of three routes by shape --
+/// contiguous runs when nothing follows the axis, each slab spread across the
+/// pool when there are few of them, each slab folded whole on one thread when
+/// there are many -- and a narrow slab is accumulated several rows at a time.
+/// None of those may let the thread count into the answer.
+#[test]
+fn a_middle_axis_sum_is_bitwise_stable_across_thread_counts() {
+    for dims in [
+        vec![5usize, 3000, 1], // contiguous runs
+        vec![2, 3000, 40],     // few slabs, each across the pool
+        vec![16, 3000, 3],     // many narrow slabs
+        vec![6, 300, 200],     // many wide slabs
+    ] {
+        let numel: usize = dims.iter().product();
+        let mut values = wide_magnitude_tensor(numel, 1)
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .to_vec();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values.clone(), Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        for (i, value) in values.iter_mut().enumerate() {
+            if i % 11 == 0 {
+                *value = f32::NAN;
+            }
+        }
+        let holed = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert_thread_invariant(&format!("sum(dim=1) on {dims:?}"), || {
+            reduction::sum(&tensor, Some(vec![1]), false).unwrap()
+        });
+        assert_thread_invariant(&format!("nansum(dim=1) on {dims:?}"), || {
+            reduction::nansum(&holed, Some(vec![1]), false).unwrap()
+        });
+    }
+}

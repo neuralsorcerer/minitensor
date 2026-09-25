@@ -287,3 +287,47 @@ def test_a_non_finite_maximum_is_the_answer(row, expected):
         assert got == expected
     else:
         np.testing.assert_allclose(got, expected)
+
+
+def _ulps_from_exact(got, exact):
+    nearest = exact.astype(np.float32)
+    return int(
+        np.abs(
+            got.view(np.int32).astype(np.int64)
+            - nearest.view(np.int32).astype(np.int64)
+        ).max()
+    )
+
+
+@pytest.mark.parametrize(
+    "shape, dim",
+    [
+        ((4, 1_000_000, 1), 1),  # nothing after the axis: contiguous runs
+        ((16, 100_000, 2), 1),  # many narrow slabs
+        ((64, 20_000, 3), 1),
+        ((8, 512, 512), 1),  # wide slabs
+        ((2, 100_000, 40), 1),  # few slabs, each across the pool
+        ((1_000_000, 2), 0),  # a narrow matrix down its rows
+    ],
+)
+def test_a_middle_axis_sum_stays_within_a_few_ulps(shape, dim):
+    """A rank-3 sum over its middle axis used to walk each output's terms one
+    at a time, a rounding chain as long as the axis: 188 ulps from the exact
+    answer on `(4, 1000000, 1)`, where NumPy -- seeing a contiguous run --
+    lands 1, and 110 on `(16, 100000, 2)`. It now accumulates in blocks folded
+    pairwise, with narrow rows taken several at a time, so no accumulator runs
+    a chain longer than about 128 additions; the worst of a few hundred
+    thousand outputs then lands within a handful of ulps (NumPy: 18 to 334 on
+    these shapes)."""
+    rng = np.random.default_rng(len(shape) * 1000 + shape[0])
+    values = (rng.random(shape) + 0.5).astype(np.float32)
+    exact = values.astype(np.float64).sum(axis=dim)
+
+    got = mt.from_numpy(values).sum(dim).numpy()
+    assert _ulps_from_exact(got, exact) <= 8
+
+    holed = values.copy()
+    holed.reshape(-1)[::13] = np.nan
+    exact_holed = np.nansum(holed.astype(np.float64), axis=dim)
+    got_holed = mt.from_numpy(holed).nansum(dim).numpy()
+    assert _ulps_from_exact(got_holed, exact_holed) <= 8
