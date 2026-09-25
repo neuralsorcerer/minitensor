@@ -9,7 +9,7 @@ use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
-use crate::ops::activation::ShiftedExp;
+use crate::ops::activation::{EXP_GROUP, ShiftedExp, exp_columns_into, lanes_to_columns};
 use crate::ops::map::{par_map_indexed, par_out_chunks};
 use crate::ops::util::check_dim;
 use crate::ops::util::{RUN_SUM_CHUNK, accumulating_dtype, pairwise_fold, pairwise_fold_vectors};
@@ -225,11 +225,6 @@ const LSE_MIN_SPREAD: usize = 4;
 /// are fixed: band boundaries follow from the shape alone.
 const LSE_TARGET_BANDS: usize = 64;
 const LSE_MIN_BAND: usize = 1 << 16;
-/// The rounding chain each accumulator lane is held to.
-const LSE_BLOCK_ROWS: usize = 128;
-/// The fewest elements one call of the exponential kernel is given: narrow
-/// rows are batched until a group is at least this wide.
-const LSE_MIN_GROUP: usize = 512;
 
 /// `max(a, b)` that lets a NaN through from either side, which is what makes
 /// a column holding a NaN reduce to NaN.
@@ -333,27 +328,13 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
     top + total.ln()
 }
 
-/// Fold lanes laid out `cols` to a row back down to one value per column.
-#[inline(always)]
-fn lanes_to_columns<T: Copy>(lanes: &[T], cols: usize, merge: impl Fn(T, T) -> T) -> Vec<T> {
-    let mut columns = lanes[..cols].to_vec();
-    for tile in lanes[cols..].chunks_exact(cols) {
-        for (c, &v) in columns.iter_mut().zip(tile) {
-            *c = merge(*c, v);
-        }
-    }
-    columns
-}
-
 /// Log-sum-exp down each column of a row-major `(rows, cols)` slab; a single
 /// column is a contiguous run and goes to [`lse_run`].
 ///
-/// Two passes over bands of rows: the column maxima, then the column sums of
-/// `exp(x - max)`. The exponentials go through the vectorized kernel a group
-/// of rows at a time -- a narrow row is batched with the ones after it until
-/// the group is `LSE_MIN_GROUP` wide, against a shift vector tiled to match --
-/// and never land in memory beyond that group. Each accumulator lane runs
-/// `LSE_BLOCK_ROWS` additions; blocks and then bands fold pairwise.
+/// Two passes over bands of rows: the column maxima, taken `EXP_GROUP` lanes
+/// at a time with narrow rows batched together, then the column sums of
+/// `exp(x - max)` from [`exp_columns_into`], which never stores the
+/// exponentials beyond one group. Bands fold pairwise.
 ///
 /// Together with [`lse_run`] this replaced a loop calling scalar `exp` per
 /// element that, for a last-axis reduction, walked the whole axis on one
@@ -389,7 +370,7 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
     };
     // Both passes take rows a group at a time, `per_group` of them, into
     // `group` lanes; lane `j` belongs to column `j % cols`.
-    let per_group = LSE_MIN_GROUP.div_ceil(cols);
+    let per_group = EXP_GROUP.div_ceil(cols);
     let group = per_group * cols;
 
     // A NaN is recorded beside the lane rather than branched on, which is what
@@ -416,33 +397,8 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
         nan_max,
     );
 
-    // The maxima tiled across a group's rows.
-    let shift: Vec<T> = maxima.iter().copied().cycle().take(group).collect();
     let sums = pairwise_fold_vectors(
-        over_bands(&|index| {
-            let rows_here = band(index);
-            let mut scratch = vec![T::zero(); group];
-            let mut terms = vec![T::zero(); group];
-            let blocks: Vec<Vec<T>> = rows_here
-                .chunks(group * LSE_BLOCK_ROWS)
-                .map(|block| {
-                    let mut lanes = vec![T::zero(); group];
-                    for part in block.chunks(group) {
-                        let n = part.len();
-                        T::exp_diff_into(part, &shift[..n], &mut scratch[..n], &mut terms[..n]);
-                        for (lane, &term) in lanes.iter_mut().zip(&terms[..n]) {
-                            *lane = *lane + term;
-                        }
-                    }
-                    lanes_to_columns(&lanes, cols, |a, b| a + b)
-                })
-                .collect();
-            if blocks.is_empty() {
-                vec![T::zero(); cols]
-            } else {
-                pairwise_fold_vectors(blocks, |a, b| a + b)
-            }
-        }),
+        over_bands(&|index| exp_columns_into(band(index), None, &maxima, cols)),
         |a, b| a + b,
     );
 

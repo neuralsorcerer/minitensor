@@ -9,8 +9,7 @@ use crate::error::MinitensorError;
 use crate::error::Result;
 use crate::ops::map::{PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_mapped};
 use crate::ops::util::{
-    accurate_indexed_sum, accurate_slab_sum, broadcast_mask_index, pairwise_fold_vectors,
-    slab_blocks, stable_sigmoid_f64,
+    accurate_indexed_sum, broadcast_mask_index, pairwise_fold_vectors, stable_sigmoid_f64,
 };
 use crate::tensor::DataType;
 use crate::tensor::Shape;
@@ -506,65 +505,105 @@ fn block_col_max<T: Float>(in_block: &[T], after: usize) -> Vec<T> {
     col_max
 }
 
-/// Write `exp(x - col_max)` into `out_block` and return the column sums of it.
-///
-/// The sums are filled in the pass that writes the exponentials: each `exp` is
-/// computed once, stored, and added. Splitting the two apart costs the whole
-/// kernel again -- recomputing `exp` for the sum ran 64% slower on
-/// `softmax(dim=0)` of a 500000x3 tensor, and reading the stored value back in
-/// a second pass 26%.
-///
-/// The rows are walked in order but added up in blocks (see [`slab_blocks`]),
-/// which is the only reason this is more accurate than a strided walk rather
-/// than identical to it.
-fn block_exp_columns<T: Float>(
-    in_block: &[T],
-    out_block: &mut [T],
-    col_max: &[T],
-    dim_size: usize,
-    after: usize,
+/// Rows are batched until one call of the exponential kernel covers at least
+/// this many elements.
+pub(crate) const EXP_GROUP: usize = 512;
+/// The rounding chain each column accumulator lane is held to.
+pub(crate) const EXP_BLOCK_ROWS: usize = 128;
+
+/// Fold lanes laid out `cols` to a row back down to one value per column.
+#[inline(always)]
+pub(crate) fn lanes_to_columns<T: Copy>(
+    lanes: &[T],
+    cols: usize,
+    merge: impl Fn(T, T) -> T,
 ) -> Vec<T> {
-    let neg_inf = T::neg_infinity();
-    let mut partials: Vec<Vec<T>> = Vec::new();
-    for steps in slab_blocks(dim_size) {
-        let mut acc = vec![T::zero(); after];
-        for k in steps {
-            let in_row = &in_block[k * after..k * after + after];
-            let out_row = &mut out_block[k * after..k * after + after];
-            for a in 0..after {
-                let m = col_max[a];
-                // A column whose max is -inf is all -inf (or empty); emit 0,
-                // matching the contiguous path's negative-infinity
-                // short-circuit, and let the zero drop out of the sum.
-                let e = if m == neg_inf {
-                    T::zero()
-                } else {
-                    (in_row[a] - m).exp()
-                };
-                out_row[a] = e;
-                acc[a] = acc[a] + e;
-            }
+    let mut columns = lanes[..cols].to_vec();
+    for tile in lanes[cols..].chunks_exact(cols) {
+        for (c, &v) in columns.iter_mut().zip(tile) {
+            *c = merge(*c, v);
         }
-        partials.push(acc);
     }
-    if partials.is_empty() {
-        return vec![T::zero(); after];
+    columns
+}
+
+/// `exp(x - shift[column])` over a row-major `(rows, cols)` block, written to
+/// `out` when there is one, and the column sums of it.
+///
+/// A column whose shift is `-inf` is all `-inf` (or empty) and gets zeros,
+/// which then drop out of its sum -- the contiguous paths' negative-infinity
+/// short-circuit.
+///
+/// The exponentials go through the vectorized kernel a group of rows at a
+/// time, the shift tiled to match: one kernel call per `EXP_GROUP` elements
+/// however narrow the rows, where a call per row of three would cost more
+/// than the arithmetic. The sums are computed in the pass that writes the
+/// exponentials -- each `exp` computed once, stored, and added; splitting the
+/// two apart cost `softmax(dim=0)` of a 500000x3 tensor 64% when recomputing
+/// and 26% when reading the stored value back -- and each accumulator lane
+/// runs `EXP_BLOCK_ROWS` additions before the blocks fold pairwise.
+///
+/// This replaced a scalar `exp` per element in the column paths of `softmax`,
+/// `log_softmax` and `logsumexp`.
+pub(crate) fn exp_columns_into<T: ShiftedExp>(
+    input: &[T],
+    mut out: Option<&mut [T]>,
+    shift: &[T],
+    cols: usize,
+) -> Vec<T> {
+    let group = EXP_GROUP.div_ceil(cols) * cols;
+    let tiled: Vec<T> = shift.iter().copied().cycle().take(group).collect();
+    let dead: Vec<usize> = (0..cols)
+        .filter(|&a| shift[a] == T::neg_infinity())
+        .collect();
+    let mut scratch = vec![T::zero(); group];
+    let mut spare = if out.is_none() {
+        vec![T::zero(); group]
+    } else {
+        Vec::new()
+    };
+    let block_len = group * EXP_BLOCK_ROWS;
+    let blocks: Vec<Vec<T>> = input
+        .chunks(block_len)
+        .enumerate()
+        .map(|(b, block)| {
+            let mut lanes = vec![T::zero(); group];
+            for (g, part) in block.chunks(group).enumerate() {
+                let n = part.len();
+                let at = b * block_len + g * group;
+                let terms: &mut [T] = match out.as_deref_mut() {
+                    Some(out) => &mut out[at..at + n],
+                    None => &mut spare[..n],
+                };
+                T::exp_diff_into(part, &tiled[..n], &mut scratch[..n], terms);
+                if !dead.is_empty() {
+                    for row in terms.chunks_exact_mut(cols) {
+                        for &a in &dead {
+                            row[a] = T::zero();
+                        }
+                    }
+                }
+                for (lane, &t) in lanes.iter_mut().zip(terms.iter()) {
+                    *lane = *lane + t;
+                }
+            }
+            lanes_to_columns(&lanes, cols, |a, b| a + b)
+        })
+        .collect();
+    if blocks.is_empty() {
+        vec![T::zero(); cols]
+    } else {
+        pairwise_fold_vectors(blocks, |a, b| a + b)
     }
-    pairwise_fold_vectors(partials, |a, b| a + b)
 }
 
 /// Column-wise softmax of a `[dim_size, after]` row-major block (`after > 1`).
 ///
 /// The softmax dimension is the outer (row) index, so the block is read down
 /// its rows: maxima, then exponentials and their sums, then the division.
-fn softmax_block_columnwise<T: Float>(
-    in_block: &[T],
-    out_block: &mut [T],
-    dim_size: usize,
-    after: usize,
-) {
+fn softmax_block_columnwise<T: ShiftedExp>(in_block: &[T], out_block: &mut [T], after: usize) {
     let col_max = block_col_max(in_block, after);
-    let col_sum = block_exp_columns(in_block, out_block, &col_max, dim_size, after);
+    let col_sum = exp_columns_into(in_block, Some(out_block), &col_max, after);
     divide_columns(out_block, &col_sum, after);
 }
 
@@ -685,7 +724,7 @@ fn banded_columns<T: ShiftedExp + Send + Sync>(
                 out_band[k]
             })]
         } else {
-            block_exp_columns(in_band, out_band, &col_max, out_band.len() / after, after)
+            exp_columns_into(in_band, Some(out_band), &col_max, after)
         }
     });
     let col_sum = pairwise_fold_vectors(partials, |a, b| a + b);
@@ -747,7 +786,7 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
             // `[dim_size, after]` row-major matrix and the reduction runs
             // down the rows. Column accumulators keep every pass contiguous
             // instead of striding by `after` per element.
-            softmax_block_columnwise(in_block, out_block, dim_size, after);
+            softmax_block_columnwise(in_block, out_block, after);
         }
     });
 
@@ -949,15 +988,7 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
                     }
                 }
             }
-            let col_sum = accurate_slab_sum(dim_size, after, T::zero(), |k, acc: &mut [T]| {
-                let in_row = &in_block[k * after..k * after + after];
-                for a in 0..after {
-                    let m = col_logsum[a];
-                    if m != neg_inf {
-                        acc[a] = acc[a] + (in_row[a] - m).exp();
-                    }
-                }
-            });
+            let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
             // Fold each column's max into log(sum) + max; -inf columns stay
             // -inf so their outputs are all -inf.
             for a in 0..after {
