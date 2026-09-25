@@ -68,6 +68,17 @@ pub(crate) fn convert_tensor_to_numpy(tensor: &Tensor, py: Python) -> PyResult<P
 
 pub(crate) fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    // The list is built one nesting level per dimension, recursively, and the
+    // engine does not bound a tensor's rank: `reshape([1] * 100000)` then
+    // `tolist()` overflowed the stack. 64 is the depth the constructors accept
+    // back and the rank NumPy allows, so anything that converts out converts in.
+    const MAX_RANK: usize = 64;
+    if shape.len() > MAX_RANK {
+        return Err(PyValueError::new_err(format!(
+            "tolist supports at most {MAX_RANK} dimensions; this tensor has {}",
+            shape.len()
+        )));
+    }
     match tensor.dtype() {
         DataType::Float32 => {
             let data = tensor.data().as_f32_slice().ok_or_else(|| {

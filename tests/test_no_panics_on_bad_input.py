@@ -532,3 +532,50 @@ def test_a_layer_with_no_inputs_starts_from_a_zero_bias():
 )
 def test_forwards_with_absurd_or_empty_extents_decline(label, run):
     _assert_no_panic(label, run)
+
+
+_NESTING_CASES = {
+    "list that contains itself": "rec = []; rec.append(rec); mt.Tensor(rec)",
+    "as_tensor of a list that contains itself": (
+        "rec = []; rec.append(rec); mt.as_tensor(rec)"
+    ),
+    "100000-deep list": "l = [1.0]\nfor _ in range(100000): l = [l]\nmt.Tensor(l)",
+    "100000-deep list as an index": (
+        "l = [0]\nfor _ in range(100000): l = [l]\nmt.zeros([1])[l]"
+    ),
+    "100000-deep tuple as a shape": (
+        "t = (1,)\nfor _ in range(100000): t = (t,)\nassert tuple(mt.zeros(t).shape) == (1,)"
+    ),
+    "tolist of a 100000-dimensional tensor": "mt.zeros([1] * 100000).tolist()",
+}
+
+
+@pytest.mark.parametrize("label", sorted(_NESTING_CASES))
+def test_unbounded_nesting_is_an_error_not_a_crash(label):
+    """Each of these recursed once per level with no bound, overflowed the
+    stack and killed the interpreter -- a list containing itself has no bottom
+    at all. Run in a subprocess, so a regression fails this test instead of
+    ending the test run."""
+
+    import subprocess
+    import sys
+    import textwrap
+
+    script = (
+        "import minitensor as mt\ntry:\n"
+        + textwrap.indent(_NESTING_CASES[label], "    ")
+        + "\nexcept Exception:\n    pass\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+
+
+def test_a_nesting_error_names_the_limit():
+    rec = []
+    rec.append(rec)
+    with pytest.raises(ValueError, match="nested more than 64 levels"):
+        mt.Tensor(rec)
+    with pytest.raises(ValueError, match="at most 64 dimensions"):
+        mt.zeros([1] * 65).tolist()

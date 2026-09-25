@@ -29,16 +29,17 @@ pub(crate) fn normalize_variadic_isize_args(
     tuple: &Bound<PyTuple>,
     arg_name: &str,
 ) -> PyResult<Vec<isize>> {
+    // `(((3,),),)` means `(3,)`. The singleton tuples are peeled in a loop:
+    // peeling them by recursion overflowed the stack, and crashed the
+    // interpreter, on a hundred thousand of them.
+    let peeled = peel_singleton_tuples(tuple)?;
+    let tuple = &peeled;
     if tuple.is_empty() {
         return Ok(Vec::new());
     }
 
     if tuple.len() == 1 {
         let first = tuple.get_item(0)?;
-
-        if let Ok(nested) = first.cast::<PyTuple>() {
-            return normalize_variadic_isize_args(nested, arg_name);
-        }
 
         if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
@@ -174,16 +175,30 @@ pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyRes
     reject_overflowing_shape(parse_shape_tuple_dims(shape, arg_name)?, arg_name)
 }
 
+/// `tuple` with every enclosing singleton tuple removed.
+fn peel_singleton_tuples<'py>(tuple: &Bound<'py, PyTuple>) -> PyResult<Bound<'py, PyTuple>> {
+    let mut current = tuple.clone();
+    while current.len() == 1 {
+        match current.get_item(0)?.cast_into::<PyTuple>() {
+            Ok(inner) => current = inner,
+            Err(_) => break,
+        }
+    }
+    Ok(current)
+}
+
 fn parse_shape_tuple_dims(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
+    // `(((3,),),)` means `(3,)`. The singleton tuples are peeled in a loop:
+    // peeling them by recursion overflowed the stack, and crashed the
+    // interpreter, on a hundred thousand of them.
+    let peeled = peel_singleton_tuples(shape)?;
+    let shape = &peeled;
     if shape.is_empty() {
         return Ok(Vec::new());
     }
 
     if shape.len() == 1 {
         let first = shape.get_item(0)?;
-        if let Ok(tuple) = first.cast::<PyTuple>() {
-            return parse_shape_tuple_dims(tuple, arg_name);
-        }
         if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
             for item in list.iter() {

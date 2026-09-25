@@ -22,6 +22,19 @@ use pyo3::types::PyFloat;
 /// Marking it afterwards makes what a caller constructs a leaf every time,
 /// whatever conversions it took to get there. The flag still respects
 /// `no_grad`, matching what `Tensor::new` would have done with it.
+/// The deepest nesting a sequence may have: NumPy's own limit on dimensions.
+///
+/// Every walk over a nested Python sequence checks it, because the walks
+/// recurse (or step) once per level, and a list that contains itself has no
+/// bottom: it overflowed the stack and took the interpreter with it.
+const MAX_NESTING: usize = 64;
+
+fn too_deeply_nested() -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "sequence is nested more than {MAX_NESTING} levels deep, or contains itself"
+    ))
+}
+
 pub(crate) fn convert_python_data_to_tensor(
     data: &Bound<PyAny>,
     dtype: DataType,
@@ -395,6 +408,16 @@ fn promote_dtypes(a: DataType, b: DataType) -> DataType {
 }
 
 pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
+    infer_dtype_at(value, 0)
+}
+
+/// [`infer_python_value_dtype`] at a nesting depth, which bounds the walk: a
+/// list containing itself recursed until the stack overflowed. Past the bound
+/// there is no answer, and the conversion that follows reports the nesting.
+fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
+    if depth > MAX_NESTING {
+        return None;
+    }
     if let Some(py_tensor) = borrow_wrapped_tensor(value) {
         return Some(py_tensor.inner.dtype());
     }
@@ -443,10 +466,10 @@ pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType>
             return Some(dtype);
         }
         if let Ok(list) = value.cast::<PyList>() {
-            return infer_sequence_dtype(list.iter());
+            return infer_sequence_dtype(list.iter(), depth + 1);
         }
         if let Ok(tuple) = value.cast::<PyTuple>() {
-            return infer_sequence_dtype(tuple.iter());
+            return infer_sequence_dtype(tuple.iter(), depth + 1);
         }
     }
 
@@ -472,13 +495,13 @@ fn sequence_dtype_via_numpy(value: &Bound<PyAny>) -> Option<DataType> {
     }
 }
 
-fn infer_sequence_dtype<'py, I>(iter: I) -> Option<DataType>
+fn infer_sequence_dtype<'py, I>(iter: I, depth: usize) -> Option<DataType>
 where
     I: Iterator<Item = Bound<'py, PyAny>>,
 {
     let mut dtype: Option<DataType> = None;
     for item in iter {
-        let item_dtype = infer_python_value_dtype(&item)?;
+        let item_dtype = infer_dtype_at(&item, depth)?;
         dtype = Some(match dtype {
             Some(current) => promote_dtypes(current, item_dtype),
             None => item_dtype,
@@ -538,6 +561,9 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
         shape: &mut Vec<usize>,
         flat_data: &mut Vec<ScalarValue>,
     ) -> PyResult<()> {
+        if depth > MAX_NESTING {
+            return Err(too_deeply_nested());
+        }
         if let Ok(nested_list) = item.cast::<PyList>() {
             let length = nested_list.len();
             if depth >= shape.len() {
@@ -738,14 +764,20 @@ fn is_ellipsis(item: &Bound<PyAny>) -> bool {
 
 /// Recursively find the first scalar leaf of a (possibly nested) list.
 fn first_list_leaf<'py>(item: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if let Ok(list) = item.cast::<PyList>() {
-        match list.iter().next() {
-            Some(inner) => first_list_leaf(&inner),
-            None => Ok(None),
-        }
-    } else {
-        Ok(Some(item.clone()))
+    // A loop, not recursion: a deeply nested list overflowed the stack, and a
+    // list containing itself never ended. The step bound turns the second
+    // into an error rather than a hang.
+    let mut current = item.clone();
+    for _ in 0..=MAX_NESTING {
+        let Ok(list) = current.cast::<PyList>() else {
+            return Ok(Some(current));
+        };
+        let Some(inner) = list.iter().next() else {
+            return Ok(None);
+        };
+        current = inner;
     }
+    Err(too_deeply_nested())
 }
 
 /// Select rows along dim 0 for integer fancy indexing, wrapping negative
