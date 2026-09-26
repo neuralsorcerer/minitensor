@@ -169,9 +169,12 @@ pub fn normalize_dim_named(dim: isize, ndim: usize, argument: &'static str) -> R
 /// `sum_chunk` may widen (`&[f32] -> f64`), which is how the gradient-norm
 /// accumulator squares `f32` parameters into an `f64` total.
 ///
-/// Below [`SUM_PAR_BYTES`] the same chunks are summed on the calling thread,
-/// in the same order, into the same pairwise combination -- so the answer is
-/// bit-for-bit the parallel one, without the pool's fixed cost.
+/// Below [`FOLD_PAR_BYTES`](crate::ops::map::FOLD_PAR_BYTES) the same chunks
+/// are summed on the calling thread, in the same order, into the same pairwise
+/// combination -- so the answer is bit-for-bit the parallel one, without the
+/// pool. Entering the pool from the interpreter's thread averaged 30us under
+/// back-to-back calls here, against 5us for its best case: 65536 float64 took
+/// 42us through it and 13 without. The crossover is the fold's, 2 MiB.
 pub(crate) fn deterministic_par_sum<T, U, F>(data: &[T], chunk: usize, sum_chunk: F) -> U
 where
     T: Sync,
@@ -179,23 +182,13 @@ where
     F: Fn(&[T]) -> U + Send + Sync,
 {
     use rayon::prelude::*;
-    let partials: Vec<U> = if std::mem::size_of_val(data) < SUM_PAR_BYTES {
+    let partials: Vec<U> = if std::mem::size_of_val(data) < crate::ops::map::FOLD_PAR_BYTES {
         data.chunks(chunk).map(&sum_chunk).collect()
     } else {
         data.par_chunks(chunk).map(&sum_chunk).collect()
     };
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
-
-/// Bytes below which [`deterministic_par_sum`] stays on the calling thread.
-///
-/// Waking the pool costs about 5us whatever the input, and the vectorized
-/// chunk sums run at 0.1 ns an element in float32 and 0.2 in float64 -- the
-/// same bytes a nanosecond either way. Measured on 4 cores, ten thousand
-/// elements took 5.2-5.6us through the pool where NumPy's single thread took
-/// 2.9-3.1; the pool pulls ahead near thirty thousand float64 and a hundred
-/// thousand float32, which are both about this many bytes.
-pub(crate) const SUM_PAR_BYTES: usize = 256 << 10; // 256 KiB
 
 /// The dtype an *accumulating* reduction reports.
 ///

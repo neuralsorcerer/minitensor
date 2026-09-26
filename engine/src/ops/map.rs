@@ -138,7 +138,12 @@ pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
 ///    16384      25.6 us
 ///    65536      30.9 us   <- enough work to amortize the wake
 /// ```
-pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
+///
+/// Those are best-case wakes. Called back to back from Python, as a real
+/// workload calls them, the same container's wake averaged 45us with a tail
+/// past 150, and at 65536 elements `maximum` measured 80us on four threads
+/// against 38 on one; at 262144 four threads were ahead. Hence 131072.
+pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 17; // 131072 elements
 
 /// Element count above which the equal-shape arithmetic kernels in
 /// `ops::kernels::binary` parallelize — the `+`, `-`, `*`, `/` that every other
@@ -168,7 +173,13 @@ pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
 /// steps by 4.6x at 131072, where the three buffers stop fitting in cache. Past
 /// that point one core is waiting on memory, and the parallel speedup is mostly
 /// the other three cores' load/store units rather than their arithmetic.
-pub(crate) const SIMD_PAR_THRESHOLD: usize = 1 << 16; // 65536 elements
+///
+/// The parallel column is each size's fastest call, and a pool woken call
+/// after call does not stay that fast: back to back from Python, 65536
+/// float32 `add` averaged 96us on four threads where one took 35, and float64
+/// 127 against 69. Four threads pulled ahead only at 262144 -- level in
+/// float32, 2.2x in float64 -- which is where this now sits.
+pub(crate) const SIMD_PAR_THRESHOLD: usize = 1 << 18; // 262144 elements
 
 /// Chunk size for parallel map loops.
 pub(crate) const PAR_CHUNK: usize = 1024;
@@ -461,6 +472,32 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
 }
 
+/// [`par_out_chunks`] for a body whose work is reading `input_bytes`: the whole
+/// output as one chunk on the calling thread below [`FOLD_PAR_BYTES`], where
+/// entering the pool costs more than the reads. The chunks are independent by
+/// `par_out_chunks`' own contract, so one chunk gives the same answer as many,
+/// and `work` must accept any whole number of `chunk`s -- which a reduction's
+/// chunk, a multiple of its row or its block, already is.
+///
+/// A reduction's output is a poor measure of its work -- a column sum of a
+/// `(64, 256)` block writes 256 values and reads 16384 -- so the gate is the
+/// input. That column sum went to four tasks here and took 64us, where one
+/// thread takes 3.
+pub(crate) fn par_out_chunks_sized<T: Send>(
+    out: &mut [T],
+    chunk: usize,
+    input_bytes: usize,
+    work: OutWork<T>,
+) {
+    if input_bytes < FOLD_PAR_BYTES {
+        if !out.is_empty() {
+            work(0, out);
+        }
+        return;
+    }
+    par_out_chunks(out, chunk, work);
+}
+
 /// [`par_out_chunks`] for a body that also has something to report -- a partial
 /// sum, a maximum, a count -- and returns one per chunk, in chunk order.
 ///
@@ -658,11 +695,18 @@ where
 /// The chunked form of `data.par_iter().any(..)`, which hands rayon one work
 /// item per element to evaluate a predicate it cannot inline. Short-circuits at
 /// chunk granularity, so a hit in the first chunk still stops the scan early.
+///
+/// Serial below [`FOLD_PAR_BYTES`], like [`par_fold_chunks`]: this had no
+/// serial arm, so a 16K-element `any` went to the pool as sixteen chunks and
+/// averaged 120us against 3us on the calling thread.
 pub(crate) fn par_any_chunk<T: Sync>(
     data: &[T],
     chunk: usize,
     test: &(dyn Fn(&[T]) -> bool + Sync),
 ) -> bool {
+    if std::mem::size_of_val(data) < FOLD_PAR_BYTES {
+        return data.chunks(chunk.max(1)).any(test);
+    }
     data.par_chunks(chunk.max(1)).any(test)
 }
 
@@ -674,6 +718,9 @@ pub(crate) fn par_all_chunk<T: Sync>(
     chunk: usize,
     test: &(dyn Fn(&[T]) -> bool + Sync),
 ) -> bool {
+    if std::mem::size_of_val(data) < FOLD_PAR_BYTES {
+        return data.chunks(chunk.max(1)).all(test);
+    }
     data.par_chunks(chunk.max(1)).all(test)
 }
 
@@ -693,6 +740,12 @@ where
     T: Sync,
 {
     debug_assert_eq!(a.len(), b.len());
+    if std::mem::size_of_val(a) < FOLD_PAR_BYTES {
+        return a
+            .chunks(chunk.max(1))
+            .zip(b.chunks(chunk.max(1)))
+            .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk));
+    }
     a.par_chunks(chunk.max(1))
         .zip(b.par_chunks(chunk.max(1)))
         .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))

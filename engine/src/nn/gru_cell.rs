@@ -659,7 +659,9 @@ mod tests {
     #[test]
     fn the_parallel_split_changes_nothing() {
         let hidden = 24; // not a multiple of any SIMD width
-        let quarter = 704;
+        // The fewest rows that take the whole batch past the threshold; a
+        // quarter's widest pass, three gates wide, then stays under it.
+        let quarter = SIMD_PAR_THRESHOLD / (4 * hidden) + 1;
         let batch = quarter * 4;
         let from_x: Vec<f32> = (0..batch * 3 * hidden)
             .map(|i| ((i % 37) as f32 - 18.0) / 6.0)

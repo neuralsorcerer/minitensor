@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::ops::map::{
-    PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks, par_map_indexed,
-    par_out_chunks, reduction_band,
+    FOLD_PAR_BYTES, PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks,
+    par_map_indexed, par_out_chunks, par_out_chunks_sized, reduction_band,
 };
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
@@ -114,6 +114,10 @@ where
     if !spread {
         return fold_rows_with(input, cols, init, step, merge);
     }
+    // Below this the pool costs more than the fold, and both splits below are
+    // run the same way on the calling thread instead -- the same bands, in the
+    // same order, merged the same way -- so the answer is the parallel one.
+    let serial = std::mem::size_of_val(input) < FOLD_PAR_BYTES;
 
     // Contiguous bands of rows, when there are enough of them to go around.
     // The band boundaries come from the row count alone -- never from the
@@ -130,18 +134,27 @@ where
     // but a sum of squares, which is what `var` and `norm` feed through here,
     // has exactly that spread.
     if let Some(band) = row_band(rows) {
-        let partials: Vec<Vec<A>> = par_map_indexed(rows.div_ceil(band), &|index| {
+        let fold_band = |index: usize| {
             let start = index * band;
             let end = ((index + 1) * band).min(rows);
             fold_rows_with(&input[start * cols..end * cols], cols, init, step, merge)
-        });
+        };
+        let partials: Vec<Vec<A>> = if serial {
+            (0..rows.div_ceil(band)).map(fold_band).collect()
+        } else {
+            par_map_indexed(rows.div_ceil(band), &fold_band)
+        };
         // The bands merge pairwise too; a running fold over them was a second,
         // shorter chain of the same kind.
         return pairwise_fold_vectors(partials, merge);
     }
 
     // Too few rows to split: give each thread its own band of output columns
-    // instead; see [`fold_column_band`].
+    // instead; see [`fold_column_band`]. Its width changes no column's answer,
+    // so on one thread it is simply all of them.
+    if serial {
+        return fold_column_band(input, cols, 0, cols, init, step, merge);
+    }
     let mut out = vec![init; cols];
     par_out_chunks(&mut out, column_band(cols), &|start, out_block| {
         let width = out_block.len();
@@ -332,8 +345,9 @@ fn reduce_axis<I, A, F, M, R>(
     if out.is_empty() {
         return;
     }
+    let input_bytes = std::mem::size_of_val(input);
     if inner == 1 {
-        par_out_chunks(out, outputs_per_task(len), &|start, chunk| {
+        par_out_chunks_sized(out, outputs_per_task(len), input_bytes, &|start, chunk| {
             for (offset, slot) in chunk.iter_mut().enumerate() {
                 let base = (start + offset) * len;
                 *slot = run(&input[base..base + len]);
@@ -350,7 +364,7 @@ fn reduce_axis<I, A, F, M, R>(
         return;
     }
     let slabs_per_task = outputs_per_task(slab).div_ceil(inner).max(1);
-    par_out_chunks(out, slabs_per_task * inner, &|start, chunk| {
+    par_out_chunks_sized(out, slabs_per_task * inner, input_bytes, &|start, chunk| {
         let first = start / inner;
         for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
             let source = &input[(first + index) * slab..(first + index + 1) * slab];

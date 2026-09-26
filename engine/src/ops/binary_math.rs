@@ -448,7 +448,7 @@ where
                     left,
                     right,
                     crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
-                    crate::ops::map::SIMD_PAR_CHUNK,
+                    crate::ops::map::PAR_CHUNK,
                     blocks,
                 )
             };
