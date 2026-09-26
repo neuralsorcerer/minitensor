@@ -34,7 +34,6 @@ use crate::{
     ops::util::pairwise_fold_vectors,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Where `value` belongs in an already-sorted `sequence`.
@@ -389,24 +388,41 @@ impl Labels<'_> {
     }
 
     /// The smallest and largest label, or `(0, -1)` when there are none.
+    ///
+    /// One chunked pass for both, on the calling thread below the fold
+    /// threshold. This was a per-element `par_iter` for the minimum and
+    /// another for the maximum, two wakes of the pool per call: most of the
+    /// 180us sixteen thousand labels took to count.
     fn bounds(&self) -> (i64, i64) {
-        match self {
-            Labels::I64(values) => (
-                values.par_iter().copied().min().unwrap_or(0),
-                values.par_iter().copied().max().unwrap_or(-1),
-            ),
-            Labels::I32(values) => (
-                values.par_iter().copied().min().unwrap_or(0).into(),
-                values.par_iter().copied().max().unwrap_or(-1).into(),
-            ),
-            Labels::Bool(values) => (
-                0,
-                if values.par_iter().copied().any(|flag| flag) {
-                    1
-                } else {
-                    0
+        fn extremes<T: Copy + Into<i64> + Sync>(values: &[T]) -> (i64, i64) {
+            let (low, high) = crate::ops::map::par_fold_chunks(
+                values,
+                crate::ops::map::PAR_CHUNK,
+                (i64::MAX, i64::MIN),
+                &|_, chunk| {
+                    chunk.iter().fold((i64::MAX, i64::MIN), |(low, high), &v| {
+                        let v: i64 = v.into();
+                        (low.min(v), high.max(v))
+                    })
                 },
-            ),
+                &|(a, b), (c, d)| (a.min(c), b.max(d)),
+            );
+            if values.is_empty() {
+                (0, -1)
+            } else {
+                (low, high)
+            }
+        }
+        match self {
+            Labels::I64(values) => extremes(values),
+            Labels::I32(values) => extremes(values),
+            Labels::Bool(values) => {
+                let any =
+                    crate::ops::map::par_any_chunk(values, crate::ops::map::PAR_CHUNK, &|c| {
+                        c.contains(&true)
+                    });
+                (0, i64::from(any))
+            }
         }
     }
 }

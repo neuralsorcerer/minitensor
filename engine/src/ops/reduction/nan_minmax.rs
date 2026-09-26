@@ -684,10 +684,14 @@ macro_rules! arg_extremum_all_bool {
                 .data()
                 .as_bool_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let index = data
-                .par_iter()
-                .position_first(|&x| x == $wanted)
-                .unwrap_or(0);
+            // Serial below the fold threshold, where waking the pool costs
+            // more than the scan; the first position is the answer either way.
+            let index = if data.len() < crate::ops::map::FOLD_PAR_BYTES {
+                data.iter().position(|&x| x == $wanted)
+            } else {
+                data.par_iter().position_first(|&x| x == $wanted)
+            }
+            .unwrap_or(0);
             write_index(result_data, index)
         }
     };

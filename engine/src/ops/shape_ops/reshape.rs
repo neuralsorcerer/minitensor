@@ -657,9 +657,16 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
     // parallel pass only decides *whether* there is a bad position, and the
     // serial scan that names the first one runs on the path where there is
     // something to name.
+    //
+    // Chunked, so the predicate inlines over a block rather than being handed
+    // to rayon one element at a time, and serial below the fold threshold:
+    // as a per-element `par_iter` it woke the pool on every call, and at
+    // sixteen thousand positions the check cost 150us of a 160us selection.
     let limit = dim_size as i64;
     let in_range = |&idx: &i64| (0..limit).contains(&idx);
-    if !indices.par_iter().all(in_range) {
+    if !crate::ops::map::par_all_chunk(indices, crate::ops::map::PAR_CHUNK, &|block| {
+        block.iter().all(in_range)
+    }) {
         let bad = indices
             .iter()
             .find(|idx| !in_range(idx))
@@ -815,17 +822,23 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
 
     let dim_size = input_dims[dim];
 
-    // Validate indices. `find_any` rather than a serial walk: the check reads
-    // the whole index tensor, which is the same size as the output, and it
-    // stops at the first offender either way.
+    // Validate indices: asked as a chunked `all`, which stays on the calling
+    // thread below the fold threshold and stops early either way, and
+    // answered by a serial scan only when there is an offender to name --
+    // the same split `index_select` makes, for the same reason.
     let idx_slice = index
         .data()
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::invalid_operation("gather indices must be int64"))?;
-    if let Some(&bad) = idx_slice
-        .par_iter()
-        .find_any(|&&v| v < 0 || v as usize >= dim_size)
-    {
+    let in_range = |&v: &i64| v >= 0 && (v as usize) < dim_size;
+    if !crate::ops::map::par_all_chunk(idx_slice, crate::ops::map::PAR_CHUNK, &|block| {
+        block.iter().all(in_range)
+    }) {
+        let bad = idx_slice
+            .iter()
+            .copied()
+            .find(|v| !in_range(v))
+            .unwrap_or(0);
         return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
     }
 
