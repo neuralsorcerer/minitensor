@@ -633,6 +633,23 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
     attach_repeat_backward(result, tensor, repeats)
 }
 
+/// Whether every one of `positions` lies in `0..limit`.
+///
+/// One unsigned comparison an element -- a negative position reads as a huge
+/// one -- folded without stopping, so each block is a straight vector loop.
+/// The short-circuiting `all` this replaces branched on every element: at
+/// 16,384 positions the check took more of `index_select` than the gather.
+/// Blocks still stop early, and stay on the calling thread below the fold
+/// threshold.
+fn all_positions_below(positions: &[i64], limit: usize) -> bool {
+    let limit = limit as u64;
+    crate::ops::map::par_all_chunk(positions, crate::ops::map::PAR_CHUNK, &|block| {
+        block
+            .iter()
+            .fold(true, |fits, &position| fits & ((position as u64) < limit))
+    })
+}
+
 /// Indexing operation - select elements along specified dimensions
 ///
 /// The positions arrive as `i64` because that is the width they are already in
@@ -664,9 +681,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
     // sixteen thousand positions the check cost 150us of a 160us selection.
     let limit = dim_size as i64;
     let in_range = |&idx: &i64| (0..limit).contains(&idx);
-    if !crate::ops::map::par_all_chunk(indices, crate::ops::map::PAR_CHUNK, &|block| {
-        block.iter().all(in_range)
-    }) {
+    if !all_positions_below(indices, dim_size) {
         let bad = indices
             .iter()
             .find(|idx| !in_range(idx))
@@ -847,9 +862,7 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::invalid_operation("gather indices must be int64"))?;
     let in_range = |&v: &i64| v >= 0 && (v as usize) < dim_size;
-    if !crate::ops::map::par_all_chunk(idx_slice, crate::ops::map::PAR_CHUNK, &|block| {
-        block.iter().all(in_range)
-    }) {
+    if !all_positions_below(idx_slice, dim_size) {
         let bad = idx_slice
             .iter()
             .copied()
