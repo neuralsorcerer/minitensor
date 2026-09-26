@@ -227,17 +227,14 @@ def isneginf(input: object) -> Tensor:
 def isreal(input: object) -> Tensor:
     """Whether each element has no imaginary part -- true everywhere here.
 
-    Every dtype in this library is real, so the answer is always true. The
-    name exists because code written against NumPy asks, and a missing
-    attribute is a worse answer than the correct one.
-
-    Built from two comparisons rather than a tensor of ones so it is true for
-    a NaN as well -- NaN has no imaginary part either, and `x == x` alone
-    would say otherwise.
+    Every dtype in this library is real, so the answer is always true -- NaN
+    included, since it has no imaginary part either. The name exists because
+    code written against NumPy asks, and a missing attribute is a worse answer
+    than the correct one. A constant, not a test of the values: comparing each
+    element with itself twice and joining the two took three passes to say so.
     """
 
-    tensor = _atleast_tensor(input)
-    return _F.eq(tensor, tensor) | _F.ne(tensor, tensor)
+    return Tensor.ones_like(_atleast_tensor(input), dtype="bool", requires_grad=False)
 
 
 #: The sign-bit predicate, held here rather than looked up on `functional` at

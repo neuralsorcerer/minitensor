@@ -295,6 +295,10 @@ def test_isreal_is_true_everywhere_including_at_nan():
     values = np.array([1.0, np.nan, np.inf, -0.0])
     np.testing.assert_array_equal(mt.isreal(_t(values)).numpy(), np.isreal(values))
     assert mt.isreal(_t(values)).numpy().all()
+    # A constant answer, so nothing to differentiate, whatever the input asks.
+    tracked = _t(values)
+    tracked.requires_grad_(True)
+    assert not mt.isreal(tracked).requires_grad
 
 
 def test_signbit_tells_the_two_zeros_apart_where_a_comparison_cannot():
