@@ -323,23 +323,6 @@ pub(crate) fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
     }
 }
 
-/// Ascending order over bare values, with `NaN` after every number.
-///
-/// The pair comparators above break ties by index so a sort's answer does not
-/// depend on the algorithm. Where only the values are being moved -- a
-/// partition that was not asked for indices -- there is no tie to break and no
-/// index to carry, and the pair is four times the memory of the value.
-///
-/// By key for the same reason they are: see [`cmp_f32_desc`].
-pub(crate) fn value_cmp_f32(a: &f32, b: &f32) -> Ordering {
-    float_key32(*a).cmp(&float_key32(*b))
-}
-
-/// [`value_cmp_f32`] for double precision.
-pub(crate) fn value_cmp_f64(a: &f64, b: &f64) -> Ordering {
-    float_key64(*a).cmp(&float_key64(*b))
-}
-
 pub(crate) fn cmp_i32_asc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
     match a.1.cmp(&b.1) {
         Ordering::Equal => a.0.cmp(&b.0),
@@ -1526,10 +1509,5 @@ mod comparator_tests {
         let plus_zero = (4usize, 0.0f32);
         assert_eq!(cmp_f32_asc(&minus_zero, &plus_zero), Ordering::Less);
         assert_eq!(cmp_f32_desc(&minus_zero, &plus_zero), Ordering::Less);
-        assert_eq!(value_cmp_f32(&-0.0, &0.0), Ordering::Equal);
-        assert_eq!(value_cmp_f32(&f32::NAN, &-f32::NAN), Ordering::Equal);
-        assert_eq!(value_cmp_f32(&f32::NAN, &f32::INFINITY), Ordering::Greater);
-        assert_eq!(value_cmp_f64(&-0.0, &0.0), Ordering::Equal);
-        assert_eq!(value_cmp_f64(&f64::NAN, &f64::INFINITY), Ordering::Greater);
     }
 }

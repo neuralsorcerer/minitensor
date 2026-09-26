@@ -143,7 +143,7 @@ of convenience aliases.
 | `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. NumPy pads an *empty* input by reading uninitialised memory; this answers zeros. |
 | `trim_zeros(input, trim='fb', dim=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them -- NumPy calls that argument `axis`, but every op here spells it `dim`. |
 | `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
-| `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 8ms partitioned against 24 sorted. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
+| `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 3ms partitioned against 31 sorted. The selection is NumPy's introselect, run on a zero-copy view of the tensor's buffer, which measured 1.6-5x faster than the engine's own; booleans are refused, as having no order worth selecting in. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
 | `argpartition(input, kth, dim=-1)` | Where the elements `partition` would produce came from, so `take_along_dim(x, argpartition(x, k), dim)` is a partition of the same data around the same `k`: that position holds what a sort would leave there and the two sides hold the same values. Not the same *arrangement* as `partition` when values repeat -- the order of everything but `k` is unspecified, which is what makes a selection cheaper than a sort, and the two forms take different routes to it. |
 | `lexsort(keys, dim=-1)` | The order that sorts by several keys at once, the **last** key primary and earlier keys breaking its ties -- NumPy's convention, and the one that reads correctly when the keys are a table's columns. One stable sort per key, least significant first, so `k` passes settle `k` keys. |
 | `take_along_axis(input, indices, axis=-1)` | `take_along_dim` under NumPy's name. |
@@ -164,7 +164,7 @@ of convenience aliases.
 | `select(input, dim, index)` | One slice along `dim`, with that dimension removed. `narrow` keeps the axis at length one; this is what makes `select(t, 0, i)` the same as `t[i]`. |
 | `flatnonzero(input)` | The flat positions of every non-zero element, as a 1-D int64 tensor. |
 | `argwhere(input)` | The indices of every non-zero element, one row each -- the same answer `nonzero` gives, under the name NumPy users reach for. |
-| `isin(elements, test_elements, assume_unique=False, invert=False)` | Whether each element appears in `test_elements`. Sorts the test set once and binary-searches it, so it costs `(n + m) log m` time and `n + m` memory rather than the `n * m` of comparing everything against everything. |
+| `isin(elements, test_elements, assume_unique=False, invert=False)` | Whether each element appears in `test_elements`. Integers go to NumPy, which counts them in a lookup table where the value range allows and measured 5-9x faster than a sort. Floats sort the test set once and binary-search it, so they cost `(n + m) log m` time and `n + m` memory rather than the `n * m` of comparing everything against everything -- except below 40,000 elements in all, where NumPy's version of the same was faster. |
 | `tril_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's lower triangle. `offset` moves the boundary off the main diagonal. |
 | `triu_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's upper triangle. |
 | `diag_indices(n, ndim=2)` | The `[ndim, n]` indices of the main diagonal of an `n`-sided cube -- every row the same range, since the main diagonal is where the coordinates agree. Shaped like `tril_indices` and `triu_indices`, so the three are interchangeable. |
@@ -1256,6 +1256,15 @@ no defined result; and `NaN != NaN`, so a run detector over `==` emits every
 number and calls it equal to itself, so `unique` answers `[1.0, nan]` for
 `[nan, 1.0, nan]`.
 
+Who does the work depends on the dtype, and was decided by timing both. A float
+`unique` is NumPy's, called on a zero-copy view of the tensor's buffer: it
+measured 1.4-2.5x faster than the engine's sort-based kernel at every size. An
+integer or boolean `unique` stays on that kernel, which measured 4.6-5.8x faster
+than NumPy's. `union1d`, `intersect1d`, `setdiff1d` and `setxor1d` split the
+same way. The answers agree, NaN included; the one visible difference is which
+sign a collapsed zero reports when `-0.0` and `0.0` both occur, and that is
+NumPy's choice on the float path.
+
 None of these is differentiable: `unique` returns a subset of its input and
 which subset changes discontinuously as values collide, and `mode` returns a
 value that jumps as counts cross.
@@ -2279,8 +2288,8 @@ norm, bincount, mode,
 cumsum, cumprod, cummax, cummin, logcumsumexp,
 
 # Ordering and search
-sort, argsort, topk, unique, unique_consecutive, searchsorted, bucketize,
-histogram, histogram_bin_edges, histc,
+sort, argsort, topk, partition, argpartition, unique, unique_consecutive,
+searchsorted, bucketize, histogram, histogram_bin_edges, histc,
 
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,

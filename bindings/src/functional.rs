@@ -1803,28 +1803,6 @@ pub fn topk(
     tensor.topk(k as usize, dim, Some(largest), Some(sorted))
 }
 
-/// Rearrange each slice along `dim` so the `kth` positions hold what a sort would put there.
-#[pyfunction]
-// PyO3 renders a negative default as `...`; spelling the signature out
-// keeps `help()` honest about it.
-#[pyo3(signature = (input, kth, dim=-1, want_indices=false))]
-#[pyo3(text_signature = "(input, kth, dim=-1, want_indices=False)")]
-pub fn partition(
-    input: &Bound<PyAny>,
-    kth: Vec<i64>,
-    dim: Option<isize>,
-    want_indices: bool,
-) -> PyResult<(PyTensor, Option<PyTensor>)> {
-    let tensor = borrow_tensor(input)?;
-    let (values, indices) =
-        engine::ops::reduction::partition(tensor.tensor(), &kth, dim, want_indices)
-            .map_err(_convert_error)?;
-    Ok((
-        PyTensor::from_tensor(values),
-        indices.map(PyTensor::from_tensor),
-    ))
-}
-
 /// Sort along `dim`, returning the sorted values and the indices that produced them.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, descending=false, stable=false))]
@@ -2291,7 +2269,6 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(eigh, parent)?)?;
     parent.add_function(wrap_pyfunction!(eigvalsh, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
-    parent.add_function(wrap_pyfunction!(partition, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;
     parent.add_function(wrap_pyfunction!(median, parent)?)?;

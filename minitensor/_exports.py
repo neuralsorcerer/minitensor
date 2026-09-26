@@ -163,7 +163,6 @@ _FUNCTIONAL_FORWARDERS = (
     "solve_triangular",
     "cholesky_solve",
     "einsum",
-    "unique",
     "unique_consecutive",
     "mode",
     "searchsorted",
@@ -327,6 +326,7 @@ _FUNCTIONAL_FORWARDERS = (
 _FUNCTIONAL_MIRRORED = (
     "partition",
     "argpartition",
+    "unique",
 )
 
 # Public members of `functional` that deliberately stay namespaced. These are

@@ -31,13 +31,16 @@ import numpy as _np
 
 from . import _core as _C
 from ._shape import (
+    _FLOAT_DTYPES,
     _as_written_values,
     _atleast_tensor,
     _element_count,
+    _from_numpy,
     _index_tensor,
     _normalize_axis,
     _normalize_axis_tuple,
     _normalize_shape_argument,
+    _numpy_view,
     _promote_pair,
     _promoted_dtype,
     broadcast_tensors,
@@ -47,6 +50,11 @@ from ._shape import meshgrid as _meshgrid
 
 Tensor = _C.Tensor
 _F = _C.functional
+
+#: The engine's `unique`, held here rather than looked up on `functional` at
+#: each call: `unique` below is put onto `functional` under the same name, so
+#: the attribute that leads here would otherwise lead back to it.
+_unique_kernel = _F.unique
 
 
 def _as_index(value: object, name: str) -> Tensor:
@@ -264,6 +272,12 @@ def _present_in_sorted(values: Tensor, ordered: Tensor) -> Tensor:
     return _F.index_select(ordered, 0, slot) == values
 
 
+#: Total elements below which a float `isin` is NumPy's. Measured on 4 cores:
+#: 20000 + 20000 float32 read 1.13x for the engine and float64 0.90x, and
+#: 50000 + 50000 both favoured it; 1000 + 1000 read 0.79x in both dtypes.
+_ISIN_NUMPY_BELOW = 40_000
+
+
 def isin(
     elements: object,
     test_elements: object,
@@ -288,6 +302,17 @@ def isin(
 
     shape = list(values.shape)
     dtype = _promoted_dtype(values, tests)
+    if dtype not in _FLOAT_DTYPES or values.numel() + tests.numel() < _ISIN_NUMPY_BELOW:
+        # NumPy's `isin` counts integers in a lookup table where the value
+        # range allows it and a sort cannot compete: 0.11-0.22x of it at every
+        # size here. For floats it sorts, as this does, and wins only below a
+        # few tens of thousands of elements, where this has more to set up.
+        found = _np.isin(
+            _numpy_view(values.astype(dtype)),
+            _numpy_view(tests.astype(dtype)),
+            invert=invert,
+        )
+        return _from_numpy(found)
     flat = values.reshape(-1).astype(dtype)
     ordered = tests.astype(dtype)
     if ordered.shape[0]:
@@ -966,6 +991,37 @@ def choose(input: object, choices: object) -> Tensor:
     return _F.gather(stacked, 0, picks.reshape([1] + target)).reshape(target)
 
 
+def unique(
+    input: object,
+    return_inverse: bool = False,
+    return_counts: bool = False,
+    return_index: bool = False,
+):
+    """The distinct values of `input`, ascending, with NaN last and collapsed.
+
+    Returns the values alone, or a tuple with whichever extras were asked for
+    -- always in NumPy's order: where each first occurred, the inverse map,
+    the counts.
+
+    Floats are NumPy's `unique`, on a view of the tensor's buffer: it measured
+    1.4-2.5x faster than the engine's sort-based kernel at every size. Integers
+    stay on that kernel, which reads 4.6-5.8x faster than NumPy on them.
+    """
+
+    tensor = _atleast_tensor(input)
+    if str(tensor.dtype) not in _FLOAT_DTYPES:
+        return _unique_kernel(tensor, return_inverse, return_counts, return_index)
+    found = _np.unique(
+        _numpy_view(tensor),
+        return_index=return_index,
+        return_inverse=return_inverse,
+        return_counts=return_counts,
+    )
+    if isinstance(found, tuple):
+        return tuple(_from_numpy(part) for part in found)
+    return _from_numpy(found)
+
+
 def union1d(input: object, other: object) -> Tensor:
     """The distinct values in either tensor, ascending.
 
@@ -975,7 +1031,9 @@ def union1d(input: object, other: object) -> Tensor:
     left, right = _promote_pair(
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
-    return _F.unique(_F.cat([left, right]))
+    if str(left.dtype) in _FLOAT_DTYPES:
+        return _from_numpy(_np.union1d(_numpy_view(left), _numpy_view(right)))
+    return unique(_F.cat([left, right]))
 
 
 def intersect1d(
@@ -999,9 +1057,23 @@ def intersect1d(
     left = _atleast_tensor(input).reshape(-1)
     right = _atleast_tensor(other).reshape(-1)
 
+    if str(left.dtype) in _FLOAT_DTYPES:
+        # The values are `left`'s, so they return in its dtype; from a float
+        # that is exact after any promotion, which an integer's is not.
+        dtype = _numpy_view(left).dtype
+        found = _np.intersect1d(
+            *(_numpy_view(side) for side in _promote_pair(left, right)),
+            return_indices=return_indices,
+        )
+        if return_indices:
+            common, *positions = found
+            found = (common.astype(dtype, copy=False), *positions)
+            return tuple(_from_numpy(part) for part in found)
+        return _from_numpy(found.astype(dtype, copy=False))
+
     if return_indices:
-        left_values, left_first = _F.unique(left, return_index=True)
-        right_values, right_first = _F.unique(right, return_index=True)
+        left_values, left_first = unique(left, return_index=True)
+        right_values, right_first = unique(right, return_index=True)
         # Both came back sorted, so the membership test needs no sort of its own.
         keep = _present_in_sorted(*_promote_pair(left_values, right_values))
         common = _F.masked_select(left_values, keep)
@@ -1013,8 +1085,8 @@ def intersect1d(
         )
         return common, in_left, in_right
 
-    left_values = _F.unique(left)
-    right_values = _F.unique(right)
+    left_values = unique(left)
+    right_values = unique(right)
     keep = _present_in_sorted(*_promote_pair(left_values, right_values))
     return _F.masked_select(left_values, keep)
 
@@ -1023,8 +1095,14 @@ def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tens
     """The distinct values in the first tensor and not the second, ascending."""
 
     del assume_unique
-    left = _F.unique(_atleast_tensor(input).reshape(-1))
+    left = _atleast_tensor(input).reshape(-1)
     right = _atleast_tensor(other).reshape(-1)
+    if str(left.dtype) in _FLOAT_DTYPES:
+        # The answer is in `left`'s dtype, so only the test side is promoted.
+        tests = right.astype(_promoted_dtype(left, right))
+        found = _np.setdiff1d(_numpy_view(left), _numpy_view(tests))
+        return _from_numpy(found.astype(_numpy_view(left).dtype, copy=False))
+    left = unique(left)
     return _F.masked_select(left, isin(left, right, invert=True))
 
 
@@ -1040,14 +1118,16 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
     left, right = _promote_pair(
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
-    left, right = _F.unique(left), _F.unique(right)
+    if str(left.dtype) in _FLOAT_DTYPES:
+        return _from_numpy(_np.setxor1d(_numpy_view(left), _numpy_view(right)))
+    left, right = unique(left), unique(right)
     # Both sides are sorted and distinct by now, which is exactly the state
     # `isin` would spend a sort reaching.
     only_left = _F.masked_select(left, _F.logical_not(_present_in_sorted(left, right)))
     only_right = _F.masked_select(
         right, _F.logical_not(_present_in_sorted(right, left))
     )
-    return _F.unique(_F.cat([only_left, only_right]))
+    return unique(_F.cat([only_left, only_right]))
 
 
 def _nonzero_extent(mask: Tensor, axis: int, ndim: int) -> tuple[int, int]:
@@ -1151,27 +1231,27 @@ def unique_values(input: object) -> Tensor:
     `unique` itself already makes.
     """
 
-    return _F.unique(_atleast_tensor(input))
+    return unique(_atleast_tensor(input))
 
 
 def unique_counts(input: object) -> UniqueCountsResult:
     """The distinct values and how often each occurred."""
 
-    values, counts = _F.unique(_atleast_tensor(input), return_counts=True)
+    values, counts = unique(_atleast_tensor(input), return_counts=True)
     return UniqueCountsResult(values, counts)
 
 
 def unique_inverse(input: object) -> UniqueInverseResult:
     """The distinct values and, for each element, which of them it was."""
 
-    values, inverse = _F.unique(_atleast_tensor(input), return_inverse=True)
+    values, inverse = unique(_atleast_tensor(input), return_inverse=True)
     return UniqueInverseResult(values, inverse)
 
 
 def unique_all(input: object) -> UniqueAllResult:
     """Everything `unique` can report, each answer named rather than positional."""
 
-    values, indices, inverse, counts = _F.unique(
+    values, indices, inverse, counts = unique(
         _atleast_tensor(input),
         return_inverse=True,
         return_counts=True,

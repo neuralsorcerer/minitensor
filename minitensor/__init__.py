@@ -80,6 +80,7 @@ from ._indexing import (
     trim_zeros,
     triu_indices,
     union1d,
+    unique,
     unique_all,
     unique_counts,
     unique_inverse,
@@ -379,7 +380,7 @@ def default_dtype(dtype: str):
 # things across two public namespaces. It now means the wrapper in both, and
 # `argpartition` joins it, which is the arrangement every other Python-level
 # op here already has.
-for _selection_name in ("partition", "argpartition"):
+for _selection_name in ("partition", "argpartition", "unique"):
     setattr(functional, _selection_name, globals()[_selection_name])
 
 _bind_functional_forwarders(_FUNCTIONAL_FORWARDERS, globals())
@@ -503,6 +504,7 @@ _BASE_EXPORTS = (
     "take",
     "take_along_dim",
     "union1d",
+    "unique",
     "intersect1d",
     "setdiff1d",
     "setxor1d",

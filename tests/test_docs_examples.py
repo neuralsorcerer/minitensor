@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from minitensor._exports import _FUNCTIONAL_FORWARDERS
+from minitensor._exports import _FUNCTIONAL_FORWARDERS, _FUNCTIONAL_MIRRORED
 
 ROOT = Path(__file__).resolve().parent.parent
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.S)
@@ -111,7 +111,10 @@ def _documented_top_level_names() -> set[str]:
 
 
 def test_documented_top_level_names_are_exactly_the_forwarded_ones():
-    """The listed names and `_FUNCTIONAL_FORWARDERS` must be the same set.
+    """The listed names and the both-namespace exports must be the same set.
+
+    Those are `_FUNCTIONAL_FORWARDERS`, bound from `functional` onto the top
+    level, and `_FUNCTIONAL_MIRRORED`, Python-level ops put onto both.
 
     This list had drifted 37 names behind by the time it was checked: every op
     added since -- `einsum`, `svd`, `qr`, `cholesky`, `unique`, `searchsorted`,
@@ -120,7 +123,7 @@ def test_documented_top_level_names_are_exactly_the_forwarded_ones():
     of it.
     """
     documented = _documented_top_level_names()
-    forwarded = set(_FUNCTIONAL_FORWARDERS)
+    forwarded = set(_FUNCTIONAL_FORWARDERS) | set(_FUNCTIONAL_MIRRORED)
 
     missing = sorted(forwarded - documented)
     assert (

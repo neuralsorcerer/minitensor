@@ -723,7 +723,7 @@ def tensorinv(a: object, ind: int = 2) -> Tensor:
 #: The contraction itself, held here rather than looked up on `functional` at
 #: each call: `vecdot` below is put onto `functional` under the same name, so
 #: the attribute that leads here would otherwise lead back to it. Same reason
-#: as `_shape._select_around`.
+#: as `_indexing._unique_kernel`.
 _contract = _C.functional.vecdot
 
 

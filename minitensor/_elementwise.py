@@ -243,7 +243,7 @@ def isreal(input: object) -> Tensor:
 #: The sign-bit predicate, held here rather than looked up on `functional` at
 #: each call: `signbit` below is put onto `functional` under the same name, so
 #: the attribute that leads here would otherwise lead back to it. Same reason
-#: as `_shape._select_around`.
+#: as `_indexing._unique_kernel`.
 _sign_bit = _C.functional.signbit
 
 
