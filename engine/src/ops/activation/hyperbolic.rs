@@ -293,7 +293,7 @@ macro_rules! float_unary_kernel {
             })?;
             let offered: Option<Vec<$ty>> = None;
             $(let offered = offered.or_else(|| {
-                <$ty as crate::ops::provider::OfferUnary>::offer_unary(
+                crate::ops::provider::offer_unary_f64(
                     crate::ops::provider::Ufunc::$op,
                     input_data,
                 )
@@ -516,7 +516,7 @@ vector_f32!(
     asin
 );
 
-float_unary_kernel!(asin_f64, as_f64_slice, f64, Float64, "f64", f64::asin);
+float_unary_kernel!(asin_f64, as_f64_slice, f64, Float64, "f64", f64::asin, offer Asin);
 
 vector_f32!(
     /// Vectorized. Taken from `asin`'s reduction rather than as `pi/2 - asin(x)`,
@@ -525,7 +525,7 @@ vector_f32!(
     acos
 );
 
-float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos);
+float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos, offer Acos);
 
 vector_f32!(
     /// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
@@ -535,7 +535,7 @@ vector_f32!(
     atan
 );
 
-float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan);
+float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan, offer Atan);
 
 #[cfg(test)]
 mod atanh_tests {
@@ -708,7 +708,7 @@ float_unary_kernel!(acosh_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     } else {
         f64::NAN
     }
-});
+}, offer Acosh);
 
 /// `atanh(x)`, split at a half so one logarithm serves both sides.
 ///

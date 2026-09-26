@@ -101,10 +101,38 @@ impl Provider for Recorder {
         }
         true
     }
+
+    fn binary_f64(
+        &self,
+        op: Ufunc,
+        lhs: &[f64],
+        rhs: &[f64],
+        out: &mut [MaybeUninit<f64>],
+    ) -> bool {
+        binary_offers()
+            .lock()
+            .unwrap()
+            .push((op, lhs.len(), rhs.len(), out.len()));
+        if out.len() != HANDLED_LEN {
+            return false;
+        }
+        for slot in out.iter_mut() {
+            slot.write(f64::from(SENTINEL));
+        }
+        true
+    }
 }
 
 /// The element-wise length the provider answers to; every other is declined.
 const HANDLED_LEN: usize = 37;
+
+/// `(op, lhs length, rhs length, output length)`: one binary offer.
+type BinaryOffer = (Ufunc, usize, usize, usize);
+
+fn binary_offers() -> &'static Mutex<Vec<BinaryOffer>> {
+    static OFFERS: OnceLock<Mutex<Vec<BinaryOffer>>> = OnceLock::new();
+    OFFERS.get_or_init(|| Mutex::new(Vec::new()))
+}
 
 fn ufunc_offers() -> &'static Mutex<Vec<(Ufunc, usize)>> {
     static OFFERS: OnceLock<Mutex<Vec<(Ufunc, usize)>>> = OnceLock::new();
@@ -535,6 +563,52 @@ fn an_element_wise_function_is_offered_whole_and_its_answer_used() {
     assert_eq!(
         *ufunc_offers().lock().unwrap(),
         vec![(Ufunc::Tanh, HANDLED_LEN), (Ufunc::Tanh, HANDLED_LEN + 1)]
+    );
+}
+
+#[test]
+fn a_binary_function_hands_a_single_element_over_as_one() {
+    let _serial = begin();
+    binary_offers().lock().unwrap().clear();
+    let values = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN]);
+    let one = tensor_f64(vec![2.5], vec![1]);
+
+    // Each form is answered by the provider rather than repeated to length.
+    for out in [
+        engine::ops::activation::pow(&values, &values).unwrap(),
+        engine::ops::activation::pow(&values, &one).unwrap(),
+        engine::ops::activation::pow(&one, &values).unwrap(),
+        engine::ops::binary_math::atan2(&values, &one).unwrap(),
+    ] {
+        assert_eq!(out.shape().dims(), &[HANDLED_LEN]);
+        assert!(
+            out.data()
+                .as_f64_slice()
+                .unwrap()
+                .iter()
+                .all(|&v| v == f64::from(SENTINEL))
+        );
+    }
+    // `x ** 2` never reaches it: a small integer exponent is a multiply.
+    let squared = engine::ops::activation::pow(&values, &tensor_f64(vec![2.0], vec![1])).unwrap();
+    let want: Vec<f64> = ramp_f64(HANDLED_LEN).iter().map(|v| v * v).collect();
+    assert_eq!(squared.data().as_f64_slice().unwrap(), &want[..]);
+
+    // A broadcast beyond a single element is computed here, never offered.
+    let rows = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN, 1]);
+    let cols = tensor_f64(ramp_f64(3), vec![1, 3]);
+    let wide = engine::ops::binary_math::atan2(&rows, &cols).unwrap();
+    assert_eq!(wide.shape().dims(), &[HANDLED_LEN, 3]);
+
+    let n = HANDLED_LEN;
+    assert_eq!(
+        *binary_offers().lock().unwrap(),
+        vec![
+            (Ufunc::Pow, n, n, n),
+            (Ufunc::Pow, n, 1, n),
+            (Ufunc::Pow, 1, n, n),
+            (Ufunc::Atan2, n, 1, n),
+        ]
     );
 }
 

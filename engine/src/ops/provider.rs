@@ -8,9 +8,9 @@
 //!
 //! The engine's kernels are the right thing to run almost everywhere, and the
 //! exceptions are specific and measured: a single large dense product in
-//! `float32` or `float64`, where a tuned BLAS wins by 1.6-2.3x, and a handful
-//! of float64 transcendentals, where the engine calls scalar `libm` and NumPy
-//! runs vectorized loops that are both faster and at least as accurate.
+//! `float32` or `float64`, where a tuned BLAS wins by 1.6-2.3x, and the float64
+//! transcendentals, where the engine calls scalar `libm` and NumPy runs
+//! vectorized loops that are both faster and at least as accurate.
 //!
 //! The library already ships next to both: `numpy`, which every install pulls
 //! in, carries a full OpenBLAS and those loops. Reaching them costs nothing but
@@ -84,12 +84,17 @@ impl<T> Gemm<'_, T> {
     }
 }
 
-/// An element-wise function the engine will offer to a provider.
+/// A float64 element-wise function the engine will offer to a provider.
 ///
 /// Only those a provider might do better are named: offering is a call and a
 /// match, and there is no point paying either for a function the engine
-/// always keeps. What *is* worth sending, for which dtype and from which size,
-/// is the provider's decision.
+/// always keeps. What *is* worth sending, and from which size, is the
+/// provider's decision. `Atan2` and `Pow` take two operands and are offered
+/// through [`Provider::binary_f64`]; the rest take one.
+///
+/// Float64 only. Every float32 kernel in `ops::simd::transcendental` computes
+/// in float64 and rounds once, which makes it correctly rounded on every
+/// input; no library that answers faster answers as well.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ufunc {
     Tanh,
@@ -106,6 +111,12 @@ pub enum Ufunc {
     Exp2,
     Log,
     Cbrt,
+    Asin,
+    Acos,
+    Atan,
+    Acosh,
+    Atan2,
+    Pow,
 }
 
 impl Ufunc {
@@ -126,6 +137,12 @@ impl Ufunc {
             Ufunc::Exp2 => "exp2",
             Ufunc::Log => "log",
             Ufunc::Cbrt => "cbrt",
+            Ufunc::Asin => "arcsin",
+            Ufunc::Acos => "arccos",
+            Ufunc::Atan => "arctan",
+            Ufunc::Acosh => "arccosh",
+            Ufunc::Atan2 => "arctan2",
+            Ufunc::Pow => "power",
         }
     }
 }
@@ -147,12 +164,20 @@ pub trait Provider: Send + Sync {
 
     /// `out[i] = op(input[i])` for every `i`, or `false` having promised
     /// nothing about `out`. The two slices are the same length.
-    fn unary_f32(&self, _op: Ufunc, _input: &[f32], _out: &mut [MaybeUninit<f32>]) -> bool {
+    fn unary_f64(&self, _op: Ufunc, _input: &[f64], _out: &mut [MaybeUninit<f64>]) -> bool {
         false
     }
 
-    /// See [`Provider::unary_f32`].
-    fn unary_f64(&self, _op: Ufunc, _input: &[f64], _out: &mut [MaybeUninit<f64>]) -> bool {
+    /// `out[i] = op(lhs[i], rhs[i])` for every `i`, or `false` having promised
+    /// nothing about `out`. An operand is either `out`'s length or a single
+    /// element that stands for every position, as `x ** 2.5` has one.
+    fn binary_f64(
+        &self,
+        _op: Ufunc,
+        _lhs: &[f64],
+        _rhs: &[f64],
+        _out: &mut [MaybeUninit<f64>],
+    ) -> bool {
         false
     }
 }
@@ -220,30 +245,35 @@ pub fn pool_threads() -> usize {
     rayon::current_num_threads().max(1)
 }
 
-/// A float dtype whose element-wise functions can be offered to a provider.
-pub(crate) trait OfferUnary: Copy + Sized {
-    /// `op` over `input` from the provider, or `None` to compute it here.
-    fn offer_unary(op: Ufunc, input: &[Self]) -> Option<Vec<Self>>;
+/// `op` over `input` from the provider, or `None` to compute it here.
+#[inline]
+pub(crate) fn offer_unary_f64(op: Ufunc, input: &[f64]) -> Option<Vec<f64>> {
+    let provider = provider()?;
+    collect(input.len(), |out| provider.unary_f64(op, input, out))
 }
 
-macro_rules! offer_unary_for {
-    ($ty:ty, $method:ident) => {
-        impl OfferUnary for $ty {
-            #[inline]
-            fn offer_unary(op: Ufunc, input: &[$ty]) -> Option<Vec<$ty>> {
-                let provider = provider()?;
-                let mut out: Vec<$ty> = Vec::with_capacity(input.len());
-                if !provider.$method(op, input, &mut out.spare_capacity_mut()[..input.len()]) {
-                    return None;
-                }
-                // SAFETY: the provider said it wrote every one of the
-                // `input.len()` elements, which is its contract for `true`.
-                unsafe { out.set_len(input.len()) };
-                Some(out)
-            }
-        }
-    };
+/// `op` over `lhs` and `rhs` from the provider, or `None` to compute it here.
+/// Each operand is `len` long or a single element; see
+/// [`Provider::binary_f64`].
+#[inline]
+pub(crate) fn offer_binary_f64(
+    op: Ufunc,
+    lhs: &[f64],
+    rhs: &[f64],
+    len: usize,
+) -> Option<Vec<f64>> {
+    let provider = provider()?;
+    collect(len, |out| provider.binary_f64(op, lhs, rhs, out))
 }
 
-offer_unary_for!(f32, unary_f32);
-offer_unary_for!(f64, unary_f64);
+/// A fresh `len`-element buffer, if `fill` says it wrote every element.
+fn collect(len: usize, fill: impl FnOnce(&mut [MaybeUninit<f64>]) -> bool) -> Option<Vec<f64>> {
+    let mut out: Vec<f64> = Vec::with_capacity(len);
+    if !fill(&mut out.spare_capacity_mut()[..len]) {
+        return None;
+    }
+    // SAFETY: the provider said it wrote every one of the `len` elements,
+    // which is its contract for `true`.
+    unsafe { out.set_len(len) };
+    Some(out)
+}

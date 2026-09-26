@@ -19,7 +19,7 @@
 //! `digamma` needs `trigamma` for its gradient, and nothing in the crate's
 //! dependencies has one.
 
-use crate::ops::provider::{OfferUnary, Ufunc};
+use crate::ops::provider::{Ufunc, offer_unary_f64};
 use crate::tensor::TensorData;
 use crate::{
     error::{MinitensorError, Result},
@@ -130,28 +130,15 @@ pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
     unary_unit(tensor, "cbrt", CBRT, CBRT_D, [0.0; 2])
 }
 
-/// A float tensor's values under `op` from the installed provider, or `None`
-/// to compute them here; see `ops::provider`.
+/// A float64 tensor's values under `op` from the installed provider, or
+/// `None` to compute them here; see `ops::provider`.
 fn offered(tensor: &Tensor, op: Ufunc) -> Option<TensorData> {
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let values = f32::offer_unary(op, tensor.data().as_f32_slice()?)?;
-            Some(TensorData::from_vec(
-                values,
-                DataType::Float32,
-                tensor.device(),
-            ))
-        }
-        DataType::Float64 => {
-            let values = f64::offer_unary(op, tensor.data().as_f64_slice()?)?;
-            Some(TensorData::from_vec(
-                values,
-                DataType::Float64,
-                tensor.device(),
-            ))
-        }
-        _ => None,
-    }
+    let values = offer_unary_f64(op, tensor.data().as_f64_slice()?)?;
+    Some(TensorData::from_vec(
+        values,
+        DataType::Float64,
+        tensor.device(),
+    ))
 }
 
 // --- exp2 ------------------------------------------------------------------

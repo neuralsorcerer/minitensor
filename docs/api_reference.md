@@ -4130,9 +4130,9 @@ which thread built the graph and whether it was cleared in between.
 Every operation holds the GIL, so two Python threads never run tensor code at
 the same moment -- with two exceptions, both work handed to NumPy. A large
 `float32` or `float64` product goes to `numpy.matmul`, and the element-wise
-functions listed by `minitensor._core.dispatch.delegated_ufuncs()` (most
-float64 transcendentals, and `cbrt`/`atanh` in float32) go to NumPy's ufuncs
-above a few hundred elements; both release the GIL while their loops run.
+functions listed by `minitensor._core.dispatch.delegated_ufuncs()` (the
+float64 transcendentals, `pow` and `atan2` among them; nothing in float32) go
+to NumPy's ufuncs above a few hundred elements; both release the GIL while their loops run.
 During that window another thread can run, and if it updates a tensor the
 operation is reading -- an optimizer `step()`, `copy_`, `fill_` or an item
 assignment on a tensor that requires a gradient, all of which write in place so

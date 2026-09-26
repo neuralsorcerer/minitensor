@@ -405,8 +405,9 @@ where
 /// `atan2f` changes that. Those need the vectorized kernel, which works on
 /// slices rather than elements, so this takes one -- used when both operands
 /// are float32 and already the output shape, which is where a block exists to
-/// hand it. Everything else, broadcasts and float64 included, falls through to
-/// the element-wise path.
+/// hand it. Float64 is offered whole to the installed provider as `wide_op`
+/// (see `ops::provider`) when neither operand needs repeating beyond a single
+/// element. Everything else falls through to the element-wise path.
 ///
 /// # Safety
 ///
@@ -417,6 +418,7 @@ unsafe fn float_binary_blocked<N, W, B>(
     rhs: &Tensor,
     narrow: N,
     wide: W,
+    wide_op: crate::ops::provider::Ufunc,
     blocks: B,
     partials: [FloatBinaryKernel; 2],
 ) -> Result<Tensor>
@@ -452,7 +454,17 @@ where
             };
             TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device())
         }
-        _ => float_binary_data_with(&lhs_tensor, &rhs_tensor, dtype, &output_shape, narrow, wide)?,
+        _ => match offer_wide(&lhs_tensor, &rhs_tensor, &output_shape, wide_op) {
+            Some(out) => TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()),
+            None => float_binary_data_with(
+                &lhs_tensor,
+                &rhs_tensor,
+                dtype,
+                &output_shape,
+                narrow,
+                wide,
+            )?,
+        },
     };
     attach_float_binary_grad(
         lhs,
@@ -464,6 +476,25 @@ where
         output_data,
         partials,
     )
+}
+
+/// A float64 pair's answer from the installed provider, or `None` to compute it
+/// here. Offered only when each operand is the output's length -- its flat
+/// order is then the output's, whatever leading ones its shape has -- or a
+/// single element, which is the one broadcast a provider is asked to know.
+fn offer_wide(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    output_shape: &Shape,
+    op: crate::ops::provider::Ufunc,
+) -> Option<Vec<f64>> {
+    let len = output_shape.numel();
+    let spans = |values: &[f64]| values.len() == len || values.len() == 1;
+    let (left, right) = (lhs.data().as_f64_slice()?, rhs.data().as_f64_slice()?);
+    if !(spans(left) && spans(right)) {
+        return None;
+    }
+    crate::ops::provider::offer_binary_f64(op, left, right, len)
 }
 
 /// Wrap one of these kernels' output as a tensor and record its chain rule.
@@ -594,6 +625,7 @@ pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             rhs,
             atan2_f32,
             atan2_f64,
+            crate::ops::provider::Ufunc::Atan2,
             move |y, x, out| kernel.atan2(y, x, out),
             [ATAN2_D_Y, ATAN2_D_X],
         )

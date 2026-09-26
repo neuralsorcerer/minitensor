@@ -11,11 +11,10 @@
 //! goes to the BLAS `numpy` brought: on a single large `float32` or `float64`
 //! product it beats the engine's own kernel by 1.6-2.3x, which is not a gap a
 //! portable Rust kernel closes -- it is per-architecture assembly, chosen at
-//! load time from a table of them. And a handful of element-wise functions
-//! go to `numpy`'s ufuncs, listed in [`delegated`] with the measurements that
-//! put them there: in float64 the engine has nothing but scalar `libm` for
-//! them, where `numpy` runs vectorized loops that are both faster and at least
-//! as accurate.
+//! load time from a table of them. And the float64 transcendentals go to
+//! `numpy`'s ufuncs, listed in [`UFUNC_ORDER`] with the measurements that put
+//! them there: in float64 the engine has nothing but scalar `libm` for them,
+//! where `numpy` runs vectorized loops that are faster and as accurate.
 //!
 //! Reaching either costs array headers and one call. The engine's buffers are
 //! already contiguous and row-major -- the layout invariant the whole engine is
@@ -290,19 +289,43 @@ impl Provider for Numpy {
         matrix_product(&mut request)
     }
 
-    fn unary_f32(&self, op: Ufunc, input: &[f32], out: &mut [MaybeUninit<f32>]) -> bool {
-        delegated(op, false) && apply_ufunc(op, input, out)
+    fn unary_f64(&self, op: Ufunc, input: &[f64], out: &mut [MaybeUninit<f64>]) -> bool {
+        apply_ufunc(op, [input], out)
     }
 
-    fn unary_f64(&self, op: Ufunc, input: &[f64], out: &mut [MaybeUninit<f64>]) -> bool {
-        delegated(op, true) && apply_ufunc(op, input, out)
+    fn binary_f64(
+        &self,
+        op: Ufunc,
+        lhs: &[f64],
+        rhs: &[f64],
+        out: &mut [MaybeUninit<f64>],
+    ) -> bool {
+        apply_ufunc(op, [lhs, rhs], out)
     }
 }
 
-/// Whether `numpy` computes `op` faster than the engine, in float64 or not.
+/// Elements below which a ufunc is not worth the crossing.
 ///
-/// Measured as NumPy's time over the engine's own kernel (below 1 means NumPy
-/// is faster), over 1e3, 1e5 and 1e6 elements on a 4-core x86-64 container:
+/// A crossing is an attach, two array headers and a ufunc dispatch, a little
+/// over a microsecond. Measured as the engine's time over the delegated one,
+/// at 256 elements float32 `cbrt` still read 0.75 and float64 `exp2` 1.00;
+/// by 1024 every delegated function read 1.7 or more. Half-way it is.
+const DEFAULT_MIN_UFUNC_LEN: usize = 512;
+
+/// See [`MIN_FLOPS`] for why this is an atomic and not a constant.
+static MIN_UFUNC_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_UFUNC_LEN);
+
+#[cfg(not(feature = "blas"))]
+/// Each delegated ufunc, looked up once, in the order of [`UFUNC_ORDER`].
+static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
+    [const { PyOnceLock::new() }; UFUNC_ORDER.len()];
+
+/// Every [`Ufunc`], each with its slot in the ufunc cache; all of them cross.
+///
+/// Measured as NumPy's time over the engine's own float64 kernel (below 1
+/// means NumPy is faster), over 1e3, 1e5 and 1e6 elements on a 4-core x86-64
+/// container -- NumPy called directly, single-threaded, against the engine's
+/// parallel loop:
 ///
 /// ```text
 ///   float64     1e3   1e5   1e6
@@ -322,44 +345,34 @@ impl Provider for Numpy {
 ///   cbrt       0.12  0.08  0.29
 /// ```
 ///
+/// and over 1e4 and 1e6, for the inverse trigonometric functions and the two
+/// binary ones (`power` with a whole array of exponents; with one exponent it
+/// read 0.77 and 1.02):
+///
+/// ```text
+///   float64     1e4   1e6
+///   arcsin     0.38  0.42
+///   arccos     0.41  0.60
+///   arctan     0.55  0.67
+///   arccosh    0.80  1.28
+///   arctan2    0.13  0.53
+///   power      0.18  0.74
+/// ```
+///
 /// Float64 has no wider type to compute in and round from, which is the trick
 /// every float32 kernel in `ops::simd::transcendental` is built on, so the
 /// engine's float64 arms are scalar `libm` calls, one element at a time;
 /// NumPy's are vectorized loops, and for `tanh` the more accurate of the two
-/// as well (1 ulp against glibc's 2).
-///
-/// No float32 function crosses. The two NumPy was faster at are the two where
-/// its answer is worse: the engine's float32 `cbrt` and `atanh` are correctly
-/// rounded on every input, and NumPy's miss on about a third and on 4.7% of
-/// them. Speed that costs the answer is not what delegation is for, so `atanh`
-/// got a vectorized kernel instead and `cbrt` keeps its own.
+/// as well (1 ulp against glibc's 2). Where a column reads above 1 the
+/// engine's four threads were beating one NumPy thread, which [`apply_ufunc`]
+/// answers by giving NumPy the same four.
 ///
 /// Delegated, a million elements take 2.5-14x less time than the engine's
-/// loop did, and 2.8-4.5x less than calling NumPy directly -- [`apply_ufunc`]
-/// runs its loop on every thread the engine would have used.
-fn delegated(_op: Ufunc, float64: bool) -> bool {
-    float64
-}
-
-/// Elements below which a ufunc is not worth the crossing.
+/// loop did, and 2.3-4.5x less than calling NumPy directly; at 512 elements,
+/// the threshold, the slowest to gain still ran 1.45x faster than the engine.
 ///
-/// A crossing is an attach, two array headers and a ufunc dispatch, a little
-/// over a microsecond. Measured as the engine's time over the delegated one,
-/// at 256 elements float32 `cbrt` still read 0.75 and float64 `exp2` 1.00;
-/// by 1024 every delegated function read 1.7 or more. Half-way it is.
-const DEFAULT_MIN_UFUNC_LEN: usize = 512;
-
-/// See [`MIN_FLOPS`] for why this is an atomic and not a constant.
-static MIN_UFUNC_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_UFUNC_LEN);
-
-#[cfg(not(feature = "blas"))]
-/// Each delegated ufunc, looked up once, in the order of [`UFUNC_ORDER`].
-static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
-    [const { PyOnceLock::new() }; UFUNC_ORDER.len()];
-
-/// Every [`Ufunc`], for giving each its slot in the ufunc cache and for
-/// listing what this build delegates.
-const UFUNC_ORDER: [Ufunc; 14] = [
+/// No float32 function crosses: see [`Ufunc`] for why.
+const UFUNC_ORDER: [Ufunc; 20] = [
     Ufunc::Tanh,
     Ufunc::Sinh,
     Ufunc::Cosh,
@@ -374,10 +387,17 @@ const UFUNC_ORDER: [Ufunc; 14] = [
     Ufunc::Exp2,
     Ufunc::Log,
     Ufunc::Cbrt,
+    Ufunc::Asin,
+    Ufunc::Acos,
+    Ufunc::Atan,
+    Ufunc::Acosh,
+    Ufunc::Atan2,
+    Ufunc::Pow,
 ];
 
 #[cfg(not(feature = "blas"))]
-/// `out = numpy.<op>(input)`, or `false` with nothing promised about `out`.
+/// `out = numpy.<op>(*operands)`, or `false` with nothing promised about
+/// `out`. Each operand is `out`'s length or a single element NumPy broadcasts.
 ///
 /// A large input is cut into one chunk per thread of the engine's pool, and
 /// each chunk's call runs on its own thread. A ufunc releases the interpreter
@@ -391,9 +411,17 @@ const UFUNC_ORDER: [Ufunc; 14] = [
 /// it, and another Python thread can hold that lock while it waits on exactly
 /// such a task -- a deadlock. A scoped thread waits on the lock and nothing
 /// else, and the calling thread gives the lock up while it joins them.
-fn apply_ufunc<T: Element>(op: Ufunc, input: &[T], out: &mut [MaybeUninit<T>]) -> bool {
-    let len = input.len();
-    if len < MIN_UFUNC_LEN.load(Ordering::Relaxed) || len != out.len() {
+fn apply_ufunc<T: Element, const N: usize>(
+    op: Ufunc,
+    operands: [&[T]; N],
+    out: &mut [MaybeUninit<T>],
+) -> bool {
+    let len = out.len();
+    if len < MIN_UFUNC_LEN.load(Ordering::Relaxed)
+        || operands
+            .iter()
+            .any(|operand| operand.len() != len && operand.len() != 1)
+    {
         return false;
     }
     let slot = UFUNC_ORDER
@@ -402,18 +430,32 @@ fn apply_ufunc<T: Element>(op: Ufunc, input: &[T], out: &mut [MaybeUninit<T>]) -
         .expect("every Ufunc is in UFUNC_ORDER");
     let chunks = (len / UFUNC_CHUNK_MIN).clamp(1, engine::ops::provider::pool_threads());
     if chunks == 1 {
-        return Python::attach(|py| call_ufunc(py, op, slot, input, out));
+        return Python::attach(|py| call_ufunc(py, op, slot, operands, out));
     }
     let chunk = len.div_ceil(chunks);
+    // The operands of the chunk starting at `start`: a slice of each full one,
+    // and a single element as it is.
+    let piece = move |start: usize, end: usize| {
+        operands.map(|operand| {
+            if operand.len() == len {
+                &operand[start..end]
+            } else {
+                operand
+            }
+        })
+    };
     Python::attach(|py| {
         py.detach(|| {
             std::thread::scope(|scope| {
-                let mut pieces = input.chunks(chunk).zip(out.chunks_mut(chunk));
+                let mut pieces = out.chunks_mut(chunk).enumerate().map(|(index, target)| {
+                    let start = index * chunk;
+                    (piece(start, start + target.len()), target)
+                });
                 let (first_in, first_out) = pieces.next().expect("at least one chunk");
                 let handles: Vec<_> = pieces
-                    .map(|(source, target)| {
+                    .map(|(sources, target)| {
                         scope.spawn(move || {
-                            Python::attach(|py| call_ufunc(py, op, slot, source, target))
+                            Python::attach(|py| call_ufunc(py, op, slot, sources, target))
                         })
                     })
                     .collect();
@@ -432,13 +474,13 @@ fn apply_ufunc<T: Element>(op: Ufunc, input: &[T], out: &mut [MaybeUninit<T>]) -
 const UFUNC_CHUNK_MIN: usize = 1 << 16;
 
 #[cfg(not(feature = "blas"))]
-/// One ufunc call over `input` into `out`, on the calling thread, which holds
-/// the interpreter lock.
-fn call_ufunc<T: Element>(
+/// One ufunc call over `operands` into `out`, on the calling thread, which
+/// holds the interpreter lock.
+fn call_ufunc<T: Element, const N: usize>(
     py: Python<'_>,
     op: Ufunc,
     slot: usize,
-    input: &[T],
+    operands: [&[T]; N],
     out: &mut [MaybeUninit<T>],
 ) -> bool {
     let Some(ufunc) = UFUNCS[slot]
@@ -467,33 +509,24 @@ fn call_ufunc<T: Element>(
         // never a warning.
         return false;
     };
-    let len = input.len();
-    let source = unsafe {
-        header(
-            py,
-            1,
-            1,
-            len,
-            Storage::RowMajor,
-            input.as_ptr().cast_mut(),
-            false,
-        )
-    };
-    let target = source.as_ref().and_then(|_| unsafe {
-        header(
-            py,
-            1,
-            1,
-            len,
-            Storage::RowMajor,
-            out.as_mut_ptr().cast::<T>(),
-            true,
-        )
-    });
-    let (Some(source), Some(target)) = (source, target) else {
-        unsafe { ffi::PyErr_Clear() };
-        return false;
-    };
+    // One header at a time, stopping at the first failure -- see
+    // `matrix_product`. The output's goes last, where a ufunc takes it.
+    let mut arguments = Vec::with_capacity(N + 1);
+    let headers = operands
+        .iter()
+        .map(|operand| (operand.as_ptr().cast_mut(), operand.len(), false))
+        .chain([(out.as_mut_ptr().cast::<T>(), out.len(), true)]);
+    for (data, len, writeable) in headers {
+        // SAFETY: each pointer is a live slice of `len` elements borrowed for
+        // this call, and the headers are dropped before it returns.
+        match unsafe { header(py, 1, 1, len, Storage::RowMajor, data, writeable) } {
+            Some(array) => arguments.push(array),
+            None => {
+                unsafe { ffi::PyErr_Clear() };
+                return false;
+            }
+        }
+    }
     // Floating-point errors are silenced for the call, as the engine's own
     // kernels never report them: `log(-1)` is NaN there, not NaN and a
     // `RuntimeWarning` -- and under `-W error` a warning is an exception, which
@@ -509,9 +542,7 @@ fn call_ufunc<T: Element>(
         unsafe { ffi::PyErr_Clear() };
         return false;
     }
-    // The output goes second and positionally, which is how a ufunc takes it
-    // -- see `matrix_product`.
-    let called = PyTuple::new(py, [source, target])
+    let called = PyTuple::new(py, arguments)
         .and_then(|arguments| ufunc.call1(py, arguments))
         .is_ok();
     // SAFETY: `token` came from setting `errors` just above, on this thread,
@@ -608,21 +639,14 @@ fn set_ufunc_threshold(min_len: usize) -> usize {
     MIN_UFUNC_LEN.swap(min_len, Ordering::Relaxed)
 }
 
-/// The element-wise functions this build hands to NumPy, as `(name, dtype)`.
+/// The NumPy names of the float64 element-wise functions this build hands to
+/// NumPy.
 #[pyfunction]
-fn delegated_ufuncs() -> Vec<(&'static str, &'static str)> {
+fn delegated_ufuncs() -> Vec<&'static str> {
     if !cfg!(not(feature = "blas")) {
         return Vec::new();
     }
-    UFUNC_ORDER
-        .into_iter()
-        .flat_map(|op| {
-            [("float32", false), ("float64", true)]
-                .into_iter()
-                .filter(move |&(_, wide)| delegated(op, wide))
-                .map(move |(dtype, _)| (op.numpy_name(), dtype))
-        })
-        .collect()
+    UFUNC_ORDER.into_iter().map(Ufunc::numpy_name).collect()
 }
 
 pub fn register_dispatch_module(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
