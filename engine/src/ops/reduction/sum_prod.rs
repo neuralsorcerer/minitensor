@@ -255,10 +255,26 @@ where
             for row in spans.remainder().chunks_exact(cols) {
                 step(&mut acc, row, 0);
             }
-            for lanes in wide.chunks_exact(cols) {
-                for (slot, &value) in acc.iter_mut().zip(lanes) {
+            // The `k` rows' worth of lanes fold pairwise, not one after
+            // another: a single column is 64 lanes, and merging them in a
+            // chain left a 4096-element row's mean 6 ulps out where `sum`'s
+            // own tree lands 2.
+            let mut groups = span / cols;
+            while groups > 1 {
+                let half = groups / 2;
+                let (low, high) = wide.split_at_mut(half * cols);
+                for (slot, &value) in low.iter_mut().zip(&high[..half * cols]) {
                     *slot = merge(*slot, value);
                 }
+                if groups % 2 == 1 {
+                    wide.copy_within((groups - 1) * cols..groups * cols, half * cols);
+                    groups = half + 1;
+                } else {
+                    groups = half;
+                }
+            }
+            for (slot, &value) in acc.iter_mut().zip(&wide[..cols]) {
+                *slot = merge(value, *slot);
             }
             acc
         })

@@ -462,8 +462,9 @@ pub fn nansum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result
 
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();
-    let needs_mask =
-        tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);
+    // The mask is for the gradient alone; building it for every call with a
+    // `dim` was a full-size pass `nansum` then threw away.
+    let needs_mask = tensor.requires_grad();
     let mask = if needs_mask {
         Some(non_nan_mask(tensor)?)
     } else {

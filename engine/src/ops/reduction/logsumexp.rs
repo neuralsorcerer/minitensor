@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::nan_stats_impl::NanMoment;
 use super::*;
 use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
@@ -738,6 +739,18 @@ pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
     }
 
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
+    // One axis or all of them, with no gradient to record: one fused kernel
+    // rather than a mask, a float copy of it and two reductions.
+    if dim.as_ref().is_none_or(|dims| dims.len() == 1)
+        && let Some(fused) = super::nan_stats_impl::nan_moments_fused(
+            tensor,
+            dim.as_deref(),
+            keepdim,
+            NanMoment::Mean,
+        )?
+    {
+        return Ok(fused);
+    }
     let dims_clone = dim.clone();
     let needs_mask =
         tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);

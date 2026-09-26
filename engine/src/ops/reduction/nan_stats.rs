@@ -21,6 +21,9 @@
 //! ask the NaN-skipping extremum directly, which is both the faster and the
 //! only correct way to spell it.
 
+use super::core_impl::normalize_reduction_dims;
+use super::sum_prod_impl::{fold_lanes, fold_slab_with};
+use crate::ops::map::{outputs_per_task, par_map_indexed};
 use crate::{
     error::{MinitensorError, Result},
     ops::{
@@ -36,8 +39,10 @@ use crate::{
         selection::where_op,
         util::create_scalar_tensor,
     },
-    tensor::{DataType, Shape, Tensor},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
+use num_traits::Float;
+use std::sync::Arc;
 
 /// How many entries along `dim` are not NaN, as a float ready to divide by.
 ///
@@ -59,6 +64,220 @@ fn boolean_false(like: &Tensor) -> Result<Tensor> {
     ))
 }
 
+/// What [`nan_moments_fused`] is asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NanMoment {
+    Mean,
+    /// The variance, divided by the count less this correction.
+    Var {
+        correction: usize,
+    },
+}
+
+/// `nanmean` or `nanvar` over one axis, or over everything, for a tensor that
+/// does not require gradients; `None` when the call is not one of those, and
+/// the composition answers instead.
+///
+/// The compositions are the definitions -- and what gradients go through --
+/// but as kernels they are a dozen full-size passes: `nanvar` built a NaN
+/// mask, a boolean negation of it, a float copy of that to count, the
+/// NaN-skipping mean (which built its own mask and float copy again), a
+/// difference, a masked select and a square, each a new tensor the size of
+/// the input. Here it is three reads of the input and no full-size
+/// intermediate: the non-NaN sums, the non-NaN counts, and for the variance
+/// the squared deviations from their quotient, each through the blocked
+/// column fold `sum` uses, so the accuracy is `sum`'s as well.
+///
+/// The arithmetic after the passes is the composition's: the mean is
+/// `sum / count` in the tensor's dtype, and the variance divides by
+/// `max(count - correction, 0)`, so an all-NaN slice is `0 / 0` and a slice
+/// with one value and a correction of one is `0 / 0` too. A NaN is skipped
+/// wherever it is; an infinity is not, and its deviation `inf - inf` makes
+/// the variance NaN, again as before.
+pub(crate) fn nan_moments_fused(
+    tensor: &Tensor,
+    dims: Option<&[usize]>,
+    keepdim: bool,
+    moment: NanMoment,
+) -> Result<Option<Tensor>> {
+    if tensor.requires_grad() || !tensor.dtype().is_float() {
+        return Ok(None);
+    }
+    let shape = tensor.shape().dims();
+    let (outer, len, inner, out_shape) = match dims {
+        None => (
+            1,
+            tensor.numel(),
+            1,
+            if keepdim {
+                Shape::new(vec![1; shape.len()])
+            } else {
+                Shape::scalar()
+            },
+        ),
+        Some(&[axis]) => {
+            let mut kept = shape.to_vec();
+            if keepdim {
+                kept[axis] = 1;
+            } else {
+                kept.remove(axis);
+            }
+            (
+                shape[..axis].iter().product(),
+                shape[axis],
+                shape[axis + 1..].iter().product(),
+                if kept.is_empty() {
+                    Shape::scalar()
+                } else {
+                    Shape::new(kept)
+                },
+            )
+        }
+        Some(_) => return Ok(None),
+    };
+    // The counts are `u32` lanes; an axis that long falls back rather than
+    // risk them wrapping.
+    if len > u32::MAX as usize {
+        return Ok(None);
+    }
+
+    let data = match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            TensorData::from_vec_f32(
+                nan_moments(input, outer, len, inner, moment),
+                tensor.device(),
+            )
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            TensorData::from_vec_f64(
+                nan_moments(input, outer, len, inner, moment),
+                tensor.device(),
+            )
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Tensor::new(
+        Arc::new(data),
+        out_shape,
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    )))
+}
+
+/// [`NanMoment`] of every column of `outer` row-major `(len, inner)` slabs.
+///
+/// Few slabs are each spread across the pool and many are handed out whole,
+/// the split `sum` makes for the same shape and for the same reason: which
+/// one happens follows from the shape alone, so the thread count cannot
+/// reach the answer.
+fn nan_moments<T>(input: &[T], outer: usize, len: usize, inner: usize, moment: NanMoment) -> Vec<T>
+where
+    T: Float + Send + Sync,
+{
+    if outer == 0 || inner == 0 {
+        return Vec::new();
+    }
+    let slab = len * inner;
+    let one = |index: usize, spread: bool| {
+        slab_moments(
+            &input[index * slab..(index + 1) * slab],
+            inner,
+            spread,
+            moment,
+        )
+    };
+    if outer < NAN_MOMENT_MIN_SLABS {
+        return (0..outer).flat_map(|index| one(index, true)).collect();
+    }
+    let per_task = outputs_per_task(slab.max(1)).div_ceil(inner).max(1);
+    par_map_indexed(outer.div_ceil(per_task), &|task| {
+        let first = task * per_task;
+        (first..(first + per_task).min(outer))
+            .flat_map(|index| one(index, false))
+            .collect::<Vec<T>>()
+    })
+    .concat()
+}
+
+/// Fewer slabs than this are each spread across the pool; `sum`'s threshold.
+const NAN_MOMENT_MIN_SLABS: usize = 4;
+
+/// [`NanMoment`] of each column of one row-major `(rows, cols)` slab.
+fn slab_moments<T>(slab: &[T], cols: usize, spread: bool, moment: NanMoment) -> Vec<T>
+where
+    T: Float + Send + Sync,
+{
+    let add = |x: T, y: T| x + y;
+    let sums = fold_slab_with(
+        slab,
+        cols,
+        T::zero(),
+        |acc: &mut [T], values: &[T], _| {
+            for (a, &v) in acc.iter_mut().zip(values) {
+                *a = *a + if v.is_nan() { T::zero() } else { v };
+            }
+        },
+        add,
+        spread,
+    );
+    let counts = fold_slab_with(
+        slab,
+        cols,
+        0u32,
+        |acc: &mut [u32], values: &[T], _| {
+            for (a, &v) in acc.iter_mut().zip(values) {
+                *a += u32::from(!v.is_nan());
+            }
+        },
+        |x, y| x + y,
+        spread,
+    );
+    let count = |c: u32| T::from(c).unwrap_or_else(T::nan);
+    let means: Vec<T> = sums
+        .iter()
+        .zip(&counts)
+        .map(|(&s, &c)| s / count(c))
+        .collect();
+    let NanMoment::Var { correction } = moment else {
+        return means;
+    };
+
+    let tiled: Vec<T> = means
+        .iter()
+        .copied()
+        .cycle()
+        .take(fold_lanes(cols).max(cols))
+        .collect();
+    let squares = fold_slab_with(
+        slab,
+        cols,
+        T::zero(),
+        |acc: &mut [T], values: &[T], first| {
+            let means = &tiled[first..first + acc.len()];
+            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
+                let d = v - m;
+                *a = *a + if v.is_nan() { T::zero() } else { d * d };
+            }
+        },
+        add,
+        spread,
+    );
+    squares
+        .iter()
+        .zip(&counts)
+        .map(|(&q, &c)| q / count(c.saturating_sub(correction.min(u32::MAX as usize) as u32)))
+        .collect()
+}
+
 /// Variance over the non-NaN entries along `dim`.
 ///
 /// A slice with fewer non-NaN entries than the correction demands has no
@@ -74,6 +293,20 @@ pub fn nanvar(
     // `nanmax` and `nanprod` make, rather than a refusal.
     if !tensor.dtype().is_float() {
         return crate::ops::reduction::var(tensor, dim, keepdim, unbiased);
+    }
+    // An empty `dim` reduces nothing; the composition already answers that.
+    let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?;
+    if dims.as_ref().is_none_or(|dims| !dims.is_empty())
+        && let Some(fused) = nan_moments_fused(
+            tensor,
+            dims.as_deref(),
+            keepdim,
+            NanMoment::Var {
+                correction: usize::from(unbiased),
+            },
+        )?
+    {
+        return Ok(fused);
     }
 
     // Centred on the NaN-skipping mean, kept broadcastable.

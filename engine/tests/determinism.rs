@@ -598,3 +598,44 @@ fn var_along_a_non_last_axis_is_bitwise_stable_across_thread_counts() {
         });
     }
 }
+
+/// The fused `nanmean` and `nanvar` split a slab exactly as `sum` does, and a
+/// NaN only ever drops out of a lane, so neither may let the pool reach the
+/// answer either.
+#[test]
+fn nan_statistics_are_bitwise_stable_across_thread_counts() {
+    for (dims, axis) in [
+        (vec![300_000usize], None),
+        (vec![3usize, 4096], Some(0isize)),
+        (vec![4096, 64], Some(0)),
+        (vec![2, 3000, 40], Some(1)),
+        (vec![16, 3000, 3], Some(1)),
+        (vec![64, 4096], Some(1)),
+    ] {
+        let numel: usize = dims.iter().product();
+        let mut values = wide_magnitude_tensor(numel, 1)
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .to_vec();
+        for (i, value) in values.iter_mut().enumerate() {
+            if i % 11 == 0 {
+                *value = f32::NAN;
+            }
+        }
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let dim = axis.map(|a| vec![a]);
+        assert_thread_invariant(&format!("nanmean({axis:?}) on {dims:?}"), || {
+            reduction::nanmean(&tensor, dim.clone(), false).unwrap()
+        });
+        assert_thread_invariant(&format!("nanvar({axis:?}) on {dims:?}"), || {
+            reduction::nanvar(&tensor, dim.clone(), false, true).unwrap()
+        });
+    }
+}
