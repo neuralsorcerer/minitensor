@@ -730,10 +730,26 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
                             if inner == 1 {
                                 // One element per row, so the slice copy the other
                                 // branch makes is a whole `memcpy` call to move
-                                // four bytes.
-                                for slot in out_chunk.iter_mut() {
-                                    slot.write(src[outer * dims[dim] + indices[chosen] as usize]);
-                                    chosen += 1;
+                                // four bytes. Taken a run at a time -- the part of
+                                // the chunk inside one outer block -- as a zip of
+                                // the output against the indices, reading from
+                                // that block's slice: stepping two counters and
+                                // testing for the wrap on every element, with the
+                                // shape re-read each time, cost 2.2ns an element
+                                // whatever the index pattern.
+                                let block = dims[dim];
+                                let mut written = 0;
+                                while written < out_chunk.len() {
+                                    let take = (selected - chosen).min(out_chunk.len() - written);
+                                    let from = &src[outer * block..(outer + 1) * block];
+                                    for (slot, &at) in out_chunk[written..written + take]
+                                        .iter_mut()
+                                        .zip(&indices[chosen..chosen + take])
+                                    {
+                                        slot.write(from[at as usize]);
+                                    }
+                                    written += take;
+                                    chosen += take;
                                     if chosen == selected {
                                         chosen = 0;
                                         outer += 1;
@@ -886,12 +902,51 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
                 build_vec::<$ty, _>(output_numel, |spare| {
                     let bytes = std::mem::size_of_val(spare);
                     par_out_chunks_sized(spare, MOVE_CHUNK, bytes, &|start, out_chunk| {
-                        for (offset, slot) in out_chunk.iter_mut().enumerate() {
-                            let position = start + offset;
-                            let base = (position / chunk_size) * dim_size * inner;
-                            let column = position % inner;
-                            let row = idx[position] as usize;
-                            slot.write(src[base + row * inner + column]);
+                        // Where the chunk starts, found once: its outer block and
+                        // its column within a row. The walk then steps them, a
+                        // run at a time, where dividing them out of the position
+                        // for every element cost two integer divisions each.
+                        let block = dim_size * inner;
+                        let mut outer = start / chunk_size;
+                        let mut at = start;
+                        let end = start + out_chunk.len();
+                        if inner == 1 {
+                            // Along the last axis -- the usual
+                            // `take_along_axis(x, i, -1)` -- a run is the rest of
+                            // one outer row: a zip of the output against the
+                            // indices, reading that row of the source.
+                            while at < end {
+                                let stop = ((outer + 1) * chunk_size).min(end);
+                                let from = &src[outer * block..(outer + 1) * block];
+                                for (slot, &row) in out_chunk[at - start..stop - start]
+                                    .iter_mut()
+                                    .zip(&idx[at..stop])
+                                {
+                                    slot.write(from[row as usize]);
+                                }
+                                at = stop;
+                                outer += 1;
+                            }
+                            return;
+                        }
+                        let mut column = at % inner;
+                        while at < end {
+                            // The rest of one row of `inner` columns, all in the
+                            // same outer block.
+                            let stop = (at + inner - column).min(end);
+                            let base = outer * block + column;
+                            for (k, (slot, &row)) in out_chunk[at - start..stop - start]
+                                .iter_mut()
+                                .zip(&idx[at..stop])
+                                .enumerate()
+                            {
+                                slot.write(src[base + row as usize * inner + k]);
+                            }
+                            at = stop;
+                            column = 0;
+                            if at % chunk_size == 0 {
+                                outer += 1;
+                            }
                         }
                     });
                 })

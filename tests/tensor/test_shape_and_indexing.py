@@ -1083,6 +1083,32 @@ def test_gather_along_every_axis_of_a_large_tensor(shape, dim):
     np.testing.assert_array_equal(got, np.take_along_axis(values, positions, axis=dim))
 
 
+@pytest.mark.parametrize(
+    "shape,dim,index_shape",
+    [
+        ((3, 700001), 1, (3, 700001)),
+        ((700001, 3), 0, (700001, 3)),
+        ((5, 300, 1000), 1, (5, 500, 1000)),
+        ((4, 6, 7), 2, (4, 6, 11)),
+    ],
+)
+def test_gather_split_across_the_pool_starts_its_chunks_mid_row(
+    shape, dim, index_shape
+):
+    """Gather walks each chunk from where it starts rather than dividing every
+    position out afresh, so the walk has to pick up correctly wherever a chunk
+    begins. The first three outputs are past the size at which the work is
+    split across the pool, so their chunks start mid-row; the index axis is a
+    different length from the input's in two of them."""
+    rng = np.random.default_rng(sum(index_shape) + dim)
+    values = rng.standard_normal(shape)
+    positions = rng.integers(0, shape[dim], index_shape).astype(np.int64)
+    got = F.gather(
+        mt.Tensor.from_numpy(values), dim, mt.Tensor.from_numpy(positions)
+    ).numpy()
+    np.testing.assert_array_equal(got, np.take_along_axis(values, positions, axis=dim))
+
+
 @pytest.mark.parametrize("where", [0, 1, 8192, 19999])
 def test_an_out_of_range_index_is_refused_from_anywhere_in_the_tensor(where):
     """The check runs in parallel and stops at the first offender, so it has to
