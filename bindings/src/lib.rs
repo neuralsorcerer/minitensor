@@ -19,17 +19,17 @@ mod functional;
 // installed -- that build linked a BLAS into the engine deliberately, and its
 // GEMM is then the same kind of thing this module reaches for, called directly
 // and without the interpreter in the way -- but the module itself still
-// registers, so `_core.dispatch` answers `gemm_provider_installed() == False`
+// registers, so `_core.dispatch` answers `provider_installed() == False`
 // instead of not existing. Gating the module was the original spelling and it
 // did not compile: the registration below is unconditional, so `--features
-// blas` failed to resolve `gemm` at all.
-mod gemm;
+// blas` failed to resolve the module at all.
 mod grad_utils;
 mod lr_scheduler;
 mod nn;
 mod numpy_compat;
 mod optim;
 mod plugins;
+mod provider;
 mod serialization;
 mod share;
 mod tensor;
@@ -47,7 +47,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // crossing into the interpreter to reach another one would be a cost for
     // nothing. `dispatch.PROVIDER_EXPECTED` reports which of the two this is.
     #[cfg(not(feature = "blas"))]
-    gemm::install_gemm_provider();
+    provider::install_provider();
 
     // Add version information
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -96,7 +96,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     plugins::register_plugin_module(py, &plugins_module)?;
     m.add_submodule(&plugins_module)?;
 
-    gemm::register_gemm_module(py, m)?;
+    provider::register_dispatch_module(py, m)?;
     domains::register_domains_module(py, m)?;
 
     serialization::register_serialization_module(py, m)?;

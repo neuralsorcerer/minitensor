@@ -189,4 +189,4 @@ class TestTheKnobs:
         which makes the assertion the stronger one either way: not "a provider
         exists" but "the provider agrees with the build".
         """
-        assert dispatch.gemm_provider_installed() is dispatch.PROVIDER_EXPECTED
+        assert dispatch.provider_installed() is dispatch.PROVIDER_EXPECTED

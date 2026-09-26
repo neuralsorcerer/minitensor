@@ -105,15 +105,15 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
                 // The provider is offered it that way round rather than being
                 // handed a transposed copy: the copy is the cost this function
                 // exists to avoid, and a GEMM reads either layout.
-                let delegated = super::$offer(super::Gemm {
+                let delegated = crate::ops::provider::$offer(crate::ops::provider::Gemm {
                     batch: 1,
                     m: rows,
                     k: in_features,
                     n: out_features,
                     lhs: a,
-                    lhs_storage: super::Storage::RowMajor,
+                    lhs_storage: crate::ops::provider::Storage::RowMajor,
                     rhs: b,
-                    rhs_storage: super::Storage::Transposed,
+                    rhs_storage: crate::ops::provider::Storage::Transposed,
                     out: c,
                 });
                 if !delegated {

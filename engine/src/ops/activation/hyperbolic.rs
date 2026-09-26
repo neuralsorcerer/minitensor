@@ -276,8 +276,13 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
 /// dtype and map `$f` element-wise into a fresh, fully-initialized buffer (no
 /// zeroing pass; see `ops::map`). Only the mapping closure differs per
 /// op.
+///
+/// A trailing `offer Op` first offers the whole input to the installed
+/// provider as [`Ufunc::Op`](crate::ops::provider::Ufunc), and maps `$f` only
+/// if it declines -- see `ops::provider` for which ones it takes and why.
 macro_rules! float_unary_kernel {
-    ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $f:expr) => {
+    ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $f:expr
+     $(, offer $op:ident)?) => {
         pub(crate) fn $name(tensor: &Tensor) -> Result<TensorData> {
             let input_data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
@@ -286,8 +291,17 @@ macro_rules! float_unary_kernel {
                     " slice from input tensor"
                 ))
             })?;
+            let offered: Option<Vec<$ty>> = None;
+            $(let offered = offered.or_else(|| {
+                <$ty as crate::ops::provider::OfferUnary>::offer_unary(
+                    crate::ops::provider::Ufunc::$op,
+                    input_data,
+                )
+            });)?
             Ok(TensorData::from_vec::<$ty>(
-                unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, $f),
+                offered.unwrap_or_else(|| {
+                    unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, $f)
+                }),
                 DataType::$dtype,
                 tensor.device(),
             ))
@@ -376,7 +390,7 @@ macro_rules! vector_f32 {
 // has nothing wider to promote to, so its routines stay scalar, each written
 // against the ranges where the textbook identity loses digits.
 
-float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);
+float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp, offer Exp);
 
 vector_f32!(
     /// Vectorized; bit-identical to `(x as f64).exp() as f32` on all 2^32 inputs.
@@ -391,7 +405,7 @@ vector_f32!(
     log
 );
 
-float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln);
+float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln, offer Log);
 
 vector_f32!(
     /// Vectorized. The kernel handles `x <= -1` itself: `1 + x` is zero or
@@ -408,7 +422,7 @@ float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
     } else {
         val.ln_1p()
     }
-});
+}, offer Log1p);
 
 vector_f32!(
     /// Vectorized. The real cube root as `exp(log|x| / 3)` with the sign put
@@ -434,7 +448,7 @@ vector_f32!(
     std::f64::consts::LOG2_E
 );
 
-float_unary_kernel!(log2_f64, as_f64_slice, f64, Float64, "f64", f64::log2);
+float_unary_kernel!(log2_f64, as_f64_slice, f64, Float64, "f64", f64::log2, offer Log2);
 
 vector_f32!(
     /// `log` scaled by `1/ln 10`; see `log2_f32`.
@@ -443,7 +457,7 @@ vector_f32!(
     std::f64::consts::LOG10_E
 );
 
-float_unary_kernel!(log10_f64, as_f64_slice, f64, Float64, "f64", f64::log10);
+float_unary_kernel!(log10_f64, as_f64_slice, f64, Float64, "f64", f64::log10, offer Log10);
 
 vector_f32!(
     /// Vectorized -- see `ops::simd::transcendental`. Replaces `libm::erff`, which
@@ -469,7 +483,7 @@ vector_f32!(
     expm1
 );
 
-float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1);
+float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1, offer Expm1);
 
 vector_f32!(
     /// Vectorized; bit-identical to `(x as f64).sin() as f32` on all 2^32 inputs.
@@ -494,7 +508,7 @@ vector_f32!(
     tan
 );
 
-float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan);
+float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan, offer Tan);
 
 vector_f32!(
     /// Vectorized, sharing its reduction with `acos_f32`.
@@ -593,7 +607,7 @@ vector_f32!(
     sinh
 );
 
-float_unary_kernel!(sinh_f64, as_f64_slice, f64, Float64, "f64", f64::sinh);
+float_unary_kernel!(sinh_f64, as_f64_slice, f64, Float64, "f64", f64::sinh, offer Sinh);
 
 vector_f32!(
     /// Vectorized. Unlike its neighbours this replaces glibc's `coshf` rather
@@ -603,7 +617,7 @@ vector_f32!(
     cosh
 );
 
-float_unary_kernel!(cosh_f64, as_f64_slice, f64, Float64, "f64", f64::cosh);
+float_unary_kernel!(cosh_f64, as_f64_slice, f64, Float64, "f64", f64::cosh, offer Cosh);
 
 /// Above this the `x^2` in the exact form would overflow long before it
 /// mattered: `asinh(a) - ln(2a)` is under `1/(4a^2)`, which at `2^28` is 3e-18
@@ -648,7 +662,7 @@ float_unary_kernel!(asinh_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
         (a + a * a / (1.0 + (1.0 + a * a).sqrt())).ln_1p()
     };
     y.copysign(x)
-});
+}, offer Asinh);
 
 vector_f32!(
     /// Vectorized, and a correctness fix. See `ops::simd::transcendental`.
@@ -724,11 +738,13 @@ fn atanh_stable(x: f64) -> f64 {
     value.copysign(x)
 }
 
-float_unary_kernel!(atanh_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
-    atanh_stable(x as f64) as f32
-});
+vector_f32!(
+    /// Vectorized, and correctly rounded like the float64 scalar it replaces.
+    atanh_f32,
+    atanh
+);
 
-float_unary_kernel!(atanh_f64, as_f64_slice, f64, Float64, "f64", atanh_stable);
+float_unary_kernel!(atanh_f64, as_f64_slice, f64, Float64, "f64", atanh_stable, offer Atanh);
 
 /// Vectorized. `log1p(exp(beta*x))/beta`, with the linear tail above
 /// `threshold` selected per block rather than per element.

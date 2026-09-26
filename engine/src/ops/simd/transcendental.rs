@@ -234,6 +234,11 @@
 //! routine in this crate by a wide margin, 8.1ms over a million float32 where
 //! the `log` kernel it is now built from costs 0.324.
 //!
+//! `atanh` is bit-identical too. It replaced a promoted scalar, so that keeps
+//! what it returned, at vector speed: it had been the one float32 function
+//! left on a scalar loop, 7x slower than NumPy, whose float32 `arctanh`
+//! misses the correctly rounded answer on 4.7% of inputs.
+//!
 //! `erf` and `erfc` are within one ulp of the correctly rounded result
 //! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
 //! of the 2^32 inputs respectively. The routines they replace misround
@@ -1005,6 +1010,32 @@ fn asinh_one<const FMA: bool>(x: f32) -> f32 {
     let c = w - (u - 1.0);
     let y = log_core::<FMA, true>(u, c).copysign(xd) as f32;
     if x.is_finite() { y } else { x }
+}
+
+/// `atanh(x)`, as `sign(x) * log1p(2|x| / (1 - |x|)) / 2`.
+///
+/// `atanh` was the one float32 function left on a scalar loop -- `atanh_stable`
+/// in float64 per element, correctly rounded and 7x slower than NumPy, whose
+/// own float32 `arctanh` misses the correctly rounded answer on 4.7% of inputs.
+/// This is that same formula on the vector path, and it keeps the rounding.
+///
+/// For a float32 magnitude `m` both `1 - m` and `2m` are exact in float64, so
+/// the only roundings ahead of the logarithm are the division and the `1 + w`
+/// inside `log1p`, whose residual `log_core` carries -- the same construction
+/// as [`log1p_one`], and the reason there is no separate small-argument form.
+///
+/// The domain edges need no fixup. `|x| = 1` makes `w` infinite and the answer
+/// `+-inf`; `|x| > 1` makes `w < -2`, so `u < 0` and `log_core` answers NaN; an
+/// infinite `x` is `inf / -inf`, which is NaN; and NaN stays NaN. Odd, so the
+/// sign goes on at the end, which also keeps `atanh(-0.0) = -0.0`.
+#[inline(always)]
+fn atanh_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let m = xd.abs();
+    let w = 2.0 * m / (1.0 - m);
+    let u = 1.0 + w;
+    let c = w - (u - 1.0);
+    ((0.5 * log_core::<FMA, true>(u, c)).copysign(xd)) as f32
 }
 
 /// `log(x) / ln(base)`, for the fixed-base logarithms.
@@ -1792,6 +1823,7 @@ block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
 block_kernel!(asinh_block, asinh_one, asinh_block_avx512, asinh_block_avx2);
+block_kernel!(atanh_block, atanh_one, atanh_block_avx512, atanh_block_avx2);
 block_kernel!(cbrt_block, cbrt_one, cbrt_block_avx512, cbrt_block_avx2);
 block_kernel_param_fallback!(
     pow_const_block,
@@ -2286,6 +2318,19 @@ impl F32Kernel {
 
     /// Write `asinh(input[i])` into every element of `out`.
     #[inline]
+    pub(crate) fn atanh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            atanh_block,
+            atanh_block_avx512,
+            atanh_block_avx2
+        )
+    }
+
+    /// Write `asinh(input[i])` into every element of `out`.
+    #[inline]
     pub(crate) fn asinh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
         dispatch!(
             self,
@@ -2468,6 +2513,7 @@ mod tests {
         Erfc,
         Acosh,
         Asinh,
+        Atanh,
         Cbrt,
         Exp2,
         Log,
@@ -2499,6 +2545,7 @@ mod tests {
             Op::Acosh => k.acosh(input, out),
             Op::Cbrt => k.cbrt(input, out),
             Op::Asinh => k.asinh(input, out),
+            Op::Atanh => k.atanh(input, out),
             Op::Exp2 => k.exp_scaled(input, out, std::f64::consts::LN_2),
             Op::Log => k.log(input, out),
             Op::Log2 => k.log_scaled(input, out, std::f64::consts::LOG2_E),
@@ -2740,6 +2787,7 @@ mod tests {
             Op::Acosh => xd.acosh() as f32,
             Op::Cbrt => xd.cbrt() as f32,
             Op::Asinh => xd.asinh() as f32,
+            Op::Atanh => xd.atanh() as f32,
             Op::Exp2 => xd.exp2() as f32,
             Op::Log => xd.ln() as f32,
             Op::Log2 => xd.log2() as f32,
@@ -2773,11 +2821,12 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 13] {
+    fn bit_exact_ops() -> [Op; 14] {
         [
             Op::Tanh,
             Op::Exp,
             Op::Asinh,
+            Op::Atanh,
             Op::Acosh,
             Op::Expm1,
             Op::Sinh,

@@ -25,6 +25,7 @@ pub mod minmax;
 pub mod normalization;
 pub(crate) mod order;
 pub mod pooling;
+pub mod provider;
 pub mod reduction;
 pub mod search;
 pub mod selection;

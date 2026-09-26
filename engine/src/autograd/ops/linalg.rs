@@ -122,10 +122,8 @@ fn check_extents(grad: usize, grad_needs: usize, other: usize, other_needs: usiz
 
 impl GradientFunction for LinearBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        use crate::ops::linalg::{
-            Gemm, Storage, gemm_f32, gemm_f64, gemm_tn_f32, gemm_tn_f64, offer_gemm_f32,
-            offer_gemm_f64,
-        };
+        use crate::ops::linalg::{gemm_f32, gemm_f64, gemm_tn_f32, gemm_tn_f64};
+        use crate::ops::provider::{Gemm, Storage, offer_gemm_f32, offer_gemm_f64};
         use crate::tensor::{DataType, Shape, TensorData};
         use std::sync::Arc;
 

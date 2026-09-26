@@ -4119,15 +4119,23 @@ which thread built the graph and whether it was cleared in between.
 ### Updating parameters while another thread reads them
 
 Every operation holds the GIL, so two Python threads never run tensor code at
-the same moment -- with one exception. A large `float32` or `float64` product
-is handed to `numpy.matmul`, which releases the GIL while its BLAS runs. During
-that window another thread can run, and if it updates a parameter the product
-is reading -- an optimizer `step()`, `copy_`, `fill_` or an item assignment on
-a tensor that requires a gradient, all of which write the parameter in place so
-every handle to it sees the update -- the product reads values that are being
+the same moment -- with two exceptions, both work handed to NumPy. A large
+`float32` or `float64` product goes to `numpy.matmul`, and the element-wise
+functions listed by `minitensor._core.dispatch.delegated_ufuncs()` (most
+float64 transcendentals, and `cbrt`/`atanh` in float32) go to NumPy's ufuncs
+above a few hundred elements; both release the GIL while their loops run.
+During that window another thread can run, and if it updates a tensor the
+operation is reading -- an optimizer `step()`, `copy_`, `fill_` or an item
+assignment on a tensor that requires a gradient, all of which write in place so
+every handle sees the update -- the operation reads values that are being
 overwritten. The result is whatever mixture of old and new values the timing
 gives, the same race PyTorch has. Keep parameter updates off threads that are
 running forward passes on the same model at the same time.
+
+The window is deliberate. Closing it would mean copying every operand before
+the handoff, which the zero-copy design exists to avoid, or taking a lock on
+every in-place write, which every optimizer step would pay for a pattern that
+is racy in PyTorch too.
 
 ## 13) Notes on devices & backends
 

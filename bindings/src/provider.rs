@@ -4,20 +4,24 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Sending one dense product to the BLAS that `numpy` already brought.
+//! Sending work to the `numpy` every install already has, where it measured
+//! faster than the engine.
 //!
-//! Every install of this library has `numpy` in it, and every install of
-//! `numpy` has a tuned BLAS in it -- OpenBLAS on the wheels, whatever the
-//! distributor chose otherwise. On a single large `float32` or `float64`
-//! product that BLAS beats the engine's own kernel by 1.6-2.3x, which is not a
-//! gap a portable Rust kernel closes: it is per-architecture assembly, chosen
-//! at load time from a table of them.
+//! Two kinds of work cross, both measured rather than assumed. A dense product
+//! goes to the BLAS `numpy` brought: on a single large `float32` or `float64`
+//! product it beats the engine's own kernel by 1.6-2.3x, which is not a gap a
+//! portable Rust kernel closes -- it is per-architecture assembly, chosen at
+//! load time from a table of them. And a handful of element-wise functions
+//! go to `numpy`'s ufuncs, listed in [`delegated`] with the measurements that
+//! put them there: in float64 the engine has nothing but scalar `libm` for
+//! them, where `numpy` runs vectorized loops that are both faster and at least
+//! as accurate.
 //!
-//! Reaching it costs three array headers and one call. The engine's buffers are
+//! Reaching either costs array headers and one call. The engine's buffers are
 //! already contiguous and row-major -- the layout invariant the whole engine is
 //! built on -- which is exactly what an array header wants, so nothing is
-//! copied, converted or allocated on either side, and `matmul` writes its
-//! answer straight into the output buffer the engine allocated.
+//! copied, converted or allocated on either side, and the answer is written
+//! straight into the output buffer the engine allocated.
 //!
 //! `matmul` and not `PyArray_MatrixProduct2`, which is the C entry point behind
 //! `dot` and looks like the cheaper way in. It is the wrong kernel: given an
@@ -25,17 +29,18 @@
 //! product (4096x128 @ 128x4096), which is the shape a wide linear layer
 //! produces and the last one to hand to a slower path.
 //!
-//! Everything else stays where it is. Batched products already saturate the
-//! thread pool with one whole matrix per worker and are within 5-45% of NumPy
-//! or ahead of it; integers do not reach a BLAS at all, in either library.
+//! Everything else stays where it is: the engine's element-wise kernels and
+//! reductions beat `numpy` by 1.2-5x, because they are parallel, fused, or
+//! both, and `numpy` is neither.
 
 // The provider and everything it needs. Not built under `--features blas`:
 // that build linked a BLAS into the engine, and reaching through the
 // interpreter for another one would be a cost with nothing on the other side
 // of it. The knobs and their reporting below are built either way, so
 // `_core.dispatch` still answers -- see `PROVIDER_EXPECTED`.
+use engine::ops::provider::Ufunc;
 #[cfg(not(feature = "blas"))]
-use engine::ops::linalg::{Gemm, GemmProvider, Storage, set_gemm_provider};
+use engine::ops::provider::{Gemm, Provider, Storage, set_provider};
 #[cfg(not(feature = "blas"))]
 use numpy::npyffi::{
     NPY_ARRAY_ALIGNED, NPY_ARRAY_C_CONTIGUOUS, NPY_ARRAY_F_CONTIGUOUS, NPY_ARRAY_WRITEABLE,
@@ -50,7 +55,9 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
 #[cfg(not(feature = "blas"))]
-use pyo3::types::PyTuple;
+use pyo3::types::{IntoPyDict, PyTuple};
+#[cfg(not(feature = "blas"))]
+use std::mem::MaybeUninit;
 #[cfg(not(feature = "blas"))]
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,8 +114,9 @@ static MIN_K: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_K);
 static MATMUL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[cfg(not(feature = "blas"))]
-/// A dense GEMM through NumPy's C-API, on memory the engine owns.
-struct NumpyGemm;
+/// Dense GEMMs and element-wise ufuncs through NumPy, on memory the engine
+/// owns.
+struct Numpy;
 
 #[cfg(not(feature = "blas"))]
 /// One `[batch, rows, cols]` array header over `data`, owning nothing.
@@ -273,7 +281,7 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
 }
 
 #[cfg(not(feature = "blas"))]
-impl GemmProvider for NumpyGemm {
+impl Provider for Numpy {
     fn gemm_f32(&self, mut request: Gemm<'_, f32>) -> bool {
         matrix_product(&mut request)
     }
@@ -281,7 +289,246 @@ impl GemmProvider for NumpyGemm {
     fn gemm_f64(&self, mut request: Gemm<'_, f64>) -> bool {
         matrix_product(&mut request)
     }
+
+    fn unary_f32(&self, op: Ufunc, input: &[f32], out: &mut [MaybeUninit<f32>]) -> bool {
+        delegated(op, false) && apply_ufunc(op, input, out)
+    }
+
+    fn unary_f64(&self, op: Ufunc, input: &[f64], out: &mut [MaybeUninit<f64>]) -> bool {
+        delegated(op, true) && apply_ufunc(op, input, out)
+    }
 }
+
+/// Whether `numpy` computes `op` faster than the engine, in float64 or not.
+///
+/// Measured as NumPy's time over the engine's own kernel (below 1 means NumPy
+/// is faster), over 1e3, 1e5 and 1e6 elements on a 4-core x86-64 container:
+///
+/// ```text
+///   float64     1e3   1e5   1e6
+///   tanh       0.19  0.39  0.41
+///   sinh       0.17  0.34  0.34
+///   cosh       0.22  0.41  0.48
+///   asinh      0.21  0.49  0.53
+///   atanh      0.30  0.50  0.51
+///   log1p      0.23  0.53  0.56
+///   log10      0.21  0.52  0.53
+///   tan        0.28  0.77  0.74
+///   expm1      0.38  0.76  0.80
+///   log2       0.36  0.88  0.94
+///   exp        0.32  0.78  0.92
+///   log        0.35  0.89  0.92
+///   exp2       0.35  0.24  0.93
+///   cbrt       0.12  0.08  0.29
+/// ```
+///
+/// Float64 has no wider type to compute in and round from, which is the trick
+/// every float32 kernel in `ops::simd::transcendental` is built on, so the
+/// engine's float64 arms are scalar `libm` calls, one element at a time;
+/// NumPy's are vectorized loops, and for `tanh` the more accurate of the two
+/// as well (1 ulp against glibc's 2).
+///
+/// No float32 function crosses. The two NumPy was faster at are the two where
+/// its answer is worse: the engine's float32 `cbrt` and `atanh` are correctly
+/// rounded on every input, and NumPy's miss on about a third and on 4.7% of
+/// them. Speed that costs the answer is not what delegation is for, so `atanh`
+/// got a vectorized kernel instead and `cbrt` keeps its own.
+///
+/// Delegated, a million elements take 2.5-14x less time than the engine's
+/// loop did, and 2.8-4.5x less than calling NumPy directly -- [`apply_ufunc`]
+/// runs its loop on every thread the engine would have used.
+fn delegated(_op: Ufunc, float64: bool) -> bool {
+    float64
+}
+
+/// Elements below which a ufunc is not worth the crossing.
+///
+/// A crossing is an attach, two array headers and a ufunc dispatch, a little
+/// over a microsecond. Measured as the engine's time over the delegated one,
+/// at 256 elements float32 `cbrt` still read 0.75 and float64 `exp2` 1.00;
+/// by 1024 every delegated function read 1.7 or more. Half-way it is.
+const DEFAULT_MIN_UFUNC_LEN: usize = 512;
+
+/// See [`MIN_FLOPS`] for why this is an atomic and not a constant.
+static MIN_UFUNC_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_UFUNC_LEN);
+
+#[cfg(not(feature = "blas"))]
+/// Each delegated ufunc, looked up once, in the order of [`UFUNC_ORDER`].
+static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
+    [const { PyOnceLock::new() }; UFUNC_ORDER.len()];
+
+/// Every [`Ufunc`], for giving each its slot in the ufunc cache and for
+/// listing what this build delegates.
+const UFUNC_ORDER: [Ufunc; 14] = [
+    Ufunc::Tanh,
+    Ufunc::Sinh,
+    Ufunc::Cosh,
+    Ufunc::Tan,
+    Ufunc::Asinh,
+    Ufunc::Atanh,
+    Ufunc::Expm1,
+    Ufunc::Log1p,
+    Ufunc::Log2,
+    Ufunc::Log10,
+    Ufunc::Exp,
+    Ufunc::Exp2,
+    Ufunc::Log,
+    Ufunc::Cbrt,
+];
+
+#[cfg(not(feature = "blas"))]
+/// `out = numpy.<op>(input)`, or `false` with nothing promised about `out`.
+///
+/// A large input is cut into one chunk per thread of the engine's pool, and
+/// each chunk's call runs on its own thread. A ufunc releases the interpreter
+/// lock inside its loop, so the chunks run at once: NumPy's vectorized loop
+/// and the engine's parallelism together, where a single call is one core.
+/// On a million float64 that took `exp`, `log` and `exp2` from 0.86-0.91x of
+/// the engine's own four-core scalar loop to ahead of it.
+///
+/// The threads are scoped ones of their own, not the engine's pool. A pool
+/// worker waiting for the interpreter lock stalls every task queued behind
+/// it, and another Python thread can hold that lock while it waits on exactly
+/// such a task -- a deadlock. A scoped thread waits on the lock and nothing
+/// else, and the calling thread gives the lock up while it joins them.
+fn apply_ufunc<T: Element>(op: Ufunc, input: &[T], out: &mut [MaybeUninit<T>]) -> bool {
+    let len = input.len();
+    if len < MIN_UFUNC_LEN.load(Ordering::Relaxed) || len != out.len() {
+        return false;
+    }
+    let slot = UFUNC_ORDER
+        .iter()
+        .position(|&known| known == op)
+        .expect("every Ufunc is in UFUNC_ORDER");
+    let chunks = (len / UFUNC_CHUNK_MIN).clamp(1, engine::ops::provider::pool_threads());
+    if chunks == 1 {
+        return Python::attach(|py| call_ufunc(py, op, slot, input, out));
+    }
+    let chunk = len.div_ceil(chunks);
+    Python::attach(|py| {
+        py.detach(|| {
+            std::thread::scope(|scope| {
+                let mut pieces = input.chunks(chunk).zip(out.chunks_mut(chunk));
+                let (first_in, first_out) = pieces.next().expect("at least one chunk");
+                let handles: Vec<_> = pieces
+                    .map(|(source, target)| {
+                        scope.spawn(move || {
+                            Python::attach(|py| call_ufunc(py, op, slot, source, target))
+                        })
+                    })
+                    .collect();
+                let first = Python::attach(|py| call_ufunc(py, op, slot, first_in, first_out));
+                handles
+                    .into_iter()
+                    .fold(first, |all, handle| handle.join().unwrap_or(false) && all)
+            })
+        })
+    })
+}
+
+#[cfg(not(feature = "blas"))]
+/// Elements a thread of [`apply_ufunc`] is given at the least: below this a
+/// thread costs more to start than its share of the loop.
+const UFUNC_CHUNK_MIN: usize = 1 << 16;
+
+#[cfg(not(feature = "blas"))]
+/// One ufunc call over `input` into `out`, on the calling thread, which holds
+/// the interpreter lock.
+fn call_ufunc<T: Element>(
+    py: Python<'_>,
+    op: Ufunc,
+    slot: usize,
+    input: &[T],
+    out: &mut [MaybeUninit<T>],
+) -> bool {
+    let Some(ufunc) = UFUNCS[slot]
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(py.import("numpy")?.getattr(op.numpy_name())?.unbind())
+        })
+        .ok()
+    else {
+        return false;
+    };
+    let Some((errors, ignore)) = QUIET
+        .get_or_try_init(py, || -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+            let config = py.import("numpy._core._ufunc_config")?;
+            let ignore = config
+                .getattr("_make_extobj")?
+                .call((), Some(&[("all", "ignore")].into_py_dict(py)?))?;
+            Ok((
+                config.getattr("_extobj_contextvar")?.unbind(),
+                ignore.unbind(),
+            ))
+        })
+        .ok()
+    else {
+        // A NumPy without the error-state variable this was written against:
+        // the engine computes the function instead, which costs speed and
+        // never a warning.
+        return false;
+    };
+    let len = input.len();
+    let source = unsafe {
+        header(
+            py,
+            1,
+            1,
+            len,
+            Storage::RowMajor,
+            input.as_ptr().cast_mut(),
+            false,
+        )
+    };
+    let target = source.as_ref().and_then(|_| unsafe {
+        header(
+            py,
+            1,
+            1,
+            len,
+            Storage::RowMajor,
+            out.as_mut_ptr().cast::<T>(),
+            true,
+        )
+    });
+    let (Some(source), Some(target)) = (source, target) else {
+        unsafe { ffi::PyErr_Clear() };
+        return false;
+    };
+    // Floating-point errors are silenced for the call, as the engine's own
+    // kernels never report them: `log(-1)` is NaN there, not NaN and a
+    // `RuntimeWarning` -- and under `-W error` a warning is an exception, which
+    // would send every call with such a value back to the slow path.
+    // `np.errstate` does this by setting a context variable, and costs 2.3
+    // microseconds a call to build and tear down; setting the variable
+    // directly costs a small fraction of that. The variable is per thread, so
+    // each chunk's thread sets its own.
+    let (errors, ignore) = (errors.as_ptr(), ignore.as_ptr());
+    // SAFETY: both are live objects held by `QUIET`, and the GIL is held.
+    let token = unsafe { ffi::PyContextVar_Set(errors, ignore) };
+    if token.is_null() {
+        unsafe { ffi::PyErr_Clear() };
+        return false;
+    }
+    // The output goes second and positionally, which is how a ufunc takes it
+    // -- see `matrix_product`.
+    let called = PyTuple::new(py, [source, target])
+        .and_then(|arguments| ufunc.call1(py, arguments))
+        .is_ok();
+    // SAFETY: `token` came from setting `errors` just above, on this thread,
+    // and is released here after restoring the caller's state.
+    unsafe {
+        if ffi::PyContextVar_Reset(errors, token) != 0 {
+            ffi::PyErr_Clear();
+        }
+        ffi::Py_DECREF(token);
+    }
+    called
+}
+
+#[cfg(not(feature = "blas"))]
+/// NumPy's error-state context variable, and the state that ignores every
+/// floating-point error; see [`apply_ufunc`].
+static QUIET: PyOnceLock<(Py<PyAny>, Py<PyAny>)> = PyOnceLock::new();
 
 #[cfg(not(feature = "blas"))]
 /// A value of `T` to re-zero a partly written output with.
@@ -308,8 +555,8 @@ impl Zero for f64 {
 
 #[cfg(not(feature = "blas"))]
 /// Point the engine's dense GEMM at NumPy, once, while the module loads.
-pub fn install_gemm_provider() {
-    set_gemm_provider(Box::new(NumpyGemm));
+pub fn install_provider() {
+    set_provider(Box::new(Numpy));
 }
 
 /// Where the boundary between the two GEMM paths currently sits.
@@ -342,20 +589,57 @@ fn set_gemm_thresholds(min_flops: usize, min_k: usize) -> (usize, usize) {
 
 /// Whether a NumPy-backed provider is installed and reachable.
 #[pyfunction]
-fn gemm_provider_installed() -> bool {
-    engine::ops::linalg::gemm_provider_installed()
+fn provider_installed() -> bool {
+    engine::ops::provider::provider_installed()
 }
 
-pub fn register_gemm_module(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
+/// The fewest elements a delegated ufunc is handed to NumPy at.
+#[pyfunction]
+fn ufunc_threshold() -> usize {
+    MIN_UFUNC_LEN.load(Ordering::Relaxed)
+}
+
+/// Move the ufunc boundary, returning where it was; see
+/// [`set_gemm_thresholds`] for why this is reachable at all. `0` delegates
+/// every delegated ufunc at any size, and a very large value none.
+#[pyfunction]
+#[pyo3(signature = (min_len))]
+fn set_ufunc_threshold(min_len: usize) -> usize {
+    MIN_UFUNC_LEN.swap(min_len, Ordering::Relaxed)
+}
+
+/// The element-wise functions this build hands to NumPy, as `(name, dtype)`.
+#[pyfunction]
+fn delegated_ufuncs() -> Vec<(&'static str, &'static str)> {
+    if !cfg!(not(feature = "blas")) {
+        return Vec::new();
+    }
+    UFUNC_ORDER
+        .into_iter()
+        .flat_map(|op| {
+            [("float32", false), ("float64", true)]
+                .into_iter()
+                .filter(move |&(_, wide)| delegated(op, wide))
+                .map(move |(dtype, _)| (op.numpy_name(), dtype))
+        })
+        .collect()
+}
+
+pub fn register_dispatch_module(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     let module = PyModule::new(py, "dispatch")?;
     module.setattr(
         "__doc__",
-        "Where dense products go: the NumPy provider, and the size boundary \
-         that decides when it is worth the crossing.",
+        "What is handed to NumPy -- dense products and a few element-wise \
+         functions -- and the size boundaries that decide when it is worth \
+         the crossing.",
     )?;
     module.add_function(wrap_pyfunction!(gemm_thresholds, &module)?)?;
     module.add_function(wrap_pyfunction!(set_gemm_thresholds, &module)?)?;
-    module.add_function(wrap_pyfunction!(gemm_provider_installed, &module)?)?;
+    module.add_function(wrap_pyfunction!(provider_installed, &module)?)?;
+    module.add_function(wrap_pyfunction!(ufunc_threshold, &module)?)?;
+    module.add_function(wrap_pyfunction!(set_ufunc_threshold, &module)?)?;
+    module.add_function(wrap_pyfunction!(delegated_ufuncs, &module)?)?;
+    module.add("DEFAULT_MIN_UFUNC_LEN", DEFAULT_MIN_UFUNC_LEN)?;
     module.add("DEFAULT_MIN_FLOPS", DEFAULT_MIN_FLOPS)?;
     module.add("DEFAULT_MIN_K", DEFAULT_MIN_K)?;
     // Whether this build installs a provider at all, which is a property of how

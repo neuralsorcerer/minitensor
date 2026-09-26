@@ -591,7 +591,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             c for c in cases if needle in c.family.lower() or needle in c.op.lower()
         ]
 
-    provider = mt._core.dispatch.gemm_provider_installed()
+    provider = mt._core.dispatch.provider_installed()
     min_flops, min_k = mt._core.dispatch.gemm_thresholds()
     print(
         f"numpy {np.__version__}  minitensor {mt.__version__}  {len(cases)} cases  "

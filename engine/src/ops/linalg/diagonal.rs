@@ -673,15 +673,15 @@ fn optimized_matmul_f32(
         // A single whole product, offered to the provider, which sees the
         // dimensions and declines anything too small to pay for the call. The
         // batched case is offered too, just below.
-        if crate::ops::linalg::offer_gemm_f32(crate::ops::linalg::Gemm {
+        if crate::ops::provider::offer_gemm_f32(crate::ops::provider::Gemm {
             batch: 1,
             m,
             k,
             n,
             lhs: lhs_data,
-            lhs_storage: crate::ops::linalg::Storage::RowMajor,
+            lhs_storage: crate::ops::provider::Storage::RowMajor,
             rhs: rhs_data,
-            rhs_storage: crate::ops::linalg::Storage::RowMajor,
+            rhs_storage: crate::ops::provider::Storage::RowMajor,
             out: output_data,
         }) {
             return Ok(());
@@ -698,20 +698,20 @@ fn optimized_matmul_f32(
                 output_data.as_mut_ptr(),
             )
         };
-    } else if crate::ops::linalg::offer_gemm_f32(crate::ops::linalg::Gemm {
+    } else if crate::ops::provider::offer_gemm_f32(crate::ops::provider::Gemm {
         batch,
         m,
         k,
         n,
         lhs: lhs_data,
-        lhs_storage: crate::ops::linalg::Storage::RowMajor,
+        lhs_storage: crate::ops::provider::Storage::RowMajor,
         rhs: rhs_data,
-        rhs_storage: crate::ops::linalg::Storage::RowMajor,
+        rhs_storage: crate::ops::provider::Storage::RowMajor,
         out: output_data,
     }) {
         // A stack of matrices, offered whole. This has to come before either
         // branch below: the rayon one cannot reach a provider at all (they are
-        // withheld from worker threads, see `gemm_provider`), and the serial
+        // withheld from worker threads, see `ops::provider`), and the serial
         // one would pay the crossing once per matrix, which at a batch of 256
         // costs more than the whole product.
     } else if batch >= rayon::current_num_threads() {
@@ -771,15 +771,15 @@ fn optimized_matmul_f64(
         // A single whole product, offered to the provider, which sees the
         // dimensions and declines anything too small to pay for the call. The
         // batched case is offered too, just below.
-        if crate::ops::linalg::offer_gemm_f64(crate::ops::linalg::Gemm {
+        if crate::ops::provider::offer_gemm_f64(crate::ops::provider::Gemm {
             batch: 1,
             m,
             k,
             n,
             lhs: lhs_data,
-            lhs_storage: crate::ops::linalg::Storage::RowMajor,
+            lhs_storage: crate::ops::provider::Storage::RowMajor,
             rhs: rhs_data,
-            rhs_storage: crate::ops::linalg::Storage::RowMajor,
+            rhs_storage: crate::ops::provider::Storage::RowMajor,
             out: output_data,
         }) {
             return Ok(());
@@ -796,20 +796,20 @@ fn optimized_matmul_f64(
                 output_data.as_mut_ptr(),
             )
         };
-    } else if crate::ops::linalg::offer_gemm_f64(crate::ops::linalg::Gemm {
+    } else if crate::ops::provider::offer_gemm_f64(crate::ops::provider::Gemm {
         batch,
         m,
         k,
         n,
         lhs: lhs_data,
-        lhs_storage: crate::ops::linalg::Storage::RowMajor,
+        lhs_storage: crate::ops::provider::Storage::RowMajor,
         rhs: rhs_data,
-        rhs_storage: crate::ops::linalg::Storage::RowMajor,
+        rhs_storage: crate::ops::provider::Storage::RowMajor,
         out: output_data,
     }) {
         // A stack of matrices, offered whole. This has to come before either
         // branch below: the rayon one cannot reach a provider at all (they are
-        // withheld from worker threads, see `gemm_provider`), and the serial
+        // withheld from worker threads, see `ops::provider`), and the serial
         // one would pay the crossing once per matrix, which at a batch of 256
         // costs more than the whole product.
     } else if batch >= rayon::current_num_threads() {

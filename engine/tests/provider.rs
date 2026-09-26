@@ -20,8 +20,10 @@
 //! each checks is the list of offers the provider saw, and cargo runs tests on
 //! several threads into one process.
 
-use engine::ops::linalg::{self, Gemm, GemmProvider, Storage, set_gemm_provider};
+use engine::ops::linalg;
+use engine::ops::provider::{Gemm, Provider, Storage, Ufunc, set_provider};
 use engine::tensor::{DataType, Shape, Tensor, TensorData};
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -73,7 +75,7 @@ impl Recorder {
     }
 }
 
-impl GemmProvider for Recorder {
+impl Provider for Recorder {
     fn gemm_f32(&self, request: Gemm<'_, f32>) -> bool {
         Self::record(&request);
         if request.k != HANDLED_K {
@@ -88,6 +90,25 @@ impl GemmProvider for Recorder {
         f64_calls().fetch_add(1, Ordering::Relaxed);
         false
     }
+
+    fn unary_f64(&self, op: Ufunc, input: &[f64], out: &mut [MaybeUninit<f64>]) -> bool {
+        ufunc_offers().lock().unwrap().push((op, input.len()));
+        if input.len() != HANDLED_LEN {
+            return false;
+        }
+        for slot in out.iter_mut() {
+            slot.write(f64::from(SENTINEL));
+        }
+        true
+    }
+}
+
+/// The element-wise length the provider answers to; every other is declined.
+const HANDLED_LEN: usize = 37;
+
+fn ufunc_offers() -> &'static Mutex<Vec<(Ufunc, usize)>> {
+    static OFFERS: OnceLock<Mutex<Vec<(Ufunc, usize)>>> = OnceLock::new();
+    OFFERS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Install the provider, take the file's lock, and start from no offers.
@@ -104,7 +125,7 @@ fn begin() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     INSTALLED.get_or_init(|| {
         assert!(
-            set_gemm_provider(Box::new(Recorder)),
+            set_provider(Box::new(Recorder)),
             "nothing else in this binary may install a provider"
         );
     });
@@ -487,7 +508,53 @@ fn a_handled_batch_writes_the_whole_stack() {
 fn a_provider_is_installed_once_and_the_second_attempt_says_so() {
     let _serial = begin();
     assert!(
-        !set_gemm_provider(Box::new(Recorder)),
+        !set_provider(Box::new(Recorder)),
         "a second provider must not displace the first"
     );
+}
+
+#[test]
+fn an_element_wise_function_is_offered_whole_and_its_answer_used() {
+    let _serial = begin();
+    ufunc_offers().lock().unwrap().clear();
+    let handled = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN]);
+    let out = engine::ops::activation::tanh(&handled).unwrap();
+    assert!(
+        out.data()
+            .as_f64_slice()
+            .unwrap()
+            .iter()
+            .all(|&v| v == f64::from(SENTINEL))
+    );
+
+    let declined = tensor_f64(ramp_f64(HANDLED_LEN + 1), vec![HANDLED_LEN + 1]);
+    let out = engine::ops::activation::tanh(&declined).unwrap();
+    let want: Vec<f64> = ramp_f64(HANDLED_LEN + 1).iter().map(|v| v.tanh()).collect();
+    assert_eq!(out.data().as_f64_slice().unwrap(), &want[..]);
+
+    assert_eq!(
+        *ufunc_offers().lock().unwrap(),
+        vec![(Ufunc::Tanh, HANDLED_LEN), (Ufunc::Tanh, HANDLED_LEN + 1)]
+    );
+}
+
+#[test]
+fn a_delegated_function_keeps_the_engines_gradient() {
+    let _serial = begin();
+    let x = Tensor::new(
+        std::sync::Arc::new(TensorData::from_vec_f64(
+            ramp_f64(HANDLED_LEN),
+            engine::device::Device::cpu(),
+        )),
+        Shape::new(vec![HANDLED_LEN]),
+        DataType::Float64,
+        engine::device::Device::cpu(),
+        true,
+    );
+    // The provider answers with a constant, so the forward is wrong on purpose;
+    // what matters is that the backward still comes from the engine, built on
+    // the output it was handed.
+    let y = engine::ops::activation::tanh(&x).unwrap();
+    assert!(y.requires_grad());
+    assert!(y.grad_fn().is_some());
 }

@@ -108,8 +108,8 @@ def test_a_delegated_matmul_gradient_passes():
     the delegated path has no gradient anyone has checked.
     """
     dispatch = mt._core.dispatch
-    if not dispatch.gemm_provider_installed:
-        pytest.skip("no GEMM provider in this build")
+    if not dispatch.provider_installed():
+        pytest.skip("no NumPy provider in this build")
 
     previous = dispatch.set_gemm_thresholds(0, 0)
     try:

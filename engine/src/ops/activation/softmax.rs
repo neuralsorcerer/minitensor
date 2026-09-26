@@ -148,7 +148,11 @@ pub(crate) fn tanh_f64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, f64::tanh);
+    let out = <f64 as crate::ops::provider::OfferUnary>::offer_unary(
+        crate::ops::provider::Ufunc::Tanh,
+        input_data,
+    )
+    .unwrap_or_else(|| unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, f64::tanh));
     Ok(TensorData::from_vec::<f64>(
         out,
         DataType::Float64,
