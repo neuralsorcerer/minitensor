@@ -98,8 +98,15 @@ fn bool_scalar_tensor(value: bool, tensor: &Tensor, keepdim: bool) -> Result<Ten
 /// `any`/`all` over every element.
 fn bool_fold_all(tensor: &Tensor, keepdim: bool, fold: BoolFold) -> Result<Tensor> {
     let value = with_truthy_slice!(tensor, |input, truthy| match fold {
-        BoolFold::Any => par_any_chunk(input, PAR_CHUNK, &|chunk| chunk.iter().any(|&v| truthy(v))),
-        BoolFold::All => par_all_chunk(input, PAR_CHUNK, &|chunk| chunk.iter().all(|&v| truthy(v))),
+        // Each chunk folds without branching, which vectorizes; the early exit
+        // is kept at chunk granularity, between chunks. A per-element `any`
+        // is a compare and a branch for every value.
+        BoolFold::Any => par_any_chunk(input, PAR_CHUNK, &|chunk| {
+            chunk.iter().fold(false, |seen, &v| seen | truthy(v))
+        }),
+        BoolFold::All => par_all_chunk(input, PAR_CHUNK, &|chunk| {
+            chunk.iter().fold(true, |held, &v| held & truthy(v))
+        }),
     });
     bool_scalar_tensor(value, tensor, keepdim)
 }

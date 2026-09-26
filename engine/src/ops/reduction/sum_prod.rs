@@ -1174,7 +1174,9 @@ pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let max_val = par_any_chunk(data, PAR_CHUNK, &|chunk| chunk.iter().any(|&x| x));
+    let max_val = par_any_chunk(data, PAR_CHUNK, &|chunk| {
+        chunk.iter().fold(false, |seen, &x| seen | x)
+    });
 
     let result_slice = result_data
         .as_bool_slice_mut()
@@ -1234,7 +1236,9 @@ pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let min_val = par_all_chunk(data, PAR_CHUNK, &|chunk| chunk.iter().all(|&x| x));
+    let min_val = par_all_chunk(data, PAR_CHUNK, &|chunk| {
+        chunk.iter().fold(true, |held, &x| held & x)
+    });
 
     let result_slice = result_data
         .as_bool_slice_mut()
