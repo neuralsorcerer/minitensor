@@ -293,14 +293,7 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
                 sums[lane] = sums[lane] + v;
             }
         }
-        let mut width = LANES;
-        while width > 1 {
-            width /= 2;
-            for lane in 0..width {
-                sums[lane] = sums[lane] + sums[lane + width];
-            }
-        }
-        sums[0]
+        crate::ops::simd::pairwise_lanes(&mut sums)
     }
 
     let chunks = run.len().div_ceil(RUN_SUM_CHUNK).max(1);

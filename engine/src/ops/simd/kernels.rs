@@ -508,14 +508,7 @@ macro_rules! float_sum_kernel {
 
             // Only now do the lanes meet, and pairwise: adding them up in order
             // would put `LANES` more roundings on the deepest value here.
-            let mut width = LANES;
-            while width > 1 {
-                width /= 2;
-                for lane in 0..width {
-                    acc[lane] += acc[lane + width];
-                }
-            }
-            acc[0]
+            pairwise_lanes(&mut acc)
         }
 
         $(#[$attr])*
@@ -559,46 +552,110 @@ float_sum_kernel!(
 ///
 /// Only the common prefix is read, so a caller with mismatched lengths gets the
 /// shorter one rather than a panic; `dot` checks the lengths itself.
+///
+/// Sixteen lanes, compiled a second time with `avx`, and the lanes met
+/// pairwise at the end with the tail folded into the lanes it would have
+/// landed in -- the shape [`simd_square_sum_f32`] measured best, for the same
+/// reasons: four float64 accumulators left the loop waiting on one add's
+/// latency per vector, at about an element a cycle, and a pairwise finish puts
+/// fewer roundings on each partial. At 16,384 float64 elements the four-lane
+/// loop took 5.5us against NumPy's 2.9; this takes 3.0.
 pub fn simd_dot_f32(a: &[f32], b: &[f32]) -> f32 {
-    let mut sums = [0f32; 8];
-    let n = a.len().min(b.len());
-    let (a, b) = (&a[..n], &b[..n]);
-    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
-    for (x, y) in a_chunks.iter().zip(b_chunks) {
-        sums[0] += x[0] * y[0];
-        sums[1] += x[1] * y[1];
-        sums[2] += x[2] * y[2];
-        sums[3] += x[3] * y[3];
-        sums[4] += x[4] * y[4];
-        sums[5] += x[5] * y[5];
-        sums[6] += x[6] * y[6];
-        sums[7] += x[7] * y[7];
-    }
-    let mut total: f32 = sums.iter().sum();
-    for (x, y) in a_rest.iter().zip(b_rest) {
-        total += x * y;
-    }
-    total
+    dot_dispatch::<f32, DOT_LANES>(a, b)
 }
 
-/// [`simd_dot_f32`] in double precision; four lanes rather than eight, matching
-/// [`simd_sum_f64`].
+/// [`simd_dot_f32`] in double precision, at the same width.
 pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
-    let mut sums = [0f64; 4];
+    dot_dispatch::<f64, DOT_LANES>(a, b)
+}
+
+/// The accumulator count of [`simd_dot_f32`] and [`simd_dot_f64`]. Public to
+/// the crate because the matrix-vector path reproduces their arithmetic lane
+/// for lane, and has to agree on the count.
+pub(crate) const DOT_LANES: usize = 16;
+
+/// Add `sums` up pairwise, halving the width each round: the finish of every
+/// lane-blocked kernel here. `sums.len()` must be a power of two.
+#[inline(always)]
+pub(crate) fn pairwise_lanes<T: Copy + std::ops::Add<Output = T>>(sums: &mut [T]) -> T {
+    debug_assert!(sums.len().is_power_of_two());
+    let mut width = sums.len();
+    while width > 1 {
+        width /= 2;
+        for lane in 0..width {
+            sums[lane] = sums[lane] + sums[lane + width];
+        }
+    }
+    sums[0]
+}
+
+/// The dot loop, written once; see [`square_sum_body`] for why it is
+/// `#[inline(always)]` and why the tail is padded rather than indexed.
+#[inline(always)]
+fn dot_body<T, const LANES: usize>(a: &[T], b: &[T]) -> T
+where
+    T: Copy + Default + std::ops::AddAssign + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
+{
+    let mut sums = [T::default(); LANES];
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<4>(), b.as_chunks::<4>());
+    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<LANES>(), b.as_chunks::<LANES>());
     for (x, y) in a_chunks.iter().zip(b_chunks) {
-        sums[0] += x[0] * y[0];
-        sums[1] += x[1] * y[1];
-        sums[2] += x[2] * y[2];
-        sums[3] += x[3] * y[3];
+        for lane in 0..LANES {
+            sums[lane] += x[lane] * y[lane];
+        }
     }
-    let mut total: f64 = sums.iter().sum();
-    for (x, y) in a_rest.iter().zip(b_rest) {
-        total += x * y;
+    if !a_rest.is_empty() {
+        let (mut x, mut y) = ([T::default(); LANES], [T::default(); LANES]);
+        for ((slot_x, slot_y), (&from_x, &from_y)) in
+            x.iter_mut().zip(&mut y).zip(a_rest.iter().zip(b_rest))
+        {
+            (*slot_x, *slot_y) = (from_x, from_y);
+        }
+        for lane in 0..LANES {
+            sums[lane] += x[lane] * y[lane];
+        }
     }
-    total
+    pairwise_lanes(&mut sums)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn dot_avx<T, const LANES: usize>(a: &[T], b: &[T]) -> T
+where
+    T: Copy + Default + std::ops::AddAssign + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
+{
+    dot_body::<T, LANES>(a, b)
+}
+
+#[inline]
+fn dot_dispatch<T, const LANES: usize>(a: &[T], b: &[T]) -> T
+where
+    T: Copy + Default + std::ops::AddAssign + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
+{
+    // A run of a block or less goes through the narrowest power-of-two width
+    // that holds it. Every lane past the run would gain `0 * 0`, and every
+    // partial is already `0 + x * y`, never `-0.0`, so a `+0.0` lane changes
+    // nothing it meets in the pairwise finish: the narrow width gives the same
+    // bits. It skips the padding, which is most of the work at this length --
+    // a matrix-vector product with `k = 4` takes one dot per row, and padding
+    // each to sixteen lanes took it from 1.4us to 2.1 at 64 rows.
+    debug_assert_eq!(LANES, 16);
+    match a.len().min(b.len()) {
+        0..=1 => return dot_body::<T, 1>(a, b),
+        2 => return dot_body::<T, 2>(a, b),
+        3..=4 => return dot_body::<T, 4>(a, b),
+        5..=8 => return dot_body::<T, 8>(a, b),
+        _ => {}
+    }
+    // The two compilations give the same bits, so which one runs is a matter
+    // of cost alone.
+    #[cfg(target_arch = "x86_64")]
+    if simd_capabilities().avx {
+        // SAFETY: `detect` confirmed avx on this CPU.
+        return unsafe { dot_avx::<T, LANES>(a, b) };
+    }
+    dot_body::<T, LANES>(a, b)
 }
 
 /// The sum of the squares of `data`.
@@ -623,10 +680,9 @@ pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
 ///  16 + avx  0.046     2.8e-7   16 + avx  0.136     2.0e-16
 /// ```
 ///
-/// This is why it is no longer bit-identical to `simd_dot(x, x)`, which it
-/// was when it replaced that spelling. That equality was what made the
-/// replacement provably a cost change and nothing else; now that it has
-/// landed, the kernel is free to be better than what it replaced.
+/// `simd_dot_f64` has since been widened to match, so in float64 the two are
+/// one computation again; the float32 square sum still differs from
+/// `simd_dot_f32(x, x)`, by accumulating in `f64`.
 ///
 /// The accumulator is `f64`. A square of an `f32` is exact in `f64` -- 24
 /// significant bits squared is 48, inside 53 -- so the only roundings left are
@@ -686,14 +742,7 @@ fn square_sum_body<T: SquareSummable, const LANES: usize>(data: &[T]) -> f64 {
     // Only now do the lanes meet, and pairwise: adding them up in order would
     // put `LANES` more roundings on the deepest value. The same reason
     // `float_sum_kernel!` ends this way.
-    let mut width = LANES;
-    while width > 1 {
-        width /= 2;
-        for lane in 0..width {
-            sums[lane] += sums[lane + width];
-        }
-    }
-    sums[0]
+    pairwise_lanes(&mut sums)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1167,26 +1216,57 @@ mod tests {
         assert!(!can_use_simd_fast_path(&too_small, &too_small, &too_small));
     }
 
+    /// A short dot runs at the narrowest width that holds it, which is only
+    /// sound if it gives the sixteen-lane answer bit for bit -- signed zeros
+    /// included, since a `-0.0` product padded with `+0.0` lanes is where the
+    /// two could part.
+    #[test]
+    fn a_short_dot_matches_the_full_width_bit_for_bit() {
+        let pool = [-0.0, 0.0, 1.5, -2.25, 1e-300, -3e300, 7.0, -0.0, 0.1, -0.3];
+        for len in 0..=20 {
+            for shift in 0..pool.len() {
+                let a: Vec<f64> = (0..len).map(|i| pool[(i + shift) % pool.len()]).collect();
+                let b: Vec<f64> = (0..len)
+                    .map(|i| pool[(i * 3 + shift + 1) % pool.len()])
+                    .collect();
+                assert_eq!(
+                    simd_dot_f64(&a, &b).to_bits(),
+                    dot_body::<f64, DOT_LANES>(&a, &b).to_bits(),
+                    "len {len} shift {shift}"
+                );
+                let (a, b): (Vec<f32>, Vec<f32>) = (
+                    a.iter().map(|&v| v as f32).collect(),
+                    b.iter().map(|&v| v as f32).collect(),
+                );
+                assert_eq!(
+                    simd_dot_f32(&a, &b).to_bits(),
+                    dot_body::<f32, DOT_LANES>(&a, &b).to_bits(),
+                    "f32 len {len} shift {shift}"
+                );
+            }
+        }
+    }
+
     /// The square-sum kernels replaced `simd_dot(x, x)`, and while they were
-    /// doing that they were bit-identical to it. They are wider now, so they
-    /// are not -- and the point of being wider is that the lane count is the
-    /// width of a one-level pairwise sum, so more lanes is a shallower tree
-    /// and fewer roundings on the deepest value.
+    /// doing that they were bit-identical to it. They then went wider than the
+    /// dot, and the dot has since followed: in float64 the two are again one
+    /// computation -- sixteen lanes, the tail padded with zeros, the lanes met
+    /// pairwise -- and must stay bit-identical, or one of them has drifted.
     ///
-    /// That advantage only exists where the tree is deep enough to have one,
-    /// which means a full block. Below that the two group the same handful of
-    /// terms slightly differently and either can win by a rounding -- at 32
-    /// elements the narrow one does, at 33 the wide one, and neither means
-    /// anything. So this asserts the two things that are actually true: over a
-    /// whole chunk, which is the length `accurate_self_sum` hands it, the wide
-    /// kernel is strictly closer; and at every length it is within a factor of
-    /// two of the narrow one, so no short input pays for the change.
+    /// Float32 is where they still differ, on purpose: the square sum
+    /// accumulates in float64, the dot in float32. That advantage only exists
+    /// where the sum is long enough for roundings to pile up -- below a block
+    /// either can win by a rounding and neither means anything. So this
+    /// asserts the two things that are actually true: over a whole chunk,
+    /// which is the length `accurate_self_sum` hands it, the wide accumulator
+    /// is strictly closer; and at every length it is within a factor of two
+    /// of the narrow one, so no short input pays for the change.
     ///
     /// The reference is Kahan-compensated and the inputs are spread across
     /// nine decades with a third of them negative, which is where an
     /// accumulation order shows at all.
     #[test]
-    fn the_square_sum_kernels_beat_the_dot_they_replaced_where_it_counts() {
+    fn the_square_sums_match_the_dot_in_f64_and_beat_it_in_f32() {
         fn kahan(data: &[f64]) -> f64 {
             let (mut sum, mut c) = (0f64, 0f64);
             for &v in data {
@@ -1206,26 +1286,23 @@ mod tests {
                 })
                 .collect();
             let narrow: Vec<f32> = wide.iter().map(|&v| v as f32).collect();
-            let wide_reference = kahan(&wide);
             let narrow_reference = kahan(&narrow.iter().map(|&v| v as f64).collect::<Vec<_>>());
             let error = |got: f64, reference: f64| ((got - reference) / reference).abs();
 
-            let fresh = error(simd_square_sum_f64(&wide), wide_reference);
-            let replaced = error(simd_dot_f64(&wide, &wide), wide_reference);
+            assert_eq!(
+                simd_square_sum_f64(&wide).to_bits(),
+                simd_dot_f64(&wide, &wide).to_bits(),
+                "f64 len {len}"
+            );
             let fresh32 = error(simd_square_sum_f32(&narrow), narrow_reference);
             let replaced32 = error(simd_dot_f32(&narrow, &narrow) as f64, narrow_reference);
 
             if len >= 8191 {
-                assert!(fresh < replaced, "f64 len {len}: {fresh:e} !< {replaced:e}");
                 assert!(
                     fresh32 < replaced32,
                     "f32 len {len}: {fresh32:e} !< {replaced32:e}"
                 );
             }
-            assert!(
-                fresh <= replaced * 2.0 + f64::EPSILON,
-                "f64 len {len}: {fresh:e} is more than twice {replaced:e}"
-            );
             assert!(
                 fresh32 <= replaced32 * 2.0 + f64::EPSILON,
                 "f32 len {len}: {fresh32:e} is more than twice {replaced32:e}"

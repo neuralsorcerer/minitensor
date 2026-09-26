@@ -20,6 +20,8 @@ use cblas::{Layout, Transpose};
 
 pub(crate) use crate::ops::map::PAR_THRESHOLD;
 use crate::ops::map::try_par_out_chunks;
+#[cfg(not(feature = "blas"))]
+use crate::ops::simd::{DOT_LANES, pairwise_lanes};
 use crate::ops::simd::{simd_dot_f32, simd_dot_f64};
 use crate::ops::util::accurate_pair_sum;
 // The hand-written GEMM banding is the fallback for builds without BLAS; with
@@ -495,22 +497,16 @@ fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
 }
 
 /// A dense element type as the matrix-vector path sees it: the dot kernel its
-/// every answer must agree with, and that kernel's accumulator count.
+/// every answer must agree with, which accumulates in `DOT_LANES` lanes.
 #[cfg(not(feature = "blas"))]
 trait GemvElement:
-    Copy
-    + Default
-    + std::ops::AddAssign
-    + std::ops::Mul<Output = Self>
-    + for<'s> std::iter::Sum<&'s Self>
+    Copy + Default + std::ops::AddAssign + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
 {
-    const LANES: usize;
     fn dot(a: &[Self], b: &[Self]) -> Self;
 }
 
 #[cfg(not(feature = "blas"))]
 impl GemvElement for f32 {
-    const LANES: usize = 8;
     fn dot(a: &[f32], b: &[f32]) -> f32 {
         simd_dot_f32(a, b)
     }
@@ -518,7 +514,6 @@ impl GemvElement for f32 {
 
 #[cfg(not(feature = "blas"))]
 impl GemvElement for f64 {
-    const LANES: usize = 4;
     fn dot(a: &[f64], b: &[f64]) -> f64 {
         simd_dot_f64(a, b)
     }
@@ -576,7 +571,7 @@ unsafe fn gemv<T: GemvElement>(
         }
     };
     if m == 1 && n > 1 && csb == 1 {
-        let lanes = T::LANES;
+        let lanes = DOT_LANES;
         let whole = k - k % lanes;
         let mut acc = vec![T::default(); lanes * n];
         for step in 0..whole {
@@ -597,13 +592,21 @@ unsafe fn gemv<T: GemvElement>(
             for (lane, sum) in sums.iter_mut().enumerate() {
                 *sum = acc[lane * n + j];
             }
-            let mut total: T = sums.iter().sum();
-            for step in whole..k {
-                // SAFETY: as above.
-                total += unsafe { *a.add(step * csa) * *b.add(step * rsb + j) };
+            // The dot pads its tail to a whole block with zeros, so every lane
+            // past the tail gains `0 * 0`: a `+0.0`, which turns a `-0.0` lane
+            // positive. Padding `b` here would multiply by what is really
+            // there, so the lanes get the product the dot would form.
+            if whole < k {
+                for (lane, sum) in sums.iter_mut().enumerate() {
+                    *sum += match whole + lane {
+                        // SAFETY: as above.
+                        step if step < k => unsafe { *a.add(step * csa) * *b.add(step * rsb + j) },
+                        _ => T::default() * T::default(),
+                    };
+                }
             }
             // SAFETY: `c` is one row of `n`.
-            unsafe { *c.add(j) = total };
+            unsafe { *c.add(j) = pairwise_lanes(&mut sums) };
         }
         return true;
     }
