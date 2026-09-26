@@ -784,13 +784,27 @@ pub(crate) fn exact_prod<I: ProdFloat>(values: impl Iterator<Item = I> + Clone) 
         let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
         (mantissa, exponent + bias)
     }
+    // Every factor is split, but the running mantissa only every
+    // `RENORMALIZE` steps: a product of that many mantissas in [0.5, 1) is
+    // still a normal `f64`, and scaling by a power of two never changes how a
+    // multiplication rounds, so each step rounds exactly as it would have
+    // renormalized. What that saves is the second split on the dependency
+    // chain, most of an element's cost.
+    const RENORMALIZE: usize = 256;
     let (mut mantissa, mut exponent) = (1.0f64, 0i64);
-    for v in values {
+    for (index, v) in values.enumerate() {
         let (m, e) = split(v.widen().abs());
-        let (m, e2) = split(mantissa * m);
-        mantissa = m;
-        exponent += e + e2;
+        mantissa *= m;
+        exponent += e;
+        if index % RENORMALIZE == RENORMALIZE - 1 {
+            let (m, e) = split(mantissa);
+            mantissa = m;
+            exponent += e;
+        }
     }
+    let (m, e) = split(mantissa);
+    mantissa = m;
+    exponent += e;
     // `mantissa * 2^exponent`, saturating: in three steps so no power of two
     // taken on the way leaves the range, since the exponent can be far outside
     // it when the true product is an overflow or an underflow.
