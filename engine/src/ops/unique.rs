@@ -33,7 +33,7 @@
 //! back, so they detach.
 
 use crate::ops::order::{
-    PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64,
+    bool_key, float_key32, float_key64, int_key32, int_key64, sorts_in_parallel,
 };
 use crate::{
     error::{MinitensorError, Result},
@@ -326,7 +326,7 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
     // itself instead -- the same choice the tensor sort makes, and for the same
     // reason: `mode` of a two-million-element vector is one output, so the band
     // split below hands the whole sort to a single core. That took 248ms.
-    let within = lanes < rayon::current_num_threads() && width >= PAR_SORT_MIN_LEN;
+    let spread = lanes < rayon::current_num_threads();
 
     macro_rules! reduce {
         ($accessor:ident, $accessor_mut:ident, $key:expr) => {{
@@ -358,7 +358,7 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
                         // branches the value comparison needs.
                         lane.clear();
                         lane.extend(row.iter().copied().map(key));
-                        if within {
+                        if spread && sorts_in_parallel(std::mem::size_of_val(lane.as_slice())) {
                             lane.par_sort_unstable();
                         } else {
                             lane.sort_unstable();

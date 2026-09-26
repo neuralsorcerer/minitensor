@@ -12,8 +12,8 @@ use crate::ops::map::{
     SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
 };
 use crate::ops::order::{
-    Entry, PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64, pack32,
-    pack64,
+    Entry, bool_key, float_key32, float_key64, int_key32, int_key64, pack32, pack64,
+    sorts_in_parallel,
 };
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
@@ -55,26 +55,53 @@ fn sort_along_dim_par<T, E, M>(
 {
     debug_assert_eq!(values.len(), outer * outer_stride);
     debug_assert_eq!(indices.len(), outer * outer_stride);
-    // Erased at the chunk boundary only: `make` stays a concrete type inside
-    // the body, so the packing still monomorphizes against it.
-    par_out_chunks2(values, indices, outer_stride, &|start, vchunk, ichunk| {
-        let o = start / outer_stride;
+    // One outer position a task, but only once there is enough to share
+    // (see [`shares_rows`]); below that the whole sort is one task, on the
+    // calling thread. Erased at the chunk boundary only: `make` stays a concrete type
+    // inside the body, so the packing still monomorphizes against it.
+    let chunk = if shares_rows::<E>(values.len()) {
+        outer_stride
+    } else {
+        values.len()
+    };
+    par_out_chunks2(values, indices, chunk, &|start, vchunk, ichunk| {
         let mut entries: Vec<E> = Vec::with_capacity(dim_size);
-        for r in 0..inner {
-            entries.clear();
-            let base = o * outer_stride + r;
-            for d in 0..dim_size {
-                entries.push(make(d, input[base + d * inner]));
-            }
-            entries.sort_unstable();
-            for (j, entry) in entries.iter().enumerate() {
-                let position = entry.position();
-                let off = r + j * inner;
-                vchunk[off] = input[base + position * inner];
-                ichunk[off] = position as i64;
+        for (row, (vrow, irow)) in vchunk
+            .chunks_mut(outer_stride)
+            .zip(ichunk.chunks_mut(outer_stride))
+            .enumerate()
+        {
+            let o = start / outer_stride + row;
+            for r in 0..inner {
+                entries.clear();
+                let base = o * outer_stride + r;
+                for d in 0..dim_size {
+                    entries.push(make(d, input[base + d * inner]));
+                }
+                entries.sort_unstable();
+                for (j, entry) in entries.iter().enumerate() {
+                    let position = entry.position();
+                    let off = r + j * inner;
+                    vrow[off] = input[base + position * inner];
+                    irow[off] = position as i64;
+                }
             }
         }
     });
+}
+
+/// Whether `len` entries sorted as independent slices are worth sharing out.
+///
+/// Below [`sorts_in_parallel`]'s size, because independent slices have no
+/// merge to pay for, but not far below: a pool round trip from Python costs
+/// 45-80us on average on four cores and past 150 one time in ten, and a
+/// sorted element about ten nanoseconds, so a sort under 64 KiB of entries
+/// (8192 float32, 4096 float64) costs less on one core than the split does at
+/// its worst. Measured split one row a task, `(4, 8)` took 7-48us for well
+/// under one on one core, and `(8, 64)` 11 where one core takes 4.6.
+fn shares_rows<E>(len: usize) -> bool {
+    const SHARE_ROWS_MIN_BYTES: usize = 64 << 10;
+    len.saturating_mul(std::mem::size_of::<E>()) >= SHARE_ROWS_MIN_BYTES
 }
 
 /// Pack one slice into sort keys, spread across the pool.
@@ -278,7 +305,7 @@ fn sort_along_dim<T, E, M>(
     // so a tensor with few of them and many slices -- which is every sort along
     // the first axis, where `outer` is one -- leaves the pool idle. Rewriting
     // the axis as the last one costs a strided pass and buys all of it.
-    if inner > 1 && outer < threads && slices.saturating_mul(dim_size) >= PAR_SORT_MIN_LEN {
+    if inner > 1 && outer < threads && shares_rows::<E>(slices.saturating_mul(dim_size)) {
         sort_along_dim_transposed(
             input,
             values,
@@ -289,7 +316,9 @@ fn sort_along_dim<T, E, M>(
             outer_stride,
             make,
         );
-    } else if slices < threads && dim_size >= PAR_SORT_MIN_LEN {
+    } else if slices < threads
+        && sorts_in_parallel(dim_size.saturating_mul(std::mem::size_of::<E>()))
+    {
         sort_rows_with_parallel_sort(
             input,
             values,

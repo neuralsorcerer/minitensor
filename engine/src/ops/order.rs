@@ -18,16 +18,19 @@
 //! The tensor sort and `mode` both order data this way, so the two cannot
 //! disagree about where a NaN or a negative zero belongs.
 
-/// Below this many elements a single slice is not worth handing to rayon: the
-/// split-and-merge overhead outweighs sorting it on one core.
+/// Whether sorting `entry_bytes` of packed entries is worth rayon's parallel
+/// sort rather than one core's.
 ///
-/// Deliberately conservative. Measured on four cores the crossover is somewhere
-/// between 4k and 8k elements and the two paths are within noise of each other
-/// across that range, where the whole sort costs well under a millisecond
-/// either way. Setting it here gives up a little between 8k and 16k in exchange
-/// for never regressing the small-slice path, which is the one that runs inside
-/// a training loop.
-pub(crate) const PAR_SORT_MIN_LEN: usize = 1 << 14;
+/// Counted in bytes of packed entries, because the crossover is: a trivial
+/// pool round trip from Python averages 45-80us on four cores, which a sort
+/// only repays once it is several times that long, and a wide entry sorts
+/// slower per element. Measured one slice at a time, a float32 sort (8-byte
+/// entries) was faster on one core up to 64k elements -- 16,384 took 228us
+/// there and 441 split -- and a float64 sort (16-byte entries) up to about
+/// 32k. 512 KiB is both crossovers.
+pub(crate) fn sorts_in_parallel(entry_bytes: usize) -> bool {
+    entry_bytes >= 512 << 10
+}
 
 /// The order-preserving unsigned key of a float, as its own width.
 ///
