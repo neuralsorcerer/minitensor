@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
 use crate::ops::map::{
-    compaction_bands, fill_compaction, par_all_chunk, par_any_chunk, par_out_chunks,
+    compact_into, compaction_bands, fill_compaction, par_all_chunk, par_any_chunk, par_out_chunks,
     par_out_chunks2,
 };
 use crate::ops::util::check_dim;
@@ -334,12 +334,13 @@ pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
             let mut row = 0usize;
             if ndim == 1 {
                 // A position is its own coordinate: no division to unravel.
-                for (offset, &value) in input[first..last].iter().enumerate() {
-                    if truthy(value) {
-                        piece[row] = (first + offset) as i64;
-                        row += 1;
-                    }
-                }
+                let band = &input[first..last];
+                compact_into(
+                    piece,
+                    band.len(),
+                    |i| truthy(band[i]),
+                    |i| (first + i) as i64,
+                );
                 return;
             }
             for (offset, &value) in input[first..last].iter().enumerate() {

@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::ops::map::{compaction_bands, fill_compaction, par_out_chunks};
+use crate::ops::map::{compact_into, compaction_bands, fill_compaction, par_out_chunks};
 use crate::{
     autograd::WhereBackward,
     device::Device,
@@ -245,12 +245,8 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
                 if inner == 1 {
                     // One element per block, where the other branch would
                     // call `memcpy` to move a single value.
-                    for (offset, &on) in mask_slice[first..last].iter().enumerate() {
-                        if on {
-                            piece[kept] = src[first + offset];
-                            kept += 1;
-                        }
-                    }
+                    let (flags, values) = (&mask_slice[first..last], &src[first..last]);
+                    compact_into(piece, flags.len(), |i| flags[i], |i| values[i]);
                     return;
                 }
                 for (offset, &on) in mask_slice[first..last].iter().enumerate() {

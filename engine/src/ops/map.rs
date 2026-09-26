@@ -429,6 +429,39 @@ pub(crate) fn fill_compaction<T: Send>(
         .for_each(|(band, piece)| fill(band, piece));
 }
 
+/// Write `value(i)` for every `i` below `len` where `keep(i)`, in order, into
+/// `out`, which is exactly as long as the number of them.
+///
+/// Without a branch on `keep`: every value is written to the next free slot
+/// and the slot only advances past a kept one, so a dropped value is
+/// overwritten by whatever comes next. Once every slot is filled the writes
+/// land on the last one, which is put back afterwards from the last kept
+/// element -- found scanning back from the end, where it usually is close by.
+/// Carrying that value through the loop instead compiled to a branch again.
+///
+/// A branch per element mispredicts on any mask that is not nearly all one
+/// way: on a million elements at half density the branchy loop took 4.6ns an
+/// element and this one 0.7.
+#[inline(always)]
+pub(crate) fn compact_into<T: Copy>(
+    out: &mut [T],
+    len: usize,
+    keep: impl Fn(usize) -> bool,
+    value: impl Fn(usize) -> T,
+) {
+    let Some(end) = out.len().checked_sub(1) else {
+        return;
+    };
+    let mut slot = 0usize;
+    for i in 0..len {
+        out[slot.min(end)] = value(i);
+        slot += keep(i) as usize;
+    }
+    if let Some(last) = (0..len).rev().find(|&i| keep(i)) {
+        out[end] = value(last);
+    }
+}
+
 /// The narrowest band of columns worth handing one task.
 ///
 /// A band this thin stops giving the reduction enough contiguous work to be
@@ -1352,6 +1385,35 @@ pub(crate) fn strided_gather<T: Copy + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The branch-free compaction writes past what it keeps and repairs the
+    /// last slot afterwards, so the cases that matter are where that repair
+    /// has something to do: a kept element followed by dropped ones, the last
+    /// kept element being the first, or the very last, and nothing kept.
+    #[test]
+    fn a_branch_free_compaction_keeps_exactly_what_a_filter_would() {
+        let patterns: [&[bool]; 7] = [
+            &[],
+            &[false, false, false],
+            &[true, true, true],
+            &[true, false, false, false],
+            &[false, false, false, true],
+            &[false, true, false, true, true, false, false],
+            &[true, false, true, false, true, false, true, false],
+        ];
+        for flags in patterns {
+            let values: Vec<i32> = (0..flags.len() as i32).map(|v| 10 * v + 1).collect();
+            let want: Vec<i32> = values
+                .iter()
+                .zip(flags)
+                .filter(|(_, keep)| **keep)
+                .map(|(&v, _)| v)
+                .collect();
+            let mut got = vec![-1; want.len()];
+            compact_into(&mut got, flags.len(), |i| flags[i], |i| values[i]);
+            assert_eq!(got, want, "{flags:?}");
+        }
+    }
 
     #[test]
     #[should_panic(expected = "binary_map inputs differ in length")]
