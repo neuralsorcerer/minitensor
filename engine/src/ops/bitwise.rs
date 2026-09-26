@@ -23,6 +23,7 @@ use crate::{
     ops::map::unary_map,
     tensor::{DataType, Tensor, TensorData},
 };
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 /// Reports a float reaching a kernel that promotion should already have
@@ -199,23 +200,25 @@ pub fn bitwise_count(tensor: &Tensor) -> Result<Tensor> {
 /// [`check_shift_amounts`]).
 macro_rules! shift_fns {
     ($shl:ident, $shr:ident, $ty:ty) => {
+        // Written without branches so the loops below vectorize: a count is
+        // clamped into range and the out-of-range case is a select. Counts
+        // are non-negative by the time these run -- `check_shift_amounts`
+        // refused the rest -- so the clamp only ever lowers one.
         #[inline(always)]
         fn $shl(value: $ty, amount: $ty) -> $ty {
+            let shifted = value.wrapping_shl(amount.min(<$ty>::BITS as $ty - 1) as u32);
             if amount >= <$ty>::BITS as $ty {
                 0
             } else {
-                value.wrapping_shl(amount as u32)
+                shifted
             }
         }
 
+        // No select needed: an arithmetic shift by width - 1 is already what a
+        // longer one saturates to, `-1` for a negative value and `0` otherwise.
         #[inline(always)]
         fn $shr(value: $ty, amount: $ty) -> $ty {
-            if amount >= <$ty>::BITS as $ty {
-                // Arithmetic shift: negatives converge on -1, not 0.
-                if value < 0 { -1 } else { 0 }
-            } else {
-                value.wrapping_shr(amount as u32)
-            }
+            value.wrapping_shr(amount.min(<$ty>::BITS as $ty - 1) as u32)
         }
     };
 }
@@ -223,30 +226,106 @@ macro_rules! shift_fns {
 shift_fns!(shl_i32, shr_i32, i32);
 shift_fns!(shl_i64, shr_i64, i64);
 
+/// A shift over two equal-length runs, compiled a second time with AVX2.
+///
+/// A per-element shift count is one instruction with AVX2 (`vpsllvd`,
+/// `vpsravd`) and has none before it, so the baseline x86-64 build shifted
+/// one element at a time: 1.1ns an element where `&` takes 0.24, and 4-5x
+/// behind NumPy, which dispatches the same way. aarch64 has variable vector
+/// shifts in its baseline, so there the plain loop vectorizes already.
+macro_rules! shift_blocks {
+    ($name:ident, $ty:ty, $f:ident) => {
+        fn $name(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+            #[inline(always)]
+            fn body(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+                let n = out.len();
+                let (lhs, rhs) = (&lhs[..n], &rhs[..n]);
+                for i in 0..n {
+                    out[i].write($f(lhs[i], rhs[i]));
+                }
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2")]
+            fn body_avx2(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+                body(lhs, rhs, out)
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            if crate::ops::simd::simd_capabilities().avx2 {
+                // SAFETY: `detect` confirmed avx2 on this CPU.
+                unsafe { body_avx2(lhs, rhs, out) };
+                return;
+            }
+            body(lhs, rhs, out)
+        }
+    };
+}
+
+shift_blocks!(shl_blocks_i32, i32, shl_i32);
+shift_blocks!(shr_blocks_i32, i32, shr_i32);
+shift_blocks!(shl_blocks_i64, i64, shl_i64);
+shift_blocks!(shr_blocks_i64, i64, shr_i64);
+
+/// `op` over two runs already the output's length, in blocks across the pool
+/// above the arithmetic kernels' threshold.
+fn equal_shape_blocks<T: Copy + Send + Sync + 'static>(
+    lhs: &[T],
+    rhs: &[T],
+    dtype: DataType,
+    device: crate::device::Device,
+    op: fn(&[T], &[T], &mut [MaybeUninit<T>]),
+) -> TensorData {
+    // SAFETY: each block kernel writes every element of the block it is given.
+    let out = unsafe {
+        crate::ops::map::binary_map_blocks_threshold(
+            lhs,
+            rhs,
+            crate::ops::map::SIMD_PAR_THRESHOLD,
+            crate::ops::map::SIMD_PAR_CHUNK,
+            op,
+        )
+    };
+    TensorData::from_vec::<T>(out, dtype, device)
+}
+
 /// Rejects negative shift counts up front, so no element has to carry a
 /// nonsense answer.
 ///
 /// This walks the *un-broadcast* right-hand buffer, which is at most the size
 /// of the output and usually far smaller, and it reads memory the kernel is
 /// about to read anyway.
+///
+/// Asked as the sign of every count OR-ed together rather than as
+/// `any(< 0)`: a short-circuiting `any` compiles to a compare and a branch per
+/// element, and so, it turned out, does `min` over references -- 10.8us to
+/// vet sixteen thousand counts for a shift that then took 2.3. An OR is one
+/// vector instruction per block, and it is negative exactly when some count
+/// is.
 fn check_shift_amounts(amounts: &Tensor, op: &str) -> Result<()> {
     let negative = match amounts.dtype() {
-        DataType::Int32 => amounts
-            .data()
-            .as_i32_slice()
-            .ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-            })?
-            .iter()
-            .any(|&v| v < 0),
-        DataType::Int64 => amounts
-            .data()
-            .as_i64_slice()
-            .ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-            })?
-            .iter()
-            .any(|&v| v < 0),
+        DataType::Int32 => {
+            amounts
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
+                })?
+                .iter()
+                .fold(0, |bits, &v| bits | v)
+                < 0
+        }
+        DataType::Int64 => {
+            amounts
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
+                })?
+                .iter()
+                .fold(0, |bits, &v| bits | v)
+                < 0
+        }
         // A boolean shift count is 0 or 1, and a float never gets this far.
         _ => false,
     };
@@ -267,9 +346,20 @@ fn check_shift_amounts(amounts: &Tensor, op: &str) -> Result<()> {
 /// the ops that have a count they can refuse up front.
 macro_rules! integer_op {
     ($name:ident, $i32_fn:ident, $i64_fn:ident, $doc:literal) => {
-        integer_op!($name, $i32_fn, $i64_fn, $doc, |_rhs, _name| Ok(()));
+        integer_op!(
+            $name,
+            $i32_fn,
+            $i64_fn,
+            $doc,
+            |_rhs, _name| Ok(()),
+            None,
+            None
+        );
     };
-    ($name:ident, $i32_fn:ident, $i64_fn:ident, $doc:literal, $check:expr) => {
+    // `$blocks32`/`$blocks64`, when given, take the operands whole when
+    // neither is broadcast -- see `shift_blocks!`.
+    ($name:ident, $i32_fn:ident, $i64_fn:ident, $doc:literal, $check:expr,
+     $blocks32:expr, $blocks64:expr) => {
         #[doc = $doc]
         pub fn $name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let (lhs_cast, rhs_cast, dtype, output_shape) =
@@ -279,8 +369,27 @@ macro_rules! integer_op {
             let check: fn(&Tensor, &str) -> Result<()> = $check;
             check(rhs_ref, stringify!($name))?;
 
-            let output_data = match dtype {
-                DataType::Int32 => broadcast_binary_arm!(
+            let whole = lhs_ref.shape().dims() == output_shape.dims()
+                && rhs_ref.shape().dims() == output_shape.dims();
+            let blocks32: Option<fn(&[i32], &[i32], &mut [MaybeUninit<i32>])> = $blocks32;
+            let blocks64: Option<fn(&[i64], &[i64], &mut [MaybeUninit<i64>])> = $blocks64;
+            let pair32 = lhs_ref
+                .data()
+                .as_i32_slice()
+                .zip(rhs_ref.data().as_i32_slice());
+            let pair64 = lhs_ref
+                .data()
+                .as_i64_slice()
+                .zip(rhs_ref.data().as_i64_slice());
+
+            let output_data = match (dtype, whole, blocks32, blocks64, pair32, pair64) {
+                (DataType::Int32, true, Some(op), _, Some((a, b)), _) => {
+                    equal_shape_blocks(a, b, dtype, lhs.device(), op)
+                }
+                (DataType::Int64, true, _, Some(op), _, Some((a, b))) => {
+                    equal_shape_blocks(a, b, dtype, lhs.device(), op)
+                }
+                (DataType::Int32, ..) => broadcast_binary_arm!(
                     lhs_ref,
                     rhs_ref,
                     &output_shape,
@@ -288,7 +397,7 @@ macro_rules! integer_op {
                     "i32",
                     $i32_fn
                 ),
-                DataType::Int64 => broadcast_binary_arm!(
+                (DataType::Int64, ..) => broadcast_binary_arm!(
                     lhs_ref,
                     rhs_ref,
                     &output_shape,
@@ -296,7 +405,7 @@ macro_rules! integer_op {
                     "i64",
                     $i64_fn
                 ),
-                other => return Err(unexpected_float(stringify!($name), other)),
+                (other, ..) => return Err(unexpected_float(stringify!($name), other)),
             };
 
             Ok(Tensor::new(
@@ -315,7 +424,9 @@ integer_op!(
     shl_i32,
     shl_i64,
     "Element-wise left shift. Counts at or past the dtype's width give 0.",
-    check_shift_amounts
+    check_shift_amounts,
+    Some(shl_blocks_i32),
+    Some(shl_blocks_i64)
 );
 integer_op!(
     bitwise_right_shift,
@@ -323,7 +434,9 @@ integer_op!(
     shr_i64,
     "Element-wise arithmetic right shift, preserving sign. Counts at or past \
      the dtype's width give 0 for non-negative values and -1 for negative ones.",
-    check_shift_amounts
+    check_shift_amounts,
+    Some(shr_blocks_i32),
+    Some(shr_blocks_i64)
 );
 
 /// The greatest common divisor and the least common multiple, at both integer
@@ -501,6 +614,49 @@ mod tests {
 
     fn i64s(tensor: &Tensor) -> Vec<i64> {
         tensor.data().as_i64_slice().unwrap().to_vec()
+    }
+
+    /// The branchless shifts and their AVX2 block path against the branchy
+    /// definition they replaced, over every count to well past the width and
+    /// the values where a shift is most likely to go wrong. The operands are
+    /// equal-shape and longer than a vector, so the block kernel runs.
+    #[test]
+    fn shifts_agree_with_the_branchy_definition_at_every_count() {
+        macro_rules! check {
+            ($ty:ty, $tensor:ident, $read:ident) => {{
+                let bits = <$ty>::BITS as $ty;
+                let values = [0, 1, -1, 5, -5, <$ty>::MAX, <$ty>::MIN, 0x55, -0x55];
+                let (mut lhs, mut rhs) = (Vec::new(), Vec::new());
+                for count in 0..=(bits + 16) {
+                    for &value in &values {
+                        lhs.push(value);
+                        rhs.push(count);
+                    }
+                }
+                let left = |v: $ty, c: $ty| {
+                    if c >= bits {
+                        0
+                    } else {
+                        v.wrapping_shl(c as u32)
+                    }
+                };
+                let right = |v: $ty, c: $ty| {
+                    if c >= bits {
+                        if v < 0 { -1 } else { 0 }
+                    } else {
+                        v.wrapping_shr(c as u32)
+                    }
+                };
+                let want_left: Vec<$ty> = lhs.iter().zip(&rhs).map(|(&v, &c)| left(v, c)).collect();
+                let want_right: Vec<$ty> =
+                    lhs.iter().zip(&rhs).map(|(&v, &c)| right(v, c)).collect();
+                let (a, b) = ($tensor(lhs), $tensor(rhs));
+                assert_eq!($read(&bitwise_left_shift(&a, &b).unwrap()), want_left);
+                assert_eq!($read(&bitwise_right_shift(&a, &b).unwrap()), want_right);
+            }};
+        }
+        check!(i32, i32_tensor, i32s);
+        check!(i64, i64_tensor, i64s);
     }
 
     #[test]

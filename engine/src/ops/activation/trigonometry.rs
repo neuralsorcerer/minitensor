@@ -313,7 +313,9 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                     " slice from exponent tensor"
                 ))
             })?;
-            if e.iter().any(|&y| y < 0) {
+            // The sign of every exponent OR-ed together, which vectorizes;
+            // a short-circuiting `any` is a branch per element.
+            if e.iter().fold(0, |bits, &y| bits | y) < 0 {
                 return Err(MinitensorError::invalid_operation(
                     "Integers cannot be raised to a negative power; cast the base \
                      to a floating point dtype first",
