@@ -494,6 +494,130 @@ fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
     }
 }
 
+/// A dense element type as the matrix-vector path sees it: the dot kernel its
+/// every answer must agree with, and that kernel's accumulator count.
+#[cfg(not(feature = "blas"))]
+trait GemvElement:
+    Copy
+    + Default
+    + std::ops::AddAssign
+    + std::ops::Mul<Output = Self>
+    + for<'s> std::iter::Sum<&'s Self>
+{
+    const LANES: usize;
+    fn dot(a: &[Self], b: &[Self]) -> Self;
+}
+
+#[cfg(not(feature = "blas"))]
+impl GemvElement for f32 {
+    const LANES: usize = 8;
+    fn dot(a: &[f32], b: &[f32]) -> f32 {
+        simd_dot_f32(a, b)
+    }
+}
+
+#[cfg(not(feature = "blas"))]
+impl GemvElement for f64 {
+    const LANES: usize = 4;
+    fn dot(a: &[f64], b: &[f64]) -> f64 {
+        simd_dot_f64(a, b)
+    }
+}
+
+/// `c = a * b` when the output is a single row or column, or `false` to leave
+/// it to the packed kernel.
+///
+/// This is the shape `matrixmultiply` handles worst: it packs both operands
+/// into panels as wide as its register tile, so a `1 x 16384 x 1` product
+/// padded two vectors out to eight columns and took 217us where a dot product
+/// takes 3. Measured against it on `1 x k x n` and `m x k x 1` up to 1024
+/// wide, this was 1.8-45x faster at every shape.
+///
+/// Every output element is `T::dot` of its row of `a` and column of `b`, bit
+/// for bit, however the operands are stored -- `linear` consumes its weight
+/// transposed where `matmul` has it upright, and the two have to agree. A
+/// strided run is gathered first; one row over an upright `b`, where a column
+/// is strided and gathering each would read `b` `n` times, instead adds one
+/// scaled row of `b` per step of `k` into `LANES` accumulator rows, which is
+/// exactly the per-lane arithmetic of the dot, finished the way it finishes.
+///
+/// # Safety
+///
+/// As `matrixmultiply`'s: the strides address only readable elements of `a`
+/// and `b`, and `c` is writable at `rsc` per row with unit column stride.
+#[cfg(not(feature = "blas"))]
+#[allow(clippy::too_many_arguments)]
+unsafe fn gemv<T: GemvElement>(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const T,
+    rsa: usize,
+    csa: usize,
+    b: *const T,
+    rsb: usize,
+    csb: usize,
+    c: *mut T,
+    rsc: usize,
+) -> bool {
+    if (m != 1 && n != 1) || k == 0 {
+        return false;
+    }
+    // A `k`-long run starting at `start`, `stride` apart, as a slice: borrowed
+    // when it is contiguous, gathered when it is not.
+    let run = |start: *const T, stride: usize| -> std::borrow::Cow<'_, [T]> {
+        // SAFETY: the caller's contract covers `k` elements `stride` apart.
+        unsafe {
+            if stride == 1 {
+                std::borrow::Cow::Borrowed(std::slice::from_raw_parts(start, k))
+            } else {
+                (0..k).map(|step| *start.add(step * stride)).collect()
+            }
+        }
+    };
+    if m == 1 && n > 1 && csb == 1 {
+        let lanes = T::LANES;
+        let whole = k - k % lanes;
+        let mut acc = vec![T::default(); lanes * n];
+        for step in 0..whole {
+            // SAFETY: row `step` of `b` is `n` contiguous elements.
+            let (scale, row) = unsafe {
+                (
+                    *a.add(step * csa),
+                    std::slice::from_raw_parts(b.add(step * rsb), n),
+                )
+            };
+            let lane = &mut acc[(step % lanes) * n..][..n];
+            for (slot, &value) in lane.iter_mut().zip(row) {
+                *slot += scale * value;
+            }
+        }
+        let mut sums = vec![T::default(); lanes];
+        for j in 0..n {
+            for (lane, sum) in sums.iter_mut().enumerate() {
+                *sum = acc[lane * n + j];
+            }
+            let mut total: T = sums.iter().sum();
+            for step in whole..k {
+                // SAFETY: as above.
+                total += unsafe { *a.add(step * csa) * *b.add(step * rsb + j) };
+            }
+            // SAFETY: `c` is one row of `n`.
+            unsafe { *c.add(j) = total };
+        }
+        return true;
+    }
+    for i in 0..m {
+        let row = run(a.wrapping_add(i * rsa), csa);
+        for j in 0..n {
+            let column = run(b.wrapping_add(j * csb), rsb);
+            // SAFETY: element `(i, j)` of `c`.
+            unsafe { *c.add(i * rsc + j) = T::dot(&row, &column) };
+        }
+    }
+    true
+}
+
 /// Define `gemm_f32` / `gemm_f64` over the corresponding `matrixmultiply` entry
 /// point. Both take row-major operands with unit column stride; the row strides
 /// stay at the *full* `k` and `n` even for a slice, which is what lets a task
@@ -530,6 +654,10 @@ macro_rules! split_gemm {
             c: *mut $ty,
             rsc: usize,
         ) {
+            // SAFETY: forwarded; `gemv` addresses exactly what the kernel would.
+            if unsafe { gemv::<$ty>(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc) } {
+                return;
+            }
             unsafe {
                 $kernel(
                     m,
@@ -1750,6 +1878,55 @@ mod split_gemm_tests {
     /// same answer as materialising the transpose and multiplying normally --
     /// that equivalence is the whole point of the stride form, and it is what
     /// lets `linear` skip a full copy of its weight on every call.
+    /// A product with one output row or column is a dot product per element,
+    /// and has to be that dot however each operand is stored: upright,
+    /// transposed, or as a strided view. `k` runs past a multiple of the lane
+    /// count so the tail is covered.
+    #[test]
+    fn a_vector_shaped_product_is_the_dot_in_every_layout() {
+        for (m, k, n) in [(1, 37, 1), (1, 37, 9), (7, 37, 1), (1, 1, 5), (5, 1, 1)] {
+            let a: Vec<f32> = fill(m * k, 0x51).iter().map(|&x| x as f32).collect();
+            let b: Vec<f32> = fill(k * n, 0x52).iter().map(|&x| x as f32).collect();
+            let want: Vec<f32> = (0..m * n)
+                .map(|at| {
+                    let (i, j) = (at / n, at % n);
+                    let row: Vec<f32> = (0..k).map(|t| a[i * k + t]).collect();
+                    let column: Vec<f32> = (0..k).map(|t| b[t * n + j]).collect();
+                    simd_dot_f32(&row, &column)
+                })
+                .collect();
+            // Every storage of each operand: `a` upright or as its transpose,
+            // `b` likewise.
+            let at: Vec<f32> = (0..k * m).map(|x| a[(x % m) * k + x / m]).collect();
+            let bt: Vec<f32> = (0..n * k).map(|x| b[(x % k) * n + x / k]).collect();
+            for (a_ptr, rsa, csa) in [(a.as_ptr(), k, 1), (at.as_ptr(), 1, m)] {
+                for (b_ptr, rsb, csb) in [(b.as_ptr(), n, 1), (bt.as_ptr(), 1, k)] {
+                    let mut got = vec![0f32; m * n];
+                    unsafe {
+                        gemm_strided_f32(
+                            m,
+                            k,
+                            n,
+                            a_ptr,
+                            rsa,
+                            csa,
+                            b_ptr,
+                            rsb,
+                            csb,
+                            got.as_mut_ptr(),
+                        )
+                    };
+                    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&got),
+                        bits(&want),
+                        "({m}, {k}, {n}) with strides a=({rsa}, {csa}) b=({rsb}, {csb})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn transposed_operands_match_a_materialised_transpose() {
         fn transpose_of(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
