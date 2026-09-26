@@ -4,10 +4,10 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::sum_prod_impl::{column_band, fold_column_band, fold_lanes, fold_slab_with, row_band};
 use super::*;
 use crate::ops::map::{
     SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
-    reduction_band,
 };
 use crate::ops::order::{
     Entry, PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64, pack32,
@@ -17,8 +17,7 @@ use crate::ops::shape_ops;
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
 use crate::ops::util::{
-    Accumulate, accumulating_dtype, accurate_run_sum, accurate_slab_sum, deterministic_par_sum,
-    pairwise_fold,
+    Accumulate, accumulating_dtype, accurate_run_sum, deterministic_par_sum, pairwise_fold,
 };
 use crate::{
     error::{MinitensorError, Result},
@@ -814,6 +813,10 @@ pub fn var(
 /// work; the point of banding at all is that one row per task is not.
 const VAR_ROW_BAND: usize = 64;
 
+/// Fewer slabs than this are each spread across the pool rather than handed
+/// one to a task; the same threshold `sum` uses.
+const VAR_MIN_SLABS: usize = 4;
+
 /// Fused single-axis variance for tensors that do not require gradients.
 ///
 /// Two cache-friendly slab passes per outer block (mean, then sum of squared
@@ -831,7 +834,6 @@ fn var_fused_single_axis(
     let dim_size = dims[axis];
     let inner: usize = dims[axis + 1..].iter().product();
     let outer: usize = dims[..axis].iter().product();
-    let outer_stride = dim_size * inner;
     let out_numel = outer * inner;
 
     let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
@@ -902,44 +904,114 @@ fn var_fused_single_axis(
                     par_out_chunks(out, VAR_ROW_BAND, &run);
                 }
             } else if inner != 0 {
-                // The reduced axis is not the last one, so each output's
-                // elements are `inner` apart. Accumulate whole slabs instead,
-                // which reads the input in memory order; the running means are
-                // a vector of `inner`, allocated once per outer position.
-                let outer = out.len() / inner;
-                par_out_chunks(out, reduction_band(outer, inner), &|start, out_chunk| {
-                    // With one outer position the columns are cut into bands
-                    // instead, so a chunk is part of one block's row rather
-                    // than all of it: the block is fixed and the chunk starts
-                    // `start % inner` columns into it.
-                    let block_base = (start / inner) * outer_stride + start % inner;
-                    let width = out_chunk.len();
-                    // Both passes are blocked for the same reason the
-                    // contiguous-row path above uses `accurate_run_sum`.
-                    let mut col_mean =
-                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + width];
-                            for (m, &v) in acc.iter_mut().zip(slab) {
-                                *m += v;
+                // The reduced axis is not the last one: `outer` slabs of
+                // `(dim_size, inner)` rows, each column of a slab one output.
+                // Both passes go through the fold `sum` uses for a column
+                // reduction -- rows read in memory order, narrow rows several
+                // at a time, each accumulator lane held to a short chain -- and
+                // the slabs are split exactly as `sum` splits them, so a slab
+                // is spread across the pool only when there are too few to go
+                // around. The fold of each lane was a chain of up to 8192 rows,
+                // and a narrow slab never vectorized: `(16, 100000, 2)` over
+                // its middle axis took 2.8ms and landed 10 ulps out.
+                let slab = dim_size * inner;
+                let lanes = fold_lanes(inner).max(inner);
+                let column_var = |source: &[$ty], target: &mut [$ty], spread: bool| {
+                    let totals = fold_slab_with(
+                        source,
+                        inner,
+                        0.0 as $ty,
+                        |acc: &mut [$ty], values: &[$ty], _| {
+                            for (a, &v) in acc.iter_mut().zip(values) {
+                                *a += v;
                             }
-                        });
-                    for m in col_mean.iter_mut() {
-                        *m /= n;
-                    }
-                    let squared =
-                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + width];
-                            for ((a, &v), &m) in acc.iter_mut().zip(slab).zip(col_mean.iter()) {
+                        },
+                        |x, y| x + y,
+                        spread,
+                    );
+                    let means: Vec<$ty> =
+                        totals.iter().cycle().take(lanes).map(|&t| t / n).collect();
+                    let squares = fold_slab_with(
+                        source,
+                        inner,
+                        0.0 as $ty,
+                        |acc: &mut [$ty], values: &[$ty], first| {
+                            let means = &means[first..first + acc.len()];
+                            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
                                 let d = v - m;
                                 *a += d * d;
                             }
-                        });
-                    for (acc, &v) in out_chunk.iter_mut().zip(squared.iter()) {
-                        *acc = v / divisor;
+                        },
+                        |x, y| x + y,
+                        spread,
+                    );
+                    for (slot, &q) in target.iter_mut().zip(&squares) {
+                        *slot = q / divisor;
                     }
-                });
+                };
+                // A slab too short to split by rows is split by columns, and
+                // then both passes run inside each column band: the band is
+                // still in cache for the second pass, where running the first
+                // over the whole slab before starting the second evicted it --
+                // 50% slower on a `(512, 4096)` matrix down its rows.
+                let band_var = |source: &[$ty], start: usize, target: &mut [$ty]| {
+                    let width = target.len();
+                    let add = |x: $ty, y: $ty| x + y;
+                    let totals = fold_column_band(
+                        source,
+                        inner,
+                        start,
+                        width,
+                        0.0 as $ty,
+                        |acc: &mut [$ty], values: &[$ty], _| {
+                            for (a, &v) in acc.iter_mut().zip(values) {
+                                *a += v;
+                            }
+                        },
+                        add,
+                    );
+                    let means: Vec<$ty> = totals.iter().map(|&t| t / n).collect();
+                    let squares = fold_column_band(
+                        source,
+                        inner,
+                        start,
+                        width,
+                        0.0 as $ty,
+                        |acc: &mut [$ty], values: &[$ty], _| {
+                            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
+                                let d = v - m;
+                                *a += d * d;
+                            }
+                        },
+                        add,
+                    );
+                    for (slot, &q) in target.iter_mut().zip(&squares) {
+                        *slot = q / divisor;
+                    }
+                };
+                let outer = out.len() / inner;
+                if outer < VAR_MIN_SLABS {
+                    for (source, target) in
+                        input.chunks_exact(slab).zip(out.chunks_exact_mut(inner))
+                    {
+                        if row_band(dim_size).is_some() {
+                            column_var(source, target, true);
+                        } else {
+                            par_out_chunks(target, column_band(inner), &|start, chunk| {
+                                band_var(source, start, chunk)
+                            });
+                        }
+                    }
+                } else {
+                    let per_task = outputs_per_task(slab).div_ceil(inner).max(1);
+                    par_out_chunks(out, per_task * inner, &|start, chunk| {
+                        let first = start / inner;
+                        for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
+                            let at = (first + index) * slab;
+                            column_var(&input[at..at + slab], target, false);
+                        }
+                    });
+                }
             }
         }};
     }

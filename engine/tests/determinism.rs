@@ -563,3 +563,38 @@ fn logsumexp_is_bitwise_stable_across_thread_counts() {
         });
     }
 }
+
+/// `var` down a non-last axis now folds its two passes through the same slab
+/// machinery `sum` uses, with a route per shape: many slabs each on one task,
+/// few slabs spread across the pool by bands of rows, and few slabs too short
+/// for that spread by bands of columns, both passes inside each band. The
+/// column band width does follow the pool, so this is the test that it cannot
+/// reach any column's answer.
+#[test]
+fn var_along_a_non_last_axis_is_bitwise_stable_across_thread_counts() {
+    for (dims, axis) in [
+        (vec![3usize, 4096], 0isize), // one short slab: column bands
+        (vec![4096, 64], 0),          // one tall slab: row bands
+        (vec![2, 3000, 40], 1),       // few slabs, row bands
+        (vec![2, 500, 300], 1),       // few slabs, column bands
+        (vec![16, 3000, 3], 1),       // many narrow slabs
+        (vec![6, 300, 200], 1),       // many wide slabs
+    ] {
+        let numel: usize = dims.iter().product();
+        let values = wide_magnitude_tensor(numel, 1)
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .to_vec();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert_thread_invariant(&format!("var(dim={axis}) on {dims:?}"), || {
+            reduction::var(&tensor, Some(vec![axis]), false, true).unwrap()
+        });
+    }
+}

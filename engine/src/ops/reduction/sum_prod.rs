@@ -34,27 +34,14 @@ const DIM0_MIN_ROW_BAND: usize = 256;
 const DIM0_MIN_BANDS: usize = 4;
 
 /// Reduce a row-major `(rows, cols)` slice along dimension 0, writing one value
-/// per column.
+/// per column, through [`fold_slab_with`].
 ///
-/// Parallelism runs across the *output* columns, never across rows, so every
-/// output element is accumulated by a single thread walking the rows in index
-/// order. The natural shape for this loop -- fold a per-worker accumulator over
-/// `par_chunks_exact(cols)` and reduce the partials -- instead lets rayon decide
-/// how rows are grouped, and that grouping changes with the thread count. For
+/// The natural shape for this loop -- fold a per-worker accumulator over
+/// `par_chunks_exact(cols)` and reduce the partials -- lets rayon decide how
+/// rows are grouped, and that grouping changes with the thread count. For
 /// floating point that changes the rounding, so the same program produced
-/// different sums on machines with different core counts.
-///
-/// Note what the *column-band* width does not affect: on that path every output
-/// element still accumulates rows `0..rows` in index order whatever the
-/// partition, so the result is identical for any block size. That leaves the
-/// width free to be chosen purely for locality -- one wide contiguous run per
-/// thread rather than many narrow interleaved ones -- including from the thread
-/// count, without costing reproducibility.
-///
-/// The *row-band* path is the other way round: there the partition decides how
-/// the partial sums are grouped, so its layout is fixed by the row count alone,
-/// and within a band the rows are blocked and folded pairwise for accuracy
-/// rather than run into a single total.
+/// different sums on machines with different core counts. Here every grouping
+/// of rows into partial sums follows from the shape alone.
 ///
 /// `combine` folds one input value into an accumulator and `merge` joins two
 /// accumulators. They are separate because the two are no longer the same
@@ -77,132 +64,216 @@ fn reduce_along_dim0<I, A, F, M>(
     if cols == 0 || out.is_empty() {
         return;
     }
+    out.copy_from_slice(&fold_slab_with(
+        input,
+        cols,
+        init,
+        move |acc: &mut [A], values: &[I], _| {
+            for (slot, &value) in acc.iter_mut().zip(values) {
+                *slot = combine(*slot, value);
+            }
+        },
+        merge,
+        true,
+    ));
+}
+
+/// Reduce each column of a row-major `(rows, cols)` slab, the building block
+/// every column reduction here -- `sum`, `var`, `norm` down a non-last axis --
+/// goes through.
+///
+/// `step(acc, values, first)` folds a run of `values` into the accumulator
+/// lanes `acc` beside it, lane `i` belonging to column `(first + i) % cols`.
+/// It sees whole rows, several narrow rows side by side, or the part of a row
+/// one column band covers, so a caller whose step needs something per column
+/// (`var` needs each column's mean) indexes a copy of it tiled across
+/// [`fold_lanes`] lanes by `first + i`. `merge` joins two accumulators.
+///
+/// With `spread`, the slab is split across the pool: into bands of rows when
+/// there are enough rows, which stream the input in memory order, and into
+/// bands of columns when there are not. Every band boundary follows from the
+/// shape alone, and the column split does not group any column's rows
+/// differently whatever its width, so the answer never depends on the thread
+/// count. Without `spread` the whole slab is folded on the calling thread;
+/// which one a caller asks for must follow from the shape as well.
+pub(crate) fn fold_slab_with<I, A, S, M>(
+    input: &[I],
+    cols: usize,
+    init: A,
+    step: S,
+    merge: M,
+    spread: bool,
+) -> Vec<A>
+where
+    I: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    S: Fn(&mut [A], &[I], usize) + Send + Sync + Copy,
+    M: Fn(A, A) -> A + Send + Sync + Copy,
+{
     let rows = input.len() / cols;
+    if !spread {
+        return fold_rows_with(input, cols, init, step, merge);
+    }
 
     // Contiguous bands of rows, when there are enough of them to go around.
-    // Each band streams the input in memory order, which the prefetcher likes
-    // far more than walking a column band down the matrix, and the partial
-    // buffers it needs cost only `bands * cols`. The band boundaries come from
-    // the row count alone -- never from the thread count -- because here the
-    // partition *does* decide how the partial sums are grouped.
-    let band = rows.div_ceil(DIM0_TARGET_BANDS).max(DIM0_MIN_ROW_BAND);
-    let bands = rows.div_ceil(band);
-    if bands >= DIM0_MIN_BANDS {
-        // Only the split is erased; `combine` stays a concrete closure type
-        // inside the band body, so the accumulate loop still inlines and
-        // vectorizes. Erasing it here instead would put an indirect call on
-        // every element.
-        //
-        // Inside a band the rows are blocked and the blocks folded pairwise,
-        // rather than run into one total. A band is up to `rows / 64` rows
-        // wide, so on a few million rows it was a chain of tens of thousands of
-        // roundings: summing four million squares two columns wide measured
-        // 7.5e-6 relative, where the same values through a contiguous
-        // `accurate_run_sum` give about 3e-7. It only shows on summands with a
-        // wide relative spread -- uniform values in [0.5, 1.5] hid it at 3.5e-7
-        // and sent me looking in the wrong place -- but a sum of squares, which
-        // is what `var` and `norm` feed through here, has exactly that spread.
-        let partials: Vec<Vec<A>> = par_map_indexed(bands, &|index| {
+    // The band boundaries come from the row count alone -- never from the
+    // thread count -- because here the partition *does* decide how the
+    // partial sums are grouped.
+    //
+    // Inside a band the rows are blocked and the blocks folded pairwise,
+    // rather than run into one total. A band is up to `rows / 64` rows wide,
+    // so on a few million rows it was a chain of tens of thousands of
+    // roundings: summing four million squares two columns wide measured
+    // 7.5e-6 relative, where the same values through a contiguous
+    // `accurate_run_sum` give about 3e-7. It only shows on summands with a
+    // wide relative spread -- uniform values in [0.5, 1.5] hid it at 3.5e-7 --
+    // but a sum of squares, which is what `var` and `norm` feed through here,
+    // has exactly that spread.
+    if let Some(band) = row_band(rows) {
+        let partials: Vec<Vec<A>> = par_map_indexed(rows.div_ceil(band), &|index| {
             let start = index * band;
             let end = ((index + 1) * band).min(rows);
-            fold_rows(&input[start * cols..end * cols], cols, init, combine, merge)
+            fold_rows_with(&input[start * cols..end * cols], cols, init, step, merge)
         });
-
         // The bands merge pairwise too; a running fold over them was a second,
         // shorter chain of the same kind.
-        let total = pairwise_fold_vectors(partials, merge);
-        out.copy_from_slice(&total);
-        return;
+        return pairwise_fold_vectors(partials, merge);
     }
 
     // Too few rows to split: give each thread its own band of output columns
-    // instead. Unlike the row split above, the column width cannot change the
-    // result -- each output still accumulates rows in index order -- so it is
-    // free to follow the thread count.
-    let block = cols
-        .div_ceil(rayon::current_num_threads().max(1))
-        .max(DIM0_MIN_BLOCK);
-    par_out_chunks(out, block, &|start, out_block| {
+    // instead; see [`fold_column_band`].
+    let mut out = vec![init; cols];
+    par_out_chunks(&mut out, column_band(cols), &|start, out_block| {
         let width = out_block.len();
-        for slot in out_block.iter_mut() {
-            *slot = init;
-        }
-        for row in input.chunks_exact(cols) {
-            let segment = &row[start..start + width];
-            for (slot, &value) in out_block.iter_mut().zip(segment) {
-                *slot = combine(*slot, value);
-            }
-        }
+        out_block.copy_from_slice(&fold_column_band(
+            input, cols, start, width, init, step, merge,
+        ));
     });
+    out
 }
 
-/// Reduce the rows of a row-major `(rows, cols)` slice on one thread: blocks
-/// of rows each run into their own accumulator row, and the blocks fold
-/// pairwise. A block is `FOLD_ROWS` rows, or `RUN_SUM_CHUNK` elements when
-/// the rows are narrow enough that that is more; either way each accumulator
-/// lane sees a chain of about `FOLD_ROWS` additions. Blocking by
-/// `RUN_SUM_CHUNK` rows instead left a 512-row slab one 512-long chain per
-/// column, 17 ulps from the exact sum.
+/// The rows in one band when a `rows`-row slab is split across the pool by
+/// rows, or `None` when there are too few rows to be worth it and the slab is
+/// split by columns instead. It follows from the row count alone, because
+/// here the partition decides how the partial sums are grouped.
+pub(crate) fn row_band(rows: usize) -> Option<usize> {
+    let band = rows.div_ceil(DIM0_TARGET_BANDS).max(DIM0_MIN_ROW_BAND);
+    (rows.div_ceil(band) >= DIM0_MIN_BANDS).then_some(band)
+}
+
+/// How many columns one task takes when a slab with too few rows to band is
+/// split by columns. Free to follow the thread count; see
+/// [`fold_column_band`].
+pub(crate) fn column_band(cols: usize) -> usize {
+    cols.div_ceil(rayon::current_num_threads().max(1))
+        .max(DIM0_MIN_BLOCK)
+}
+
+/// Fold columns `start..start + width` of a row-major slab `cols` wide, on one
+/// thread, handing `step` the part of each row they cover with `first` set to
+/// `start`.
 ///
-/// This is a band of [`reduce_along_dim0`], and a whole slab of
-/// [`reduce_axis`] when there are enough slabs to go around.
-fn fold_rows<I, A, F, M>(input: &[I], cols: usize, init: A, combine: F, merge: M) -> Vec<A>
+/// Each column's rows are blocked by `FOLD_ROWS` however wide the band, so the
+/// width cannot change any column's answer and is free to follow the thread
+/// count. This used to be a running total down the rows, a chain as long as
+/// the slab: 16 ulps on the variance of a `(512, 4096)` matrix down its rows.
+pub(crate) fn fold_column_band<I, A, S, M>(
+    input: &[I],
+    cols: usize,
+    start: usize,
+    width: usize,
+    init: A,
+    step: S,
+    merge: M,
+) -> Vec<A>
 where
     I: Copy,
     A: Copy,
-    F: Fn(A, I) -> A + Copy,
-    M: Fn(A, A) -> A + Copy,
+    S: Fn(&mut [A], &[I], usize),
+    M: Fn(A, A) -> A,
 {
-    // A narrow row leaves the accumulate loop a few elements long, too short
-    // to vectorize, so narrow rows are taken `k` at a time into an accumulator
-    // `k` rows wide and its lanes merged down to one row at the end of the
-    // block. Summing `(16, 100000, 2)` over its middle axis went from 1.06ms
-    // to 0.22ms this way, and a `(1000000, 2)` matrix over its rows from 0.65
-    // to 0.14 -- and both closer to the exact answer, since `k` accumulators
-    // per column is `k` shorter rounding chains.
-    let span = if cols < NARROW_ROW {
+    let rows = input.len() / cols;
+    let blocks: Vec<Vec<A>> = (0..rows)
+        .step_by(FOLD_ROWS)
+        .map(|first| {
+            let mut acc = vec![init; width];
+            for row in first..(first + FOLD_ROWS).min(rows) {
+                let at = row * cols + start;
+                step(&mut acc, &input[at..at + width], start);
+            }
+            acc
+        })
+        .collect();
+    if blocks.is_empty() {
+        return vec![init; width];
+    }
+    pairwise_fold_vectors(blocks, merge)
+}
+
+/// How many accumulator lanes [`fold_rows_with`] folds narrow rows into: a
+/// whole number of rows, at least `NARROW_ROW` elements. A caller whose step
+/// indexes a per-column vector tiles it to at least this length.
+pub(crate) fn fold_lanes(cols: usize) -> usize {
+    if cols < NARROW_ROW {
         NARROW_ROW.div_ceil(cols) * cols
     } else {
         cols
-    };
+    }
+}
+
+/// [`fold_slab_with`] on one thread: blocks of rows each run into their own
+/// accumulator row, and the blocks fold pairwise. A block is `FOLD_ROWS` rows,
+/// or `RUN_SUM_CHUNK` elements when the rows are narrow enough that that is
+/// more; either way each accumulator lane sees a chain of about `FOLD_ROWS`
+/// additions. Blocking by `RUN_SUM_CHUNK` rows instead left a 512-row slab one
+/// 512-long chain per column, 17 ulps from the exact sum.
+///
+/// A narrow row leaves the accumulate loop a few elements long, too short to
+/// vectorize, so narrow rows are taken `k` at a time into [`fold_lanes`]
+/// lanes and merged down to one row at the end of the block. Summing
+/// `(16, 100000, 2)` over its middle axis went from 1.06ms to 0.22ms this way,
+/// and a `(1000000, 2)` matrix over its rows from 0.65 to 0.14 -- and both
+/// closer to the exact answer, since `k` accumulators per column is `k`
+/// shorter rounding chains.
+fn fold_rows_with<I, A, S, M>(input: &[I], cols: usize, init: A, step: S, merge: M) -> Vec<A>
+where
+    I: Copy,
+    A: Copy,
+    S: Fn(&mut [A], &[I], usize) + Copy,
+    M: Fn(A, A) -> A + Copy,
+{
+    let span = fold_lanes(cols);
     let blocks: Vec<Vec<A>> = input
         .chunks((RUN_SUM_CHUNK / cols).max(FOLD_ROWS) * cols)
         .map(|block| {
             let mut wide = vec![init; span];
             let mut spans = block.chunks_exact(span);
             for group in &mut spans {
-                for (slot, &value) in wide.iter_mut().zip(group) {
-                    *slot = combine(*slot, value);
-                }
+                step(&mut wide, group, 0);
             }
             let mut acc = vec![init; cols];
             for row in spans.remainder().chunks_exact(cols) {
-                for (slot, &value) in acc.iter_mut().zip(row) {
-                    *slot = combine(*slot, value);
-                }
+                step(&mut acc, row, 0);
             }
-            if span == cols {
-                for (slot, &value) in acc.iter_mut().zip(&wide) {
+            for lanes in wide.chunks_exact(cols) {
+                for (slot, &value) in acc.iter_mut().zip(lanes) {
                     *slot = merge(*slot, value);
-                }
-            } else {
-                for lanes in wide.chunks_exact(cols) {
-                    for (slot, &value) in acc.iter_mut().zip(lanes) {
-                        *slot = merge(*slot, value);
-                    }
                 }
             }
             acc
         })
         .collect();
+    if blocks.is_empty() {
+        return vec![init; cols];
+    }
     pairwise_fold_vectors(blocks, merge)
 }
 
 /// Rows narrower than this many elements are accumulated several at a time;
-/// see [`fold_rows`].
+/// see [`fold_rows_with`].
 const NARROW_ROW: usize = 64;
 
-/// The rounding chain each accumulator lane in [`fold_rows`] is held to.
+/// The rounding chain each accumulator lane in [`fold_slab_with`] is held to.
 const FOLD_ROWS: usize = RUN_SUM_CHUNK / NARROW_ROW;
 
 /// Reduce the middle axis of a row-major `(outer, len, inner)` slice, one value
@@ -267,7 +338,18 @@ fn reduce_axis<I, A, F, M, R>(
         let first = start / inner;
         for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
             let source = &input[(first + index) * slab..(first + index + 1) * slab];
-            target.copy_from_slice(&fold_rows(source, inner, init, combine, merge));
+            target.copy_from_slice(&fold_slab_with(
+                source,
+                inner,
+                init,
+                move |acc: &mut [A], values: &[I], _| {
+                    for (slot, &value) in acc.iter_mut().zip(values) {
+                        *slot = combine(*slot, value);
+                    }
+                },
+                merge,
+                false,
+            ));
         }
     });
 }

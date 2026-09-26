@@ -207,3 +207,38 @@ def test_logsumexp_non_finite_values_mean_the_same_on_both_paths(shape, dim, dty
     finite = np.isfinite(composed)
     atol = 1e-5 if dtype == "float32" else 1e-12
     np.testing.assert_allclose(fused[finite], composed[finite], rtol=atol, atol=atol)
+
+
+# One shape per route the fused `var` takes down a non-last axis.
+VAR_ROUTES = [
+    ((512, 4096), 0),  # one short slab, split by columns
+    ((4096, 1024), 0),  # one tall slab, split by rows
+    ((100_000, 8), 0),  # one tall narrow slab
+    ((2, 300_000, 5), 1),  # few slabs, each split by rows
+    ((16, 100_000, 2), 1),  # many narrow slabs
+    ((8, 512, 512), 1),  # many wide slabs
+]
+
+
+def _ulps(got, exact):
+    nearest = exact.astype(got.dtype)
+    kind = np.int32 if got.dtype == np.float32 else np.int64
+    return int(
+        np.abs(
+            got.view(kind).astype(np.int64) - nearest.view(kind).astype(np.int64)
+        ).max()
+    )
+
+
+@pytest.mark.parametrize("shape,dim", VAR_ROUTES)
+def test_var_down_a_non_last_axis_stays_within_a_few_ulps(shape, dim):
+    """The fused `var` accumulated each column of a slab in one chain of up to
+    8192 rows: 40 ulps from the exact answer on a `(4096, 1024)` matrix down
+    its rows, 23 on `(64, 20000, 3)` down its middle axis. It now folds through
+    the same short blocked chains `sum` does."""
+    rng = np.random.default_rng(len(shape) * 100 + dim)
+    values = (rng.random(shape) + 0.5).astype(np.float32)
+    exact = values.astype(np.float64).var(axis=dim, ddof=1)
+    t = mt.from_numpy(values)
+    assert _ulps(t.var(dim).numpy(), exact) <= 8
+    assert _ulps(t.std(dim).numpy(), np.sqrt(exact)) <= 8
