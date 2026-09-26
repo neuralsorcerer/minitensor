@@ -347,6 +347,17 @@ float32: `diff` 195 µs to 7, `count_nonzero` 99 to 4, `sum(0)` 64 to 3,
 `add` at 65,536 96 to 9. The thresholds are one machine's; a host whose pool
 wakes faster would split sooner, and `ops::map` is where to look.
 
+The same sweep turned up the other half of the mid-size cost: the sequential
+loops under `unary_map`, `binary_map` and `ternary_map` were compiled for the
+x86-64 baseline alone, so every kernel built on them ran at SSE2 width. They
+are now compiled twice and pick AVX2 at run time, as the `ops::simd` kernels
+already did; no float result can move. At 16,384 elements the surface geomean
+went from 1.17x to 1.31x: float32 `floor_divide` 154 µs to 12, float64 `isnan`
+7.9 to 4.7, `bitwise_count` and `nextafter` 2.5–3x. One kernel needed more
+than the wider registers: `nan_to_num` captured its replacement values by
+reference, which kept its loop scalar under either build, 12 µs where moving
+them gives 3.
+
 ### Two of them were not slow. They were wrong.
 
 The float32 side of that module grew six kernels while this file was being
