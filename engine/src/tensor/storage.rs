@@ -626,9 +626,9 @@ impl TensorData {
 
     #[inline(always)]
     fn fill_slice<T: Copy + Send + Sync>(slice: &mut [T], value: T) {
-        if slice.len() >= 1024 {
-            // `fill` per chunk, not a write per element: rayon was being handed
-            // one work item per element to perform a single store.
+        // The same rule as [`Self::filled_buffer`]: stores into pages already
+        // faulted in are one core's work below the copy threshold.
+        if std::mem::size_of_val(slice) >= PARALLEL_COPY_THRESHOLD {
             crate::ops::map::par_out_chunks(slice, crate::ops::map::PAR_CHUNK, &|_, chunk| {
                 chunk.fill(value)
             });

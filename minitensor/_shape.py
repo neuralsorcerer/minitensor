@@ -1359,11 +1359,12 @@ def geomspace(
         # The exponential of a logarithm is not the number that went in, and
         # the two ends are the two the caller named. One step is the *start*
         # alone, so it must not be overwritten with the end.
-        exact = _np.asarray(values.numpy(), dtype=_np.float64)
+        # One copy, out of the tensor's buffer view, and the tensor shares it.
+        exact = _np.array(_numpy_view(values), dtype=_np.float64)
         exact[0] = abs(first)
         if steps > 1:
             exact[-1] = abs(last)
-        values = Tensor.from_numpy(exact)
+        values = _from_numpy(exact)
     result = values * sign
     if dtype is not None and str(result.dtype) != str(dtype):
         result = result.astype(str(dtype))
