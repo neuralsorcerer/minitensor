@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 
@@ -81,7 +82,7 @@ def _call(base, index, src, reduce, include_self=True):
 @pytest.mark.parametrize("include_self", [True, False])
 @pytest.mark.parametrize("trial", range(6))
 def test_against_a_reference(reduce, include_self, trial):
-    rng = np.random.default_rng(hash((reduce, include_self, trial)) % 2**32)
+    rng = np.random.default_rng(stable_seed(reduce, include_self, trial))
     base = rng.normal(size=6)
     src = rng.normal(size=9)
     index = rng.integers(0, 6, 9)
@@ -171,13 +172,25 @@ def _grads(base, index, src, reduce, include_self, weights):
 @pytest.mark.parametrize("include_self", [True, False])
 @pytest.mark.parametrize("trial", range(4))
 def test_the_gradients_match_central_differences(reduce, include_self, trial):
-    rng = np.random.default_rng(hash((reduce, include_self, trial, "g")) % 2**32)
+    rng = np.random.default_rng(stable_seed(reduce, include_self, trial, "g"))
     # Shifted away from zero so the difference quotient means something for
     # `prod`, and so `amax`/`amin` ties stay improbable.
     base = rng.normal(size=5) + 1.5
     src = rng.normal(size=8) + 1.5
     index = rng.integers(0, 5, 8)
     weights = rng.normal(size=5)
+    if reduce in ("amax", "amin"):
+        # The derivative has a kink wherever two values contending for a slot
+        # are equal, and a central difference straddling one reports half the
+        # gradient to each. Checked rather than hoped for, so a new seed that
+        # lands near a tie fails here and says so.
+        for slot in range(base.size):
+            contenders = np.sort(
+                np.concatenate([src[index == slot], base[slot : slot + 1]])
+                if include_self
+                else src[index == slot]
+            )
+            assert np.all(np.diff(contenders) > 1e-3), (slot, contenders)
 
     def forward(b, s):
         return float(

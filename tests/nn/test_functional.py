@@ -8,6 +8,7 @@ import math
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 from minitensor import functional as F
@@ -1418,7 +1419,7 @@ def test_relu_and_leaky_relu_agree_on_which_side_zero_belongs_to():
 def test_cross_entropy_index_targets_match_the_dense_formula(
     reduction, dtype, index_dtype
 ):
-    rng = np.random.default_rng(hash((reduction, dtype)) % 2**31)
+    rng = np.random.default_rng(stable_seed(reduction, dtype))
     rows, classes = 64, 40
     logits = rng.standard_normal((rows, classes)).astype(dtype)
     idx = rng.integers(0, classes, rows).astype(index_dtype)

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,19 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def stable_seed(*parts) -> int:
+    """A seed that is the same for the same `parts` in every process.
+
+    `hash()` is not: Python salts the hash of every string per process, so a
+    test seeding with `hash((reduce, trial))` drew different data on every
+    run, and one run in many drew two values within a finite-difference step
+    of each other at a kink of `amin`, which failed a gradient check that had
+    passed hundreds of times. A checksum of the parts' `repr` does not move.
+    """
+
+    return zlib.crc32(repr(parts).encode())
 
 
 def callable_attribute(tensor, name):

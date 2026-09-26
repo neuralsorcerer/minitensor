@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 
@@ -102,7 +103,7 @@ MODES = [("nearest", False), ("bilinear", False), ("bilinear", True)]
 @pytest.mark.parametrize("shape,output_size", CASES)
 @pytest.mark.parametrize("mode,align_corners", MODES)
 def test_it_matches_the_coordinate_rule(shape, output_size, mode, align_corners):
-    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(
+    values = np.random.default_rng(stable_seed(shape, output_size)).standard_normal(
         shape
     )
     got = mt.nn.interpolate(

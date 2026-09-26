@@ -23,6 +23,7 @@ import math
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 
@@ -102,7 +103,7 @@ def _call(image, grid, **kwargs):
 @pytest.mark.parametrize("padding", ["zeros", "border", "reflection"])
 @pytest.mark.parametrize("align_corners", [False, True])
 def test_against_a_reference_written_from_the_definition(mode, padding, align_corners):
-    rng = np.random.default_rng(hash((mode, padding, align_corners)) % 2**32)
+    rng = np.random.default_rng(stable_seed(mode, padding, align_corners))
     image = rng.normal(size=(2, 3, 5, 4))
     # Deliberately outside [-1, 1] as well, so the padding mode is exercised.
     grid = rng.uniform(-2.0, 2.0, size=(2, 6, 7, 2))

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 
@@ -378,7 +379,7 @@ def test_the_contraction_answers_the_same_whichever_route_it_takes(shape, dim):
     a unit axis, an empty one.
     """
 
-    rng = np.random.default_rng(abs(hash((shape, dim))) % 2**32)
+    rng = np.random.default_rng(stable_seed(shape, dim))
     first = rng.standard_normal(shape)
     second = rng.standard_normal(shape)
     np.testing.assert_allclose(

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import stable_seed
 
 import minitensor as mt
 
@@ -77,7 +78,7 @@ OPS = [
 @pytest.mark.parametrize("shape,output_size", CASES)
 @pytest.mark.parametrize("op,reduce,name", OPS)
 def test_it_matches_the_window_rule(shape, output_size, op, reduce, name):
-    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(
+    values = np.random.default_rng(stable_seed(shape, output_size)).standard_normal(
         shape
     )
     got = op(mt.Tensor(values, dtype="float64"), output_size).numpy()
