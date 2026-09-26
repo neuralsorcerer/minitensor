@@ -569,9 +569,23 @@ pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tens
     let mut result_data =
         TensorData::zeros_on_device(output_shape_obj.numel(), out_dtype, tensor.device());
 
+    let len = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    macro_rules! float_prod {
+        ($accessor:ident, $accessor_mut:ident) => {{
+            let input = tensor
+                .data()
+                .$accessor()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get float slice"))?;
+            let out = result_data
+                .$accessor_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get float slice"))?;
+            prod_float_along_axis(input, out, len, inner);
+        }};
+    }
     match tensor.dtype() {
-        DataType::Float32 => prod_along_dim_f32(tensor, &mut result_data, dim)?,
-        DataType::Float64 => prod_along_dim_f64(tensor, &mut result_data, dim)?,
+        DataType::Float32 => float_prod!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float64 => float_prod!(as_f64_slice, as_f64_slice_mut),
         DataType::Int32 => prod_along_dim_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => prod_along_dim_i64(tensor, &mut result_data, dim)?,
         DataType::Bool => unreachable!("bool was promoted above"),
@@ -584,6 +598,191 @@ pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tens
         tensor.device(),
         tensor.requires_grad(),
     ))
+}
+
+/// A float dtype whose product is accumulated in `f64`.
+pub(crate) trait ProdFloat: Copy + Send + Sync {
+    fn widen(self) -> f64;
+    fn narrow(total: f64) -> Self;
+}
+
+impl ProdFloat for f32 {
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        self as f64
+    }
+    #[inline(always)]
+    fn narrow(total: f64) -> Self {
+        total as f32
+    }
+}
+
+impl ProdFloat for f64 {
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        self
+    }
+    #[inline(always)]
+    fn narrow(total: f64) -> Self {
+        total
+    }
+}
+
+/// The product of a contiguous run, accumulated in `f64` across eight lanes in
+/// fixed chunks of `RUN_SUM_CHUNK`, the chunks multiplied in order -- and
+/// spread across the pool when the run is long enough, which cannot change
+/// the answer since the chunks are fixed.
+///
+/// `f64` because a float32 product rounded at every step is biased: the exact
+/// product of two factors near one has structured low bits, and rounding them
+/// to nearest lands low on average -- about 0.05 ulp a multiplication on
+/// factors within 5e-4 of one. That is a drift, not a random walk, so it grows
+/// with the length: four million such factors came out 15000 ulps low. No
+/// grouping helps (a pairwise product was 30 times worse); a wider accumulator
+/// does, rounding once at the end. NumPy multiplies in float32 and drifts the
+/// same way. A float64 input gains nothing from it but the same deterministic
+/// split. An answer that is not a normal `f64` is recomputed by [`exact_prod`].
+pub(crate) fn prod_run<I: ProdFloat>(run: &[I]) -> f64 {
+    fn chunk_prod<I: ProdFloat>(chunk: &[I]) -> f64 {
+        const LANES: usize = 8;
+        let mut lanes = [1f64; LANES];
+        let (blocks, rest) = chunk.as_chunks::<LANES>();
+        for block in blocks {
+            for lane in 0..LANES {
+                lanes[lane] *= block[lane].widen();
+            }
+        }
+        let mut total: f64 = lanes.iter().product();
+        for &v in rest {
+            total *= v.widen();
+        }
+        total
+    }
+    let total: f64 = if run.len() < PROD_PAR_MIN {
+        run.chunks(RUN_SUM_CHUNK).map(chunk_prod).product()
+    } else {
+        par_map_indexed(run.len().div_ceil(RUN_SUM_CHUNK), &|index| {
+            let from = index * RUN_SUM_CHUNK;
+            chunk_prod(&run[from..(from + RUN_SUM_CHUNK).min(run.len())])
+        })
+        .into_iter()
+        .product()
+    };
+    if total.is_normal() {
+        total
+    } else {
+        exact_prod(run.iter().copied())
+    }
+}
+
+/// Runs at least this long have their chunks spread across the pool.
+const PROD_PAR_MIN: usize = 1 << 16;
+
+/// The float product along the middle axis of `(outer, len, inner)`, through
+/// the same routing `sum` takes -- contiguous runs by [`prod_run`], slabs by
+/// the blocked row fold -- with every accumulator an `f64`; see [`prod_run`].
+///
+/// This replaced a slab loop that multiplied in the input's own dtype, one
+/// column at a time along a contiguous row: `prod` along the rows of a
+/// `(1024, 4096)` float32 matrix took 3.6ms against `sum`'s 0.19, and along the
+/// middle of `(16, 100000, 2)` 2.0ms.
+fn prod_float_along_axis<I: ProdFloat>(input: &[I], out: &mut [I], len: usize, inner: usize) {
+    if out.is_empty() {
+        return;
+    }
+    // No factors: every product is empty, and one. `reduce_axis` would cut the
+    // input into zero-length slabs.
+    if len == 0 {
+        out.fill(I::narrow(1.0));
+        return;
+    }
+    let mut wide = vec![1f64; out.len()];
+    reduce_axis(
+        input,
+        &mut wide,
+        len,
+        inner,
+        1f64,
+        |a: f64, v: I| a * v.widen(),
+        |a: f64, b: f64| a * b,
+        prod_run,
+    );
+    let slab = len * inner;
+    par_out_chunks(out, outputs_per_task(len), &|start, chunk| {
+        for (offset, slot) in chunk.iter_mut().enumerate() {
+            let at = start + offset;
+            let total = wide[at];
+            // A contiguous run came through `prod_run`, which checked already.
+            *slot = I::narrow(if total.is_normal() || inner == 1 {
+                total
+            } else {
+                let first = (at / inner) * slab + at % inner;
+                exact_prod((0..len).map(|k| input[first + k * inner]))
+            });
+        }
+    });
+}
+
+/// The product of `values` without a partial product ever leaving `f64`'s
+/// range: the check [`prod_run`] and [`prod_float_along_axis`] fall back to
+/// when their answer is not a normal `f64`.
+///
+/// Their lanes and blocks multiply separately, so on factors spanning a huge
+/// range one partial can overflow to infinity while another underflows to
+/// zero, and joining them gives NaN -- from finite, nonzero data, where the
+/// running product the grouping replaced saturated instead. An answer that is
+/// normal came through without that happening; anything else -- NaN, an
+/// infinity, zero, a subnormal -- is recomputed here, which only data that
+/// holds such values or truly overflows ever pays for.
+///
+/// A NaN factor, or a zero and an infinity together, is NaN; otherwise a zero
+/// makes the product a zero and an infinity an infinity, signed by the parity
+/// of the negative factors. Anything else is multiplied as a mantissa and a
+/// separate exponent, so the only rounding is the last one.
+pub(crate) fn exact_prod<I: ProdFloat>(values: impl Iterator<Item = I> + Clone) -> f64 {
+    let (mut negative, mut zero, mut infinite, mut nan) = (false, false, false, false);
+    for v in values.clone() {
+        let v = v.widen();
+        negative ^= v.is_sign_negative();
+        zero |= v == 0.0;
+        infinite |= v.is_infinite();
+        nan |= v.is_nan();
+    }
+    let sign = if negative { -1.0 } else { 1.0 };
+    if nan || (zero && infinite) {
+        return f64::NAN;
+    }
+    if zero {
+        return sign * 0.0;
+    }
+    if infinite {
+        return sign * f64::INFINITY;
+    }
+    // (mantissa in [0.5, 1), exponent) of a positive, finite, nonzero value.
+    fn split(x: f64) -> (f64, i64) {
+        let (x, bias) = if x < f64::MIN_POSITIVE {
+            (x * 2f64.powi(64), -64)
+        } else {
+            (x, 0)
+        };
+        let bits = x.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i64 - 1022;
+        let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+        (mantissa, exponent + bias)
+    }
+    let (mut mantissa, mut exponent) = (1.0f64, 0i64);
+    for v in values {
+        let (m, e) = split(v.widen().abs());
+        let (m, e2) = split(mantissa * m);
+        mantissa = m;
+        exponent += e + e2;
+    }
+    // `mantissa * 2^exponent`, saturating: in three steps so no power of two
+    // taken on the way leaves the range, since the exponent can be far outside
+    // it when the true product is an overflow or an underflow.
+    let exponent = exponent.clamp(-3300, 3300) as i32;
+    let third = exponent / 3;
+    sign * mantissa * 2f64.powi(third) * 2f64.powi(third) * 2f64.powi(exponent - 2 * third)
 }
 
 /// Generates a product-along-dim reduction kernel. Body is identical across
@@ -638,24 +837,6 @@ macro_rules! prod_along_dim_kernel {
         }
     };
 }
-
-prod_along_dim_kernel!(
-    prod_along_dim_f32,
-    as_f32_slice,
-    as_f32_slice_mut,
-    "f32",
-    f32,
-    1f32
-);
-
-prod_along_dim_kernel!(
-    prod_along_dim_f64,
-    as_f64_slice,
-    as_f64_slice_mut,
-    "f64",
-    f64,
-    1f64
-);
 
 prod_along_dim_kernel!(
     prod_along_dim_i32,

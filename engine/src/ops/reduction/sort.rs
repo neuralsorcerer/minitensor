@@ -4,7 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::sum_prod_impl::{column_band, fold_column_band, fold_lanes, fold_slab_with, row_band};
+use super::sum_prod_impl::{
+    ProdFloat, column_band, fold_column_band, fold_lanes, fold_slab_with, prod_run, row_band,
+};
 use super::*;
 use crate::ops::map::{
     SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
@@ -1055,17 +1057,13 @@ pub(crate) fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .data()
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-
-    let prod: f32 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_prod_f32).product::<f32>()
-    } else {
-        simd_prod_f32(data)
-    };
-
+    // In `f64`, over fixed chunks multiplied in order: see `prod_run`. The
+    // chunk products used to be combined by rayon's `product()`, whose
+    // grouping follows the pool, so the answer moved with the thread count.
+    let prod = <f32 as ProdFloat>::narrow(prod_run(data));
     let result_slice = result_data
         .as_f32_slice_mut()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-
     result_slice[0] = prod;
     Ok(())
 }
@@ -1075,17 +1073,13 @@ pub(crate) fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .data()
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-
-    let prod: f64 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_prod_f64).product::<f64>()
-    } else {
-        simd_prod_f64(data)
-    };
-
+    // In `f64`, over fixed chunks multiplied in order: see `prod_run`. The
+    // chunk products used to be combined by rayon's `product()`, whose
+    // grouping follows the pool, so the answer moved with the thread count.
+    let prod = <f64 as ProdFloat>::narrow(prod_run(data));
     let result_slice = result_data
         .as_f64_slice_mut()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-
     result_slice[0] = prod;
     Ok(())
 }

@@ -639,3 +639,38 @@ fn nan_statistics_are_bitwise_stable_across_thread_counts() {
         });
     }
 }
+
+/// A float `prod` is accumulated in `f64` over fixed chunks and fixed blocks;
+/// the whole-tensor form used to combine its chunks with rayon's `product()`,
+/// whose grouping followed the pool.
+#[test]
+fn prod_is_bitwise_stable_across_thread_counts() {
+    for (dims, axis) in [
+        (vec![300_000usize], None),
+        (vec![300_000usize], Some(0isize)),
+        (vec![64, 4096], Some(1)),
+        (vec![4096, 64], Some(0)),
+        (vec![16, 3000, 3], Some(1)),
+        (vec![3, 4096], Some(0)),
+    ] {
+        let numel: usize = dims.iter().product();
+        let values: Vec<f32> = moderate_tensor(numel, 1, 0x9D0D)
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .iter()
+            .map(|v| 1.0 + v * 1e-3)
+            .collect();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(dims.clone()),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let dim = axis.map(|a| vec![a]);
+        assert_thread_invariant(&format!("prod({axis:?}) on {dims:?}"), || {
+            reduction::prod(&tensor, dim.clone(), false).unwrap()
+        });
+    }
+}
