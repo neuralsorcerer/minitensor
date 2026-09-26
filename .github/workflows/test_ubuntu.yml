@@ -70,8 +70,9 @@ jobs:
         if: matrix.python-version == '3.12'
         shell: bash
         env:
-          # Measured at 10.64 MiB on rustc 1.94 / cp312. The budget is set to
-          # catch a step change -- a dependency that does not get stripped, a
+          # Measured at 11.78 MiB on rustc 1.98 / cp312, from 10.64 on 1.94
+          # before the NumPy provider, the gemv path and the newer vector
+          # kernels. The budget is set to catch a step change -- a dependency that does not get stripped, a
           # generic instantiated across every dtype -- and not to ration the
           # ordinary growth of the engine, so there is real headroom and a
           # change that legitimately needs more should raise this number with
