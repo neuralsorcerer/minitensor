@@ -68,6 +68,8 @@ pub(crate) fn extremum_along_dim_with_indices(
             if layout.inner == 1 {
                 let rows = if is_max { $rows_max } else { $rows_min };
                 rows(input, values, indices, layout.dim_size, nan_aware);
+            } else if layout.inner > 1 {
+                slab_arg_extremum(input, values, indices, &layout, is_max, nan_aware);
             } else if nan_aware {
                 reduce_arg_along_dim_par(
                     input,

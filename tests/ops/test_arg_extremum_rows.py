@@ -88,3 +88,49 @@ def test_the_row_path_answers_as_the_walk_did(shape, dtype):
                 continue
             nan_arg = t.nanargmax(d) if is_max else t.nanargmin(d)
             assert np.array_equal(nan_arg.numpy(), want_nan_i), (case, is_max)
+
+
+# Along an axis that is not the last: narrow and wide slabs, one slab and many,
+# tall and short, so each way `slab_arg_extremum` cuts its work is exercised.
+SLAB_CASES = [
+    ((1000, 2), 0),
+    ((70_000, 2), 0),
+    ((20_000, 33), 0),
+    ((4096, 1024), 0),
+    ((3, 4096), 0),
+    ((16, 3000, 3), 1),
+    ((2, 500, 300), 1),
+    ((8, 512, 512), 1),
+]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("shape,dim", SLAB_CASES)
+def test_the_slab_path_answers_as_the_walk_did(shape, dim, dtype):
+    """`max(dim)` and the arg reductions down a non-last axis take each block
+    of rows' extremum in one vectorized pass and then search only the block
+    that holds a column's first match; they must still name the first match
+    of the whole column, and its value."""
+    rng = np.random.default_rng(sum(shape) + dim)
+    for case, a in _inputs(shape, dtype, rng).items():
+        t = mt.from_numpy(np.ascontiguousarray(a))
+        moved = np.moveaxis(a, dim, -1)
+        for is_max in (True, False):
+            want_v, want_i = _reference(moved, is_max, skip_nan=False)
+            v, i = t.max(dim) if is_max else t.min(dim)
+            v, i = v.numpy(), i.numpy()
+            assert np.array_equal(i, want_i), (case, is_max)
+            assert np.array_equal(v, want_v, equal_nan=True), (case, is_max)
+            assert np.array_equal(np.signbit(v), np.signbit(want_v)), (case, is_max)
+            arg = t.argmax(dim) if is_max else t.argmin(dim)
+            assert np.array_equal(arg.numpy(), want_i), (case, is_max)
+            np.testing.assert_array_equal(
+                (t.amax(dim) if is_max else t.amin(dim)).numpy(),
+                moved.max(axis=-1) if is_max else moved.min(axis=-1),
+            )
+
+            _, want_nan_i = _reference(moved, is_max, skip_nan=True)
+            if np.isnan(moved).all(axis=-1).any():
+                continue
+            nan_arg = t.nanargmax(dim) if is_max else t.nanargmin(dim)
+            assert np.array_equal(nan_arg.numpy(), want_nan_i), (case, is_max)

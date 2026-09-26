@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::sum_prod_impl::{column_band, fold_slab_with};
 use super::*;
 use crate::ops::map::{
     outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks, par_out_chunks2,
@@ -968,6 +969,218 @@ float_extremum_columns!(min_columns_f32, f32, f32::INFINITY, <);
 float_extremum_columns!(max_columns_f64, f64, f64::NEG_INFINITY, >);
 float_extremum_columns!(min_columns_f64, f64, f64::INFINITY, <);
 
+/// The extremum of each column of `outer` slabs of `(len, inner)` rows, for a
+/// slab too narrow for the column walk above -- `inner` below
+/// `BLOCKED_INNER_MIN`.
+///
+/// Those went one output at a time down the generic strided walk, a branchy
+/// comparison per element `inner` apart: `max` down the rows of a
+/// `(200000, 33)` float32 matrix took 12.7ms where `sum` took 0.42, and NumPy
+/// 7.1. They now go through the fold `sum` uses for a slab -- rows streamed in
+/// memory order, narrow ones several to an accumulator row, split across the
+/// pool as `sum` splits them -- with a step that is two selects and so
+/// vectorizes. The grouping cannot change the answer, since an extremum is
+/// exact. It can change which of `-0.0` and `0.0` a column whose extremum is
+/// zero reports, as the lane fold along a row already could.
+///
+/// A NaN propagates: once in a lane nothing displaces it, since no comparison
+/// against it is true, and every NaN is reported as the canonical one.
+fn narrow_slab_extremum<T>(
+    input: &[T],
+    output: &mut [T],
+    layout: &DimReductionLayout,
+    seed: T,
+    is_max: bool,
+) where
+    T: num_traits::Float + Send + Sync,
+{
+    let inner = layout.inner;
+    let slab = layout.dim_size * inner;
+    let outer = output.len() / inner;
+    let pick = move |a: T, v: T| {
+        let wins = if is_max { v > a } else { v < a };
+        if v.is_nan() || wins { v } else { a }
+    };
+    let fold = |source: &[T], spread: bool| {
+        fold_slab_with(
+            source,
+            inner,
+            seed,
+            move |acc: &mut [T], values: &[T], _| {
+                for (a, &v) in acc.iter_mut().zip(values) {
+                    *a = pick(*a, v);
+                }
+            },
+            pick,
+            spread,
+        )
+    };
+    let finish = |target: &mut [T], found: &[T]| {
+        for (slot, &v) in target.iter_mut().zip(found) {
+            *slot = if v.is_nan() { T::nan() } else { v };
+        }
+    };
+    if slab == 0 {
+        output.fill(seed);
+    } else if outer < NARROW_EXTREMUM_MIN_SLABS {
+        for (source, target) in input.chunks_exact(slab).zip(output.chunks_exact_mut(inner)) {
+            finish(target, &fold(source, true));
+        }
+    } else {
+        let per_task = outputs_per_task(slab).div_ceil(inner).max(1);
+        par_out_chunks(output, per_task * inner, &|start, chunk| {
+            let first = start / inner;
+            for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
+                let at = (first + index) * slab;
+                finish(target, &fold(&input[at..at + slab], false));
+            }
+        });
+    }
+}
+
+/// Fewer slabs than this are each spread across the pool; `sum`'s threshold.
+const NARROW_EXTREMUM_MIN_SLABS: usize = 4;
+
+/// The value and first index of the extremum of each column of `outer`
+/// slabs of `(len, inner)` rows: the indexed reduction along any axis but the
+/// last, for a float dtype.
+///
+/// The walks this replaces carried the value, the index and the NaN rule
+/// through one branchy comparison per element -- down each output's column
+/// `inner` apart when the slab was narrow, which put `max(dim=0)` of a
+/// `(200000, 33)` float32 matrix at 8.8ms against `amax`'s 0.56 and NumPy's
+/// 27.
+///
+/// Now the slab is cut into blocks of rows, and each block's column extrema
+/// are taken by [`narrow_slab_extremum`]'s fold (a NaN-skipping one for
+/// `nan_aware`) -- one vectorized pass over the input, split across the pool
+/// when the slab is. The blocks' extrema give each column's target, and the
+/// first block whose extremum matches it holds the column's first match, so
+/// finding the index is a search of that block's rows for that one column --
+/// a few thousand reads for the whole slab, not a second pass over it. A
+/// search that knew only the targets had to walk the rows until each column
+/// turned up, which on random data is half the slab at best, and cost more
+/// than the fold.
+///
+/// "Matches" is equality, or NaN-ness when NaN propagated. The first match is
+/// the tie-break the walks had, lowest index, and signed zeros compare equal,
+/// so whichever came first is found; the value reported is the element at
+/// that index. Under `nan_aware` an all-NaN block's extremum is the seed and
+/// can equal a real target, so a block that turns out to hold no match is
+/// passed over; a column with no match anywhere is all NaN, reported as NaN
+/// at index 0.
+pub(crate) fn slab_arg_extremum<T>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    layout: &DimReductionLayout,
+    is_max: bool,
+    nan_aware: bool,
+) where
+    T: num_traits::Float + Send + Sync,
+{
+    let inner = layout.inner;
+    let rows = layout.dim_size;
+    let slab = rows * inner;
+    let outer = values.len() / inner;
+    let seed = if is_max {
+        T::neg_infinity()
+    } else {
+        T::infinity()
+    };
+    let pick = move |a: T, v: T| {
+        let wins = if is_max { v > a } else { v < a };
+        if (!nan_aware && v.is_nan()) || wins {
+            v
+        } else {
+            a
+        }
+    };
+    let block = ARG_BLOCK_ELEMS.div_ceil(inner).max(ARG_BLOCK_MIN_ROWS);
+    let blocks = rows.div_ceil(block);
+
+    let one = |source: &[T], vals: &mut [T], idxs: &mut [i64], spread: bool| {
+        let extremum = |b: usize| {
+            fold_slab_with(
+                &source[b * block * inner..((b + 1) * block).min(rows) * inner],
+                inner,
+                seed,
+                move |acc: &mut [T], values: &[T], _| {
+                    for (a, &v) in acc.iter_mut().zip(values) {
+                        *a = pick(*a, v);
+                    }
+                },
+                pick,
+                false,
+            )
+        };
+        let extrema: Vec<Vec<T>> = if spread {
+            par_map_indexed(blocks, &extremum)
+        } else {
+            (0..blocks).map(extremum).collect()
+        };
+        let mut targets = extrema[0].clone();
+        for part in &extrema[1..] {
+            for (t, &v) in targets.iter_mut().zip(part) {
+                *t = pick(*t, v);
+            }
+        }
+        let locate = |start: usize, vals: &mut [T], idxs: &mut [i64]| {
+            for (offset, (value, index)) in vals.iter_mut().zip(idxs.iter_mut()).enumerate() {
+                let c = start + offset;
+                let target = targets[c];
+                let matches = |v: T| v == target || (target.is_nan() && v.is_nan());
+                let found = (0..blocks)
+                    .filter(|&b| matches(extrema[b][c]))
+                    .find_map(|b| {
+                        (b * block..((b + 1) * block).min(rows))
+                            .find(|&r| matches(source[r * inner + c]))
+                    });
+                (*value, *index) = match found {
+                    Some(r) => (source[r * inner + c], r as i64),
+                    None => (T::nan(), 0),
+                };
+            }
+        };
+        if spread {
+            par_out_chunks2(vals, idxs, column_band(inner), &locate);
+        } else {
+            locate(0, vals, idxs);
+        }
+    };
+    if slab == 0 {
+        values.fill(seed);
+        indices.fill(0);
+    } else if outer < NARROW_EXTREMUM_MIN_SLABS {
+        for ((source, vals), idxs) in input
+            .chunks_exact(slab)
+            .zip(values.chunks_exact_mut(inner))
+            .zip(indices.chunks_exact_mut(inner))
+        {
+            one(source, vals, idxs, true);
+        }
+    } else {
+        let per_task = outputs_per_task(slab).div_ceil(inner).max(1);
+        par_out_chunks2(values, indices, per_task * inner, &|start, vals, idxs| {
+            let first = start / inner;
+            for (index, (v, i)) in vals
+                .chunks_exact_mut(inner)
+                .zip(idxs.chunks_exact_mut(inner))
+                .enumerate()
+            {
+                let at = (first + index) * slab;
+                one(&input[at..at + slab], v, i, false);
+            }
+        });
+    }
+}
+
+/// Elements in one block of [`slab_arg_extremum`], and the fewest rows one
+/// may hold. Fixed, so the blocks follow from the shape alone -- though here
+/// they could not change the answer anyway, an extremum being exact.
+const ARG_BLOCK_ELEMS: usize = 8192;
+const ARG_BLOCK_MIN_ROWS: usize = 16;
+
 /// Reduce `dim` to its extremum, without reporting where it was found.
 ///
 /// The value-only forms of `min` and `max` differed only in their seed and
@@ -1070,6 +1283,8 @@ fn extremum_along_dim(
                         }
                     }
                 }
+            } else if layout.inner > 1 {
+                narrow_slab_extremum(input, output, &layout, seed, is_max);
             } else {
                 reduce_along_dim_par(
                     input,
