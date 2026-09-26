@@ -154,20 +154,34 @@ what delegation is for.
 ### Sort-family operations, from Python
 
 These cross at the Python level rather than through the provider, because the
-answer's size is not known until NumPy has it. Engine time over NumPy's:
+answer's size is not known until NumPy has it.
 
 | op | float | integer |
 |---|---|---|
-| `unique` | 1.4–2.5× | engine 4.6–5.8× ahead |
-| `union1d`, `intersect1d`, `setdiff1d`, `setxor1d` | 1.1–8× | engine 1.5–5.8× ahead |
-| `partition`, `argpartition` | 1.6–5× | 2–5.6× |
-| `isin` | below 40,000 elements | 4.5–9× |
+| `unique`, values or counts | NumPy's `unique` | engine, 4.6–5.8× ahead of NumPy |
+| `unique` with `return_index` / `return_inverse` | engine, 3–9× ahead of NumPy's stable path | engine |
+| `union1d`, `intersect1d`, `setdiff1d`, `setxor1d` | engine's composition over NumPy arrays | engine, 1.5–5.8× ahead |
+| `partition`, `argpartition` | NumPy, 1.6–5× ahead | NumPy, 2–5.6× ahead |
+| `isin` | NumPy below 40,000 elements | NumPy, 4.5–9× ahead |
 
-So floats cross and integers stay, except for `partition`, which crosses in
-every dtype, and `isin`, where NumPy's integer path counts values in a lookup
-table no sort competes with. `intersect1d` and `setdiff1d` keep the left
-operand's dtype and cross only when it is a float, so an `int64` is never
-rounded through a promotion and back.
+The float rows took a second attempt. NumPy's `unique` sorts unstably, and on
+arm64 with random pivots, so which of `-0.0` and `0.0` -- or of two NaNs with
+different bits -- stood for its group changed from run to run, and a
+determinism test failed on macOS. `unique` now pins those two groups to their
+first member in the input after NumPy returns. NumPy's `intersect1d` and the
+rest sort again inside, so they are not called at all: the set operations are
+the engine's own composition -- distinct values, a membership mask, a
+selection -- written over pinned NumPy arrays, which keeps every value one of
+theirs. At 10,000 elements that runs at 0.6–0.9× of NumPy's own set functions,
+where the engine's composition ran at 0.28–0.9×; at a million, 0.6–1.1× against
+0.7–1.1×. `setxor1d` also keeps the engine's answer of one NaN where NumPy
+returns one per side.
+
+`partition` crosses in every dtype, and its order away from `k` is NumPy's,
+unspecified as it always was. `isin` crosses for integers because NumPy counts
+them in a lookup table no sort competes with. `intersect1d` and `setdiff1d`
+keep the left operand's dtype, so an `int64` is never rounded through a
+promotion and back.
 
 ## What is not delegated
 

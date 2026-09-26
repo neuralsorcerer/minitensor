@@ -1003,23 +1003,76 @@ def unique(
     -- always in NumPy's order: where each first occurred, the inverse map,
     the counts.
 
-    Floats are NumPy's `unique`, on a view of the tensor's buffer: it measured
-    1.4-2.5x faster than the engine's sort-based kernel at every size. Integers
-    stay on that kernel, which reads 4.6-5.8x faster than NumPy on them.
+    Float values, with or without their counts, are NumPy's `unique` on a view
+    of the tensor's buffer: 1.4-2.5x faster than the engine's sort at every
+    size measured. Anything that needs positions -- `return_index`,
+    `return_inverse` -- stays on the engine, which beat NumPy's stable path
+    by 3-9x, as do integers, where it reads 4.6-5.8x faster.
+
+    The zero and the NaN each stand for the first of their group in the input.
+    `-0.0` and `0.0` are one value, as are NaNs with different bits, and
+    NumPy sorts unstably -- on arm64 with random pivots -- so which member it
+    reported changed from run to run and failed a determinism test.
     """
 
     tensor = _atleast_tensor(input)
-    if str(tensor.dtype) not in _FLOAT_DTYPES:
+    if str(tensor.dtype) not in _FLOAT_DTYPES or return_inverse or return_index:
         return _unique_kernel(tensor, return_inverse, return_counts, return_index)
-    found = _np.unique(
-        _numpy_view(tensor),
-        return_index=return_index,
-        return_inverse=return_inverse,
-        return_counts=return_counts,
+    if not return_counts:
+        return _from_numpy(_distinct(_numpy_view(tensor)))
+    flat = _numpy_view(tensor).reshape(-1)
+    values, counts = _np.unique(flat, return_counts=True)
+    _pin_first_occurrences(values, flat)
+    return _from_numpy(values), _from_numpy(counts)
+
+
+def _distinct(array: _np.ndarray) -> _np.ndarray:
+    """A float array's distinct values, ascending: NumPy's `unique`, with the
+    zero and NaN groups pinned to their first members (see `unique`)."""
+
+    flat = array.reshape(-1)
+    values = _np.unique(flat)
+    _pin_first_occurrences(values, flat)
+    return values
+
+
+def _distinct_pair(
+    left: Tensor, right: Tensor, promoted: str
+) -> tuple[_np.ndarray, _np.ndarray, _np.ndarray, _np.ndarray]:
+    """Each side's distinct values as it is, and as `promoted` for comparing.
+
+    The set operations below are the engine's own composition -- `unique`, a
+    membership test, a selection -- written over these arrays, because
+    NumPy's `intersect1d` and the rest re-sort unstably inside and would
+    reintroduce the run-to-run sign of zero `unique` is careful to avoid.
+    Every value they return is taken from these arrays; the membership tests
+    only choose which, and a boolean has no sign to lose.
+    """
+
+    ours, theirs = _distinct(_numpy_view(left)), _distinct(_numpy_view(right))
+    return (
+        ours,
+        theirs,
+        ours.astype(promoted, copy=False),
+        theirs.astype(promoted, copy=False),
     )
-    if isinstance(found, tuple):
-        return tuple(_from_numpy(part) for part in found)
-    return _from_numpy(found)
+
+
+def _pin_first_occurrences(values: _np.ndarray, source: _np.ndarray) -> None:
+    """Make the zero and the NaN in sorted, distinct `values` the first zero
+    and the first NaN of `source`, bit for bit.
+
+    They are the only groups whose members can differ while comparing equal,
+    so they are the only places an unstable sort can leave its mark.
+    """
+
+    if values.size == 0:
+        return
+    zero = int(_np.searchsorted(values, 0.0))
+    if zero < values.size and values[zero] == 0:
+        values[zero] = source[int(_np.argmax(source == 0))]
+    if _np.isnan(values[-1]):
+        values[-1] = source[int(_np.argmax(_np.isnan(source)))]
 
 
 def union1d(input: object, other: object) -> Tensor:
@@ -1032,7 +1085,9 @@ def union1d(input: object, other: object) -> Tensor:
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
     if str(left.dtype) in _FLOAT_DTYPES:
-        return _from_numpy(_np.union1d(_numpy_view(left), _numpy_view(right)))
+        return _from_numpy(
+            _distinct(_np.concatenate([_numpy_view(left), _numpy_view(right)]))
+        )
     return unique(_F.cat([left, right]))
 
 
@@ -1057,20 +1112,6 @@ def intersect1d(
     left = _atleast_tensor(input).reshape(-1)
     right = _atleast_tensor(other).reshape(-1)
 
-    if str(left.dtype) in _FLOAT_DTYPES:
-        # The values are `left`'s, so they return in its dtype; from a float
-        # that is exact after any promotion, which an integer's is not.
-        dtype = _numpy_view(left).dtype
-        found = _np.intersect1d(
-            *(_numpy_view(side) for side in _promote_pair(left, right)),
-            return_indices=return_indices,
-        )
-        if return_indices:
-            common, *positions = found
-            found = (common.astype(dtype, copy=False), *positions)
-            return tuple(_from_numpy(part) for part in found)
-        return _from_numpy(found.astype(dtype, copy=False))
-
     if return_indices:
         left_values, left_first = unique(left, return_index=True)
         right_values, right_first = unique(right, return_index=True)
@@ -1080,11 +1121,19 @@ def intersect1d(
         # Where the common values sit in each side's distinct list, which is
         # sorted -- so a search finds them without comparing every pair.
         in_left = _F.masked_select(left_first, keep)
-        in_right = _F.index_select(
-            right_first, 0, _F.searchsorted(right_values, common, False)
-        )
+        # `common` is in the left's dtype; widening it to the right's is exact,
+        # since each value was found equal to one there after promotion.
+        found = _F.searchsorted(right_values, common.astype(right_values.dtype), False)
+        in_right = _F.index_select(right_first, 0, found)
         return common, in_left, in_right
 
+    if str(left.dtype) in _FLOAT_DTYPES:
+        # The values are `left`'s and keep its dtype, which from a float is
+        # exact after any promotion and from an integer would not be.
+        ours, _, wide_ours, wide_theirs = _distinct_pair(
+            left, right, _promoted_dtype(left, right)
+        )
+        return _from_numpy(ours[_np.isin(wide_ours, wide_theirs, assume_unique=True)])
     left_values = unique(left)
     right_values = unique(right)
     keep = _present_in_sorted(*_promote_pair(left_values, right_values))
@@ -1098,10 +1147,11 @@ def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tens
     left = _atleast_tensor(input).reshape(-1)
     right = _atleast_tensor(other).reshape(-1)
     if str(left.dtype) in _FLOAT_DTYPES:
-        # The answer is in `left`'s dtype, so only the test side is promoted.
-        tests = right.astype(_promoted_dtype(left, right))
-        found = _np.setdiff1d(_numpy_view(left), _numpy_view(tests))
-        return _from_numpy(found.astype(_numpy_view(left).dtype, copy=False))
+        ours, _, wide_ours, wide_theirs = _distinct_pair(
+            left, right, _promoted_dtype(left, right)
+        )
+        keep = _np.isin(wide_ours, wide_theirs, assume_unique=True, invert=True)
+        return _from_numpy(ours[keep])
     left = unique(left)
     return _F.masked_select(left, isin(left, right, invert=True))
 
@@ -1119,7 +1169,14 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
     if str(left.dtype) in _FLOAT_DTYPES:
-        return _from_numpy(_np.setxor1d(_numpy_view(left), _numpy_view(right)))
+        ours, theirs, _, _ = _distinct_pair(left, right, str(left.dtype))
+        only = _np.concatenate(
+            [
+                ours[_np.isin(ours, theirs, assume_unique=True, invert=True)],
+                theirs[_np.isin(theirs, ours, assume_unique=True, invert=True)],
+            ]
+        )
+        return _from_numpy(_distinct(only))
     left, right = unique(left), unique(right)
     # Both sides are sorted and distinct by now, which is exactly the state
     # `isin` would spend a sort reaching.

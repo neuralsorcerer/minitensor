@@ -6,12 +6,14 @@
 
 """The sort-family operations NumPy answers, held to the kernel they replaced.
 
-Float `unique` and the set operations built on it, small or integer `isin`,
-and `partition`/`argpartition` go to NumPy on a view of the tensor's buffer,
-because NumPy measured faster at them. Integer `unique` and the integer set
-operations stay on the engine's kernel, which measured faster. These tests pin
-that each route gives the same answer as the other would have, so the split is
-a speed decision and nothing else.
+Float `unique` values (and counts), small or integer `isin`, and
+`partition`/`argpartition` go to NumPy on a view of the tensor's buffer,
+because NumPy measured faster at them. Everything that needs positions, and
+integer `unique`, stays on the engine's kernel, which measured faster; the set
+operations are built from `unique` either way. These tests pin that each route
+gives the same answer as the other would have, so the split is a speed
+decision and nothing else -- down to which of `-0.0` and `0.0` a group reports,
+which NumPy's unstable sort would otherwise leave to chance.
 """
 
 from __future__ import annotations
@@ -65,6 +67,27 @@ def test_float_unique_agrees_with_the_engine_kernel(dtype, flags):
         _same(mine, _values(theirs))
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("counts", [False, True])
+def test_each_group_reports_its_first_member(dtype, counts):
+    """`-0.0` and `0.0` are one value, as are NaNs with different bits, and an
+    unstable sort may put either first. The one reported is the input's first,
+    whatever the sort did -- on arm64 NumPy's sort picks pivots at random, and
+    a run-to-run difference in the sign of a zero failed a determinism test."""
+    quiet, negative = np.float64("nan"), -np.float64("nan")
+    for source in (
+        [3.0, 0.0, -0.0, 1.0, negative, quiet, 0.0],
+        [-0.0, 3.0, 0.0, quiet, negative, 1.0] * 50,
+    ):
+        values = np.array(source, dtype=dtype)
+        got = mt.unique(_tensor(values), return_counts=counts)
+        got = _values(got[0] if counts else got)
+        first_zero = values[np.argmax(values == 0)]
+        first_nan = values[np.argmax(np.isnan(values))]
+        assert np.signbit(got[0 if got[0] == 0 else 1]) == np.signbit(first_zero)
+        assert got[-1].tobytes() == first_nan.tobytes()
+
+
 def test_unique_inverse_rebuilds_the_input():
     x = _tensor(_AWKWARD)
     values, inverse = mt.unique(x, return_inverse=True)
@@ -94,7 +117,13 @@ def test_float_set_operations_match_numpy(left_dtype, right_dtype):
     _same(mt.union1d(left, right), np.union1d(a, b))
     # The one-sided operations keep the left operand's dtype.
     _same(mt.intersect1d(left, right), np.intersect1d(a, b).astype(left_dtype))
-    _same(mt.setxor1d(left, right), np.setxor1d(a, b))
+    # NumPy keeps a NaN from each side, since NaN != NaN; here, as in
+    # `unique`, all NaNs are one value.
+    xor = np.setxor1d(a, b)
+    _same(
+        mt.setxor1d(left, right),
+        np.concatenate([xor[~np.isnan(xor)], [np.nan]]).astype(xor.dtype),
+    )
     _same(mt.setdiff1d(left, right), np.setdiff1d(left_np, b).astype(left_dtype))
 
     common, in_left, in_right = mt.intersect1d(left, right, return_indices=True)

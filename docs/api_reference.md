@@ -1256,14 +1256,16 @@ no defined result; and `NaN != NaN`, so a run detector over `==` emits every
 number and calls it equal to itself, so `unique` answers `[1.0, nan]` for
 `[nan, 1.0, nan]`.
 
-Who does the work depends on the dtype, and was decided by timing both. A float
-`unique` is NumPy's, called on a zero-copy view of the tensor's buffer: it
-measured 1.4-2.5x faster than the engine's sort-based kernel at every size. An
-integer or boolean `unique` stays on that kernel, which measured 4.6-5.8x faster
-than NumPy's. `union1d`, `intersect1d`, `setdiff1d` and `setxor1d` split the
-same way. The answers agree, NaN included; the one visible difference is which
-sign a collapsed zero reports when `-0.0` and `0.0` both occur, and that is
-NumPy's choice on the float path.
+Who does the work depends on the dtype and on what is asked for, and was
+decided by timing both. Float values, with or without counts, are NumPy's
+`unique` on a zero-copy view of the tensor's buffer; anything that needs
+positions (`return_index`, `return_inverse`) stays on the engine, which beat
+NumPy's stable path by 3-9x, and so do integers, where the engine is 4.6-5.8x
+faster. `union1d`, `intersect1d`, `setdiff1d` and `setxor1d` are built from
+`unique` either way. Whichever route, the zero and the NaN each stand for the
+first member of their group in the input -- `-0.0` and `0.0` are one value, and
+NumPy's unstable sort would otherwise leave the sign that is reported to
+chance.
 
 None of these is differentiable: `unique` returns a subset of its input and
 which subset changes discontinuously as values collide, and `mode` returns a
