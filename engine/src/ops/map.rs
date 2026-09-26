@@ -892,35 +892,86 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
 }
 
 /// Sequential core: write `op(input[i])` into every element of `out`.
-#[inline(always)]
+///
+/// The three sequential cores here are compiled twice, as the kernels in
+/// `ops::simd` are: once for the baseline and once with AVX2, picked at run
+/// time. LLVM vectorizes these loops on its own once told which registers it
+/// may use; the loop is the same either way, and no float result can differ,
+/// since Rust neither contracts nor reassociates. Measured at 16,384
+/// elements, a float64 `isnan` (whose `bool` output the baseline narrows two
+/// lanes at a time) went from 7.8us to 4.6us, and float32 `floor_divide` from
+/// 154us to 12us.
+///
+/// Each is spelled as a named `#[inline(always)]` body under a
+/// `#[target_feature]` twin. A closure run under one shared multiversioned
+/// helper measured the same on simple maps but left `nan_to_num`'s branches
+/// scalar, at a nanosecond an element.
 fn map_into<T, U, F>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
 where
     T: Copy,
     F: Fn(T) -> U,
 {
-    debug_assert_eq!(input.len(), out.len());
-    for (o, &i) in out.iter_mut().zip(input.iter()) {
-        o.write(op(i));
+    #[inline(always)]
+    fn body<T: Copy, U, F: Fn(T) -> U>(input: &[T], out: &mut [MaybeUninit<U>], op: &F) {
+        debug_assert_eq!(input.len(), out.len());
+        for (o, &i) in out.iter_mut().zip(input.iter()) {
+            o.write(op(i));
+        }
     }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    fn body_avx2<T: Copy, U, F: Fn(T) -> U>(input: &[T], out: &mut [MaybeUninit<U>], op: &F) {
+        body(input, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2 {
+        // SAFETY: avx2 was detected on this CPU.
+        return unsafe { body_avx2(input, out, op) };
+    }
+    body(input, out, op)
 }
 
 /// Sequential core: write `op(lhs[i], rhs[i])` into every element of `out`.
-#[inline(always)]
+/// Compiled twice, as [`map_into`] is.
 fn zip_into<A, B, U, F>(lhs: &[A], rhs: &[B], out: &mut [MaybeUninit<U>], op: &F)
 where
     A: Copy,
     B: Copy,
     F: Fn(A, B) -> U,
 {
-    debug_assert_eq!(lhs.len(), out.len());
-    debug_assert_eq!(rhs.len(), out.len());
-    for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
-        o.write(op(l, r));
+    #[inline(always)]
+    fn body<A: Copy, B: Copy, U, F: Fn(A, B) -> U>(
+        lhs: &[A],
+        rhs: &[B],
+        out: &mut [MaybeUninit<U>],
+        op: &F,
+    ) {
+        debug_assert_eq!(lhs.len(), out.len());
+        debug_assert_eq!(rhs.len(), out.len());
+        for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+            o.write(op(l, r));
+        }
     }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    fn body_avx2<A: Copy, B: Copy, U, F: Fn(A, B) -> U>(
+        lhs: &[A],
+        rhs: &[B],
+        out: &mut [MaybeUninit<U>],
+        op: &F,
+    ) {
+        body(lhs, rhs, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2 {
+        // SAFETY: avx2 was detected on this CPU.
+        return unsafe { body_avx2(lhs, rhs, out, op) };
+    }
+    body(lhs, rhs, out, op)
 }
 
 /// Sequential core: write `op(a[i], b[i], c[i])` into every element of `out`.
-#[inline(always)]
+/// Compiled twice, as [`map_into`] is.
 fn zip3_into<A, B, C, U, F>(a: &[A], b: &[B], c: &[C], out: &mut [MaybeUninit<U>], op: &F)
 where
     A: Copy,
@@ -928,12 +979,38 @@ where
     C: Copy,
     F: Fn(A, B, C) -> U,
 {
-    debug_assert_eq!(a.len(), out.len());
-    debug_assert_eq!(b.len(), out.len());
-    debug_assert_eq!(c.len(), out.len());
-    for (((o, &x), &y), &z) in out.iter_mut().zip(a.iter()).zip(b.iter()).zip(c.iter()) {
-        o.write(op(x, y, z));
+    #[inline(always)]
+    fn body<A: Copy, B: Copy, C: Copy, U, F: Fn(A, B, C) -> U>(
+        a: &[A],
+        b: &[B],
+        c: &[C],
+        out: &mut [MaybeUninit<U>],
+        op: &F,
+    ) {
+        debug_assert_eq!(a.len(), out.len());
+        debug_assert_eq!(b.len(), out.len());
+        debug_assert_eq!(c.len(), out.len());
+        for (((o, &x), &y), &z) in out.iter_mut().zip(a.iter()).zip(b.iter()).zip(c.iter()) {
+            o.write(op(x, y, z));
+        }
     }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    fn body_avx2<A: Copy, B: Copy, C: Copy, U, F: Fn(A, B, C) -> U>(
+        a: &[A],
+        b: &[B],
+        c: &[C],
+        out: &mut [MaybeUninit<U>],
+        op: &F,
+    ) {
+        body(a, b, c, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2 {
+        // SAFETY: avx2 was detected on this CPU.
+        return unsafe { body_avx2(a, b, c, out, op) };
+    }
+    body(a, b, c, out, op)
 }
 
 /// Map `op` over `input` into a fresh, exactly-sized `Vec` (no zeroing pass).
