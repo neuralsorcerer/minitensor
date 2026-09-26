@@ -8,7 +8,8 @@ use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
 use crate::ops::map::{
-    compaction_bands, par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2,
+    compaction_bands, fill_compaction, par_all_chunk, par_any_chunk, par_out_chunks,
+    par_out_chunks2,
 };
 use crate::ops::util::check_dim;
 use crate::{
@@ -17,7 +18,6 @@ use crate::{
     ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -328,34 +328,34 @@ pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
         let mut flat = vec![0i64; found * ndim];
         // The counts say how many rows each band owns, so cutting the output
         // there hands every band a disjoint run to fill.
-        let mut rest: &mut [i64] = &mut flat;
-        let mut pieces: Vec<&mut [i64]> = Vec::with_capacity(starts.len() - 1);
-        for window in starts.windows(2) {
-            let (head, tail) = rest.split_at_mut((window[1] - window[0]) * ndim);
-            pieces.push(head);
-            rest = tail;
-        }
-        pieces
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(index, piece)| {
-                let first = index * band;
-                let last = (first + band).min(len);
-                let mut row = 0usize;
+        fill_compaction(&mut flat, &starts, ndim, &|index, piece| {
+            let first = index * band;
+            let last = (first + band).min(len);
+            let mut row = 0usize;
+            if ndim == 1 {
+                // A position is its own coordinate: no division to unravel.
                 for (offset, &value) in input[first..last].iter().enumerate() {
-                    if !truthy(value) {
-                        continue;
+                    if truthy(value) {
+                        piece[row] = (first + offset) as i64;
+                        row += 1;
                     }
-                    // Unravel right to left, which is the order row-major
-                    // strides divide in.
-                    let mut position = first + offset;
-                    for axis in (0..ndim).rev() {
-                        piece[row * ndim + axis] = (position % dims[axis]) as i64;
-                        position /= dims[axis];
-                    }
-                    row += 1;
                 }
-            });
+                return;
+            }
+            for (offset, &value) in input[first..last].iter().enumerate() {
+                if !truthy(value) {
+                    continue;
+                }
+                // Unravel right to left, which is the order row-major
+                // strides divide in.
+                let mut position = first + offset;
+                for axis in (0..ndim).rev() {
+                    piece[row * ndim + axis] = (position % dims[axis]) as i64;
+                    position /= dims[axis];
+                }
+                row += 1;
+            }
+        });
         (found, flat)
     });
 

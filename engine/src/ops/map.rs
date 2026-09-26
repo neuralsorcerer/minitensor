@@ -356,7 +356,13 @@ pub(crate) fn outputs_per_task(width: usize) -> usize {
 /// from the element count and never from the thread pool: the bands decide
 /// where each kept value lands, and an output that moved with the machine's
 /// core count would not be the same answer twice.
-pub(crate) const COMPACT_MIN_BAND: usize = 1 << 14;
+///
+/// 131,072 elements, from 16,384. A band that short is 20-40us of work, less
+/// than a pool round trip from Python costs, so two of them ran slower split
+/// than one core took for both: `flatnonzero` of 32,768 float32 took 180us
+/// split, 44 on one core, against NumPy's 82. At this width every size from
+/// 16,384 to a million measured at or ahead of NumPy for both compactions.
+pub(crate) const COMPACT_MIN_BAND: usize = 1 << 17;
 pub(crate) const COMPACT_BANDS: usize = 64;
 
 /// How a compaction's output is divided: the band width, the number of bands,
@@ -388,6 +394,39 @@ pub(crate) fn compaction_bands(
     }
     starts.push(running);
     (band, starts)
+}
+
+/// Fill a compaction's output band by band, from what [`compaction_bands`]
+/// counted: `out` is cut where `starts` says, `width` elements per kept item,
+/// and `fill(band, piece)` writes band `band`'s run.
+///
+/// On the calling thread when there is one band, which is every compaction
+/// below two bands' worth of input. Handing a single band to rayon still sent
+/// it to the pool and back: `nonzero` of 16,384 elements took 68us, most of it
+/// that round trip, where NumPy takes 41.
+pub(crate) fn fill_compaction<T: Send>(
+    out: &mut [T],
+    starts: &[usize],
+    width: usize,
+    fill: &(dyn Fn(usize, &mut [T]) + Sync),
+) {
+    let mut rest = out;
+    let mut pieces: Vec<&mut [T]> = Vec::with_capacity(starts.len() - 1);
+    for window in starts.windows(2) {
+        let (head, tail) = std::mem::take(&mut rest).split_at_mut((window[1] - window[0]) * width);
+        pieces.push(head);
+        rest = tail;
+    }
+    if pieces.len() < 2 {
+        for (band, piece) in pieces.into_iter().enumerate() {
+            fill(band, piece);
+        }
+        return;
+    }
+    pieces
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(band, piece)| fill(band, piece));
 }
 
 /// The narrowest band of columns worth handing one task.

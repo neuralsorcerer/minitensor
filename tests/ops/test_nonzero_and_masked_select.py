@@ -298,11 +298,11 @@ def test_selecting_by_the_indices_and_by_the_mask_agree():
 # output, and where a band's run starts is the number of elements the bands
 # before it kept. Get that arithmetic wrong and the answer is not merely slower,
 # it is a permutation of itself with holes in it.
-_PAST_ONE_BAND = 1 << 14
+_PAST_ONE_BAND = 1 << 17
 
 
 @pytest.mark.parametrize(
-    "length", [_PAST_ONE_BAND - 1, _PAST_ONE_BAND, _PAST_ONE_BAND + 1, 200_003]
+    "length", [_PAST_ONE_BAND - 1, _PAST_ONE_BAND, _PAST_ONE_BAND + 1, 600_011]
 )
 @pytest.mark.parametrize("density", [0.0, 0.003, 0.5, 1.0])
 def test_a_compaction_spanning_several_bands_answers_as_one_would(length, density):
@@ -346,6 +346,6 @@ def test_several_bands_of_a_matrix_report_the_multi_index_of_each_row():
     than of the band's first."""
 
     rng = np.random.default_rng(7)
-    values = (rng.random((701, 53)) < 0.02).astype(np.float64)
+    values = (rng.random((2701, 131)) < 0.02).astype(np.float64)
     got = mt.nonzero(mt.from_numpy(values)).numpy()
     np.testing.assert_array_equal(got, np.argwhere(values))

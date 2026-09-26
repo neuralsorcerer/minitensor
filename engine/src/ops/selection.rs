@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::ops::map::{compaction_bands, par_out_chunks};
+use crate::ops::map::{compaction_bands, fill_compaction, par_out_chunks};
 use crate::{
     autograd::WhereBackward,
     device::Device,
@@ -13,7 +13,6 @@ use crate::{
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -239,40 +238,30 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
             })?;
             // The counts say exactly how long each band's piece of the output
             // is, so cutting it there hands every band a disjoint run to fill.
-            let mut rest: &mut [$ty] = dst;
-            let mut pieces: Vec<&mut [$ty]> = Vec::with_capacity(starts.len() - 1);
-            for window in starts.windows(2) {
-                let (head, tail) = rest.split_at_mut((window[1] - window[0]) * inner);
-                pieces.push(head);
-                rest = tail;
-            }
-            pieces
-                .into_par_iter()
-                .enumerate()
-                .for_each(|(index, piece)| {
-                    let first = index * band;
-                    let last = (first + band).min(len);
-                    let mut kept = 0usize;
-                    if inner == 1 {
-                        // One element per block, where the other branch would
-                        // call `memcpy` to move a single value.
-                        for (offset, &on) in mask_slice[first..last].iter().enumerate() {
-                            if on {
-                                piece[kept] = src[first + offset];
-                                kept += 1;
-                            }
-                        }
-                        return;
-                    }
+            fill_compaction(dst, &starts, inner, &|index, piece: &mut [$ty]| {
+                let first = index * band;
+                let last = (first + band).min(len);
+                let mut kept = 0usize;
+                if inner == 1 {
+                    // One element per block, where the other branch would
+                    // call `memcpy` to move a single value.
                     for (offset, &on) in mask_slice[first..last].iter().enumerate() {
                         if on {
-                            let block = first + offset;
-                            piece[kept * inner..(kept + 1) * inner]
-                                .copy_from_slice(&src[block * inner..(block + 1) * inner]);
+                            piece[kept] = src[first + offset];
                             kept += 1;
                         }
                     }
-                });
+                    return;
+                }
+                for (offset, &on) in mask_slice[first..last].iter().enumerate() {
+                    if on {
+                        let block = first + offset;
+                        piece[kept * inner..(kept + 1) * inner]
+                            .copy_from_slice(&src[block * inner..(block + 1) * inner]);
+                        kept += 1;
+                    }
+                }
+            });
         }};
     }
 
