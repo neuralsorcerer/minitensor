@@ -735,8 +735,14 @@ nanarg_extremum_all_lanes!(
 ///
 /// The lane count is fixed rather than taken from the hardware, so the fold
 /// groups the same way on every machine.
+///
+/// With `$nan` false the NaN flag is not kept and a NaN is simply skipped --
+/// no comparison against one is true -- which is the NaN-skipping extremum.
 macro_rules! float_extremum_row {
     ($name:ident, $ty:ty, $identity:expr, $better:tt, $lanes:expr) => {
+        float_extremum_row!($name, $ty, $identity, $better, $lanes, true);
+    };
+    ($name:ident, $ty:ty, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
         #[inline]
         fn $name(row: &[$ty]) -> $ty {
             const LANES: usize = $lanes;
@@ -751,7 +757,9 @@ macro_rules! float_extremum_row {
                     }
                     // `as u32` rather than a bool `|=`: keeps the lane update
                     // branch-free so it vectorizes with the comparison above.
-                    nans[lane] |= (v != v) as u32;
+                    if $nan {
+                        nans[lane] |= (v != v) as u32;
+                    }
                 }
             }
             let mut best: $ty = $identity;
@@ -766,7 +774,9 @@ macro_rules! float_extremum_row {
                 if v $better best {
                     best = v;
                 }
-                nan |= (v != v) as u32;
+                if $nan {
+                    nan |= (v != v) as u32;
+                }
             }
             if nan != 0 { <$ty>::NAN } else { best }
         }
@@ -777,6 +787,137 @@ float_extremum_row!(max_row_f32, f32, f32::NEG_INFINITY, >, 8);
 float_extremum_row!(min_row_f32, f32, f32::INFINITY, <, 8);
 float_extremum_row!(max_row_f64, f64, f64::NEG_INFINITY, >, 4);
 float_extremum_row!(min_row_f64, f64, f64::INFINITY, <, 4);
+float_extremum_row!(max_row_skip_f32, f32, f32::NEG_INFINITY, >, 8, false);
+float_extremum_row!(min_row_skip_f32, f32, f32::INFINITY, <, 8, false);
+float_extremum_row!(max_row_skip_f64, f64, f64::NEG_INFINITY, >, 4, false);
+float_extremum_row!(min_row_skip_f64, f64, f64::INFINITY, <, 4, false);
+
+/// The value and first index of the extremum of each contiguous row of
+/// `input`, `dim_size` elements long: the indexed reduction along the last
+/// axis, for a float dtype.
+///
+/// The generic walk this replaces carried the value, the index and a NaN
+/// short-circuit through one branchy scalar loop, which could not vectorize:
+/// `argmax` along the rows of a `(1024, 4096)` float32 matrix took 1.56ms
+/// where NumPy takes 0.67. Here each row is the whole-tensor `argmax`'s two
+/// passes in small -- the extremum by the lane fold `max` along a row uses,
+/// then a search for the first element equal to it, the row still in cache.
+/// The first match is the tie-break the walk had, lowest index, and signed
+/// zeros compare equal so whichever came first is found. The value reported
+/// is the element at that index, not the fold's, so it carries that element's
+/// own sign of zero.
+///
+/// `nan_aware` skips NaN; an all-NaN row then reports NaN at index 0.
+/// Otherwise a NaN wins and the first one is reported. A row nothing is found
+/// in is empty and reports the seed at index 0, as the walk did.
+macro_rules! float_arg_rows {
+    ($name:ident, $ty:ty, $seed:expr, $better:tt, $fold:ident, $skip:ident) => {
+        pub(crate) fn $name(
+            input: &[$ty],
+            values: &mut [$ty],
+            indices: &mut [i64],
+            dim_size: usize,
+            nan_aware: bool,
+        ) {
+            // The extremum of one contiguous run, its position relative to
+            // the run; `None` when the run holds nothing to report.
+            let run_arg = |run: &[$ty]| -> Option<($ty, usize)> {
+                let at = if nan_aware {
+                    let best = $skip(run);
+                    locate_first(run, |v: $ty| v == best)
+                } else {
+                    let best = $fold(run);
+                    if best.is_nan() {
+                        locate_first(run, |v: $ty| v != v)
+                    } else {
+                        locate_first(run, |v: $ty| v == best)
+                    }
+                };
+                at.map(|at| (run[at], at))
+            };
+            let empty = if nan_aware { <$ty>::NAN } else { $seed };
+
+            // A few very long rows: cut each into bands of `ARG_BAND_LEN`, so
+            // the pool has something to share, and keep the first of the
+            // band winners in band order -- the comparison the walk made
+            // between elements, made between bands, so the same winner.
+            if values.len() <= ARG_BAND_MAX_OUTPUTS && dim_size >= ARG_BAND_MIN_LEN {
+                let bands = dim_size.div_ceil(ARG_BAND_LEN);
+                let winners = par_map_indexed(values.len() * bands, &|task| {
+                    let (row, band) = (task / bands, task % bands);
+                    let from = row * dim_size + band * ARG_BAND_LEN;
+                    let to = (from + ARG_BAND_LEN).min((row + 1) * dim_size);
+                    run_arg(&input[from..to]).map(|(v, at)| (v, band * ARG_BAND_LEN + at))
+                });
+                let beats = |v: $ty, best: $ty| {
+                    if nan_aware {
+                        v $better best
+                    } else {
+                        (v != v && best == best) || v $better best
+                    }
+                };
+                for (row, (value, index)) in values.iter_mut().zip(indices.iter_mut()).enumerate()
+                {
+                    let mut best: Option<($ty, usize)> = None;
+                    for &found in winners[row * bands..(row + 1) * bands].iter().flatten() {
+                        if best.is_none_or(|(b, _)| beats(found.0, b)) {
+                            best = Some(found);
+                        }
+                    }
+                    (*value, *index) = best.map_or((empty, 0), |(v, at)| (v, at as i64));
+                }
+                return;
+            }
+
+            par_out_chunks2(
+                values,
+                indices,
+                outputs_per_task(dim_size),
+                &|start, vals, idxs| {
+                    for (offset, (value, index)) in vals.iter_mut().zip(idxs.iter_mut()).enumerate()
+                    {
+                        let first = (start + offset) * dim_size;
+                        (*value, *index) = run_arg(&input[first..first + dim_size])
+                            .map_or((empty, 0), |(v, at)| (v, at as i64));
+                    }
+                },
+            );
+        }
+    };
+}
+
+float_arg_rows!(
+    argmax_rows_f32,
+    f32,
+    f32::NEG_INFINITY,
+    >,
+    max_row_f32,
+    max_row_skip_f32
+);
+float_arg_rows!(
+    argmin_rows_f32,
+    f32,
+    f32::INFINITY,
+    <,
+    min_row_f32,
+    min_row_skip_f32
+);
+float_arg_rows!(
+    argmax_rows_f64,
+    f64,
+    f64::NEG_INFINITY,
+    >,
+    max_row_f64,
+    max_row_skip_f64
+);
+float_arg_rows!(
+    argmin_rows_f64,
+    f64,
+    f64::INFINITY,
+    <,
+    min_row_f64,
+    min_row_skip_f64
+);
 
 /// Fold `width` columns of a slab, streaming the input in memory order.
 ///

@@ -53,7 +53,7 @@ pub(crate) fn extremum_along_dim_with_indices(
     /// One float dtype: NaN either wins immediately or is skipped, depending on
     /// `nan_aware`.
     macro_rules! float_arm {
-        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal) => {{
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal, $rows_max:ident, $rows_min:ident) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -65,7 +65,10 @@ pub(crate) fn extremum_along_dim_with_indices(
                 ))
             })?;
             let is_max = which == Extremum::Max;
-            if nan_aware {
+            if layout.inner == 1 {
+                let rows = if is_max { $rows_max } else { $rows_min };
+                rows(input, values, indices, layout.dim_size, nan_aware);
+            } else if nan_aware {
                 reduce_arg_along_dim_par(
                     input,
                     values,
@@ -146,8 +149,22 @@ pub(crate) fn extremum_along_dim_with_indices(
     }
 
     match tensor.dtype() {
-        DataType::Float32 => float_arm!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
-        DataType::Float64 => float_arm!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
+        DataType::Float32 => float_arm!(
+            as_f32_slice,
+            as_f32_slice_mut,
+            f32,
+            "f32",
+            argmax_rows_f32,
+            argmin_rows_f32
+        ),
+        DataType::Float64 => float_arm!(
+            as_f64_slice,
+            as_f64_slice_mut,
+            f64,
+            "f64",
+            argmax_rows_f64,
+            argmin_rows_f64
+        ),
         DataType::Int32 => exact_arm!(
             as_i32_slice,
             as_i32_slice_mut,
