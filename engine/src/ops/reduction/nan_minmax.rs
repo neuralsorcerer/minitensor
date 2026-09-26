@@ -920,63 +920,15 @@ float_arg_rows!(
     min_row_skip_f64
 );
 
-/// Fold `width` columns of a slab, streaming the input in memory order.
+/// The extremum of each column of `outer` slabs of `(len, inner)` rows: the
+/// value-only reduction along any axis but the last, for a float dtype.
 ///
-/// The same idea as [`float_extremum_row`] with the slab's own columns as the
-/// lanes: `width` accumulators are already live and independent, so the only
-/// thing stopping the loop from vectorizing was the NaN test inside the fold.
-/// Carrying a NaN mask alongside keeps the comparison branchless and puts the
-/// propagation back in one pass at the end. Through the generic closure this
-/// cost `max` along dimension 0 of a 4096x1024 f32 tensor 3.6 ms where `sum`
-/// over the same axis took 0.39 ms.
-macro_rules! float_extremum_columns {
-    ($name:ident, $ty:ty, $identity:expr, $better:tt) => {
-        /// Fold steps `[from, to)` of the slab at `base`, over the `out.len()`
-        /// columns starting at `start`.
-        #[inline]
-        fn $name(
-            input: &[$ty],
-            base: usize,
-            start: usize,
-            from: usize,
-            to: usize,
-            inner: usize,
-            out: &mut [$ty],
-        ) {
-            let width = out.len();
-            let mut nans = vec![0u32; width];
-            out.fill($identity);
-            for step in from..to {
-                let slab = &input[base + step * inner + start..][..width];
-                for ((acc, flag), &v) in out.iter_mut().zip(nans.iter_mut()).zip(slab) {
-                    if v $better *acc {
-                        *acc = v;
-                    }
-                    *flag |= (v != v) as u32;
-                }
-            }
-            for (acc, &flag) in out.iter_mut().zip(nans.iter()) {
-                if flag != 0 {
-                    *acc = <$ty>::NAN;
-                }
-            }
-        }
-    };
-}
-
-float_extremum_columns!(max_columns_f32, f32, f32::NEG_INFINITY, >);
-float_extremum_columns!(min_columns_f32, f32, f32::INFINITY, <);
-float_extremum_columns!(max_columns_f64, f64, f64::NEG_INFINITY, >);
-float_extremum_columns!(min_columns_f64, f64, f64::INFINITY, <);
-
-/// The extremum of each column of `outer` slabs of `(len, inner)` rows, for a
-/// slab too narrow for the column walk above -- `inner` below
-/// `BLOCKED_INNER_MIN`.
-///
-/// Those went one output at a time down the generic strided walk, a branchy
-/// comparison per element `inner` apart: `max` down the rows of a
-/// `(200000, 33)` float32 matrix took 12.7ms where `sum` took 0.42, and NumPy
-/// 7.1. They now go through the fold `sum` uses for a slab -- rows streamed in
+/// Slabs narrower than `BLOCKED_INNER_MIN` went one output at a time down the
+/// generic strided walk, a branchy comparison per element `inner` apart: `max`
+/// down the rows of a `(200000, 33)` float32 matrix took 12.7ms where `sum`
+/// took 0.42, and NumPy 7.1. Wider ones had a column walk of their own that
+/// measured 2-4x slower than this on float32. Both now go through the fold
+/// `sum` uses for a slab -- rows streamed in
 /// memory order, narrow ones several to an accumulator row, split across the
 /// pool as `sum` splits them -- with a step that is two selects and so
 /// vectorizes. The grouping cannot change the answer, since an extremum is
@@ -985,7 +937,7 @@ float_extremum_columns!(min_columns_f64, f64, f64::INFINITY, <);
 ///
 /// A NaN propagates: once in a lane nothing displaces it, since no comparison
 /// against it is true, and every NaN is reported as the canonical one.
-fn narrow_slab_extremum<T>(
+fn slab_extremum<T>(
     input: &[T],
     output: &mut [T],
     layout: &DimReductionLayout,
@@ -1022,7 +974,7 @@ fn narrow_slab_extremum<T>(
     };
     if slab == 0 {
         output.fill(seed);
-    } else if outer < NARROW_EXTREMUM_MIN_SLABS {
+    } else if outer < EXTREMUM_MIN_SLABS {
         for (source, target) in input.chunks_exact(slab).zip(output.chunks_exact_mut(inner)) {
             finish(target, &fold(source, true));
         }
@@ -1039,7 +991,7 @@ fn narrow_slab_extremum<T>(
 }
 
 /// Fewer slabs than this are each spread across the pool; `sum`'s threshold.
-const NARROW_EXTREMUM_MIN_SLABS: usize = 4;
+const EXTREMUM_MIN_SLABS: usize = 4;
 
 /// The value and first index of the extremum of each column of `outer`
 /// slabs of `(len, inner)` rows: the indexed reduction along any axis but the
@@ -1052,7 +1004,7 @@ const NARROW_EXTREMUM_MIN_SLABS: usize = 4;
 /// 27.
 ///
 /// Now the slab is cut into blocks of rows, and each block's column extrema
-/// are taken by [`narrow_slab_extremum`]'s fold (a NaN-skipping one for
+/// are taken by [`slab_extremum`]'s fold (a NaN-skipping one for
 /// `nan_aware`) -- one vectorized pass over the input, split across the pool
 /// when the slab is. The blocks' extrema give each column's target, and the
 /// first block whose extremum matches it holds the column's first match, so
@@ -1151,7 +1103,7 @@ pub(crate) fn slab_arg_extremum<T>(
     if slab == 0 {
         values.fill(seed);
         indices.fill(0);
-    } else if outer < NARROW_EXTREMUM_MIN_SLABS {
+    } else if outer < EXTREMUM_MIN_SLABS {
         for ((source, vals), idxs) in input
             .chunks_exact(slab)
             .zip(values.chunks_exact_mut(inner))
@@ -1199,7 +1151,7 @@ fn extremum_along_dim(
     let is_max = which == Extremum::Max;
 
     macro_rules! float_arm {
-        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal, $row_max:ident, $row_min:ident, $col_max:ident, $col_min:ident) => {{
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal, $row_max:ident, $row_min:ident) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -1226,65 +1178,8 @@ fn extremum_along_dim(
                         *out = if is_max { $row_max(row) } else { $row_min(row) };
                     }
                 });
-            } else if layout.inner >= BLOCKED_INNER_MIN {
-                // Wide reduced axis: stream the slabs in memory order with the
-                // columns as accumulators. Same partition as the generic
-                // blocked path in `reduce_along_dim_par`, since the choice of
-                // bands is what makes that path worth taking.
-                let (dim_size, inner, outer_stride) =
-                    (layout.dim_size, layout.inner, layout.outer_stride);
-                let outer = if outer_stride == 0 {
-                    1
-                } else {
-                    input.len() / outer_stride.max(1)
-                };
-                if outer > 1 {
-                    par_out_chunks(output, inner, &|start, row| {
-                        let base = (start / inner) * outer_stride;
-                        if is_max {
-                            $col_max(input, base, 0, 0, dim_size, inner, row);
-                        } else {
-                            $col_min(input, base, 0, 0, dim_size, inner, row);
-                        }
-                    });
-                } else {
-                    // One slab, so there is no outer work to hand out. Banding
-                    // the columns gives each thread a narrow stripe of every
-                    // row; banding the *rows* lets each stream a contiguous run
-                    // and merge afterwards. That regrouping is free here in a
-                    // way it is not for a sum: an extremum is exactly
-                    // associative, so how the steps are grouped cannot change
-                    // the answer.
-                    let bands = rayon::current_num_threads().max(1);
-                    let band = dim_size.div_ceil(bands).max(1);
-                    let partials: Vec<Vec<$ty>> = par_map_indexed(dim_size.div_ceil(band), &|b| {
-                        let mut acc = vec![seed; inner];
-                        let from = b * band;
-                        let to = ((b + 1) * band).min(dim_size);
-                        if is_max {
-                            $col_max(input, 0, 0, from, to, inner, &mut acc);
-                        } else {
-                            $col_min(input, 0, 0, from, to, inner, &mut acc);
-                        }
-                        acc
-                    });
-                    output.copy_from_slice(&partials[0]);
-                    for partial in &partials[1..] {
-                        for (slot, &v) in output.iter_mut().zip(partial) {
-                            // A partial may already hold NaN, and a bare
-                            // comparison would drop it.
-                            *slot = if *slot != *slot || v != v {
-                                <$ty>::NAN
-                            } else if (v > *slot) == is_max && v != *slot {
-                                v
-                            } else {
-                                *slot
-                            };
-                        }
-                    }
-                }
             } else if layout.inner > 1 {
-                narrow_slab_extremum(input, output, &layout, seed, is_max);
+                slab_extremum(input, output, &layout, seed, is_max);
             } else {
                 reduce_along_dim_par(
                     input,
@@ -1342,9 +1237,7 @@ fn extremum_along_dim(
             f32,
             "f32",
             max_row_f32,
-            min_row_f32,
-            max_columns_f32,
-            min_columns_f32
+            min_row_f32
         ),
         DataType::Float64 => float_arm!(
             as_f64_slice,
@@ -1352,9 +1245,7 @@ fn extremum_along_dim(
             f64,
             "f64",
             max_row_f64,
-            min_row_f64,
-            max_columns_f64,
-            min_columns_f64
+            min_row_f64
         ),
         DataType::Int32 => int_arm!(as_i32_slice, as_i32_slice_mut, i32, "i32"),
         DataType::Int64 => int_arm!(as_i64_slice, as_i64_slice_mut, i64, "i64"),
