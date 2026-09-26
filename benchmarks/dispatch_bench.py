@@ -6,9 +6,9 @@
 
 """Measure every kernel against NumPy, so delegation is a measurement and not a guess.
 
-`engine::ops::linalg::gemm_provider` sends dense products to the BLAS that
-NumPy brought and leaves everything else on the engine's own kernels. That
-split is only right if it is true here, on this machine, and it is not
+`engine::ops::provider` sends dense products to the BLAS that NumPy brought
+and the float64 transcendentals to its ufuncs, and leaves everything else on
+the engine's own kernels. That split is only right if it is true here, on this machine, and it is not
 portable: it depends on the host BLAS, the core count and the SIMD width. This
 script is how the claim is re-taken.
 

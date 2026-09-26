@@ -148,7 +148,7 @@ python -m pytest tests/tensor/test_tensor_core.py
 
 `blas` links OpenBLAS into the engine instead of using its own GEMM, and it is
 the one feature that changes which code compiles rather than only how it runs:
-`bindings/src/gemm.rs` gates its NumPy provider off, because a build with a
+`bindings/src/provider.rs` gates its NumPy provider off, because a build with a
 BLAS of its own has nothing to gain by crossing into the interpreter to reach
 another. Gated code is code no ordinary build type-checks, which is how this
 feature has now twice stopped compiling without anyone noticing.

@@ -1,8 +1,10 @@
 # Where the work goes, and why
 
-`engine::ops::linalg::gemm_provider` sends dense matrix products to the BLAS
-that NumPy brought and leaves every other kernel on the engine's own. That split
-is a measurement, not a preference, and `dispatch_bench.py` is how it is
+`engine::ops::provider` sends dense matrix products to the BLAS that NumPy
+brought, and the float64 transcendentals to NumPy's ufuncs; the Python layer
+sends float `unique`, the set operations, `partition` and small or integer
+`isin` to NumPy as well. Every other kernel stays on the engine's own. That
+split is a measurement, not a preference, and `dispatch_bench.py` is how it is
 re-taken:
 
 ```
@@ -121,6 +123,51 @@ cores and pays a crossing per block. The one shape that wins (1×512×7×7 → 5
 channels, a single block with a deep contraction) is one point out of eight, and
 a rule fitted to it would be a rule about this machine. So convolution stays
 native, and the code carries no special case.
+
+### Float64 transcendentals
+
+The engine's float64 arms of `tanh`, `exp`, `log`, the hyperbolic and inverse
+trigonometric functions, `cbrt`, `atan2` and `pow` were scalar `libm` calls, one
+element at a time; NumPy's are vectorized loops, and for `tanh` the more
+accurate of the two (1 ulp against glibc's 2). Above 512 elements they go to
+NumPy on views of the engine's buffers, a large input split across the same
+number of threads the engine's own loop would have used, each releasing the
+interpreter lock while its chunk runs. `_core.dispatch.delegated_ufuncs()`
+lists them. Engine time over delegated time:
+
+| op | 1e4 | 1e6 |
+|---|---|---|
+| `arcsin` | 2.42× | 5.38× |
+| `arccos` | 2.64× | 5.01× |
+| `arctan` | 1.70× | 4.48× |
+| `arccosh` | 1.22× | 2.65× |
+| `arctan2` | 7.25× | 4.37× |
+| `power` | 5.68× | 4.72× |
+
+and 2.5–14× at a million elements for the fourteen that crossed first. Nothing
+in float32 crosses: every float32 kernel in `ops::simd::transcendental`
+computes in float64 and rounds once, which makes it correctly rounded on every
+input, and NumPy's float32 `cbrt` and `atanh`, the two it was faster at,
+missed on a third and on 4.7% of inputs. Speed that costs the answer is not
+what delegation is for.
+
+### Sort-family operations, from Python
+
+These cross at the Python level rather than through the provider, because the
+answer's size is not known until NumPy has it. Engine time over NumPy's:
+
+| op | float | integer |
+|---|---|---|
+| `unique` | 1.4–2.5× | engine 4.6–5.8× ahead |
+| `union1d`, `intersect1d`, `setdiff1d`, `setxor1d` | 1.1–8× | engine 1.5–5.8× ahead |
+| `partition`, `argpartition` | 1.6–5× | 2–5.6× |
+| `isin` | below 40,000 elements | 4.5–9× |
+
+So floats cross and integers stay, except for `partition`, which crosses in
+every dtype, and `isin`, where NumPy's integer path counts values in a lookup
+table no sort competes with. `intersect1d` and `setdiff1d` keep the left
+operand's dtype and cross only when it is a float, so an `int64` is never
+rounded through a promotion and back.
 
 ## What is not delegated
 
@@ -247,81 +294,37 @@ what says the measurement was of the binary path and not of the machine.
 
 ## What still loses
 
-Of the kernels in the tables above, at 16M elements there is **nothing** in
-float32 that NumPy computes faster, and one thing in float64: `tanh`. The
-breadth sweep further down finds ten more float64 transcendentals behind for
-the same reason, which is the one set out here -- this section is where the
-reason lives, that one is where the list is.
+Of the kernels in the tables above, at 16M elements there is **nothing** that
+NumPy computes faster. Float64 `tanh` was the exception until it was
+delegated, and why it was delegated rather than rewritten is worth keeping:
+`ops::simd::transcendental`'s float32 kernels compute in float64 and round
+once, and a float64 *output* cannot borrow that trick. It is not the
+polynomial: extending the module's `expm1` series moves the worst case from 6
+ulp to 4 and stops there, and the `tanh(x) = u/(u+2), u = expm1(2x)` form fed
+an `expm1` from libm still reaches 3 ulp. The error is in the form -- `u`
+cancels against `+2` for negative `x`, and the recombination cancels again --
+and matching NumPy's 1 ulp means NumPy's algorithm, a segmented table with a
+polynomial per segment. Borrowing the one already loaded is cheaper than
+writing it.
 
-`tanh` is not only a 16M problem: it loses at every size, and worse at the
-small ones:
+### Where the size of the call decides it
 
-```
-tanh float64        1,000     14.6us  vs    2.2us    0.15x
-                  100,000    524.6us  vs  158.3us    0.30x
-                1,000,000      4.48ms vs    1.56ms   0.35x
-               16,000,000     85.64ms vs   43.83ms   0.51x
-```
+The parallel thresholds in `ops::map` were fitted to each size's fastest call,
+and a pool woken call after call from Python is not that fast. On this 4-core
+container a trivial rayon round trip averaged 45 µs back to back and 79 µs with
+a 2 µs gap between calls, against a best case of 3.4, with the 90th percentile
+past 150. At 16,384 elements that sent `sum(0)` of a `(64, 256)` block to four
+tasks for 64 µs of work worth 3, `any` to 121 µs, and `narrow` -- and so
+`diff`, `append`, `gradient` and `trapezoid` -- to 30–220 µs of copying worth
+one or two.
 
-`ops::simd::transcendental` holds hand-vectorized kernels for `tanh`, `erf`,
-`exp`, `log` and the rest — float32 only, computing internally in float64 and
-rounding once. A float64 *output* cannot borrow that trick, and the reason is
-worth stating precisely, because the obvious one is wrong.
-
-It is **not** the polynomial. Extending the module's `expm1` Taylor series from
-r¹² to r¹⁴ moves the worst case from 6 ulp to 4 and stops there. Feed the same
-`tanh(x) = u/(u+2), u = expm1(2x)` form an `expm1` from libm — better than any
-polynomial worth writing — and it still reaches **3 ulp**, with 109,151 of
-2,000,001 sampled points over 1 ulp. The error is in the algebraic form: `u`
-cancels against `+2` for negative `x`, and `2ⁿ·p + (2ⁿ − 1)` cancels again
-inside the recombination. No polynomial fixes either.
-
-That form is nevertheless exactly right for a float32 result, and the module
-already proves it rather than assuming it: its `tanh` is bit-identical to
-`(x as f64).tanh() as f32` on **all 2³² float32 inputs**, on every dispatch
-path, checked exhaustively by an ignored test rather than sampled. One float32
-ulp is 2²⁹ float64 ulps, so three of the latter disappear entirely in the
-rounding — that headroom is exactly what the float32 kernel is spending. A
-float64 output has none to spend.
-
-The bar for float64 is higher than libm, not equal to it. Measured against a
-200-bit `mpmath` reference over 23,997 points, NumPy's array `np.tanh` is
-faithful to **≤ 1 ulp**, while the scalar `tanh` glibc gives the engine today
-reaches **2 ulp**. So for float64 `tanh` NumPy is currently both faster *and*
-more accurate than what we do, and matching it means a different algorithm — a
-segmented table with a polynomial per segment, which is what NumPy has — rather
-than a better polynomial in this one.
-
-One thing does help, for anyone who takes it on: folding to `|x|` before the
-reduction removes the first of the two cancellations, and drops the points over
-1 ulp from 109,151 to 3,641. The maximum stays at 3.
-
-By the logic that sends GEMM to NumPy, this op is a candidate for the same
-treatment — it is the one kernel where NumPy is better on both axes. It is not
-delegated because a provider path costs a trait, a registration, a threshold
-and a rayon-worker guard, and this is one operation at one dtype; it would also
-leave float64 `tanh` returning different bits to the Python package than to a
-Rust embedder. If a second op ever joins it, that arithmetic changes.
-
-Everything built on these kernels inherits the shape but not the loss — float64
-`sigmoid` and `gelu` still win (2.9× and 2.3×), because their cost is dominated
-by the passes they avoid rather than by the transcendental itself. float64
-`exp` and `log` do lose at 1000 elements (0.29× and 0.38×), for the reason the
-next paragraph gives, but close as the array grows and are ahead or level by
-16M: `exp` 1.07–1.11× and `log` 0.99–1.02× over repeat runs. Of the ops in
-these tables `tanh` is the only one that stays behind at every size, which is
-why it is the one described here.
-
-Below 16M the remaining losses are small ones at small sizes, and in the band
-the parallel thresholds in `ops::map` govern. The call overhead that used to
-dominate the small end has been taken out for the binary ops -- see the
-elementwise table above -- so what is left there is the transcendental itself,
-which is why the names in this paragraph are all unary.
-
-Those thresholds carry their own measurements in that file, taken on a
-different machine; re-tuning them to this container would improve these
-numbers and regress that one, so they are left alone. If you are tuning for a
-specific host, that file is where to look and this script is how to check.
+So the folds, the reductions and the data movement now stay on the calling
+thread below 2 MiB of input (`FOLD_PAR_BYTES`), with the same chunks in the
+same order, so no answer moves; the equal-shape arithmetic splits at 262,144
+elements and the broadcasting path at 131,072. What that bought at 16,384
+float32: `diff` 195 µs to 7, `count_nonzero` 99 to 4, `sum(0)` 64 to 3,
+`add` at 65,536 96 to 9. The thresholds are one machine's; a host whose pool
+wakes faster would split sooner, and `ops::map` is where to look.
 
 ### Two of them were not slow. They were wrong.
 
@@ -520,18 +523,17 @@ had been 0.77x with NumPy's column unmoved.
 
 ### What it still says is behind
 
-Five groups. The first is down to one name and the fourth is empty, so what
-is left is really three:
+Five groups. Two are delegated now and the fourth is empty, so what is left
+is float32 `cbrt` and two rows that are answers rather than problems:
 
-- **Transcendentals with no vectorised kernel at all.** `cbrt` 0.34–0.66×.
-  Behind in *both* dtypes, which is what separates it from the group below:
-  the fix is a kernel, not an algorithm.
+- **Transcendentals with no vectorised kernel at all.** `cbrt` 0.34–0.66× in
+  float32; its float64 goes to NumPy. The fix is a kernel, not an algorithm.
 
   `pow` was the other name here at 0.53–0.79 and is no longer behind in
   float32. Built out of the `exp` and `log` kernels rather than left on
-  `powf`, it reads 1.21; its float64 0.73 is the ordinary float64 gap and it
-  has moved to that bullet. `cbrt` halved the same way — four passes became
-  one kernel, 0.19 to 0.66 — without reaching parity, which is the honest
+  `powf`, it reads 1.21; its float64 goes to NumPy. `cbrt` halved the same
+  way — four passes became one kernel, 0.19 to 0.66 — without reaching
+  parity, which is the honest
   reason it is still here: the remaining distance is a dedicated kernel worth
   about thirty float64 operations to beat 0.67ns an element, and that lands
   near parity rather than past it.
@@ -553,62 +555,22 @@ is left is really three:
   reads 11.32. `atan2` was the last and the most stubborn -- monomorphizing
   its call did nothing, because the call was to `atan2f` -- and it took a
   kernel of its own to go 5.555ms to 0.574, 0.15× to 1.41.
-- **Transcendentals in float64.** `log1p` 0.30×, `sinh` 0.31, `tan` 0.39,
-  `asinh` 0.39, `expm1` 0.40, `log10` 0.44, `cosh` 0.48, `atan2` 0.48, `atan`
-  0.52, `tanh` 0.57, `exp2` 0.66, `pow` 0.73, `log2` 0.84 — all but one of
-  them at or above 1.0 in float32, most well above, and the exception is
-  `log10` level at 0.92.
-  `ops::simd::transcendental` is float32-only by design: it computes in
-  float64 and rounds once, which is exactly the headroom a float64 output does
-  not have. The section above says why that is a different algorithm rather
-  than a better polynomial. It is the largest gap left, and the one with no
-  cheap version.
-- **Sorting and selection.** `setxor1d` 0.23–0.32×, `unique` 0.41–0.58,
-  `union1d` 0.46–0.49, `argpartition` 0.49–0.60, `intersect1d` 0.53–0.67,
-  `partition` 0.63–0.65. Every one of them is a comparison sort or a selection
-  underneath, and ours is a portable one where NumPy's is vectorised per
-  microarchitecture. This is the group with the most operations in it and the
-  one a single change would move furthest.
+- **Transcendentals in float64** and **sorting and selection** are
+  delegated now -- see *What is delegated* -- and read as NumPy plus the
+  crossing.
 
-  Three plausible changes are not that change, and all are worth writing down
-  so the next person does not spend the afternoon on any of them.
-
-  `unique` sorts with a comparator closure, while `ops::order` holds
-  order-preserving integer keys whose header records comparisons falling from
-  62 ms to 18. Sorting a million float32 as keys rather than through the
-  comparator is **1.16×** -- 11.52 ms against 9.89 including the pass that
-  builds the keys -- where the distance to NumPy is 2.3×. In a debug build the
-  same measurement reads 1.87×, which is what makes it tempting; in release the
-  comparator inlines.
-
-  And `sort` does not pay for the indices it returns. It looks like it should:
-  `mt.sort` and `mt.argsort` cost the same to the microsecond, so the values
-  are getting an argsort whether or not the caller wanted one. But it already
-  sorts a packed key-and-position `u64` rather than a `(value, index)` pair,
-  and that packing is what makes carrying the position nearly free -- measured
-  standalone over a million float32, the pair costs 14.78 ms, the packed word
-  10.58, and the values alone 9.21. A values-only path is worth about 1.3x,
-  not the 3x the API shape suggests.
-
-  And an LSD radix sort does not beat it either -- not on the host this was
-  tried on, and the reason it did not is itself worth knowing. The packed entry
-  is what makes radix look free: the entries are built in position order, so a
-  stable sort on the key bits alone reproduces the comparison sort's total
-  order exactly, positions and all. Written properly -- `u64` digits, every
-  histogram in one read, passes skipped when one bucket holds everything,
-  parallel per-block histograms and scatters -- a million float32 took 23.6 ms
-  serially and 16.9 ms in parallel against 10.9 for the comparison sort. The
-  serial passes cost about 5.8 ns an element, which is *slower than a fully
-  random scatter* on the same machine (4.4 ns), while plain copying ran at a
-  normal 24 GB/s. That pattern points at the host rather than at the
-  algorithm -- a VM whose nested page tables make each TLB miss expensive, and
-  a 256-way scatter is a steady stream of them -- so on bare metal the answer
-  may differ. It was not shipped because it could not be measured as faster
-  where it was measured at all; whoever retries it should time a random
-  scatter first, because that number decides the result before the sort does.
-
-  What is left in every case is the algorithm, and matching it means a
-  vectorised quicksort.
+  Three plausible engine-side changes to the sort were measured first and did
+  not pay, and are worth keeping so nobody spends the afternoon again. Sorting
+  a million float32 as order-preserving integer keys rather than through the
+  comparator was 1.16x -- 11.52 ms against 9.89 -- where the distance to NumPy
+  was 2.3x. A values-only `sort` would save about 1.3x, not the 3x the API
+  shape suggests: the packed key-and-position `u64` it sorts already carries
+  the position nearly free. And an LSD radix sort on those packed words took
+  23.6 ms serially and 16.9 in parallel against 10.9 for the comparison sort,
+  at 5.8 ns an element per pass -- slower than a fully random scatter on the
+  same VM (4.4 ns), which points at nested page tables rather than at the
+  algorithm; on bare metal it may differ, and a random-scatter timing decides
+  it before the sort does.
 - **Compositions where NumPy has a kernel.** This group is empty, and it is
   the only one that has emptied. It held most of this list once: `fmax`/`fmin`
   were five passes and are 2.28–3.12 now, `nanmax`/`nanmin` and

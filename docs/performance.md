@@ -106,6 +106,20 @@ crossing into the Python binding and the output allocation dominate; by 1M they
 are noise. Read the 4K column as the cost of calling an op, not the cost of the
 op.
 
+The table is float32. In float64 the engine has no wider type to compute in
+and round from, so its transcendentals were scalar `libm` calls; above 512
+elements they now go to NumPy's vectorized ufuncs on views of the engine's
+buffers, split across the engine's thread count, which put them 2.5-14x ahead
+of the old loop at a million elements. `minitensor._core.dispatch.delegated_ufuncs()`
+lists them, and `benchmarks/README.md` has the measurements.
+
+Where a mid-size operation goes parallel is also measured rather than assumed.
+Waking the thread pool from Python averaged tens of microseconds on the
+container these numbers come from, so folds, reductions and copies stay on
+the calling thread below 2 MiB of input and the equal-shape arithmetic below
+262,144 elements. None of those cutoffs changes an answer: the work is split
+into the same pieces either way.
+
 Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
 `log`, `sin`, `cos` and `tan` are bit-identical to the correctly-rounded
 float64 value on **all 2^32 float32 inputs**, checked exhaustively; `erf`,
