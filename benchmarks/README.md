@@ -169,13 +169,20 @@ arm64 with random pivots, so which of `-0.0` and `0.0` -- or of two NaNs with
 different bits -- stood for its group changed from run to run, and a
 determinism test failed on macOS. `unique` now pins those two groups to their
 first member in the input after NumPy returns. NumPy's `intersect1d` and the
-rest sort again inside, so they are not called at all: the set operations are
-the engine's own composition -- distinct values, a membership mask, a
-selection -- written over pinned NumPy arrays, which keeps every value one of
-theirs. At 10,000 elements that runs at 0.6–0.9× of NumPy's own set functions,
-where the engine's composition ran at 0.28–0.9×; at a million, 0.6–1.1× against
-0.7–1.1×. `setxor1d` also keeps the engine's answer of one NaN where NumPy
-returns one per side.
+rest sort again inside, so they are not called at all. The set operations work
+on the pinned distinct values instead: `intersect1d` and `setxor1d` merge-sort
+the two sides as NumPy does and then pin the only group that ordering could
+leave ambiguous (the zero for `intersect1d`, the NaN for `setxor1d`), and
+`setdiff1d` masks the left side with `isin`, so every value returned is one of
+the pinned ones. At 16,384 elements and at a million, `intersect1d`,
+`setxor1d` and `union1d` run at 0.83–0.94× of NumPy's own set functions and
+`setdiff1d` at 0.66–0.8×, where the engine's composition ran at 0.28–0.9×.
+`setxor1d` also keeps the engine's answer of one NaN where NumPy returns one
+per side.
+
+Membership by `searchsorted` into the other, already sorted side looked like
+the cheaper test and measured the other way: a binary search per value lost to
+`isin`'s one stable sort by 1.5–1.6×, and to a plain merge by more.
 
 `partition` crosses in every dtype, and its order away from `k` is NumPy's,
 unspecified as it always was. `isin` crosses for integers because NumPy counts
