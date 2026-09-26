@@ -444,18 +444,51 @@ fn where_map<T: Copy + Send + Sync>(
     let output_dims = output_shape.dims();
     let rank = output_dims.len();
 
-    let same_shape = condition_shape.dims() == output_dims
-        && input_shape.dims() == output_dims
-        && other_shape.dims() == output_dims
-        && condition.len() == numel
-        && input.len() == numel
-        && other.len() == numel;
-
-    if same_shape {
+    // The common forms: a condition covering the output, and each value
+    // either covering it too or a single element standing for every position
+    // -- `where(mask, x, y)`, and `where(isnan(x), 0, x)` behind `nanprod`,
+    // `nan_to_num` and the rest. An operand whose element count is the
+    // output's has the output's flat order whatever leading ones its shape
+    // has, so the positions line up without a walker.
+    //
+    // Written as zipped selects over whole runs, which the compiler turns into
+    // blends: the per-element indexed form behind a branch mispredicted on
+    // every other element of a random mask, and the scalar forms went through
+    // the coordinate walker below, at about 4ns an element either way.
+    let spans = |len: usize| len == numel || len == 1;
+    if condition.len() == numel && spans(input.len()) && spans(other.len()) {
         let fill_chunk = |start: usize, chunk: &mut [MaybeUninit<T>]| {
-            for (k, slot) in chunk.iter_mut().enumerate() {
-                let i = start + k;
-                slot.write(if condition[i] { input[i] } else { other[i] });
+            let range = start..start + chunk.len();
+            let cond = &condition[range.clone()];
+            match (input.len() == numel, other.len() == numel) {
+                (true, true) => {
+                    for (((slot, &c), &x), &y) in chunk
+                        .iter_mut()
+                        .zip(cond)
+                        .zip(&input[range.clone()])
+                        .zip(&other[range])
+                    {
+                        slot.write(if c { x } else { y });
+                    }
+                }
+                (true, false) => {
+                    let y = other[0];
+                    for ((slot, &c), &x) in chunk.iter_mut().zip(cond).zip(&input[range]) {
+                        slot.write(if c { x } else { y });
+                    }
+                }
+                (false, true) => {
+                    let x = input[0];
+                    for ((slot, &c), &y) in chunk.iter_mut().zip(cond).zip(&other[range]) {
+                        slot.write(if c { x } else { y });
+                    }
+                }
+                (false, false) => {
+                    let (x, y) = (input[0], other[0]);
+                    for (slot, &c) in chunk.iter_mut().zip(cond) {
+                        slot.write(if c { x } else { y });
+                    }
+                }
             }
         };
         // SAFETY: the chunks partition the spare slice and every element of
