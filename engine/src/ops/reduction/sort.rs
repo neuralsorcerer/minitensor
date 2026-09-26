@@ -99,7 +99,8 @@ where
     // the body writes every element of the chunk it is given.
     unsafe {
         build_vec(dim_size, |spare| {
-            par_out_chunks(spare, SIMD_PAR_CHUNK, &|start, chunk| {
+            let bytes = std::mem::size_of_val(spare);
+            crate::ops::map::par_out_chunks_sized(spare, SIMD_PAR_CHUNK, bytes, &|start, chunk| {
                 for (offset, slot) in chunk.iter_mut().enumerate() {
                     let d = start + offset;
                     slot.write(make(d, input[base + d * inner]));

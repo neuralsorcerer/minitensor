@@ -386,7 +386,8 @@ pub fn count_nonzero(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) ->
             .as_bool_slice_mut()
             .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
         with_truthy_slice!(&contiguous, |input, truthy| {
-            par_out_chunks(out, PAR_CHUNK, &|start, block| {
+            let bytes = std::mem::size_of_val(input);
+            crate::ops::map::par_out_chunks_sized(out, PAR_CHUNK, bytes, &|start, block| {
                 let source = &input[start..start + block.len()];
                 for (slot, &v) in block.iter_mut().zip(source) {
                     *slot = truthy(v);

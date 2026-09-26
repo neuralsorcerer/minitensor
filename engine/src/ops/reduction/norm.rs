@@ -437,13 +437,19 @@ fn fused_euclidean_norm(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
             } else {
                 // Many independent runs, so the outer axis is the one to
                 // split; each run then folds on a single thread.
-                par_out_chunks(&mut out, PAR_CHUNK, &|start, block| {
-                    for (offset, slot) in block.iter_mut().enumerate() {
-                        let base = (start + offset) * run;
-                        let slice = &data[base..base + run];
-                        *slot = crate::ops::util::accurate_self_sum(slice, 0f64, $square_sum);
-                    }
-                });
+                let bytes = std::mem::size_of_val(data);
+                crate::ops::map::par_out_chunks_sized(
+                    &mut out,
+                    PAR_CHUNK,
+                    bytes,
+                    &|start, block| {
+                        for (offset, slot) in block.iter_mut().enumerate() {
+                            let base = (start + offset) * run;
+                            let slice = &data[base..base + run];
+                            *slot = crate::ops::util::accurate_self_sum(slice, 0f64, $square_sum);
+                        }
+                    },
+                );
             }
             out
         }};

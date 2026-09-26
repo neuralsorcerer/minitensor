@@ -11,7 +11,7 @@ use crate::{
     },
     device::Device,
     error::{MinitensorError, Result},
-    ops::map::{PAR_THRESHOLD, build_vec, outputs_per_task, par_out_chunks},
+    ops::map::{PAR_THRESHOLD, build_vec, outputs_per_task, par_out_chunks, par_out_chunks_sized},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -469,7 +469,8 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             // every element is written once.
             let out = unsafe {
                 build_vec::<$ty, _>(numel, |spare| {
-                    par_out_chunks(spare, task, &|start, out_chunk| {
+                    let bytes = std::mem::size_of_val(spare);
+                    par_out_chunks_sized(spare, task, bytes, &|start, out_chunk| {
                         let mut written = 0usize;
                         while written < out_chunk.len() {
                             // Where this lands: which repeat of the
@@ -705,40 +706,46 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
             // run of `inner` per selected index, so every element is written.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    par_out_chunks(spare, rows_per_task * inner, &|start, out_chunk| {
-                        // A chunk starts on a row boundary because its width is
-                        // a whole number of rows; row `r` of the output is
-                        // outer position `r / selected` and selected index
-                        // `r % selected`. Both are found once for the chunk and
-                        // then stepped, rather than divided out per row.
-                        let row = start / inner;
-                        let mut outer = row / selected;
-                        let mut chosen = row % selected;
-                        if inner == 1 {
-                            // One element per row, so the slice copy the other
-                            // branch makes is a whole `memcpy` call to move
-                            // four bytes.
-                            for slot in out_chunk.iter_mut() {
-                                slot.write(src[outer * dims[dim] + indices[chosen] as usize]);
+                    let bytes = std::mem::size_of_val(spare);
+                    par_out_chunks_sized(
+                        spare,
+                        rows_per_task * inner,
+                        bytes,
+                        &|start, out_chunk| {
+                            // A chunk starts on a row boundary because its width is
+                            // a whole number of rows; row `r` of the output is
+                            // outer position `r / selected` and selected index
+                            // `r % selected`. Both are found once for the chunk and
+                            // then stepped, rather than divided out per row.
+                            let row = start / inner;
+                            let mut outer = row / selected;
+                            let mut chosen = row % selected;
+                            if inner == 1 {
+                                // One element per row, so the slice copy the other
+                                // branch makes is a whole `memcpy` call to move
+                                // four bytes.
+                                for slot in out_chunk.iter_mut() {
+                                    slot.write(src[outer * dims[dim] + indices[chosen] as usize]);
+                                    chosen += 1;
+                                    if chosen == selected {
+                                        chosen = 0;
+                                        outer += 1;
+                                    }
+                                }
+                                return;
+                            }
+                            for piece in out_chunk.chunks_mut(inner) {
+                                let source =
+                                    outer * dims[dim] * inner + indices[chosen] as usize * inner;
+                                piece.write_copy_of_slice(&src[source..source + inner]);
                                 chosen += 1;
                                 if chosen == selected {
                                     chosen = 0;
                                     outer += 1;
                                 }
                             }
-                            return;
-                        }
-                        for piece in out_chunk.chunks_mut(inner) {
-                            let source =
-                                outer * dims[dim] * inner + indices[chosen] as usize * inner;
-                            piece.write_copy_of_slice(&src[source..source + inner]);
-                            chosen += 1;
-                            if chosen == selected {
-                                chosen = 0;
-                                outer += 1;
-                            }
-                        }
-                    });
+                        },
+                    );
                 })
             };
             TensorData::$from_vec(out, device)
@@ -864,7 +871,8 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
             // sits in -- so any cut works.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    par_out_chunks(spare, MOVE_CHUNK, &|start, out_chunk| {
+                    let bytes = std::mem::size_of_val(spare);
+                    par_out_chunks_sized(spare, MOVE_CHUNK, bytes, &|start, out_chunk| {
                         for (offset, slot) in out_chunk.iter_mut().enumerate() {
                             let position = start + offset;
                             let base = (position / chunk_size) * dim_size * inner;
@@ -1018,7 +1026,8 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
             // the end, writing every element exactly once.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    par_out_chunks(spare, MOVE_CHUNK, &fill);
+                    let bytes = std::mem::size_of_val(spare);
+                    par_out_chunks_sized(spare, MOVE_CHUNK, bytes, &fill);
                 })
             };
             TensorData::$from_vec(out, device)
