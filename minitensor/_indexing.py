@@ -1036,6 +1036,18 @@ def _distinct(array: _np.ndarray) -> _np.ndarray:
     return values
 
 
+def _distinct_nan(values: _np.ndarray, source: _np.ndarray) -> _np.ndarray:
+    """`values`, sorted, with its trailing NaNs collapsed to the first NaN of
+    `source`: the one group a merge of two distinct sides can repeat."""
+
+    nans = int(_np.isnan(values).sum())
+    if nans > 1:
+        values = values[: values.size - nans + 1]
+    if nans:
+        values[-1] = source[int(_np.argmax(_np.isnan(source)))]
+    return values
+
+
 def _distinct_pair(
     left: Tensor, right: Tensor, promoted: str
 ) -> tuple[_np.ndarray, _np.ndarray, _np.ndarray, _np.ndarray]:
@@ -1130,10 +1142,21 @@ def intersect1d(
     if str(left.dtype) in _FLOAT_DTYPES:
         # The values are `left`'s and keep its dtype, which from a float is
         # exact after any promotion and from an integer would not be.
+        #
+        # Both sides are distinct, so the common values are the equal
+        # neighbours once the two are merged: one sort, where probing one side
+        # into the other was a binary search per value. Which of an equal pair
+        # an unstable sort puts first is only visible in the sign of a zero,
+        # so the zero is pinned back to the left side's own.
         ours, _, wide_ours, wide_theirs = _distinct_pair(
             left, right, _promoted_dtype(left, right)
         )
-        return _from_numpy(ours[_np.isin(wide_ours, wide_theirs, assume_unique=True)])
+        merged = _np.sort(_np.concatenate([wide_ours, wide_theirs]))
+        common = merged[:-1][merged[1:] == merged[:-1]].astype(ours.dtype)
+        zero = int(_np.searchsorted(common, 0.0))
+        if zero < common.size and common[zero] == 0:
+            common[zero] = ours[int(_np.searchsorted(ours, 0.0))]
+        return _from_numpy(common)
     left_values = unique(left)
     right_values = unique(right)
     keep = _present_in_sorted(*_promote_pair(left_values, right_values))
@@ -1169,14 +1192,20 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
         _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
     )
     if str(left.dtype) in _FLOAT_DTYPES:
+        # Both sides distinct, so a value is in exactly one of them precisely
+        # when it differs from both its neighbours once the two are merged --
+        # one sort, where probing each side into the other was two binary
+        # searches per value and five times NumPy's time. A pair that is
+        # equal across the sides leaves together, so the one member an
+        # unstable sort could place either way is NaN, which equals nothing:
+        # it collapses to the first NaN of the two sides.
         ours, theirs, _, _ = _distinct_pair(left, right, str(left.dtype))
-        only = _np.concatenate(
-            [
-                ours[_np.isin(ours, theirs, assume_unique=True, invert=True)],
-                theirs[_np.isin(theirs, ours, assume_unique=True, invert=True)],
-            ]
-        )
-        return _from_numpy(_distinct(only))
+        merged = _np.concatenate([ours, theirs])
+        order = _np.sort(merged)
+        lone = _np.ones(order.size + 1, dtype=bool)
+        lone[1:-1] = order[1:] != order[:-1]
+        result = order[lone[1:] & lone[:-1]]
+        return _from_numpy(_distinct_nan(result, merged))
     left, right = unique(left), unique(right)
     # Both sides are sorted and distinct by now, which is exactly the state
     # `isin` would spend a sort reaching.
