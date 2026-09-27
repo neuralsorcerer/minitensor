@@ -440,39 +440,45 @@ fn where_map<T: Copy + Send + Sync>(
     // blends: the per-element indexed form behind a branch mispredicted on
     // every other element of a random mask, and the scalar forms went through
     // the coordinate walker below, at about 4ns an element either way.
+    //
+    // And run through the map cores' multiversioned loops rather than written
+    // out here. Compiled for the x86-64 baseline, widening a byte of mask to
+    // a lane of float needs SSE4.1, which the baseline lacks, so the select
+    // stayed scalar and branched: 31us for 16,384 float32 on a random mask,
+    // 3.6 now; 372 for 262,144, 108 now. The closures are `move` so the
+    // scalar operand is a copy in a register -- captured by reference, as
+    // `nan_to_num`'s once were, it kept those loops scalar, 2-3x slower.
     let spans = |len: usize| len == numel || len == 1;
     if condition.len() == numel && spans(input.len()) && spans(other.len()) {
         let fill_chunk = |start: usize, chunk: &mut [MaybeUninit<T>]| {
+            use crate::ops::map::{map_slices_into, zip_slices_into, zip3_slices_into};
             let range = start..start + chunk.len();
             let cond = &condition[range.clone()];
             match (input.len() == numel, other.len() == numel) {
-                (true, true) => {
-                    for (((slot, &c), &x), &y) in chunk
-                        .iter_mut()
-                        .zip(cond)
-                        .zip(&input[range.clone()])
-                        .zip(&other[range])
-                    {
-                        slot.write(if c { x } else { y });
-                    }
-                }
+                (true, true) => zip3_slices_into(
+                    cond,
+                    &input[range.clone()],
+                    &other[range],
+                    chunk,
+                    &move |c: bool, x: T, y: T| if c { x } else { y },
+                ),
                 (true, false) => {
                     let y = other[0];
-                    for ((slot, &c), &x) in chunk.iter_mut().zip(cond).zip(&input[range]) {
-                        slot.write(if c { x } else { y });
-                    }
+                    zip_slices_into(cond, &input[range], chunk, &move |c: bool, x: T| {
+                        if c { x } else { y }
+                    })
                 }
                 (false, true) => {
                     let x = input[0];
-                    for ((slot, &c), &y) in chunk.iter_mut().zip(cond).zip(&other[range]) {
-                        slot.write(if c { x } else { y });
-                    }
+                    zip_slices_into(cond, &other[range], chunk, &move |c: bool, y: T| {
+                        if c { x } else { y }
+                    })
                 }
                 (false, false) => {
                     let (x, y) = (input[0], other[0]);
-                    for (slot, &c) in chunk.iter_mut().zip(cond) {
-                        slot.write(if c { x } else { y });
-                    }
+                    map_slices_into(cond, chunk, &move |c: bool| {
+                        if c { x } else { y }
+                    })
                 }
             }
         };
