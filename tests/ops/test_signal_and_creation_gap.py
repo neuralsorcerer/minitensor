@@ -121,6 +121,50 @@ def test_sliding_products_agree_whether_or_not_a_gradient_is_tracked(lengths, mo
             )
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_valid_product_of_equal_lengths_is_one_dot(dtype):
+    """Its one overlap is a dot product, and so are its gradients: each side
+    receives the other, reversed for a convolution."""
+
+    rng = np.random.default_rng(29)
+    signal, kernel = (rng.standard_normal(33).astype(dtype) for _ in range(2))
+    for ours, theirs, reverse in (
+        (mt.correlate, np.correlate, False),
+        (mt.convolve, np.convolve, True),
+    ):
+        first, second = mt.from_numpy(signal), mt.from_numpy(kernel)
+        first.requires_grad_(True)
+        second.requires_grad_(True)
+        got = ours(first, second, "valid")
+        assert got.dtype == dtype and tuple(got.shape) == (1,)
+        np.testing.assert_allclose(
+            got.detach().numpy(), theirs(signal, kernel, "valid"), rtol=1e-5
+        )
+        got.sum().backward()
+        np.testing.assert_array_equal(
+            first.grad.numpy(), kernel[::-1] if reverse else kernel
+        )
+        np.testing.assert_array_equal(
+            second.grad.numpy(), signal[::-1] if reverse else signal
+        )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("length", [(1 << 15) - 1, 1 << 15])
+def test_a_long_valid_product_of_equal_lengths_matches_numpy(dtype, length):
+    """From 32,768 float64 samples the untracked dot is NumPy's own; float32
+    and anything shorter stay with ours. Both sides of that line answer."""
+
+    rng = np.random.default_rng(length)
+    signal, kernel = (rng.standard_normal(length).astype(dtype) for _ in range(2))
+    for ours, theirs in ((mt.correlate, np.correlate), (mt.convolve, np.convolve)):
+        got = ours(mt.from_numpy(signal), mt.from_numpy(kernel), "valid")
+        assert got.dtype == dtype and tuple(got.shape) == (1,)
+        np.testing.assert_allclose(
+            got.numpy(), theirs(signal, kernel, "valid"), rtol=1e-4, atol=1e-3
+        )
+
+
 def test_convolve_is_correlate_with_one_signal_reversed():
     rng = np.random.default_rng(113)
     first = rng.standard_normal(9)

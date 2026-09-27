@@ -35,6 +35,7 @@ from ._shape import (
     _as_written_values,
     _atleast_tensor,
     _element_count,
+    _flat,
     _from_numpy,
     _index_tensor,
     _normalize_axis,
@@ -107,12 +108,6 @@ def _read_at(read, tensor: Tensor, axis: int, indices: Tensor) -> Tensor:
     except IndexError:
         length = tensor.shape[axis]
         return read(tensor, axis, _F.where(indices < 0, indices + length, indices))
-
-
-def _flat(tensor: Tensor) -> Tensor:
-    """`tensor` as a vector, without a reshape when it already is one."""
-
-    return tensor if tensor.ndim() == 1 else tensor.reshape(-1)
 
 
 def take(input: object, index: object) -> Tensor:

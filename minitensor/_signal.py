@@ -28,10 +28,18 @@ import math as _math
 import numpy as _np
 
 from . import _core as _C
-from ._shape import _atleast_tensor, _from_numpy, _numpy_view, _promote_pair
+from ._shape import _atleast_tensor, _flat, _from_numpy, _numpy_view, _promote_pair
 
 Tensor = _C.Tensor
 _F = _C.functional
+
+# An untracked float64 dot of at least this many samples is NumPy's. Its BLAS
+# splits one that long over threads that wake in microseconds, where ours stays
+# on one thread because a round trip through the pool costs tens: 13us against
+# its 9 at 65,536 samples, even at 32,768, and 3.5 against 5.3 at 16,384 in
+# ours' favour. A float32 BLAS dot stays on one thread and is the slower at
+# every length, 60us against 14 at 262,144.
+_NUMPY_DOT_FROM = 1 << 15
 
 
 def _window_positions(length: int, periodic: bool, name: str) -> tuple[Tensor, float]:
@@ -144,8 +152,8 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
     easier to state as an offset than to arrive at by padding.
     """
 
-    signal = _atleast_tensor(first).reshape(-1)
-    kernel = _atleast_tensor(second).reshape(-1)
+    signal = _flat(_atleast_tensor(first))
+    kernel = _flat(_atleast_tensor(second))
     if signal.shape[0] == 0 or kernel.shape[0] == 0:
         raise ValueError(f"{name} needs two non-empty sequences")
     if mode not in ("full", "same", "valid"):
@@ -160,25 +168,32 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         signal = signal.astype("float64")
         kernel = kernel.astype("float64")
 
-    if not (signal.requires_grad or kernel.requires_grad):
+    length, taps = signal.shape[0], kernel.shape[0]
+    tracked = signal.requires_grad or kernel.requires_grad
+    if mode == "valid" and length == taps:
+        # One overlap, which is one dot product. NumPy's sliding product
+        # copies an input it cannot write to, and the views below are
+        # read-only by design: two 8MB copies made a 1M-sample correlation
+        # 4.9ms where the dot it amounts to takes 0.2. Its `dot` copies a
+        # reversed view as well, so a convolution reverses into a buffer of
+        # its own.
+        if flip:
+            kernel = _F.flip(kernel, [0])
+        if tracked or length < _NUMPY_DOT_FROM or str(signal.dtype) != "float64":
+            return _F.dot(signal, kernel).reshape(1)
+        return _from_numpy(
+            _np.array([_np.dot(_numpy_view(signal), _numpy_view(kernel))])
+        )
+
+    if not tracked:
         # Nothing to differentiate, so NumPy's own sliding product answers,
         # over views and in the dtype promoted above. `conv1d` goes through
         # its general convolution machinery for a single channel, 5-70x
         # NumPy's time on these shapes: 1.9ms against 0.3 for 16,384
         # samples and 64 taps.
-        first, second = _numpy_view(signal), _numpy_view(kernel)
-        if mode == "valid" and first.shape[0] == second.shape[0]:
-            # One overlap, which is one dot product. NumPy's sliding product
-            # copies an input it cannot write to, and these views are
-            # read-only by design: two 8MB copies made a 1M-sample
-            # correlation 4.9ms where the dot it amounts to takes 0.2.
-            return _from_numpy(
-                _np.array([_np.dot(first, second[::-1] if flip else second)])
-            )
         product = _np.convolve if flip else _np.correlate
-        return _from_numpy(product(first, second, mode))
+        return _from_numpy(product(_numpy_view(signal), _numpy_view(kernel), mode))
 
-    length, taps = signal.shape[0], kernel.shape[0]
     if flip:
         kernel = _F.flip(kernel, [0])
 

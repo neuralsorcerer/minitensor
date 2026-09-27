@@ -24,6 +24,7 @@ from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import (
     _atleast_tensor,
+    _flat,
     _normalize_axis,
     _normalize_axis_tuple,
     _promote_pair,
@@ -67,14 +68,13 @@ def vdot(input: object, other: object) -> Tensor:
     difference between them for real tensors.
     """
 
-    a = _atleast_tensor(input).reshape(-1)
-    b = _atleast_tensor(other).reshape(-1)
-    if a.shape[0] != b.shape[0]:
+    a, b = _atleast_tensor(input), _atleast_tensor(other)
+    if a.numel() != b.numel():
         raise ValueError(
             f"vdot needs the same number of elements in each operand, "
-            f"got {a.shape[0]} and {b.shape[0]}"
+            f"got {a.numel()} and {b.numel()}"
         )
-    return _F.dot(a, b)
+    return _F.dot(_flat(a), _flat(b))
 
 
 def kron(input: object, other: object) -> Tensor:

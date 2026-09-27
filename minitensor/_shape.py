@@ -237,6 +237,12 @@ def _atleast_tensor(input: object) -> Tensor:
     return as_tensor(input)
 
 
+def _flat(tensor: Tensor) -> Tensor:
+    """`tensor` as a vector, without a reshape when it already is one."""
+
+    return tensor if tensor.ndim() == 1 else tensor.reshape(-1)
+
+
 def _as_written_values(value: object, into: Tensor) -> Tensor:
     """`value` as something the write family can put into `into`.
 
