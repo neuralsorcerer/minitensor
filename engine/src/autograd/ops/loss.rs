@@ -7,7 +7,7 @@
 //! Gradient functions for the loss operations in [`crate::ops::loss`].
 
 use super::*;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::{PAR_THRESHOLD, par_out_chunks_gated};
 use crate::{
     error::{MinitensorError, Result},
     ops::map::{binary_map, ternary_map, unary_map_into},
@@ -234,7 +234,7 @@ pub struct CrossEntropyLossBackward {
 macro_rules! cross_entropy_index_grad {
     ($name:ident, $ty:ty, $idx:ty) => {
         fn $name(probs: &[$ty], idx: &[$idx], classes: usize, scale: &[f64], out: &mut [$ty]) {
-            par_out_chunks(out, classes, &|start, o| {
+            par_out_chunks_gated(out, classes, PAR_THRESHOLD, &|start, o| {
                 let row = start / classes;
                 let p = &probs[start..start + o.len()];
                 {

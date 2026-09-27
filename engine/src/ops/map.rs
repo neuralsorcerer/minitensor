@@ -550,6 +550,28 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
 }
 
+/// [`par_out_chunks`] with a floor under the split: below `threshold` output
+/// elements the chunks run one after another on the calling thread.
+///
+/// For kernels whose natural task is one row or one plane -- a softmax row, a
+/// class-axis gradient -- where a single task is far less work than waking the
+/// pool, so splitting pays only once there are enough of them. The chunks are
+/// the same either way, so `work` sees exactly the calls it would in parallel.
+pub(crate) fn par_out_chunks_gated<T: Send>(
+    out: &mut [T],
+    chunk: usize,
+    threshold: usize,
+    work: OutWork<T>,
+) {
+    if out.len() < threshold && chunk > 0 {
+        for (index, out_chunk) in out.chunks_mut(chunk).enumerate() {
+            work(index * chunk, out_chunk);
+        }
+        return;
+    }
+    par_out_chunks(out, chunk, work);
+}
+
 /// [`par_out_chunks`] for a body whose work is reading `input_bytes`: the whole
 /// output as one chunk on the calling thread below [`FOLD_PAR_BYTES`], where
 /// entering the pool costs more than the reads. The chunks are independent by

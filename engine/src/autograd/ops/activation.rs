@@ -12,7 +12,7 @@ use super::*;
 use crate::{
     error::{MinitensorError, Result},
     ops::activation::units::{UnitGradKernel, UnitParams},
-    ops::map::{binary_map, par_out_chunks},
+    ops::map::{binary_map, par_out_chunks_gated},
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
@@ -985,21 +985,10 @@ fn zip_blocks_maybe_par<T, F>(
         return;
     }
 
-    if grad_output.len() < PAR_THRESHOLD {
-        for (block_idx, ((go, sv), out)) in grad_output
-            .chunks(group)
-            .zip(saved.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-            .enumerate()
-        {
-            block(block_idx, go, sv, out);
-        }
-    } else {
-        par_out_chunks(grad_input, group, &|start, out| {
-            let span = start..start + out.len();
-            block(start / group, &grad_output[span.clone()], &saved[span], out);
-        });
-    }
+    par_out_chunks_gated(grad_input, group, PAR_THRESHOLD, &|start, out| {
+        let span = start..start + out.len();
+        block(start / group, &grad_output[span.clone()], &saved[span], out);
+    });
 }
 /// Geometry shared by the softmax-family backward kernels: the reduced
 /// dimension's size, the number of trailing elements per slice (`after`), and

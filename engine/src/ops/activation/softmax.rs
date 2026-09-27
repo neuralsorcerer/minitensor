@@ -8,7 +8,8 @@ use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
 use crate::ops::map::{
-    EXPENSIVE_PAR_THRESHOLD, PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_mapped,
+    EXPENSIVE_PAR_THRESHOLD, PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_gated,
+    par_out_chunks_mapped,
 };
 use crate::ops::util::{
     accurate_indexed_sum, broadcast_mask_index, pairwise_fold_vectors, stable_sigmoid_f64,
@@ -743,30 +744,6 @@ fn banded_columns<T: ShiftedExp + Send + Sync>(
 }
 
 /// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
-/// Run `block` over every `group`-sized block of `out`: on the calling thread
-/// below `threshold` elements, a block to a task above it.
-///
-/// A block to a task at every size sent any softmax with more than one row to
-/// the pool, however small: a `(4, 10)` float32 softmax took 7.3us, 0.7 on
-/// the calling thread, and a `(128, 128)` one 122us against 58. Above the
-/// threshold a block stays one task, which is what keeps the pool balanced
-/// when its workers wake at different times -- sixteen tasks of 16384
-/// elements ran a `(256, 1024)` softmax 27% slower than 256 of 1024.
-fn par_blocks<T: Send>(
-    out: &mut [T],
-    group: usize,
-    threshold: usize,
-    block: &(dyn Fn(usize, &mut [T]) + Sync),
-) {
-    if out.len() < threshold {
-        for (index, out_block) in out.chunks_mut(group).enumerate() {
-            block(index * group, out_block);
-        }
-        return;
-    }
-    par_out_chunks(out, group, block);
-}
-
 fn softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
@@ -792,7 +769,7 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
-    par_blocks(
+    par_out_chunks_gated(
         output_slice,
         group,
         T::SPLIT_THRESHOLD,
@@ -857,7 +834,7 @@ fn masked_softmax_core<T: Float + Send + Sync>(
     // lookup out inline needed six copies of it.
     let walk = MaskWalk::new(mask_data, tensor_shape, mask_shape, dim, after);
 
-    par_blocks(
+    par_out_chunks_gated(
         output_slice,
         group,
         EXPENSIVE_PAR_THRESHOLD,
@@ -996,7 +973,7 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
-    par_blocks(
+    par_out_chunks_gated(
         output_slice,
         group,
         T::SPLIT_THRESHOLD,
@@ -1090,7 +1067,7 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
     // copies of this lookup.
     let walk = MaskWalk::new(mask_data, tensor_shape, mask_shape, dim, after);
 
-    par_blocks(
+    par_out_chunks_gated(
         output_slice,
         group,
         EXPENSIVE_PAR_THRESHOLD,
