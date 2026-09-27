@@ -442,10 +442,15 @@ integer_op!(
 /// The greatest common divisor and the least common multiple, at both integer
 /// widths.
 ///
-/// Euclid's algorithm on the magnitudes, which is what makes the answer
-/// non-negative for negative operands: a common divisor of `-12` and `8` is a
-/// common divisor of `12` and `8`, and the convention every library follows is
-/// to report the positive one.
+/// Taken on the magnitudes, which is what makes the answer non-negative for
+/// negative operands: a common divisor of `-12` and `8` is a common divisor of
+/// `12` and `8`, and the convention every library follows is to report the
+/// positive one.
+///
+/// By Stein's binary algorithm rather than Euclid's: the common power of two
+/// comes off in one trailing-zero count, and every step after it is a
+/// subtraction and a shift where Euclid's is an integer division, twenty to
+/// forty cycles apiece. The divisor is the same number either way.
 macro_rules! divisor_fns {
     ($gcd:ident, $lcm:ident, $ty:ty) => {
         #[inline(always)]
@@ -455,10 +460,25 @@ macro_rules! divisor_fns {
             // does not overflow on the way in.
             let mut x = a.unsigned_abs();
             let mut y = b.unsigned_abs();
-            while y != 0 {
-                let remainder = x % y;
-                x = y;
-                y = remainder;
+            if x == 0 || y == 0 {
+                // Every integer divides zero, so the other one is the answer.
+                x |= y;
+            } else {
+                let shared = (x | y).trailing_zeros();
+                x >>= x.trailing_zeros();
+                loop {
+                    // Both odd from here: their difference is even, and the
+                    // factors of two in it are not common to both.
+                    y >>= y.trailing_zeros();
+                    if x > y {
+                        std::mem::swap(&mut x, &mut y);
+                    }
+                    y -= x;
+                    if y == 0 {
+                        break;
+                    }
+                }
+                x <<= shared;
             }
             // The one magnitude that cannot come back is the most negative
             // value's, and it can only survive here as `gcd(MIN, 0)`; the
@@ -906,6 +926,43 @@ mod tests {
             gcd(&a, &b).unwrap().data().as_i32_slice().unwrap(),
             &expected[..]
         );
+    }
+
+    /// Stein's algorithm has to find Euclid's divisor, every time: across
+    /// signs, powers of two shared and not, the zeros and both extremes.
+    #[test]
+    fn the_binary_gcd_agrees_with_euclid() {
+        fn euclid(a: i64, b: i64) -> u64 {
+            let (mut x, mut y) = (a.unsigned_abs(), b.unsigned_abs());
+            while y != 0 {
+                (x, y) = (y, x % y);
+            }
+            x
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut values: Vec<i64> = vec![0, 1, -1, 2, -2, 48, -48, 1 << 40, i64::MAX, i64::MIN];
+        for _ in 0..400 {
+            let raw = next();
+            // Mixed magnitudes, with a shared power of two now and then.
+            values.push(((raw >> (raw % 60)) as i64) << (raw % 7));
+        }
+        let wide: Vec<(i64, i64)> = values
+            .iter()
+            .flat_map(|&a| values.iter().step_by(7).map(move |&b| (a, b)))
+            .collect();
+        for &(a, b) in &wide {
+            let want = euclid(a, b).min(i64::MAX as u64) as i64;
+            assert_eq!(gcd_i64(a, b), want, "gcd({a}, {b})");
+            let (a32, b32) = (a as i32, b as i32);
+            let want32 = euclid(a32 as i64, b32 as i64).min(i32::MAX as u64) as i32;
+            assert_eq!(gcd_i32(a32, b32), want32, "gcd({a32}, {b32})");
+        }
     }
 
     #[test]
