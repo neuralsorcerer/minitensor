@@ -437,46 +437,6 @@ pub(crate) fn negative_log_likelihood(
     negate(&likelihood)
 }
 
-/// Raise tensor elements to a power
-pub(crate) fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
-    let output_data = match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let exponent = exponent as f32;
-            TensorData::from_vec::<f32>(
-                unary_map(input_data, move |value: f32| value.powf(exponent)),
-                DataType::Float32,
-                tensor.device(),
-            )
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            TensorData::from_vec::<f64>(
-                unary_map(input_data, move |value: f64| value.powf(exponent)),
-                DataType::Float64,
-                tensor.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Power operation only supported for floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::*;

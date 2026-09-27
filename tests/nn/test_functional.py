@@ -1565,3 +1565,33 @@ def test_binary_cross_entropy_matches_its_definition(dtype, reduction):
         np.testing.assert_allclose(
             clean, total if reduction == "sum" else total / want[3:].size, rtol=1e-5
         )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("gamma", [0.0, 0.5, 2.0])
+@pytest.mark.parametrize("soft", [False, True], ids=["indices", "soft"])
+def test_focal_loss_per_element_terms_match_their_definition(dtype, gamma, soft):
+    """alpha * (1 - p)^gamma * -(t * log p), per element, with classes that
+    carry no target mass contributing nothing."""
+
+    rng = np.random.default_rng(8)
+    logits = rng.standard_normal((6, 11)).astype(dtype)
+    if soft:
+        targets = rng.random((6, 11)).astype(dtype)
+        targets[:, ::3] = 0.0
+        targets /= targets.sum(axis=1, keepdims=True)
+        target_arg = mt.from_numpy(targets)
+    else:
+        labels = rng.integers(0, 11, 6)
+        targets = np.eye(11, dtype=dtype)[labels]
+        target_arg = mt.from_numpy(labels)
+
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    log_p = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
+    want = 0.25 * (1.0 - np.exp(log_p)) ** gamma * -(targets * log_p)
+
+    got = F.focal_loss(
+        mt.from_numpy(logits), target_arg, alpha=0.25, gamma=gamma, reduction="none"
+    ).numpy()
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-7)
+    assert (got[targets == 0] == 0).all()

@@ -482,56 +482,70 @@ pub fn binary_cross_entropy_loss(
     }
 }
 
-/// The elementwise binary cross entropy from its two logarithms, in one pass.
+/// A tensor of `$body` over three tensors of one float dtype and shape, in one
+/// pass -- the elementwise tail of a loss, once its logarithms are taken.
 ///
-/// Spelled as tensor ops -- two clamps, `1 - targets`, two products, a sum and
-/// a negation against a tensor of zeros -- this was nine passes and as many
-/// buffers after the logarithms: 204us for 32,768 float32 values, of which the
-/// two logarithms are 36. The arithmetic is the same operations in the same
-/// order, `0 - (a + b)` included, so every value is bit-for-bit what it was;
-/// and the clamp is a comparison, not `max`, so a NaN still propagates.
-fn bce_terms(targets: &Tensor, log_p: &Tensor, log_q: &Tensor) -> Result<Tensor> {
-    macro_rules! terms {
-        ($accessor:ident, $ty:ty) => {{
-            let (Some(y), Some(lp), Some(lq)) = (
-                targets.data().$accessor(),
-                log_p.data().$accessor(),
-                log_q.data().$accessor(),
-            ) else {
-                return Err(MinitensorError::internal_error(
-                    "binary cross entropy operands are not the loss's dtype",
-                ));
-            };
-            let clamp = |v: $ty| if v < -100.0 { -100.0 } else { v };
-            crate::ops::map::ternary_map(y, lp, lq, |y: $ty, lp: $ty, lq: $ty| {
-                0.0 - (y * clamp(lp) + (1.0 - y) * clamp(lq))
-            })
-        }};
-    }
-    let data = match targets.dtype() {
-        DataType::Float32 => TensorData::from_vec(
-            terms!(as_f32_slice, f32),
-            DataType::Float32,
-            targets.device(),
-        ),
-        DataType::Float64 => TensorData::from_vec(
-            terms!(as_f64_slice, f64),
-            DataType::Float64,
-            targets.device(),
-        ),
-        other => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "binary cross entropy needs floating-point inputs, got {other:?}"
-            )));
-        }
+/// Spelled as tensor ops, binary cross entropy's tail -- two clamps,
+/// `1 - targets`, two products, a sum and a negation against a tensor of
+/// zeros -- was nine passes and as many buffers: 204us for 32,768 float32
+/// values, of which the two logarithms are 36. Each body below is the same
+/// operations in the same order as the ops it replaces, so every value is
+/// bit-for-bit what it was.
+macro_rules! float_ternary {
+    ($a:expr, $b:expr, $c:expr, |$x:ident, $y:ident, $z:ident| $body:expr) => {
+        float_ternary!($a, $b, $c, [], |$x, $y, $z| $body)
     };
-    Ok(Tensor::new(
-        Arc::new(data),
-        targets.shape().clone(),
-        targets.dtype(),
-        targets.device(),
-        false,
-    ))
+    // `[name = value, ...]` are `f64` constants the body reads at the
+    // tensor's own width, converted the way `create_scalar_tensor` converts.
+    ($a:expr, $b:expr, $c:expr, [$($k:ident = $v:expr),*], |$x:ident, $y:ident, $z:ident| $body:expr) => {{
+        let (a, b, c): (&Tensor, &Tensor, &Tensor) = ($a, $b, $c);
+        macro_rules! arm {
+            ($accessor:ident, $ty:ty) => {{
+                let (Some(xs), Some(ys), Some(zs)) = (
+                    a.data().$accessor(),
+                    b.data().$accessor(),
+                    c.data().$accessor(),
+                ) else {
+                    return Err(MinitensorError::internal_error(
+                        "loss operands are not the loss's dtype",
+                    ));
+                };
+                $(let $k = $v as $ty;)*
+                crate::ops::map::ternary_map(xs, ys, zs, move |$x: $ty, $y: $ty, $z: $ty| $body)
+            }};
+        }
+        let data = match a.dtype() {
+            DataType::Float32 => {
+                TensorData::from_vec(arm!(as_f32_slice, f32), DataType::Float32, a.device())
+            }
+            DataType::Float64 => {
+                TensorData::from_vec(arm!(as_f64_slice, f64), DataType::Float64, a.device())
+            }
+            other => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "this loss needs floating-point inputs, got {other:?}"
+                )));
+            }
+        };
+        Tensor::new(
+            Arc::new(data),
+            a.shape().clone(),
+            a.dtype(),
+            a.device(),
+            false,
+        )
+    }};
+}
+
+/// Binary cross entropy's elementwise terms from its two logarithms. The
+/// clamp is a comparison, not `max`, so a NaN still propagates as `clip`
+/// propagated it.
+fn bce_terms(targets: &Tensor, log_p: &Tensor, log_q: &Tensor) -> Result<Tensor> {
+    Ok(float_ternary!(targets, log_p, log_q, |y, lp, lq| {
+        let lp = if lp < -100.0 { -100.0 } else { lp };
+        let lq = if lq < -100.0 { -100.0 } else { lq };
+        0.0 - (y * lp + (1.0 - y) * lq)
+    }))
 }
 
 /// Binary cross entropy computed directly from logits.
@@ -654,8 +668,6 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         // Compute elementwise targets * (log_tensor(targets) - log_tensor(predictions))
         let log_targets = log_tensor(targets)?;
         let log_predictions = log_tensor(predictions)?;
-        let diff = sub(&log_targets, &log_predictions)?;
-        let raw = mul(targets, &diff)?;
 
         // A zero in the target makes that product `0 * -inf`, which is NaN, and
         // one NaN term takes the whole reduction with it. A zero-probability
@@ -667,9 +679,9 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         // Masking the result rather than the log also covers a zero *and* a
         // zero prediction at the same position, where the log difference is
         // `-inf - -inf`.
-        let zero = create_scalar_tensor(0.0, targets.dtype(), targets.device())?;
-        let target_is_zero = targets.eq(&zero)?;
-        let kld = crate::ops::selection::where_op(&target_is_zero, &zero, &raw)?;
+        let kld = float_ternary!(targets, &log_targets, &log_predictions, |t, lt, lp| {
+            if t == 0.0 { 0.0 } else { t * (lt - lp) }
+        });
 
         // Apply reduction.
         //
@@ -759,20 +771,32 @@ pub fn focal_loss(
         let softmax_predictions = exp(&log_predictions)?;
         let softmax_for_grad = softmax_predictions.clone().detach();
 
-        // Compute focal loss components
-        let one = create_scalar_tensor(
-            1.0,
-            softmax_predictions.dtype(),
-            softmax_predictions.device(),
-        )?;
-        let one_minus_p = sub(&one, &softmax_predictions)?;
-        let focal_weight = power(&one_minus_p, gamma)?;
-
-        // Compute negative log likelihood with focal weighting
-        let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
-        let alpha_tensor = create_scalar_tensor(alpha, predictions.dtype(), predictions.device())?;
-        let weighted_nll = mul(&nll, &focal_weight)?;
-        let focal_values = mul(&weighted_nll, &alpha_tensor)?;
+        // alpha * (1 - p)^gamma * -(t * log p), in one pass. Spelled as tensor
+        // ops it was eight passes, and the power -- a `powf` per element --
+        // ran over every class, though a class without target mass contributes
+        // nothing: 861us for 32 rows of 1,024 classes. There the old ops gave
+        // `-0.0 * (1 - p)^gamma * alpha`, which is -0.0 for every `p` a
+        // softmax produces, so the power is taken only for a NaN -- where it
+        // decides between NaN and, at `gamma == 0`, -0.0. The rest is the
+        // same operations in the same order.
+        let focal_values = float_ternary!(
+            &targets_one_hot,
+            &log_predictions,
+            &softmax_predictions,
+            [gamma = gamma, alpha = alpha],
+            |t, lp, p| {
+                if t == 0.0 {
+                    let weight = if p.is_nan() {
+                        (1.0 - p).powf(gamma)
+                    } else {
+                        1.0
+                    };
+                    -0.0 * weight * alpha
+                } else {
+                    -(lp * t) * (1.0 - p).powf(gamma) * alpha
+                }
+            }
+        );
 
         // Apply reduction
         // Averaged over samples, matching cross_entropy: only the true-class
