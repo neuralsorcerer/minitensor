@@ -15,6 +15,7 @@ use crate::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
 pub(crate) use crate::ops::util::{normalize_dim, normalize_dim_named};
@@ -256,43 +257,56 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
         ));
     }
 
-    // Normalise negative dimensions and validate range
-    let mut normalized = Vec::with_capacity(ndim);
+    // Normalise negative dimensions and validate range, then check that they
+    // form a permutation -- by marking each axis seen, where sorting a copy
+    // and comparing it against a collected range cost two allocations on
+    // every `.T`.
+    let mut normalized: SmallVec<[usize; 8]> = SmallVec::with_capacity(ndim);
     for &d in &dims {
         normalized.push(normalize_dim(d, ndim)?);
     }
-    // Check that dims form a proper permutation
-    let mut sorted = normalized.clone();
-    sorted.sort_unstable();
-    if sorted != (0..ndim).collect::<Vec<_>>() {
-        return Err(MinitensorError::invalid_operation(
-            "dims must be a permutation of dimensions".to_string(),
-        ));
+    let mut seen: SmallVec<[bool; 8]> = smallvec![false; ndim];
+    for &axis in &normalized {
+        if std::mem::replace(&mut seen[axis], true) {
+            return Err(MinitensorError::invalid_operation(
+                "dims must be a permutation of dimensions".to_string(),
+            ));
+        }
     }
 
     // A permutation that leaves the elements where they are is a relabelling.
     // Checked here as well as inside `transpose` because the decomposition
     // below is a sequence of swaps, and a free permutation does not have to
-    // decompose into free swaps.
+    // decompose into free swaps. The identity is the tensor itself, as a
+    // transpose of an axis with itself is.
     if crate::ops::util::preserves_memory_order(tensor.shape().dims(), &normalized) {
+        if normalized
+            .iter()
+            .enumerate()
+            .all(|(position, &axis)| position == axis)
+        {
+            return Ok(tensor.clone());
+        }
         let dims = tensor.shape().dims();
         let permuted: Vec<usize> = normalized.iter().map(|&axis| dims[axis]).collect();
         return reshape(tensor, Shape::new(permuted));
     }
 
-    // Apply sequence of transposes to achieve the permutation
-    let mut result = tensor.clone();
-    let mut current: Vec<usize> = (0..ndim).collect();
+    // Apply sequence of transposes to achieve the permutation, the first
+    // straight from the input rather than from a clone of it.
+    let mut result: Option<Tensor> = None;
+    let mut current: SmallVec<[usize; 8]> = (0..ndim).collect();
     for i in 0..ndim {
         let target = normalized[i];
         let j = current.iter().position(|&x| x == target).unwrap();
         if i != j {
-            result = result.transpose(i as isize, j as isize)?;
+            let from = result.as_ref().unwrap_or(tensor);
+            result = Some(from.transpose(i as isize, j as isize)?);
             current.swap(i, j);
         }
     }
 
-    Ok(result)
+    Ok(result.unwrap_or_else(|| tensor.clone()))
 }
 
 /// Move tensor dimensions to new positions, keeping relative order of other dims
