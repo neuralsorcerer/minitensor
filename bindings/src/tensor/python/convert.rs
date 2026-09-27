@@ -114,19 +114,35 @@ fn build_tensor_from_python(
 
     // Handle scalars.
     //
-    // Each extract is guarded by an exact-type test because `extract` reports
-    // failure by *raising*: on a Python float, the bool and int attempts each
-    // built and discarded a Python exception before the float attempt got the
-    // value, so `x + 1.0` paid for two exceptions nothing ever saw. Anything
-    // that is not exactly one of the three -- a subclass, or an object that
-    // merely converts -- still reaches every branch in the old order.
-    let inexact = !(data.is_exact_instance_of::<PyBool>()
-        || data.is_exact_instance_of::<PyInt>()
-        || data.is_exact_instance_of::<PyFloat>());
+    // Each extract is guarded by a test of the value's kind because `extract`
+    // reports failure by *raising*: on a Python float, the bool and int
+    // attempts each built and discarded a Python exception before the float
+    // attempt got the value, so `x + 1.0` paid for two exceptions nothing ever
+    // saw. The exact builtin types say their kind, and so does a NumPy
+    // scalar's dtype -- `np.float64` subclasses `float`, so it used to try
+    // every branch. Anything else -- a subclass, or an object that merely
+    // converts -- still reaches every branch in the old order.
+    let exact_bool = data.is_exact_instance_of::<PyBool>();
+    let exact_int = data.is_exact_instance_of::<PyInt>();
+    let exact_float = data.is_exact_instance_of::<PyFloat>();
+    let numpy = if exact_bool || exact_int || exact_float {
+        None
+    } else {
+        crate::dtype::numpy_scalar_dtype(data)
+    };
+    let inexact = !(exact_bool || exact_int || exact_float) && numpy.is_none();
+    let (is_bool, is_int, is_float) = match numpy {
+        Some(DataType::Bool) => (true, false, false),
+        Some(DataType::Int32 | DataType::Int64) => (false, true, false),
+        Some(DataType::Float32 | DataType::Float64) => (false, false, true),
+        None => (
+            exact_bool || inexact,
+            exact_int || inexact,
+            exact_float || inexact,
+        ),
+    };
 
-    if (data.is_exact_instance_of::<PyBool>() || inexact)
-        && let Ok(value_bool) = data.extract::<bool>()
-    {
+    if is_bool && let Ok(value_bool) = data.extract::<bool>() {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_bool(vec![value_bool], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Bool, device, requires_grad);
@@ -136,9 +152,7 @@ fn build_tensor_from_python(
         return Ok(tensor);
     }
 
-    if (data.is_exact_instance_of::<PyInt>() || inexact)
-        && let Ok(value_int) = data.extract::<i64>()
-    {
+    if is_int && let Ok(value_int) = data.extract::<i64>() {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_i64(vec![value_int], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
@@ -148,9 +162,7 @@ fn build_tensor_from_python(
         return Ok(tensor);
     }
 
-    if (data.is_exact_instance_of::<PyFloat>() || inexact)
-        && let Ok(value_float) = data.extract::<f64>()
-    {
+    if is_float && let Ok(value_float) = data.extract::<f64>() {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_f64(vec![value_float], device));
         let mut tensor = Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);

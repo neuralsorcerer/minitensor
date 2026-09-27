@@ -5,11 +5,13 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::DataType;
+use numpy::{PyArrayDescr, PyArrayDescrMethods};
 use parking_lot::RwLock;
 use pyo3::exceptions::PyValueError;
-use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyFloat, PyInt};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyAny, PyBool, PyFloat, PyInt, PyType};
+use pyo3::{ffi, intern};
 use std::sync::LazyLock;
 
 static DEFAULT_DTYPE: LazyLock<RwLock<DataType>> = LazyLock::new(|| RwLock::new(DataType::Float32));
@@ -79,8 +81,55 @@ pub fn get_default_dtype() -> String {
     dtype_to_str(default_dtype()).to_string()
 }
 
-fn is_numpy_module(module_name: &str) -> bool {
-    module_name == "numpy" || module_name.starts_with("numpy.")
+/// `numpy.generic`, the base of every NumPy scalar type, looked up once.
+///
+/// Not found means NumPy cannot be imported, which the extension never sees
+/// -- NumPy is a hard dependency -- but the crate's own tests can, and a value
+/// cannot be a NumPy scalar then anyway.
+static NUMPY_GENERIC: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+fn numpy_generic(py: Python<'_>) -> Option<&Bound<'_, PyType>> {
+    if let Some(generic) = NUMPY_GENERIC.get(py) {
+        return Some(generic.bind(py));
+    }
+    let generic = py
+        .import(intern!(py, "numpy"))
+        .ok()?
+        .getattr(intern!(py, "generic"))
+        .ok()?
+        .cast_into::<PyType>()
+        .ok()?;
+    Some(NUMPY_GENERIC.get_or_init(py, || generic.unbind()).bind(py))
+}
+
+/// Whether `value`'s type is one of NumPy's own scalar types.
+///
+/// A subclass written in Python is not: it is a heap type, and its instances
+/// can carry attributes a NumPy scalar cannot.
+pub(crate) fn is_numpy_scalar(value: &Bound<'_, PyAny>) -> bool {
+    let Some(generic) = numpy_generic(value.py()) else {
+        return false;
+    };
+    let kind = value.get_type();
+    // SAFETY: `kind` is a live type object, borrowed for the call.
+    let heap = unsafe { ffi::PyType_GetFlags(kind.as_type_ptr()) } & ffi::Py_TPFLAGS_HEAPTYPE;
+    heap == 0 && kind.is_subclass(generic).unwrap_or(false)
+}
+
+/// The dtype of a NumPy scalar -- `np.float64(0.1)`, `np.int32(3)` -- read off
+/// its descriptor; `None` for anything else, and for a NumPy dtype this crate
+/// does not carry.
+///
+/// The descriptor's type number, where this used to ask the type for its
+/// module name, the value for its dtype, and the dtype for its lowercased
+/// name: three strings built to recognise one of five constants.
+pub(crate) fn numpy_scalar_dtype(value: &Bound<'_, PyAny>) -> Option<DataType> {
+    let py = value.py();
+    if !value.is_instance(numpy_generic(py)?).unwrap_or(false) {
+        return None;
+    }
+    let descr = value.getattr(intern!(py, "dtype")).ok()?;
+    crate::share::dtype_from_type_num(descr.cast::<PyArrayDescr>().ok()?.num())
 }
 
 fn integer_like_dtype_for_context(context: DataType) -> DataType {
@@ -116,35 +165,6 @@ fn float_like_dtype_for_context(context: DataType) -> DataType {
     }
 }
 
-fn numpy_scalar_dtype(value: &Bound<'_, PyAny>) -> PyResult<Option<DataType>> {
-    let is_numpy_type = match value.get_type().module() {
-        Ok(module) => match module.to_str() {
-            Ok(module_name) => is_numpy_module(module_name),
-            Err(_) => false,
-        },
-        Err(_) => false,
-    };
-
-    if !is_numpy_type {
-        return Ok(None);
-    }
-
-    let dtype_name = intern!(value.py(), "dtype");
-    let dtype_obj = match value.getattr(dtype_name) {
-        Ok(dtype) => dtype,
-        Err(_) => return Ok(None),
-    };
-
-    let dtype_str = match dtype_obj.str() {
-        Ok(dtype_text) => match dtype_text.to_str() {
-            Ok(text) => text.to_ascii_lowercase(),
-            Err(_) => return Ok(None),
-        },
-        Err(_) => return Ok(None),
-    };
-    Ok(dtype_from_str(&dtype_str))
-}
-
 pub fn resolve_scalar_dtype(value: &Bound<'_, PyAny>, context: DataType) -> PyResult<DataType> {
     // The three builtin scalars first, and by *exact* type. These are what
     // `x + 1.0` and `x * 2` hand over, and an exact check is a pointer
@@ -167,7 +187,7 @@ pub fn resolve_scalar_dtype(value: &Bound<'_, PyAny>, context: DataType) -> PyRe
         return Ok(integer_like_dtype_for_context(context));
     }
 
-    if let Some(dtype) = numpy_scalar_dtype(value)? {
+    if let Some(dtype) = numpy_scalar_dtype(value) {
         return Ok(dtype);
     }
 
@@ -322,56 +342,47 @@ class FloatNotCallable:
     }
 
     #[test]
-    fn numpy_scalar_dtype_fast_path_and_failures() {
+    fn numpy_scalar_dtype_reads_numpy_scalars_only() {
         Python::attach(|py| -> PyResult<()> {
             let helper = module_from_code(
                 py,
-                r#"def make_numpy_scalar(dtype_text='float64', raise_str=False):
-    class DType:
-        def __str__(self):
-            if raise_str:
-                raise RuntimeError('dtype str failed')
-            return dtype_text
-
-    class Scalar:
-        __module__ = 'numpy'
-        @property
-        def dtype(self):
-            return DType()
-
-    return Scalar()
-
-
-def make_bad_module_name_scalar():
-    class Scalar:
-        __module__ = '\udcff'
-        @property
-        def dtype(self):
-            class DType:
-                def __str__(self):
-                    return 'float32'
-            return DType()
-    return Scalar()
-"#,
+                "class Impostor:\n    __module__ = 'numpy'\n    dtype = 'float64'\n",
                 "dtype_helpers_numpy_paths",
             )?;
+            let impostor = helper.getattr("Impostor")?.call0()?;
+            assert_eq!(numpy_scalar_dtype(&impostor), None);
+            assert!(!is_numpy_scalar(&impostor));
+            let float = PyFloat::new(py, 1.5);
+            assert_eq!(numpy_scalar_dtype(float.as_any()), None);
 
-            let scalar = helper.getattr("make_numpy_scalar")?.call0()?;
-            assert_eq!(numpy_scalar_dtype(&scalar)?, Some(DataType::Float64));
+            // NumPy is the extension's dependency; this crate's tests may run
+            // without it, and then there is nothing further to read.
+            let Ok(numpy) = py.import("numpy") else {
+                return Ok(());
+            };
+            for (name, want) in [
+                ("float64", Some(DataType::Float64)),
+                ("float32", Some(DataType::Float32)),
+                ("int32", Some(DataType::Int32)),
+                ("int64", Some(DataType::Int64)),
+                ("bool_", Some(DataType::Bool)),
+                ("float16", None),
+                ("uint8", None),
+            ] {
+                let scalar = numpy.getattr(name)?.call1((1,))?;
+                assert_eq!(numpy_scalar_dtype(&scalar), want, "{name}");
+                assert!(is_numpy_scalar(&scalar), "{name}");
+            }
 
-            let unknown_dtype = helper
-                .getattr("make_numpy_scalar")?
-                .call1(("complex128", false))?;
-            assert_eq!(numpy_scalar_dtype(&unknown_dtype)?, None);
-
-            let bad_dtype_str = helper
-                .getattr("make_numpy_scalar")?
-                .call1(("float64", true))?;
-            assert_eq!(numpy_scalar_dtype(&bad_dtype_str)?, None);
-
-            let bad_module = helper.getattr("make_bad_module_name_scalar")?.call0()?;
-            assert_eq!(numpy_scalar_dtype(&bad_module)?, None);
-
+            let subclass = module_from_code(
+                py,
+                "import numpy\nclass Sub(numpy.float64):\n    pass\n",
+                "dtype_helpers_numpy_subclass",
+            )?
+            .getattr("Sub")?
+            .call1((1.0,))?;
+            assert_eq!(numpy_scalar_dtype(&subclass), Some(DataType::Float64));
+            assert!(!is_numpy_scalar(&subclass));
             Ok(())
         })
         .unwrap();
@@ -472,14 +483,6 @@ def make_bad_module_name_scalar():
     }
 
     #[test]
-    fn is_numpy_module_checks_exact_prefix() {
-        assert!(is_numpy_module("numpy"));
-        assert!(is_numpy_module("numpy.random"));
-        assert!(!is_numpy_module("numpyx"));
-        assert!(!is_numpy_module("other.numpy"));
-    }
-
-    #[test]
     fn resolve_scalar_dtype_respects_index_like_objects() {
         Python::attach(|py| -> PyResult<()> {
             let code = r#"class IndexLike:
@@ -510,28 +513,6 @@ def make_bad_module_name_scalar():
             let value = module.getattr("FakeNumpyScalar")?.call0()?;
             let resolved = resolve_scalar_dtype(&value, DataType::Float32)?;
             assert_eq!(resolved, DataType::Float32);
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn resolve_scalar_dtype_numpy_module_with_dtype_uses_numpy_fast_path() {
-        Python::attach(|py| -> PyResult<()> {
-            let code = r#"class PretendNumpyType:
-    __module__ = 'numpy'
-    @property
-    def dtype(self):
-        class DType:
-            def __str__(self):
-                return 'float64'
-        return DType()
-"#;
-            let module = module_from_code(py, code, "dtype_helpers_numpy_fallback")?;
-
-            let value = module.getattr("PretendNumpyType")?.call0()?;
-            let resolved = resolve_scalar_dtype(&value, DataType::Float64)?;
-            assert_eq!(resolved, DataType::Float64);
             Ok(())
         })
         .unwrap();

@@ -71,6 +71,8 @@ class ConvertsToIndex:
         (np.int64(2), 2),
         (np.int32(2), 2),
         (np.bool_(True), 1),
+        (np.float16(0.5), 0.5),
+        (np.uint8(2), 2),
         (np.array(2.0), 2.0),
         (FloatSubclass(0.5), 0.5),
         (IntSubclass(2), 2),
@@ -79,8 +81,9 @@ class ConvertsToIndex:
     ],
 )
 def test_every_scalar_kind_reaches_the_same_answer(dtype, operand, value):
-    """One value, thirteen spellings. Each takes a different branch of the
-    classification and they must all add the same number.
+    """One value, fifteen spellings. Each takes a different branch of the
+    classification and they must all add the same number. The last NumPy
+    scalars have dtypes of no tensor's, and reach the general extraction.
     """
     got = (_tensor(dtype) + operand).numpy().astype(np.float64)
     np.testing.assert_allclose(got, _reference(dtype) + value, rtol=1e-6)

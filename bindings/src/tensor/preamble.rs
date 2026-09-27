@@ -94,13 +94,13 @@ fn register_leaf_tensor(tensor: &Tensor) {
 /// and once for the strides. Most callers only read, and the ones that need to
 /// own clone once from here instead of cloning a clone.
 ///
-/// The builtin scalars and sequences are turned away before the wrapper is
-/// asked for: they are the common miss -- every `x * 2.0` reaches here -- and
-/// neither can carry an attribute. Asking costs more than the op it serves.
-/// Before Python 3.13 an attribute is found missing by raising
-/// `AttributeError` and formatting its message, which `hasattr` then
-/// discards: 3,800 instructions, most of the 0.9us `x * 2.0` cost over
-/// `x * y`. Exact types only, since a subclass can carry one.
+/// The builtin scalars and sequences, and NumPy's scalars, are turned away
+/// before the wrapper is asked for: they are the common miss -- every
+/// `x * 2.0` reaches here -- and none can carry an attribute. Asking costs
+/// more than the op it serves. Before Python 3.13 an attribute is found
+/// missing by raising `AttributeError` and formatting its message, which
+/// `hasattr` then discards: 3,800 instructions, most of the 0.9us `x * 2.0`
+/// cost over `x * y`. Exact types only, since a subclass can carry one.
 pub(crate) fn borrow_wrapped_tensor<'py>(
     value: &'py Bound<'py, PyAny>,
 ) -> Option<PyRef<'py, PyTensor>> {
@@ -112,6 +112,7 @@ pub(crate) fn borrow_wrapped_tensor<'py>(
         || value.is_exact_instance_of::<PyBool>()
         || value.is_exact_instance_of::<PyList>()
         || value.is_exact_instance_of::<PyTuple>()
+        || crate::dtype::is_numpy_scalar(value)
     {
         return None;
     }
