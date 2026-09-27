@@ -771,30 +771,44 @@ where
 /// Serial below [`FOLD_PAR_BYTES`], like [`par_fold_chunks`]: this had no
 /// serial arm, so a 16K-element `any` went to the pool as sixteen chunks and
 /// averaged 120us against 3us on the calling thread.
+///
+/// Above it, the first [`PROBE_CHUNKS`] chunks are tried here before the rest
+/// goes to the pool, because a scan that settles at once is the common case
+/// for `any` of a dense mask and `all` of one with a hole, and the pool's
+/// round trip cost more than the answer: `any` of a random four-million-flag
+/// mask took 8.4us, NumPy's 1.6.
 pub(crate) fn par_any_chunk<T: Sync>(
     data: &[T],
     chunk: usize,
     test: &(dyn Fn(&[T]) -> bool + Sync),
 ) -> bool {
+    let chunk = chunk.max(1);
     if std::mem::size_of_val(data) < FOLD_PAR_BYTES {
-        return data.chunks(chunk.max(1)).any(test);
+        return data.chunks(chunk).any(test);
     }
-    data.par_chunks(chunk.max(1)).any(test)
+    let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
+    probe.chunks(chunk).any(test) || rest.par_chunks(chunk).any(test)
 }
 
 /// True when `test` holds for every chunk of `data`. The counterpart of
-/// [`par_any_chunk`]; spelled out rather than written as a double negation at
-/// each call site.
+/// [`par_any_chunk`], probe included; spelled out rather than written as a
+/// double negation at each call site.
 pub(crate) fn par_all_chunk<T: Sync>(
     data: &[T],
     chunk: usize,
     test: &(dyn Fn(&[T]) -> bool + Sync),
 ) -> bool {
+    let chunk = chunk.max(1);
     if std::mem::size_of_val(data) < FOLD_PAR_BYTES {
-        return data.chunks(chunk.max(1)).all(test);
+        return data.chunks(chunk).all(test);
     }
-    data.par_chunks(chunk.max(1)).all(test)
+    let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
+    probe.chunks(chunk).all(test) && rest.par_chunks(chunk).all(test)
 }
+
+/// Chunks [`par_any_chunk`] and [`par_all_chunk`] try on the calling thread
+/// before handing the rest to the pool.
+const PROBE_CHUNKS: usize = 4;
 
 /// True when `test` holds for every matching pair of chunks.
 ///
