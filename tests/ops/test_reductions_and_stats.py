@@ -369,6 +369,31 @@ def test_functional_quantile_sequence_matches_numpy():
     np.testing.assert_allclose(values.numpy(), expected, rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_quantile_reads_a_tensor_of_probabilities_as_it_reads_a_list(dtype):
+    """A tensor `q` is read straight from its buffer rather than element by
+    element; it has to mean exactly what the same probabilities as a list or
+    a float mean, down to the output's shape."""
+
+    values = np.random.default_rng(137).standard_normal(301)
+    x = mt.from_numpy(values)
+    many = np.linspace(0.0, 1.0, 257)
+    as_tensor = mt.from_numpy(many.astype(dtype))
+    np.testing.assert_allclose(
+        F.quantile(x, as_tensor).numpy(),
+        F.quantile(x, many.astype(dtype).tolist()).numpy(),
+        rtol=0,
+        atol=0,
+    )
+    one = F.quantile(x, mt.from_numpy(np.array(0.3, dtype=dtype)))
+    assert tuple(one.shape) == ()
+    np.testing.assert_array_equal(
+        one.numpy(), F.quantile(x, float(np.array(0.3, dtype=dtype))).numpy()
+    )
+    with pytest.raises(ValueError, match="at least one"):
+        F.quantile(x, mt.from_numpy(np.array([], dtype=dtype)))
+
+
 def test_quantile_invalid_inputs_raise():
     data = mt.tensor([1.0, 2.0, 3.0])
     with pytest.raises(ValueError):

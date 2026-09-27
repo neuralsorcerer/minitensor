@@ -223,6 +223,31 @@ enum QuantileArg {
 }
 
 fn parse_quantile_arg(q: &Bound<PyAny>) -> PyResult<QuantileArg> {
+    // A tensor of probabilities is read where it lies. Extracted as a
+    // sequence, every element came back as a tensor of its own and was then
+    // asked for its float: 1,024 probabilities took 1.9ms to hand over, for a
+    // quantile computation of 60us.
+    if let Ok(tensor) = q.extract::<PyRef<PyTensor>>()
+        && tensor.inner.ndim() <= 1
+    {
+        let values = tensor
+            .inner
+            .astype(DataType::Float64)
+            .and_then(|wide| wide.contiguous())
+            .map_err(_convert_error)?;
+        let values = values
+            .data()
+            .as_f64_slice()
+            .ok_or_else(|| PyRuntimeError::new_err("quantile: probabilities are not float64"))?
+            .to_vec();
+        return match (tensor.inner.ndim(), values.as_slice()) {
+            (0, &[value]) => Ok(QuantileArg::Scalar(value)),
+            (_, []) => Err(PyValueError::new_err(
+                "quantile() expected at least one probability value",
+            )),
+            _ => Ok(QuantileArg::Multiple(values)),
+        };
+    }
     if let Ok(value) = q.extract::<f64>() {
         return Ok(QuantileArg::Scalar(value));
     }
