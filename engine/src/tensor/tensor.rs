@@ -25,10 +25,6 @@ use crate::{
     ops::{arithmetic::add, reduction::QuantileInterpolation},
 };
 
-/// Output elements above which a selection copy is worth spreading across the
-/// pool. Matches the elementwise map threshold: the work per element is a copy
-/// either way.
-const INDEX_PAR_THRESHOLD: usize = 1 << 14;
 use std::{borrow::Cow, mem::MaybeUninit, sync::Arc};
 
 // ===== core: struct definition, constructors, autograd storage =====
@@ -378,7 +374,7 @@ impl SelectionPlan {
                 // that matrix took 2.4ms on one core, against 1.4 for `clone`.
                 if self.runs == 1 && self.inner_step == 1 {
                     let block = &input[self.base..self.base + self.contig];
-                    if output.len() < INDEX_PAR_THRESHOLD {
+                    if output.len() < PAR_THRESHOLD {
                         output.write_copy_of_slice(block);
                     } else {
                         let chunk =
@@ -390,7 +386,7 @@ impl SelectionPlan {
                     return;
                 }
 
-                if output.len() < INDEX_PAR_THRESHOLD {
+                if output.len() < PAR_THRESHOLD {
                     self.copy_runs(input, output, 0);
                     return;
                 }
