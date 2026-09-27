@@ -109,6 +109,13 @@ loss.backward()
 lines.append("grad_x " + digest(x.grad))
 lines.append("grad_w " + digest(w.grad))
 
+# A normalization's weight gradient sums over every row, and in float64 a
+# regrouping of that sum shows in the last bits.
+rows = mt.Tensor(values[:256].astype(np.float64), dtype="float64", requires_grad=True)
+gain = mt.Tensor(np.linspace(0.5, 1.5, 1024), dtype="float64", requires_grad=True)
+mt.functional.rms_norm(rows, [1024], gain).sum().backward()
+lines.append("rms_norm_grad_weight " + digest(gain.grad))
+
 print("\\n".join(lines))
 """
 

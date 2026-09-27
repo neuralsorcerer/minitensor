@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_map_indexed, par_out_chunks_gated};
 use crate::ops::shape_ops;
 use crate::{
     error::{MinitensorError, Result},
@@ -13,7 +13,6 @@ use crate::{
     ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -749,7 +748,7 @@ macro_rules! rms_norm_grad {
             let recip = 1.0 / norm as f64;
 
             if want_input {
-                par_out_chunks(&mut grad_input, norm, &|start, gi| {
+                par_out_chunks_gated(&mut grad_input, norm, PAR_THRESHOLD, &|start, gi| {
                     let r = inv_rms[start / norm] as f64;
                     let row = &input[start..start + norm];
                     let g = &grad[start..start + norm];
@@ -766,31 +765,44 @@ macro_rules! rms_norm_grad {
                 });
             }
 
+            // The weight's gradient sums over every row, in bands of rows
+            // whose size follows from the shape alone: the grouping of a
+            // float sum decides its rounding, and a fold whose grouping the
+            // pool chose answered by the thread count. Below
+            // `PAR_THRESHOLD` elements the whole of it is one band on the
+            // calling thread.
             let grad_weight = if want_weight {
-                let acc = input
-                    .par_chunks(norm)
-                    .zip(grad.par_chunks(norm))
-                    .zip(inv_rms.par_iter())
-                    .fold(
-                        || vec![0.0f64; norm],
-                        |mut acc, ((row, g), &r)| {
-                            let r = r as f64;
-                            for i in 0..norm {
-                                acc[i] += g[i] as f64 * row[i] as f64 * r;
-                            }
-                            acc
-                        },
-                    )
-                    .reduce(
-                        || vec![0.0f64; norm],
-                        |mut a, b| {
-                            for i in 0..norm {
-                                a[i] += b[i];
-                            }
-                            a
-                        },
-                    );
-                acc.into_iter().map(|v| v as $ty).collect()
+                let rows = inv_rms.len();
+                let band_rows = if rows * norm < PAR_THRESHOLD {
+                    rows.max(1)
+                } else {
+                    outputs_per_task(norm)
+                };
+                let partial = |band: usize| {
+                    let mut acc = vec![0.0f64; norm];
+                    for r in band * band_rows..((band + 1) * band_rows).min(rows) {
+                        let scale = inv_rms[r] as f64;
+                        let row = &input[r * norm..][..norm];
+                        let g = &grad[r * norm..][..norm];
+                        for i in 0..norm {
+                            acc[i] += g[i] as f64 * row[i] as f64 * scale;
+                        }
+                    }
+                    acc
+                };
+                let bands = rows.div_ceil(band_rows);
+                let mut partials = if bands > 1 {
+                    par_map_indexed(bands, &partial).into_iter()
+                } else {
+                    vec![partial(0)].into_iter()
+                };
+                let mut total = partials.next().unwrap_or_else(|| vec![0.0f64; norm]);
+                for part in partials {
+                    for (sum, value) in total.iter_mut().zip(part) {
+                        *sum += value;
+                    }
+                }
+                total.into_iter().map(|v| v as $ty).collect()
             } else {
                 Vec::new()
             };
