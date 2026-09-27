@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import math as _math
 
+import numpy as _np
+
 from . import _core as _C
-from ._shape import _atleast_tensor, _promote_pair
+from ._shape import _atleast_tensor, _from_numpy, _numpy_view, _promote_pair
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -158,21 +160,39 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         signal = signal.astype("float64")
         kernel = kernel.astype("float64")
 
+    if not (signal.requires_grad or kernel.requires_grad):
+        # Nothing to differentiate, so NumPy's own sliding product answers,
+        # over views and in the dtype promoted above. `conv1d` goes through
+        # its general convolution machinery for a single channel, 5-70x
+        # NumPy's time on these shapes: 1.9ms against 0.3 for 16,384
+        # samples and 64 taps.
+        product = _np.convolve if flip else _np.correlate
+        return _from_numpy(product(_numpy_view(signal), _numpy_view(kernel), mode))
+
     length, taps = signal.shape[0], kernel.shape[0]
     if flip:
         kernel = _F.flip(kernel, [0])
 
     # `conv1d` is a correlation, which is why the reversal above is what
-    # separates the two names.
-    full = _C.functional.conv1d(
-        signal.reshape(1, 1, -1), kernel.reshape(1, 1, -1), None, 1, taps - 1, 1, 1
-    ).reshape(-1)
-    if mode == "full":
-        return full
+    # separates the two names. It pads both ends by the same amount, and
+    # that amount decides where its answer starts.
+    def overlaps(padding: int) -> Tensor:
+        return _C.functional.conv1d(
+            signal.reshape(1, 1, -1), kernel.reshape(1, 1, -1), None, 1, padding, 1, 1
+        ).reshape(-1)
 
     shortest, longest = min(length, taps), max(length, taps)
     if mode == "valid":
-        return _C.functional.narrow(full, 0, shortest - 1, longest - shortest + 1)
+        # The full overlaps run from `1 - taps` to `length - 1`; the valid
+        # ones are the `longest - shortest + 1` starting at `shortest - taps`,
+        # which padding by `taps - shortest` on each side yields exactly.
+        # Computing them all and keeping these did `length + taps - 1` dot
+        # products for as few as one: `correlate` of two 1,024-sample
+        # signals took 1.9ms where NumPy takes 1us.
+        return overlaps(taps - shortest)
+    full = overlaps(taps - 1)
+    if mode == "full":
+        return full
     start = (shortest - 1) // 2 if flip or length >= taps else length // 2
     return _C.functional.narrow(full, 0, start, longest)
 

@@ -100,6 +100,27 @@ def test_the_sliding_products_match_numpy(signal, kernel, mode):
     )
 
 
+@pytest.mark.parametrize("mode", ["full", "same", "valid"])
+@pytest.mark.parametrize("lengths", [(1, 1), (9, 4), (4, 9), (64, 64), (300, 17)])
+def test_sliding_products_agree_whether_or_not_a_gradient_is_tracked(lengths, mode):
+    """Untracked, the sliding product is NumPy's over views of the promoted
+    operands; tracked, it is `conv1d`, which records the gradient. Both must
+    give NumPy's answer, and a `'valid'` product computes only the overlaps
+    it returns rather than every one of them."""
+
+    rng = np.random.default_rng(stable_seed(lengths, mode))
+    signal, kernel = (rng.standard_normal(n) for n in lengths)
+    for ours, theirs in ((mt.correlate, np.correlate), (mt.convolve, np.convolve)):
+        want = theirs(signal, kernel, mode)
+        for tracked in (False, True):
+            first = mt.from_numpy(signal)
+            first.requires_grad_(tracked)
+            got = ours(first, mt.from_numpy(kernel), mode)
+            np.testing.assert_allclose(
+                got.detach().numpy(), want, rtol=1e-12, atol=1e-12
+            )
+
+
 def test_convolve_is_correlate_with_one_signal_reversed():
     rng = np.random.default_rng(113)
     first = rng.standard_normal(9)
