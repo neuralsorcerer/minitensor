@@ -390,7 +390,16 @@ def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
         # pass copies both shifted halves out before subtracting them --
         # 17us at 16,384 float64 where NumPy takes 7. The engine path stays
         # for a gradient to be recorded, and for `bool`, which it refuses.
-        return _from_numpy(_np.diff(_numpy_view(tensor), n=order, axis=axis))
+        view = _numpy_view(tensor)
+        if order > 1:
+            return _from_numpy(_np.diff(view, n=order, axis=axis))
+        # One pass is one subtraction of two shifted views, which is all
+        # `np.diff` does once it has spent 2us building them: 10.8us for
+        # 16,384 float32 against 5.4 for NumPy's own call.
+        later = [slice(None)] * view.ndim
+        earlier = list(later)
+        later[axis], earlier[axis] = slice(1, None), slice(None, -1)
+        return _from_numpy(_np.subtract(view[tuple(later)], view[tuple(earlier)]))
     for _ in range(order):
         length = tensor.shape[axis]
         if length == 0:
@@ -932,6 +941,8 @@ def ediff1d(
     """
 
     flat = _atleast_tensor(input).reshape(-1)
+    if to_begin is None and to_end is None:
+        return diff(flat) if flat.shape[0] > 1 else _F.narrow(flat, 0, 0, 0)
     # The joined-on values promote with the differences rather than being cast
     # onto their dtype: `to_begin=2.5` against an integer input used to arrive
     # as 2. NumPy refuses the pair outright; promoting keeps the value, which
