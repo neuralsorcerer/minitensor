@@ -1240,3 +1240,27 @@ def test_a_strided_row_selection_is_taken_rather_than_refused(index_dtype):
     np.testing.assert_array_equal(
         np.asarray(mt.Tensor.from_numpy(matrix)[rows]), matrix[rows]
     )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        (slice(1, None),),
+        (slice(None), slice(1, None)),
+        (slice(None, None, 2),),
+        (slice(None), slice(None, None, 2)),
+        (slice(None), 5),
+        (slice(None), slice(5, 6)),
+        (slice(3, 200, 7), slice(1, None, 3)),
+        (Ellipsis, slice(2, None, 5)),
+    ],
+    ids=repr,
+)
+@pytest.mark.parametrize("dtype", ["float32", "int64", "bool"])
+def test_large_basic_selections_match_numpy(key, dtype):
+    """Selections big enough to split across the pool: one contiguous block,
+    runs cut by a step on the innermost axis, a column, and runs of one."""
+
+    source = np.arange(512 * 384).reshape(512, 384) % 97
+    source = source.astype(dtype) if dtype != "bool" else source % 3 == 0
+    np.testing.assert_array_equal(mt.from_numpy(source)[key].numpy(), source[key])

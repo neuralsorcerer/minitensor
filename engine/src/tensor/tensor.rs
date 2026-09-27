@@ -29,7 +29,7 @@ use crate::{
 /// pool. Matches the elementwise map threshold: the work per element is a copy
 /// either way.
 const INDEX_PAR_THRESHOLD: usize = 1 << 14;
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, mem::MaybeUninit, sync::Arc};
 
 // ===== core: struct definition, constructors, autograd storage =====
 /// Core tensor structure for minitensor.
@@ -181,8 +181,12 @@ pub enum TensorIndex {
 /// million integer divisions to move two megabytes, and it made `x[a:b]` 14x
 /// slower than the `narrow` that produces exactly the same tensor.
 struct SelectionPlan {
-    /// Elements per contiguous run.
+    /// Elements per run.
     contig: usize,
+    /// Source-index step between consecutive elements of a run: 1 when the
+    /// run is a contiguous block, more when the innermost selected axis is
+    /// stepped over or is not the source's innermost -- `x[:, ::2]`, `x[:, 5]`.
+    inner_step: usize,
     /// Number of runs, i.e. the product of the leading (walked) dimensions.
     runs: usize,
     /// Sizes of the walked dimensions, outermost first.
@@ -235,6 +239,18 @@ impl SelectionPlan {
             }
         }
 
+        // Where not even the innermost output dimension is contiguous, it is
+        // still a run -- a strided one. Taken one element at a time, as runs
+        // of one, `x[:, ::2]` of a 2048x2048 float32 matrix made four million
+        // one-element copies and ran at 2.3x NumPy's time.
+        let mut inner_step = 1;
+        if run_dims == 0 && ndim_out > 0 {
+            let j = ndim_out - 1;
+            contig = out_dims[j];
+            inner_step = steps[j] * strides[orig_dim_map[j]];
+            run_dims = 1;
+        }
+
         // Every selection's start contributes a fixed offset; only the walked
         // dimensions then move.
         let mut base = offset;
@@ -251,6 +267,7 @@ impl SelectionPlan {
 
         Self {
             contig,
+            inner_step,
             runs,
             outer_dims,
             outer_steps,
@@ -276,12 +293,24 @@ impl SelectionPlan {
         (src, coord)
     }
 
-    /// Copy `runs` contiguous blocks starting from run index `first`.
+    /// Copy the runs that fill `output`, starting from run index `first`.
     #[inline]
-    fn copy_runs<T: Copy>(&self, input: &[T], output: &mut [T], first: usize) {
+    fn copy_runs<T: Copy>(&self, input: &[T], output: &mut [MaybeUninit<T>], first: usize) {
         let (mut src, mut coord) = self.seek(first);
         for dst in output.chunks_mut(self.contig) {
-            dst.copy_from_slice(&input[src..src + self.contig]);
+            if self.inner_step != 1 {
+                let column = input[src..].iter().step_by(self.inner_step);
+                for (slot, &value) in dst.iter_mut().zip(column) {
+                    slot.write(value);
+                }
+            } else if self.contig < 8 {
+                // A call to `memcpy` costs more than a short run's copy.
+                for (slot, &value) in dst.iter_mut().zip(&input[src..src + self.contig]) {
+                    slot.write(value);
+                }
+            } else {
+                dst.write_copy_of_slice(&input[src..src + self.contig]);
+            }
             for j in (0..coord.len()).rev() {
                 coord[j] += 1;
                 src += self.outer_steps[j];
@@ -294,29 +323,53 @@ impl SelectionPlan {
         }
     }
 
-    fn gather<T: Copy + Send + Sync>(&self, input: &[T], output: &mut [T]) {
-        if self.contig == 0 || self.runs == 0 {
-            return;
-        }
-        // One run means the whole selection is a single contiguous block.
-        if self.runs == 1 {
-            output.copy_from_slice(&input[self.base..self.base + self.contig]);
-            return;
-        }
+    /// The selection, into a fresh buffer of `numel` elements.
+    ///
+    /// Written once. The buffer used to be zeroed first and then overwritten,
+    /// which for `x[1:]` of a 2048x2048 float32 matrix was a 16MB memset in
+    /// front of the 16MB copy.
+    fn gather<T: Copy + Send + Sync>(&self, input: &[T], numel: usize) -> Vec<T> {
+        // SAFETY: every path writes every element: the runs tile the output
+        // exactly, and a single contiguous run is copied whole, in one piece
+        // or in chunks that tile it.
+        unsafe {
+            crate::ops::map::build_vec::<T, _>(numel, |output| {
+                if self.contig == 0 || self.runs == 0 {
+                    return;
+                }
+                // One contiguous run is the whole selection as a single block,
+                // split across the pool like any other large copy: `x[1:]` of
+                // that matrix took 2.4ms on one core, against 1.4 for `clone`.
+                if self.runs == 1 && self.inner_step == 1 {
+                    let block = &input[self.base..self.base + self.contig];
+                    if output.len() < INDEX_PAR_THRESHOLD {
+                        output.write_copy_of_slice(block);
+                    } else {
+                        let chunk =
+                            (block.len() / rayon::current_num_threads().max(1)).max(1 << 16);
+                        par_out_chunks(output, chunk, &|start, dst| {
+                            dst.write_copy_of_slice(&block[start..start + dst.len()]);
+                        });
+                    }
+                    return;
+                }
 
-        if output.len() < INDEX_PAR_THRESHOLD {
-            self.copy_runs(input, output, 0);
-            return;
-        }
+                if output.len() < INDEX_PAR_THRESHOLD {
+                    self.copy_runs(input, output, 0);
+                    return;
+                }
 
-        // Hand each task a band of whole runs. Seeding its odometer costs one
-        // decomposition; every run after that is reached by addition.
-        let bands = rayon::current_num_threads().max(1);
-        let per_band = self.runs.div_ceil(bands).max(1);
-        let band_width = per_band * self.contig;
-        par_out_chunks(output, band_width, &|start, dst| {
-            self.copy_runs(input, dst, (start / band_width) * per_band)
-        });
+                // Hand each task a band of whole runs. Seeding its odometer
+                // costs one decomposition; every run after that is reached by
+                // addition.
+                let bands = rayon::current_num_threads().max(1);
+                let per_band = self.runs.div_ceil(bands).max(1);
+                let band_width = per_band * self.contig;
+                par_out_chunks(output, band_width, &|start, dst| {
+                    self.copy_runs(input, dst, (start / band_width) * per_band)
+                });
+            })
+        }
     }
 }
 
@@ -1986,9 +2039,6 @@ impl Tensor {
         }
 
         let out_shape = Shape::new(out_dims.clone());
-        let mut result_data =
-            TensorData::zeros_on_device(out_shape.numel(), self.dtype, self.device);
-
         let plan = SelectionPlan::new(
             shape_dims,
             strides,
@@ -1999,23 +2049,23 @@ impl Tensor {
             &steps,
         );
 
+        let numel = out_shape.numel();
         macro_rules! gather_arm {
-            ($accessor:ident, $mut_accessor:ident, $tyname:literal) => {{
+            ($accessor:ident, $tyname:literal) => {{
                 let input = self.data.$accessor().ok_or_else(|| {
                     MinitensorError::internal_error(concat!("Expected ", $tyname, " data"))
                 })?;
-                let output = result_data.$mut_accessor().unwrap();
-                plan.gather(input, output);
+                TensorData::from_vec(plan.gather(input, numel), self.dtype, self.device)
             }};
         }
 
-        match self.dtype {
-            DataType::Float32 => gather_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
-            DataType::Float64 => gather_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
-            DataType::Int32 => gather_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
-            DataType::Int64 => gather_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
-            DataType::Bool => gather_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
-        }
+        let result_data = match self.dtype {
+            DataType::Float32 => gather_arm!(as_f32_slice, "f32"),
+            DataType::Float64 => gather_arm!(as_f64_slice, "f64"),
+            DataType::Int32 => gather_arm!(as_i32_slice, "i32"),
+            DataType::Int64 => gather_arm!(as_i64_slice, "i64"),
+            DataType::Bool => gather_arm!(as_bool_slice, "bool"),
+        };
 
         let output = Tensor::new(
             Arc::new(result_data),
