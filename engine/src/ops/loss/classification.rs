@@ -4,13 +4,12 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::*;
 use crate::ops::arithmetic::mul;
 use crate::ops::map::{
-    PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks,
-    unary_map, unary_map_blocks_threshold,
+    VECTOR_F32_PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks, unary_map,
+    unary_map_blocks_threshold,
 };
-use crate::ops::util::{NegLogSigmoid, deterministic_par_sum};
+use crate::ops::util::NegLogSigmoid;
 use crate::{
     error::{MinitensorError, Result},
     ops::{comparison, selection::masked_fill_scalar},
@@ -95,65 +94,33 @@ pub(crate) fn sign_tensor(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Sum all elements in a tensor to produce a scalar
+/// Sum all elements in a tensor to produce a scalar.
+///
+/// Through the whole-tensor `sum`'s own kernels: vectorised, folded pairwise
+/// across 8192-element chunks, and so the same number `sum()` gives. Summed
+/// here one element after another below the parallel threshold, it was a
+/// chain of dependent adds -- 35us of a 50us `mse_loss` over 32K float32
+/// values -- whose error grew with the length rather than its logarithm.
 pub(crate) fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
-    // Reduced losses are 0-dim scalars; a shape-[1] result breaks float(loss).
-    let scalar_shape = Shape::scalar();
-
-    let output_data = match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            TensorData::from_vec::<f32>(
-                vec![sum_slice(input_data)],
-                DataType::Float32,
-                tensor.device(),
-            )
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            TensorData::from_vec::<f64>(
-                vec![sum_slice(input_data)],
-                DataType::Float64,
-                tensor.device(),
-            )
-        }
+    let mut output_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+    match tensor.dtype() {
+        DataType::Float32 => crate::ops::reduction::sum_all_f32(tensor, &mut output_data)?,
+        DataType::Float64 => crate::ops::reduction::sum_all_f64(tensor, &mut output_data)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sum only supported for floating point tensors",
             ));
         }
-    };
+    }
 
+    // Reduced losses are 0-dim scalars; a shape-[1] result breaks float(loss).
     Ok(Tensor::new(
         Arc::new(output_data),
-        scalar_shape,
+        Shape::scalar(),
         tensor.dtype(),
         tensor.device(),
         tensor.requires_grad(),
     ))
-}
-
-/// Chunked sum of a float slice, parallel above [`PAR_THRESHOLD`].
-///
-/// Chunking keeps the accumulation order (and therefore the rounding) stable
-/// for a given length regardless of how rayon schedules the chunks -- but only
-/// within a chunk. Combining the chunk partials with `sum()` on the parallel
-/// iterator reintroduced the scheduling dependence this comment claimed to
-/// rule out, so the partials go through `deterministic_par_sum` instead.
-fn sum_slice<T>(data: &[T]) -> T
-where
-    T: Copy + Send + Sync + Default + std::iter::Sum<T> + std::ops::Add<Output = T>,
-{
-    let chunk_sum = |chunk: &[T]| chunk.iter().copied().sum::<T>();
-    if data.len() < PAR_THRESHOLD {
-        chunk_sum(data)
-    } else {
-        deterministic_par_sum(data, CHUNK, chunk_sum)
-    }
 }
 
 /// Divide tensor by a scalar value
@@ -512,7 +479,7 @@ pub(crate) fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::*;
     use crate::test_support::tensor_of;
 
     #[test]

@@ -23,8 +23,6 @@ use crate::{
 };
 use std::sync::Arc;
 
-pub(crate) const CHUNK: usize = 1024;
-
 /// Whether a loss that carries its own analytical backward should attach one,
 /// given the tensors it differentiates with respect to.
 ///
