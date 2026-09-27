@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import operator as _operator
 
+import numpy as _np
+
 from . import _core as _C
-from ._shape import _atleast_tensor, _normalize_axis
+from ._shape import _atleast_tensor, _from_numpy, _normalize_axis, _numpy_view
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -94,6 +96,29 @@ def _coordinates(spacing: object, length: int, dtype: str, name: str) -> Tensor:
     return positions.astype(dtype)
 
 
+#: Size from which an untracked `gradient` is NumPy's rather than the engine
+#: path's. The engine path builds every slice of its stencils as a tensor and
+#: joins them, which costs little until the data leaves cache and then costs
+#: 2-3x NumPy's in-place loop: a million float64 took 8.6ms against 4.2, a
+#: 64x4096 float64 grid 6.5 against 2.2. Below this NumPy's call costs more
+#: than the engine's slices save -- 1,024 float64 took 20us against 15, a
+#: 256x256 float32 grid 174 against 141 -- and from here nearly every shape
+#: measured at 0.33-0.91 of the engine's time. The exception is a flat
+#: million-element float32 vector, 5-11% slower here than on the engine path,
+#: whose slices are cheap enough there to share across its thread pool.
+_NUMPY_FROM_BYTES = 1 << 19
+
+
+def _require_samples(length: int, edge_order: int) -> None:
+    """Refuse an axis too short for the stencils `edge_order` asks for."""
+
+    if length < edge_order + 1:
+        raise ValueError(
+            f"gradient needs at least {edge_order + 1} samples along an axis for "
+            f"edge_order={edge_order}, got {length}"
+        )
+
+
 def _broadcastable(vector: Tensor, axis: int, rank: int) -> Tensor:
     """A 1-D vector reshaped to line up with `axis` of a rank-`rank` tensor."""
 
@@ -136,11 +161,7 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
 
     length = values.shape[axis]
     rank = values.ndim()
-    if length < edge_order + 1:
-        raise ValueError(
-            f"gradient needs at least {edge_order + 1} samples along an axis for "
-            f"edge_order={edge_order}, got {length}"
-        )
+    _require_samples(length, edge_order)
 
     # The two gaps around each interior point.
     behind = _slice(positions, 0, 1, length - 1) - _slice(positions, 0, 0, length - 1)
@@ -220,11 +241,7 @@ def _one_axis_uniform(
     """
 
     length = values.shape[axis]
-    if length < edge_order + 1:
-        raise ValueError(
-            f"gradient needs at least {edge_order + 1} samples along an axis for "
-            f"edge_order={edge_order}, got {length}"
-        )
+    _require_samples(length, edge_order)
 
     interior = (
         _slice(values, axis, 2, length - 2) - _slice(values, axis, 0, length - 2)
@@ -304,7 +321,42 @@ def gradient(
     else:
         spacings = [spacing] * len(axes)
 
-    results = tuple(
-        _along(values, step, axis, order, dtype) for axis, step in zip(axes, spacings)
+    tracked = values.requires_grad or any(
+        isinstance(step, Tensor) and step.requires_grad for step in spacings
     )
+    if tracked or values.nbytes < _NUMPY_FROM_BYTES:
+        results = tuple(
+            _along(values, step, axis, order, dtype)
+            for axis, step in zip(axes, spacings)
+        )
+    else:
+        # Nothing to differentiate and enough of it, so NumPy's own
+        # `gradient` answers, over a view and after the checks above. The
+        # stencils below are NumPy's, bit for bit and dtype for dtype, and so
+        # is its answer; see `_NUMPY_FROM_BYTES` for when it is faster.
+        view = _numpy_view(values)
+        answers = []
+        for axis, step in zip(axes, spacings):
+            length = values.shape[axis]
+            _require_samples(length, order)
+            answers.append(
+                _from_numpy(
+                    _np.gradient(
+                        view,
+                        _numpy_step(step, length, dtype),
+                        axis=axis,
+                        edge_order=order,
+                    )
+                )
+            )
+        results = tuple(answers)
     return results[0] if len(results) == 1 else results
+
+
+def _numpy_step(spacing: object, length: int, dtype: str) -> object:
+    """`spacing` as `numpy.gradient` takes it: the checked step, or a view of
+    the coordinates at the samples' dtype, as the engine path reads them."""
+
+    if _is_step(spacing):
+        return _checked_step(spacing)
+    return _numpy_view(_coordinates(spacing, length, dtype, "gradient"))

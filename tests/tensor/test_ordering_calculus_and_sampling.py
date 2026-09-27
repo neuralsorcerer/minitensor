@@ -263,6 +263,43 @@ def test_the_two_paths_agree_on_the_grid_they_share(edge_order):
         )
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("edge_order", [1, 2])
+@pytest.mark.parametrize("spacing", ["none", "step", "uniform", "uneven"])
+def test_gradient_agrees_whether_or_not_a_gradient_is_tracked(
+    dtype, edge_order, spacing, monkeypatch
+):
+    """Untracked and large enough, the derivative is NumPy's `gradient` over a
+    view; tracked, it is built from engine slices so autograd can follow it.
+    Both implement NumPy's stencils, and must give the same bits -- NaN and
+    infinity included, which is where the two stencils part ways. The size
+    threshold is lowered so these small inputs take the NumPy path."""
+
+    monkeypatch.setattr(mt._calculus, "_NUMPY_FROM_BYTES", 0)
+
+    rng = np.random.default_rng(29)
+    values = rng.standard_normal((5, 9)) * 10
+    values[1, 4], values[3, 2] = np.nan, np.inf
+    columns = values.shape[1]
+    arguments = {
+        "none": (),
+        "step": (0.5,),
+        "uniform": (_t(np.arange(columns) * 0.25, dtype),),
+        "uneven": (_t(np.cumsum(rng.random(columns) + 0.1), dtype),),
+    }[spacing]
+    answers = []
+    for tracked in (False, True):
+        tensor = _t(values, dtype)
+        tensor.requires_grad_(tracked)
+        answers.append(
+            mt.gradient(tensor, *arguments, dim=1, edge_order=edge_order)
+            .detach()
+            .numpy()
+        )
+    np.testing.assert_array_equal(answers[0], answers[1])
+    assert answers[0].dtype == answers[1].dtype == np.dtype(dtype)
+
+
 def test_gradient_over_every_axis_returns_one_tensor_each():
     values = RNG.standard_normal((4, 5, 3))
     got = mt.gradient(_t(values))
