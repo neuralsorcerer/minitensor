@@ -8,7 +8,7 @@ use crate::autograd::with_grad_fn;
 use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
-use crate::ops::map::{outputs_per_task, par_row_outputs};
+use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_row_outputs};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -242,6 +242,21 @@ fn lane_sum<T: Copy>(row: &[T], term: impl Fn(T) -> f64) -> f64 {
     ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
 }
 
+/// Rows per task for a normalization over rows of `norm` elements.
+///
+/// All of them below [`PAR_THRESHOLD`] elements: a task of
+/// [`outputs_per_task`]'s size is about as much work as waking a thread
+/// for it, so splitting a tensor only a few tasks wide costs more than it
+/// saves. Measured on a float32 `layer_norm` over 512 wide rows, 33 rows --
+/// the first count that split -- took 116us against 39 for 32 on one core.
+fn rows_per_task(rows: usize, norm: usize) -> usize {
+    if rows.saturating_mul(norm) < PAR_THRESHOLD {
+        rows
+    } else {
+        outputs_per_task(norm)
+    }
+}
+
 macro_rules! layer_norm_rows {
     ($name:ident, $ty:ty) => {
         fn $name(
@@ -297,7 +312,7 @@ macro_rules! layer_norm_rows {
 
             par_row_outputs(
                 rows,
-                outputs_per_task(norm),
+                rows_per_task(rows, norm),
                 &mut buffers,
                 &widths,
                 &|first_row, buffers| {
@@ -627,7 +642,7 @@ macro_rules! rms_norm_rows {
             let rows = inv_rms.len();
             par_row_outputs(
                 rows,
-                outputs_per_task(norm),
+                rows_per_task(rows, norm),
                 &mut [out, inv_rms],
                 &[norm, 1],
                 &|first_row, buffers| {
