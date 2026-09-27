@@ -94,25 +94,32 @@ fn register_leaf_tensor(tensor: &Tensor) {
 /// and once for the strides. Most callers only read, and the ones that need to
 /// own clone once from here instead of cloning a clone.
 ///
-/// The builtin scalars and sequences, and NumPy's scalars, are turned away
-/// before the wrapper is asked for: they are the common miss -- every
-/// `x * 2.0` reaches here -- and none can carry an attribute. Asking costs
-/// more than the op it serves. Before Python 3.13 an attribute is found
+/// The builtin scalars and sequences, the parts of a subscript, and NumPy's
+/// scalars and arrays are turned away before the wrapper is asked for: they
+/// are the common miss -- every `x * 2.0` and every `x[1:3]` reaches here,
+/// the subscript several times -- and none can carry an attribute. Asking
+/// costs more than the op it serves. Before Python 3.13 an attribute is found
 /// missing by raising `AttributeError` and formatting its message, which
 /// `hasattr` then discards: 3,800 instructions, most of the 0.9us `x * 2.0`
 /// cost over `x * y`. Exact types only, since a subclass can carry one.
 pub(crate) fn borrow_wrapped_tensor<'py>(
     value: &'py Bound<'py, PyAny>,
 ) -> Option<PyRef<'py, PyTensor>> {
-    if let Ok(py_tensor) = value.extract::<PyRef<PyTensor>>() {
-        return Some(py_tensor);
+    // `cast` rather than `extract`, whose failure is a `PyErr` built and
+    // dropped on every one of the misses below.
+    if let Ok(py_tensor) = value.cast::<PyTensor>() {
+        return py_tensor.try_borrow().ok();
     }
     if value.is_exact_instance_of::<PyFloat>()
         || value.is_exact_instance_of::<PyInt>()
         || value.is_exact_instance_of::<PyBool>()
         || value.is_exact_instance_of::<PyList>()
         || value.is_exact_instance_of::<PyTuple>()
-        || crate::dtype::is_numpy_scalar(value)
+        || value.is_exact_instance_of::<PySlice>()
+        || value.is_exact_instance_of::<PyString>()
+        || value.is_none()
+        || value.is(value.py().Ellipsis())
+        || crate::dtype::is_numpy_value(value)
     {
         return None;
     }

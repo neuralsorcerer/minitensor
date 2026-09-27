@@ -847,7 +847,16 @@ fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<u
 /// boolean array is not one either: it is a mask, and masks select a different
 /// number of elements than they contain.
 pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<usize>)>> {
-    if item.is_instance_of::<pyo3::types::PyBool>() || item.extract::<i64>().is_ok() {
+    // The basic entries by type, not by asking each for an integer: a slice
+    // refuses by raising, and that was most of what `x[1:3]` cost. Anything
+    // else that is an integer -- a NumPy one, an `__index__` -- is none of
+    // the forms below and comes out as `None` at the end.
+    if item.is_exact_instance_of::<PyInt>()
+        || item.is_instance_of::<pyo3::types::PyBool>()
+        || item.is_exact_instance_of::<PySlice>()
+        || item.is_none()
+        || is_ellipsis(item)
+    {
         return Ok(None);
     }
     if let Some(pt) = borrow_wrapped_tensor(item) {
@@ -1404,7 +1413,10 @@ fn full_slice(dim: usize) -> TensorIndex {
 /// which axis was overrun nor how long it is — the two facts needed to fix the
 /// call. The engine's `IndexError` already reports all three, so match it.
 fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<TensorIndex> {
-    if let Ok(i) = item.extract::<isize>() {
+    // A slice or `None` is not asked for an integer first: the refusal is
+    // raised and its message formatted, which cost more than the slice.
+    let basic = item.is_exact_instance_of::<PySlice>() || item.is_none();
+    if !basic && let Ok(i) = item.extract::<isize>() {
         let mut idx = i;
         if idx < 0 {
             idx += dim_size as isize;

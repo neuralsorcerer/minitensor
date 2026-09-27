@@ -81,39 +81,52 @@ pub fn get_default_dtype() -> String {
     dtype_to_str(default_dtype()).to_string()
 }
 
-/// `numpy.generic`, the base of every NumPy scalar type, looked up once.
+/// `numpy.generic` and `numpy.ndarray`, the bases of every NumPy scalar and
+/// array type, looked up once.
 ///
 /// Not found means NumPy cannot be imported, which the extension never sees
 /// -- NumPy is a hard dependency -- but the crate's own tests can, and a value
-/// cannot be a NumPy scalar then anyway.
-static NUMPY_GENERIC: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+/// cannot be one of NumPy's then anyway.
+static NUMPY_TYPES: PyOnceLock<(Py<PyType>, Py<PyType>)> = PyOnceLock::new();
 
-fn numpy_generic(py: Python<'_>) -> Option<&Bound<'_, PyType>> {
-    if let Some(generic) = NUMPY_GENERIC.get(py) {
-        return Some(generic.bind(py));
-    }
-    let generic = py
-        .import(intern!(py, "numpy"))
-        .ok()?
-        .getattr(intern!(py, "generic"))
-        .ok()?
-        .cast_into::<PyType>()
-        .ok()?;
-    Some(NUMPY_GENERIC.get_or_init(py, || generic.unbind()).bind(py))
+fn numpy_types(py: Python<'_>) -> Option<(&Bound<'_, PyType>, &Bound<'_, PyType>)> {
+    let types = match NUMPY_TYPES.get(py) {
+        Some(types) => types,
+        None => {
+            let numpy = py.import(intern!(py, "numpy")).ok()?;
+            let base = |name| -> Option<Py<PyType>> {
+                Some(
+                    numpy
+                        .getattr(name)
+                        .ok()?
+                        .cast_into::<PyType>()
+                        .ok()?
+                        .unbind(),
+                )
+            };
+            let found = (base(intern!(py, "generic"))?, base(intern!(py, "ndarray"))?);
+            NUMPY_TYPES.get_or_init(py, || found)
+        }
+    };
+    Some((types.0.bind(py), types.1.bind(py)))
 }
 
-/// Whether `value`'s type is one of NumPy's own scalar types.
+/// Whether `value` is one of NumPy's own scalars or arrays.
 ///
 /// A subclass written in Python is not: it is a heap type, and its instances
-/// can carry attributes a NumPy scalar cannot.
-pub(crate) fn is_numpy_scalar(value: &Bound<'_, PyAny>) -> bool {
-    let Some(generic) = numpy_generic(value.py()) else {
-        return false;
-    };
+/// can carry attributes these cannot. That is also the cheap question, so it
+/// is asked first, and turns away a wrapper class without consulting NumPy.
+pub(crate) fn is_numpy_value(value: &Bound<'_, PyAny>) -> bool {
     let kind = value.get_type();
     // SAFETY: `kind` is a live type object, borrowed for the call.
     let heap = unsafe { ffi::PyType_GetFlags(kind.as_type_ptr()) } & ffi::Py_TPFLAGS_HEAPTYPE;
-    heap == 0 && kind.is_subclass(generic).unwrap_or(false)
+    if heap != 0 {
+        return false;
+    }
+    let Some((generic, ndarray)) = numpy_types(value.py()) else {
+        return false;
+    };
+    kind.is_subclass(generic).unwrap_or(false) || kind.is_subclass(ndarray).unwrap_or(false)
 }
 
 /// The dtype of a NumPy scalar -- `np.float64(0.1)`, `np.int32(3)` -- read off
@@ -125,7 +138,7 @@ pub(crate) fn is_numpy_scalar(value: &Bound<'_, PyAny>) -> bool {
 /// name: three strings built to recognise one of five constants.
 pub(crate) fn numpy_scalar_dtype(value: &Bound<'_, PyAny>) -> Option<DataType> {
     let py = value.py();
-    if !value.is_instance(numpy_generic(py)?).unwrap_or(false) {
+    if !value.is_instance(numpy_types(py)?.0).unwrap_or(false) {
         return None;
     }
     let descr = value.getattr(intern!(py, "dtype")).ok()?;
@@ -351,7 +364,7 @@ class FloatNotCallable:
             )?;
             let impostor = helper.getattr("Impostor")?.call0()?;
             assert_eq!(numpy_scalar_dtype(&impostor), None);
-            assert!(!is_numpy_scalar(&impostor));
+            assert!(!is_numpy_value(&impostor));
             let float = PyFloat::new(py, 1.5);
             assert_eq!(numpy_scalar_dtype(float.as_any()), None);
 
@@ -371,8 +384,11 @@ class FloatNotCallable:
             ] {
                 let scalar = numpy.getattr(name)?.call1((1,))?;
                 assert_eq!(numpy_scalar_dtype(&scalar), want, "{name}");
-                assert!(is_numpy_scalar(&scalar), "{name}");
+                assert!(is_numpy_value(&scalar), "{name}");
             }
+            let array = numpy.getattr("ones")?.call1((2,))?;
+            assert!(is_numpy_value(&array));
+            assert_eq!(numpy_scalar_dtype(&array), None);
 
             let subclass = module_from_code(
                 py,
@@ -382,7 +398,7 @@ class FloatNotCallable:
             .getattr("Sub")?
             .call1((1.0,))?;
             assert_eq!(numpy_scalar_dtype(&subclass), Some(DataType::Float64));
-            assert!(!is_numpy_scalar(&subclass));
+            assert!(!is_numpy_value(&subclass));
             Ok(())
         })
         .unwrap();
