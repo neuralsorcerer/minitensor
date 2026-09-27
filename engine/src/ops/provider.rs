@@ -89,8 +89,10 @@ impl<T> Gemm<'_, T> {
 /// Only those a provider might do better are named: offering is a call and a
 /// match, and there is no point paying either for a function the engine
 /// always keeps. What *is* worth sending, and from which size, is the
-/// provider's decision. `Atan2` and `Pow` take two operands and are offered
-/// through [`Provider::binary_f64`]; the rest take one.
+/// provider's decision. `Atan2`, `Pow`, `Remainder` and `Fmod` take two
+/// operands and are offered through [`Provider::binary_f64`]; the rest take
+/// one. The last two are exact, so a provider's answer is the engine's to the
+/// bit; they are offered because the engine's is a scalar `libm` call.
 ///
 /// Float64 only. Every float32 kernel in `ops::simd::transcendental` computes
 /// in float64 and rounds once, which makes it correctly rounded on every
@@ -117,6 +119,8 @@ pub enum Ufunc {
     Acosh,
     Atan2,
     Pow,
+    Remainder,
+    Fmod,
 }
 
 impl Ufunc {
@@ -143,6 +147,8 @@ impl Ufunc {
             Ufunc::Acosh => "arccosh",
             Ufunc::Atan2 => "arctan2",
             Ufunc::Pow => "power",
+            Ufunc::Remainder => "remainder",
+            Ufunc::Fmod => "fmod",
         }
     }
 }

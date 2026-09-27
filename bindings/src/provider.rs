@@ -345,7 +345,7 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 ///   cbrt       0.12  0.08  0.29
 /// ```
 ///
-/// and over 1e4 and 1e6, for the inverse trigonometric functions and the two
+/// and over 1e4 and 1e6, for the inverse trigonometric functions and the
 /// binary ones (`power` with a whole array of exponents; with one exponent it
 /// read 0.77 and 1.02):
 ///
@@ -357,7 +357,13 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 ///   arccosh    0.80  1.28
 ///   arctan2    0.13  0.53
 ///   power      0.18  0.74
+///   remainder  0.59  2.43
+///   fmod       0.58  2.30
 /// ```
+///
+/// `remainder` and `fmod` are exact, so unlike the rest they cross with no
+/// question of accuracy at all: the engine's arm is glibc's scalar `fmod`,
+/// NumPy's its own vectorized loop, and the bits are the same.
 ///
 /// Float64 has no wider type to compute in and round from, which is the trick
 /// every float32 kernel in `ops::simd::transcendental` is built on, so the
@@ -372,7 +378,7 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 /// the threshold, the slowest to gain still ran 1.45x faster than the engine.
 ///
 /// No float32 function crosses: see [`Ufunc`] for why.
-const UFUNC_ORDER: [Ufunc; 20] = [
+const UFUNC_ORDER: [Ufunc; 22] = [
     Ufunc::Tanh,
     Ufunc::Sinh,
     Ufunc::Cosh,
@@ -393,6 +399,8 @@ const UFUNC_ORDER: [Ufunc; 20] = [
     Ufunc::Acosh,
     Ufunc::Atan2,
     Ufunc::Pow,
+    Ufunc::Remainder,
+    Ufunc::Fmod,
 ];
 
 #[cfg(not(feature = "blas"))]

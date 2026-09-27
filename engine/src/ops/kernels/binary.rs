@@ -407,6 +407,10 @@ binary_kernel!(
 // the floor division above: a == floor_div(a, b) * b + rem(a, b). Float
 // variants yield NaN for zero divisors like `%` itself; integer zero divisors
 // are rejected by the op layer.
+//
+// A zero remainder takes the divisor's sign too: `-4.0 % 2.0` is `0.0` and
+// `4.0 % -2.0` is `-0.0`, in Python and in NumPy. `fmod` gives its zero the
+// dividend's sign, and passing that through gave both the wrong one.
 binary_kernel!(
     rem_f32_direct,
     as_f32_slice,
@@ -415,7 +419,9 @@ binary_kernel!(
     "f32",
     |a: f32, b: f32| {
         let r = a % b;
-        if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+        if r == 0.0 {
+            r.copysign(b)
+        } else if (r < 0.0) != (b < 0.0) {
             r + b
         } else {
             r
@@ -430,7 +436,9 @@ binary_kernel!(
     "f64",
     |a: f64, b: f64| {
         let r = a % b;
-        if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+        if r == 0.0 {
+            r.copysign(b)
+        } else if (r < 0.0) != (b < 0.0) {
             r + b
         } else {
             r

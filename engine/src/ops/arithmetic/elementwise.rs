@@ -594,6 +594,28 @@ impl ModulusConvention {
             Self::Truncated => "fmod",
         }
     }
+
+    /// The float64 result from the installed provider, or `None` to compute
+    /// it here.
+    ///
+    /// The engine's float64 modulus is `libm`'s scalar `fmod`, one element at
+    /// a time, where NumPy's is a vectorized loop -- 28ns an element against
+    /// 18 over 100,000 -- and a modulus is exact, so the answer does not
+    /// depend on who computes it. Offered only when each operand is the
+    /// output's length or a single element, the two layouts a provider takes.
+    fn offer(self, lhs: &Tensor, rhs: &Tensor, len: usize) -> Option<Vec<f64>> {
+        use crate::ops::provider::{Ufunc, offer_binary_f64};
+        let (left, right) = (lhs.data().as_f64_slice()?, rhs.data().as_f64_slice()?);
+        let spans = |values: &[f64]| values.len() == len || values.len() == 1;
+        if !(spans(left) && spans(right)) {
+            return None;
+        }
+        let op = match self {
+            Self::Floored => Ufunc::Remainder,
+            Self::Truncated => Ufunc::Fmod,
+        };
+        offer_binary_f64(op, left, right, len)
+    }
 }
 
 /// One dtype's elementwise kernel, as the four in a [`ModulusConvention`] are
@@ -654,7 +676,10 @@ fn modulus(lhs: &Tensor, rhs: &Tensor, convention: ModulusConvention) -> Result<
     let kernels = convention.kernels();
     let output_data = match result_dtype {
         DataType::Float32 => kernels[0](lhs_ref, rhs_ref, &output_shape)?,
-        DataType::Float64 => kernels[1](lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => match convention.offer(lhs_ref, rhs_ref, output_shape.numel()) {
+            Some(out) => TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()),
+            None => kernels[1](lhs_ref, rhs_ref, &output_shape)?,
+        },
         DataType::Int32 => kernels[2](lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int64 => kernels[3](lhs_ref, rhs_ref, &output_shape)?,
         DataType::Bool => {
@@ -722,6 +747,61 @@ mod modulus_tests {
 
     fn wide(tensor: &Tensor) -> Vec<f64> {
         tensor.data().as_f64_slice().unwrap().to_vec()
+    }
+
+    /// A remainder of zero takes the divisor's sign, as Python's `%` and
+    /// NumPy's `remainder` give it, while `fmod`'s zero keeps the dividend's.
+    /// Both widths, since only float64 is ever handed to a provider: these
+    /// run on a bare engine with none installed, which is the engine's own
+    /// kernel either way.
+    #[test]
+    fn a_zero_remainder_takes_the_divisors_sign() {
+        let dividends = [-4.0, 4.0, -0.0, 0.0, 6.0, -6.0];
+        let divisors = [2.0, -2.0, 3.0, -3.0, 3.0, -3.0];
+        // (remainder, fmod) signs: negative?
+        let remainder_negative = [false, true, false, true, false, true];
+        let fmod_negative = [true, false, true, false, false, true];
+
+        let (a, b) = (
+            f64_tensor(dividends.to_vec()),
+            f64_tensor(divisors.to_vec()),
+        );
+        let got = wide(&remainder(&a, &b).unwrap());
+        let truncated = wide(&fmod(&a, &b).unwrap());
+        for i in 0..dividends.len() {
+            assert_eq!(got[i], 0.0);
+            assert_eq!(
+                got[i].is_sign_negative(),
+                remainder_negative[i],
+                "remainder {i}"
+            );
+            assert_eq!(
+                truncated[i].is_sign_negative(),
+                fmod_negative[i],
+                "fmod {i}"
+            );
+        }
+
+        let narrow = |values: &[f64]| {
+            Tensor::new(
+                Arc::new(TensorData::from_vec_f32(
+                    values.iter().map(|&v| v as f32).collect(),
+                    Device::cpu(),
+                )),
+                Shape::new(vec![values.len()]),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            )
+        };
+        let got = remainder(&narrow(&dividends), &narrow(&divisors)).unwrap();
+        for (i, value) in got.data().as_f32_slice().unwrap().iter().enumerate() {
+            assert_eq!(
+                value.is_sign_negative(),
+                remainder_negative[i],
+                "f32 remainder {i}"
+            );
+        }
     }
 
     /// Every sign pairing, which is the only place the two conventions differ.

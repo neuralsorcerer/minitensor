@@ -42,7 +42,9 @@ _OURS = {
     "arctan2": "atan2",
     "power": "pow",
 }
-_BINARY = {"arctan2", "power"}
+_BINARY = {"arctan2", "power", "remainder", "fmod"}
+# Exact operations: whoever computes them owes the same bits.
+_EXACT = {"remainder", "fmod"}
 DELEGATED = dispatch.delegated_ufuncs()
 
 
@@ -80,7 +82,7 @@ def test_the_delegated_list_is_what_the_measurements_chose():
     if not dispatch.PROVIDER_EXPECTED:
         assert DELEGATED == []
         return
-    assert len(DELEGATED) == 20
+    assert len(DELEGATED) == 22
     assert all(hasattr(np, name) for name in DELEGATED)
 
 
@@ -110,6 +112,9 @@ def test_delegated_values_are_numpys_and_agree_with_the_engine(name):
     for kind in (np.isnan, np.isposinf, np.isneginf):
         np.testing.assert_array_equal(kind(native), kind(reference))
     assert _ulps(native, reference) <= 4
+    if name in _EXACT:
+        np.testing.assert_array_equal(native, reference)
+        np.testing.assert_array_equal(np.signbit(native), np.signbit(reference))
 
 
 @requires_delegation
