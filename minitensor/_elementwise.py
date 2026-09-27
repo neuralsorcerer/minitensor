@@ -210,18 +210,31 @@ def ldexp(input: object, other: object) -> Tensor:
 # --- predicates -----------------------------------------------------------
 
 
+def _is_infinity(input: object, infinity: float) -> Tensor:
+    """Whether each element is exactly `infinity`, of one sign.
+
+    One comparison, where testing for either infinity and then for the sign
+    took three passes and twice the time. Only a float can hold an infinity;
+    anything else asks `isinf`, which answers false everywhere without
+    reading the values.
+    """
+
+    tensor = _atleast_tensor(input)
+    if "float" not in str(tensor.dtype):
+        return _F.isinf(tensor)
+    return tensor == infinity
+
+
 def isposinf(input: object) -> Tensor:
     """Whether each element is `+inf`."""
 
-    tensor = _atleast_tensor(input)
-    return _F.logical_and(_F.isinf(tensor), tensor > 0)
+    return _is_infinity(input, _math.inf)
 
 
 def isneginf(input: object) -> Tensor:
     """Whether each element is `-inf`."""
 
-    tensor = _atleast_tensor(input)
-    return _F.logical_and(_F.isinf(tensor), tensor < 0)
+    return _is_infinity(input, -_math.inf)
 
 
 def isreal(input: object) -> Tensor:

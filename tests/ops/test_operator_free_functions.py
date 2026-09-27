@@ -291,6 +291,29 @@ def test_isposinf_and_isneginf_split_isinf():
     )
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+def test_isposinf_and_isneginf_are_one_comparison_in_every_dtype(dtype):
+    """A float compares with the infinity it asks about; any other dtype holds
+    none, and must say so rather than compare an infinity cast onto it."""
+
+    if dtype.startswith("float"):
+        values = np.array([np.inf, -np.inf, -0.0, np.nan, -1.5, 3.0], dtype=dtype)
+    else:
+        info = np.iinfo(dtype) if dtype != "bool" else None
+        values = (
+            np.array([True, False])
+            if info is None
+            else np.array([info.min, -1, 0, 1, info.max], dtype=dtype)
+        )
+    tensor = mt.from_numpy(values)
+    if dtype.startswith("float"):
+        tensor.requires_grad_(True)
+    for ours, theirs in ((mt.isposinf, np.isposinf), (mt.isneginf, np.isneginf)):
+        got = ours(tensor)
+        assert str(got.dtype) == "bool" and not got.requires_grad
+        np.testing.assert_array_equal(got.numpy(), theirs(values))
+
+
 def test_isreal_is_true_everywhere_including_at_nan():
     values = np.array([1.0, np.nan, np.inf, -0.0])
     np.testing.assert_array_equal(mt.isreal(_t(values)).numpy(), np.isreal(values))
