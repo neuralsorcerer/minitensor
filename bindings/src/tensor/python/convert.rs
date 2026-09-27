@@ -482,7 +482,7 @@ fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
         // inference falls through to the default float dtype, and `as_tensor`
         // would disagree with `from_numpy` about the same array.
         if let Ok((kind, itemsize)) = numpy_dtype_parts(value)
-            && let Some(widened) = widened_numpy_dtype(&kind, itemsize)
+            && let Some(widened) = widened_numpy_dtype(kind, itemsize)
             && let Ok(dtype) = dtype::parse_dtype(widened)
         {
             return Some(dtype);
@@ -1710,22 +1710,31 @@ fn sequence_via_numpy(
 /// `i64::MAX`, and mantissas wider than `float64`'s, cannot survive the cast,
 /// and silently rounding a user's data is worse than telling them to choose
 /// the cast themselves.
-fn widened_numpy_dtype(kind: &str, itemsize: usize) -> Option<&'static str> {
+fn widened_numpy_dtype(kind: u8, itemsize: usize) -> Option<&'static str> {
     match (kind, itemsize) {
-        ("f", 2) => Some("float32"),
-        ("i", 1) | ("i", 2) => Some("int32"),
-        ("u", 1) | ("u", 2) => Some("int32"),
-        ("u", 4) => Some("int64"),
+        (b'f', 2) => Some("float32"),
+        (b'i', 1) | (b'i', 2) => Some("int32"),
+        (b'u', 1) | (b'u', 2) => Some("int32"),
+        (b'u', 4) => Some("int64"),
         _ => None,
     }
 }
 
-/// Read a NumPy array's dtype as `(kind, itemsize)`, e.g. `("u", 1)` for uint8.
-fn numpy_dtype_parts(array: &Bound<PyAny>) -> PyResult<(String, usize)> {
+/// Read a NumPy array's dtype as `(kind, itemsize)`, e.g. `(b'u', 1)` for
+/// uint8.
+///
+/// Off the descriptor for an array. Asking the dtype object for the two
+/// attributes, and building a `String` for the one-letter kind, was a third
+/// of `from_numpy` on a small array -- every array operand pays it.
+fn numpy_dtype_parts(array: &Bound<PyAny>) -> PyResult<(u8, usize)> {
+    if let Ok(untyped) = array.cast::<PyUntypedArray>() {
+        let descr = untyped.dtype();
+        return Ok((descr.kind(), descr.itemsize()));
+    }
     let dtype = array.getattr(intern!(array.py(), "dtype"))?;
     let kind: String = dtype.getattr(intern!(array.py(), "kind"))?.extract()?;
     let itemsize: usize = dtype.getattr(intern!(array.py(), "itemsize"))?.extract()?;
-    Ok((kind, itemsize))
+    Ok((kind.bytes().next().unwrap_or(b'?'), itemsize))
 }
 
 /// Cast a NumPy array to a dtype the engine supports, when that is exact.
@@ -1734,7 +1743,7 @@ fn numpy_dtype_parts(array: &Bound<PyAny>) -> PyResult<(String, usize)> {
 /// the caller reports them rather than rounding them.
 fn widen_numpy_dtype<'py>(array: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let (kind, itemsize) = numpy_dtype_parts(array)?;
-    match widened_numpy_dtype(&kind, itemsize) {
+    match widened_numpy_dtype(kind, itemsize) {
         Some(target) => array.call_method1(intern!(array.py(), "astype"), (target,)),
         None => Ok(array.clone()),
     }
@@ -1767,16 +1776,22 @@ pub(crate) fn convert_numpy_to_tensor(
     // One arm per supported dtype, written once: they differed only in the
     // element type and the tag, and the copy is the same parallel one for all
     // of them -- 64MB of float32 took 63ms copied on one core and 25 split.
+    //
+    // The array is read without rust-numpy's dynamic borrow, whose
+    // registration and release in a process-wide table were half of what
+    // `convert_numpy_to_tensor` cost on a small array. It guards against a
+    // conflicting borrow held in Rust, and there can be none: the bindings
+    // never release the GIL, so no other Rust runs while this copy does, and
+    // nothing between here and the end of the copy calls back into Python.
     macro_rules! from_array {
         ($ty:ty, $dtype:expr) => {
             if let Ok(typed) = array.cast::<PyArrayDyn<$ty>>() {
-                let readonly = typed.readonly();
-                let shape = Shape::new(readonly.shape().to_vec());
-                let data = TensorData::from_vec(
-                    TensorData::copied_slice(readonly.as_slice()?),
-                    $dtype,
-                    Device::cpu(),
-                );
+                let shape = Shape::new(typed.shape().to_vec());
+                // SAFETY: see above; the array is C-contiguous
+                // (`as_c_contiguous`), which `as_slice` checks as well.
+                let values = unsafe { typed.as_slice() }?;
+                let data =
+                    TensorData::from_vec(TensorData::copied_slice(values), $dtype, Device::cpu());
                 return Ok(Tensor::new(
                     Arc::new(data),
                     shape,
@@ -1797,17 +1812,15 @@ pub(crate) fn convert_numpy_to_tensor(
     // and 1 is undefined behavior as a Rust `bool`, so the bytes are read as
     // what they are and normalised the way NumPy reads them: not zero is true.
     if let Ok(typed) = array.cast::<PyArrayDyn<bool>>() {
-        let readonly = typed.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let len = readonly.len();
+        let shape = Shape::new(typed.shape().to_vec());
+        let len = typed.len();
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
             // SAFETY: the array is C-contiguous (`as_c_contiguous` above) with
-            // `len` one-byte elements, the read-only borrow keeps it from being
-            // written through Rust for as long as this lives, and any byte is
-            // a valid `u8`.
-            unsafe { std::slice::from_raw_parts(readonly.data().cast::<u8>(), len) }
+            // `len` one-byte elements, nothing writes it while the GIL is held
+            // (see `from_array!`), and any byte is a valid `u8`.
+            unsafe { std::slice::from_raw_parts(typed.data().cast::<u8>(), len) }
         };
         let values: Vec<bool> = bytes.iter().map(|&byte| byte != 0).collect();
         let data = TensorData::from_vec(values, DataType::Bool, Device::cpu());
@@ -1821,7 +1834,7 @@ pub(crate) fn convert_numpy_to_tensor(
     }
     {
         let described = numpy_dtype_parts(array)
-            .map(|(kind, size)| format!("{kind}{}", size * 8))
+            .map(|(kind, size)| format!("{}{}", kind as char, size * 8))
             .unwrap_or_else(|_| "unknown".to_string());
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "Unsupported NumPy dtype '{described}'. Supported dtypes are \
