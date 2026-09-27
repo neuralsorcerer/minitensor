@@ -618,30 +618,52 @@ where
         rhs_aligned[rhs_offset + i] = if dim == 1 { 0 } else { rhs_strides[i] };
     }
 
-    // Inner-run fast path. In any valid broadcast each operand's last dimension
-    // is either the output's last dimension (contiguous, stride 1) or 1
-    // (broadcast, stride 0). So the expensive coordinate decomposition is done
-    // once per output *row* (its coordinates over dims `0..last`) instead of
-    // once per element, and each row is filled with a contiguous, auto-
-    // vectorizable inner loop whose broadcast branch is hoisted out.
-    let last = rank - 1;
-    let inner = output_dims[last];
-    let lhs_last = lhs_aligned[last]; // 0 (broadcast) or 1 (contiguous)
-    let rhs_last = rhs_aligned[last];
-
-    // Base offsets into lhs/rhs for output row `row`.
-    let row_bases = |row: usize| -> (usize, usize) {
-        let mut lhs_base = 0usize;
-        let mut rhs_base = 0usize;
-        let mut tmp = row;
-        for i in (0..last).rev() {
-            let coord = tmp % output_dims[i];
-            tmp /= output_dims[i];
-            lhs_base += coord * lhs_aligned[i];
-            rhs_base += coord * rhs_aligned[i];
+    // Coalesce the output's axes, innermost first: an axis joins the one
+    // inside it when both operands step through it as a continuation of that
+    // axis -- contiguous with it, or broadcast along both -- so the two
+    // address as one. Axes of extent one address nothing and are dropped.
+    // Without this the inner run was the last axis alone: a per-channel scale
+    // of an (8, 64, 8, 8) tensor ran in rows of 8, each paying for its offsets
+    // by division, 39us where the same product without the broadcast takes 3.7.
+    let mut dims: SmallVec<[usize; 8]> = SmallVec::new();
+    let mut lhs_steps: SmallVec<[usize; 8]> = SmallVec::new();
+    let mut rhs_steps: SmallVec<[usize; 8]> = SmallVec::new();
+    for axis in (0..rank).rev() {
+        let (extent, ls, rs) = (output_dims[axis], lhs_aligned[axis], rhs_aligned[axis]);
+        if extent == 1 {
+            continue;
         }
-        (lhs_base, rhs_base)
-    };
+        if let (Some(inner), Some(&il), Some(&ir)) =
+            (dims.last_mut(), lhs_steps.last(), rhs_steps.last())
+            && ls == il * *inner
+            && rs == ir * *inner
+        {
+            *inner *= extent;
+            continue;
+        }
+        dims.push(extent);
+        lhs_steps.push(ls);
+        rhs_steps.push(rs);
+    }
+    if dims.is_empty() {
+        // Every axis has extent one: a single element.
+        dims.push(1);
+        lhs_steps.push(0);
+        rhs_steps.push(0);
+    }
+    // Outermost first, as the walk below reads them.
+    dims.reverse();
+    lhs_steps.reverse();
+    rhs_steps.reverse();
+
+    // The innermost coalesced axis is the run. Each operand is contiguous
+    // along it (step 1) or broadcast (step 0): it began as a last axis, whose
+    // aligned stride is one of the two, and merging keeps the innermost step.
+    let last = dims.len() - 1;
+    let inner = dims[last];
+    let lhs_last = lhs_steps[last];
+    let rhs_last = rhs_steps[last];
+    let (outer_dims, outer_l, outer_r) = (&dims[..last], &lhs_steps[..last], &rhs_steps[..last]);
 
     // Fill one output row given its input base offsets.
     let fill_row = |out_row: &mut [std::mem::MaybeUninit<U>], lhs_base: usize, rhs_base: usize| {
@@ -680,18 +702,43 @@ where
         }
     };
 
+    // Whole rows from row `first`: the offsets are decomposed once, by
+    // division, and every row after is reached by addition.
+    let walk = |first: usize, out: &mut [std::mem::MaybeUninit<U>]| {
+        let mut coord: SmallVec<[usize; 8]> = smallvec![0; outer_dims.len()];
+        let (mut rest, mut lhs_base, mut rhs_base) = (first, 0usize, 0usize);
+        for j in (0..outer_dims.len()).rev() {
+            coord[j] = rest % outer_dims[j];
+            rest /= outer_dims[j];
+            lhs_base += coord[j] * outer_l[j];
+            rhs_base += coord[j] * outer_r[j];
+        }
+        for out_row in out.chunks_mut(inner) {
+            fill_row(out_row, lhs_base, rhs_base);
+            for j in (0..outer_dims.len()).rev() {
+                coord[j] += 1;
+                lhs_base += outer_l[j];
+                rhs_base += outer_r[j];
+                if coord[j] < outer_dims[j] {
+                    break;
+                }
+                lhs_base -= coord[j] * outer_l[j];
+                rhs_base -= coord[j] * outer_r[j];
+                coord[j] = 0;
+            }
+        }
+    };
+
     // For small tensors a sequential row walk avoids rayon task overhead.
     if numel < BINARY_PAR_THRESHOLD {
-        let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
-            for (row, out_row) in spare.chunks_mut(inner).enumerate() {
-                let (lhs_base, rhs_base) = row_bases(row);
-                fill_row(out_row, lhs_base, rhs_base);
-            }
-            Ok(())
-        };
-        // SAFETY: `fill` writes every element of the spare slice.
-        let out = unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }
-            .unwrap_or_else(|e| match e {});
+        // SAFETY: `walk` writes every element of the spare slice.
+        let out = unsafe {
+            build_vec_with::<U, Infallible, _>(numel, |spare| {
+                walk(0, spare);
+                Ok(())
+            })
+        }
+        .unwrap_or_else(|e| match e {});
         return Ok(out);
     }
 
@@ -699,20 +746,17 @@ where
     // work regardless of the inner-run length.
     let rows_per_chunk = (PAR_CHUNK / inner).max(1);
     let chunk_len = rows_per_chunk * inner;
-    let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
-        par_out_chunks(spare, chunk_len, &|start, out_chunk| {
-            let first_row = (start / chunk_len) * rows_per_chunk;
-            for (local, out_row) in out_chunk.chunks_mut(inner).enumerate() {
-                let (lhs_base, rhs_base) = row_bases(first_row + local);
-                fill_row(out_row, lhs_base, rhs_base);
-            }
-        });
-        Ok(())
-    };
     // SAFETY: the chunks partition the spare slice into whole rows and every
     // row is fully written.
-    let out =
-        unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
+    let out = unsafe {
+        build_vec_with::<U, Infallible, _>(numel, |spare| {
+            par_out_chunks(spare, chunk_len, &|start, out_chunk| {
+                walk(start / inner, out_chunk)
+            });
+            Ok(())
+        })
+    }
+    .unwrap_or_else(|e| match e {});
     Ok(out)
 }
 
@@ -859,6 +903,65 @@ mod tests {
                 expected.as_slice(),
                 "broadcast {ash:?} + {bsh:?}"
             );
+        }
+    }
+
+    /// The broadcast kernel coalesces the output's axes before walking it, and
+    /// walks rows by addition. Checked against an element-by-element reference
+    /// over shapes that coalesce -- a channel scale of a 4-D tensor, trailing
+    /// and leading broadcasts, broadcasts on both sides at once -- that keep
+    /// axes apart, that carry extents of one on either side or the output, and
+    /// that are large enough to split across the pool mid-row.
+    #[test]
+    fn broadcasting_matches_an_element_by_element_reference() {
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[8, 64, 8, 8], &[1, 64, 1, 1]),
+            (&[1, 64, 1, 1], &[8, 64, 8, 8]),
+            (&[6, 5, 4, 3], &[5, 1, 1]),
+            (&[6, 1, 4, 1], &[1, 5, 1, 3]),
+            (&[3, 1, 7], &[1, 4, 1]),
+            (&[1, 1, 9], &[4, 1, 1]),
+            (&[2, 1, 3, 1, 5], &[1, 1, 3, 4, 1]),
+            (&[7, 1], &[1, 1]),
+            (&[1], &[3, 1, 2]),
+            (&[40, 33, 1, 25], &[33, 17, 1]),
+            (&[3, 64, 700], &[64, 1]),
+        ];
+        for &(ash, bsh) in cases {
+            let rank = ash.len().max(bsh.len());
+            let pad = |shape: &[usize]| -> Vec<usize> {
+                let mut padded = vec![1; rank - shape.len()];
+                padded.extend_from_slice(shape);
+                padded
+            };
+            let (pa, pb) = (pad(ash), pad(bsh));
+            let out: Vec<usize> = pa.iter().zip(&pb).map(|(&x, &y)| x.max(y)).collect();
+            let (an, bn) = (ash.iter().product::<usize>(), bsh.iter().product::<usize>());
+            let a: Vec<f32> = (0..an).map(|x| (x % 1013) as f32 - 500.0).collect();
+            let b: Vec<f32> = (0..bn).map(|x| (x % 97) as f32 * 0.5 + 1.0).collect();
+            let got = sub(
+                &tensor_of::<f32>(a.clone(), ash.to_vec(), false),
+                &tensor_of::<f32>(b.clone(), bsh.to_vec(), false),
+            )
+            .unwrap();
+            assert_eq!(got.shape().dims(), &out[..]);
+            let got = got.data().as_f32_slice().unwrap();
+            let flat = |shape: &[usize], index: &[usize]| -> usize {
+                shape
+                    .iter()
+                    .zip(index)
+                    .fold(0, |acc, (&d, &i)| acc * d + if d == 1 { 0 } else { i })
+            };
+            let mut index = vec![0usize; rank];
+            for (position, value) in got.iter().enumerate() {
+                let mut rest = position;
+                for d in (0..rank).rev() {
+                    index[d] = rest % out[d];
+                    rest /= out[d];
+                }
+                let want = a[flat(&pa, &index)] - b[flat(&pb, &index)];
+                assert_eq!(*value, want, "{ash:?} - {bsh:?} at {position}");
+            }
         }
     }
 
