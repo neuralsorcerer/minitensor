@@ -1264,3 +1264,33 @@ def test_large_basic_selections_match_numpy(key, dtype):
     source = np.arange(512 * 384).reshape(512, 384) % 97
     source = source.astype(dtype) if dtype != "bool" else source % 3 == 0
     np.testing.assert_array_equal(mt.from_numpy(source)[key].numpy(), source[key])
+
+
+@pytest.mark.parametrize(
+    "shape, key",
+    [
+        ((64, 512), (slice(1, 60), slice(5, 500))),
+        ((96, 32), (slice(10, 90),)),
+        ((48, 40), (slice(None), 7)),
+        ((48, 40), (slice(None), slice(None, None, 3))),
+        ((48, 40), (slice(3, 45, 4), slice(1, None, 2))),
+        ((12, 20, 24), (slice(2, 11), slice(1, 19, 3), slice(4, 20))),
+        ((12, 20, 24), (4, slice(None), slice(2, 3))),
+        ((5, 6), (2, 3)),
+    ],
+    ids=repr,
+)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_basic_selection_sends_its_gradient_back_to_what_it_read(shape, key, dtype):
+    """The gradient lands on exactly the selected positions, zeros elsewhere."""
+
+    rng = np.random.default_rng(7)
+    source = rng.standard_normal(shape).astype(dtype)
+    x = mt.from_numpy(source)
+    x.requires_grad_(True)
+    picked = x[key]
+    weights = rng.standard_normal(source[key].shape).astype(dtype)
+    (picked * mt.from_numpy(weights)).sum().backward()
+    expected = np.zeros_like(source)
+    expected[key] = weights
+    np.testing.assert_array_equal(x.grad.numpy(), expected)

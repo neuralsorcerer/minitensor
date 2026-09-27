@@ -180,7 +180,7 @@ pub enum TensorIndex {
 /// a division and a modulo per dimension. For a 2000x256 row slice that is two
 /// million integer divisions to move two megabytes, and it made `x[a:b]` 14x
 /// slower than the `narrow` that produces exactly the same tensor.
-struct SelectionPlan {
+pub(crate) struct SelectionPlan {
     /// Elements per run.
     contig: usize,
     /// Source-index step between consecutive elements of a run: 1 when the
@@ -198,7 +198,7 @@ struct SelectionPlan {
 }
 
 impl SelectionPlan {
-    fn new(
+    pub(crate) fn new(
         shape_dims: &[usize],
         strides: &[usize],
         offset: usize,
@@ -311,15 +311,51 @@ impl SelectionPlan {
             } else {
                 dst.write_copy_of_slice(&input[src..src + self.contig]);
             }
-            for j in (0..coord.len()).rev() {
-                coord[j] += 1;
-                src += self.outer_steps[j];
-                if coord[j] < self.outer_dims[j] {
-                    break;
-                }
-                src -= coord[j] * self.outer_steps[j];
-                coord[j] = 0;
+            self.advance(&mut coord, &mut src);
+        }
+    }
+
+    /// Step the odometer to the next run, moving `src` with it.
+    #[inline]
+    fn advance(&self, coord: &mut [usize], src: &mut usize) {
+        for j in (0..coord.len()).rev() {
+            coord[j] += 1;
+            *src += self.outer_steps[j];
+            if coord[j] < self.outer_dims[j] {
+                break;
             }
+            *src -= coord[j] * self.outer_steps[j];
+            coord[j] = 0;
+        }
+    }
+
+    /// The selection's gradient: `grad` written back to the positions the
+    /// selection read, in `input`, which the caller has zeroed.
+    ///
+    /// A basic selection reads each position at most once -- every step is
+    /// positive and an integer index removes its dimension -- so the runs are
+    /// written rather than accumulated. Each run goes back as a block, where
+    /// the gradient used to recompute every element's position with a
+    /// division and a modulo per dimension.
+    pub(crate) fn scatter<T: Copy>(&self, grad: &[T], input: &mut [T]) {
+        if self.contig == 0 || self.runs == 0 {
+            return;
+        }
+        let (mut dst, mut coord) = self.seek(0);
+        for run in grad.chunks(self.contig) {
+            if self.inner_step != 1 {
+                let column = input[dst..].iter_mut().step_by(self.inner_step);
+                for (slot, &value) in column.zip(run) {
+                    *slot = value;
+                }
+            } else if run.len() < 8 {
+                for (slot, &value) in input[dst..dst + run.len()].iter_mut().zip(run) {
+                    *slot = value;
+                }
+            } else {
+                input[dst..dst + run.len()].copy_from_slice(run);
+            }
+            self.advance(&mut coord, &mut dst);
         }
     }
 
@@ -2028,14 +2064,8 @@ impl Tensor {
                 self.device,
                 self.requires_grad,
             );
-            return self.wrap_index_grad(
-                output,
-                offset,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            );
+            let plan = SelectionPlan::new(shape_dims, strides, offset, &[], &[], &[], &[]);
+            return self.wrap_index_grad(output, plan);
         }
 
         let out_shape = Shape::new(out_dims.clone());
@@ -2074,35 +2104,23 @@ impl Tensor {
             self.device,
             self.requires_grad,
         );
-        self.wrap_index_grad(output, offset, out_dims, orig_dim_map, starts, steps)
+        self.wrap_index_grad(output, plan)
     }
 
     /// Attach an [`IndexBackward`] gradient function to a freshly indexed tensor.
     ///
-    /// `out_dims` is empty for a scalar (fully integer-indexed) result. Gradient
-    /// tracking is only wired for floating-point, contiguous inputs, which is
-    /// always the case at the Python boundary where indexing is applied.
-    fn wrap_index_grad(
-        &self,
-        output: Tensor,
-        offset: usize,
-        out_dims: Vec<usize>,
-        orig_dim_map: Vec<usize>,
-        starts: Vec<usize>,
-        steps: Vec<usize>,
-    ) -> Result<Tensor> {
+    /// `plan` is the one the forward copied with, so the gradient goes back to
+    /// exactly the positions that were read. Gradient tracking is only wired
+    /// for floating-point, contiguous inputs, which is always the case at the
+    /// Python boundary where indexing is applied.
+    fn wrap_index_grad(&self, output: Tensor, plan: SelectionPlan) -> Result<Tensor> {
         if !self.requires_grad || !self.dtype.is_float() || !self.is_contiguous() {
             return Ok(output);
         }
         let grad_fn = Arc::new(crate::autograd::IndexBackward {
             input_id: self.tensor_id,
-            input_shape: self.shape.dims().to_vec(),
-            input_strides: self.strides.as_slice().to_vec(),
-            offset,
-            out_dims,
-            orig_dim_map,
-            starts,
-            steps,
+            input_shape: self.shape.clone(),
+            plan,
         });
         let output = autograd::with_grad_fn(output, grad_fn)?;
         Ok(output)

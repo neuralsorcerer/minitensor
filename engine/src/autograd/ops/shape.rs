@@ -9,7 +9,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::map::{PAR_CHUNK, par_out_chunks},
     ops::reduction,
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -364,28 +364,22 @@ impl GradientFunction for RepeatBackward {
 
 /// Gradient function for basic indexing (`tensor[...]` via [`Tensor::index`]).
 ///
-/// The forward gathers input element `offset + Σ_j (start_j + coord_j·step_j)·
-/// input_stride_{dim_j}` for each output coordinate; the backward scatters the
-/// gradient straight back to those positions. Assumes contiguous input storage,
-/// which always holds at the Python boundary where indexing is applied.
+/// The backward writes the gradient back through the forward's own copy plan,
+/// run by run, into zeros. Assumes contiguous input storage, which always holds
+/// at the Python boundary where indexing is applied.
 pub struct IndexBackward {
     pub input_id: TensorId,
-    pub input_shape: Vec<usize>,
-    pub input_strides: Vec<usize>,
-    pub offset: usize,
-    pub out_dims: Vec<usize>,
-    pub orig_dim_map: Vec<usize>,
-    pub starts: Vec<usize>,
-    pub steps: Vec<usize>,
+    pub input_shape: Shape,
+    pub(crate) plan: crate::tensor::SelectionPlan,
 }
 
 impl GradientFunction for IndexBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let numel: usize = self.input_shape.iter().product();
-        let mut grad_data =
-            TensorData::zeros_on_device(numel, grad_output.dtype(), grad_output.device());
-        let out_strides = Strides::from_shape(&Shape::new(self.out_dims.clone()));
-        let out_strides = out_strides.as_slice();
+        let mut grad_data = TensorData::zeros_on_device(
+            self.input_shape.numel(),
+            grad_output.dtype(),
+            grad_output.device(),
+        );
 
         macro_rules! scatter {
             ($slice:ident, $mut_slice:ident) => {{
@@ -395,22 +389,7 @@ impl GradientFunction for IndexBackward {
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for index backward")
                 })?;
-                if self.out_dims.is_empty() {
-                    // Scalar result: a single collapsed element.
-                    gi[self.offset] += go[0];
-                } else {
-                    for (idx, &g) in go.iter().enumerate() {
-                        let mut rem = idx;
-                        let mut src = self.offset;
-                        for (j, &ostride) in out_strides.iter().enumerate() {
-                            let coord = rem / ostride;
-                            rem %= ostride;
-                            src += (self.starts[j] + coord * self.steps[j])
-                                * self.input_strides[self.orig_dim_map[j]];
-                        }
-                        gi[src] += g;
-                    }
-                }
+                self.plan.scatter(go, gi);
             }};
         }
 
@@ -426,7 +405,7 @@ impl GradientFunction for IndexBackward {
 
         let grad_input = Tensor::new(
             Arc::new(grad_data),
-            Shape::new(self.input_shape.clone()),
+            self.input_shape.clone(),
             grad_output.dtype(),
             grad_output.device(),
             false,
