@@ -432,6 +432,35 @@ def test_scalar_rpow_tensor_grad():
     assert np.allclose(exp.grad.numpy(), expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("exponent", [1.0, 2.0, 3.0, 2.5])
+def test_a_scalar_power_differentiates_to_the_lower_power(exponent, dtype):
+    """`e * x**(e-1)` element for element, special values included. The small
+    integer powers are exact products: `2x` for a square and `3 * (x * x)`,
+    the correctly rounded square, for a cube."""
+
+    values = np.array(
+        [0.0, -0.0, 1.5, -2.25, 1e-3, 7.0, np.inf, -np.inf, np.nan], dtype=dtype
+    )
+    base = mt.from_numpy(values)
+    base.requires_grad_(True)
+    (base**exponent).sum().backward()
+    e = values.dtype.type(exponent)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        expected = {
+            1.0: np.full_like(values, e),
+            2.0: e * values,
+            3.0: e * (values * values),
+        }.get(exponent)
+        if expected is None:
+            expected = e * np.power(values, e - 1)
+    got = base.grad.numpy()
+    if exponent == 2.5:
+        np.testing.assert_allclose(got, expected, rtol=1e-6)
+    else:
+        np.testing.assert_array_equal(got, expected)
+
+
 def test_tensor_pow_scalar_base_requires_grad():
     base = Tensor(2.0, dtype="float32", requires_grad=True)
     exp = Tensor([1.0, 2.0, -0.5], dtype="float32")

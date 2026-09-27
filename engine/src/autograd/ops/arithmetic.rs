@@ -1162,6 +1162,30 @@ impl GradientFunction for ClampBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+/// `e * b^(e-1) * g` for one exponent `e` shared by every base.
+///
+/// The small integer powers fold the way the forward `pow` folds them, with
+/// no `libm` call per element: `x**2` differentiates to `2 * b`, where
+/// `powf(b, 1)` is `b` exactly, and `x**3` to `3 * b * b`, the correctly
+/// rounded square, which `powf(b, 2)` misses by an ulp on about one input in
+/// a thousand.
+fn scalar_exponent_base_grad<T>(base: &[T], grad: &[T], e: T) -> Vec<T>
+where
+    T: num_traits::Float + Send + Sync,
+{
+    let one = T::one();
+    let power = e - one;
+    if power == one {
+        binary_map(base, grad, move |b: T, g: T| e * b * g)
+    } else if power == T::zero() {
+        binary_map(base, grad, move |_: T, g: T| e * g)
+    } else if power == one + one {
+        binary_map(base, grad, move |b: T, g: T| e * (b * b) * g)
+    } else {
+        binary_map(base, grad, move |b: T, g: T| e * b.powf(power) * g)
+    }
+}
+
 /// Gradient function for power operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowBroadcast {
@@ -1218,10 +1242,7 @@ impl GradientFunction for PowBackward {
                             vec![accum]
                         }
                         PowBroadcast::ExponentScalar => {
-                            let exp_val = exp_slice[0];
-                            binary_map(base_slice, grad_out, move |b: f32, g: f32| {
-                                exp_val * b.powf(exp_val - 1.0) * g
-                            })
+                            scalar_exponent_base_grad(base_slice, grad_out, exp_slice[0])
                         }
                     };
                     let grad_data =
@@ -1309,10 +1330,7 @@ impl GradientFunction for PowBackward {
                             vec![accum]
                         }
                         PowBroadcast::ExponentScalar => {
-                            let exp_val = exp_slice[0];
-                            binary_map(base_slice, grad_out, move |b: f64, g: f64| {
-                                exp_val * b.powf(exp_val - 1.0) * g
-                            })
+                            scalar_exponent_base_grad(base_slice, grad_out, exp_slice[0])
                         }
                     };
                     let grad_data =
