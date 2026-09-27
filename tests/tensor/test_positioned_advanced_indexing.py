@@ -175,6 +175,28 @@ def test_the_selection_matches_index_select(x):
     np.testing.assert_array_equal(t[:, idx].numpy(), mt.index_select(t, 1, idx).numpy())
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        (slice(None), [0, 2]),
+        (Ellipsis, [3, 1]),
+        (slice(None), None, [1]),
+        (slice(0, 2), [0, 2]),
+    ],
+    ids=["full", "ellipsis", "newaxis", "narrowed"],
+)
+def test_a_selection_is_its_own_tensor(x, key):
+    """Where the rest of the subscript takes every position, the gather reads
+    the tensor itself rather than a copy of it -- and still hands back a
+    tensor of its own, so writing into it leaves the source alone."""
+
+    t = mt.from_numpy(x.copy())
+    picked = t[key]
+    same(picked, x[key])
+    picked += 100.0
+    np.testing.assert_array_equal(t.numpy(), x)
+
+
 def test_the_same_forms_can_be_written_to(x):
     """Reading `t[:, idx]` and not being able to write it is a half-feature."""
 

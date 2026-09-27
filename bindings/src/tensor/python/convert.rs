@@ -888,12 +888,20 @@ fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<u
     macro_rules! read {
         ($ty:ty) => {
             if let Ok(array) = item.cast::<PyArrayDyn<$ty>>() {
-                let readonly = array.readonly();
-                let shape = readonly.shape().to_vec();
+                let shape = array.shape().to_vec();
+                // SAFETY: read without rust-numpy's dynamic borrow, for the
+                // reason `convert_numpy_to_tensor` gives: the bindings never
+                // release the GIL, and nothing here calls back into Python.
                 let values: Vec<i64> = if array.is_c_contiguous() {
-                    readonly.as_slice()?.iter().map(|&v| v as i64).collect()
+                    unsafe { array.as_slice() }?
+                        .iter()
+                        .map(|&v| v as i64)
+                        .collect()
                 } else {
-                    readonly.as_array().iter().map(|&v| v as i64).collect()
+                    unsafe { array.as_array() }
+                        .iter()
+                        .map(|&v| v as i64)
+                        .collect()
                 };
                 return Ok(Some((values, shape)));
             }
@@ -1294,7 +1302,18 @@ pub(crate) fn try_single_array_index(
 
     let basic_key = basic_part(key, &items, found.position)?;
     let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
-    let mut base = reference.index(&indices).map_err(_convert_error)?;
+    // The basic part is read only by the gather below, so where it selects
+    // everything it is the tensor itself, shared rather than copied: `t[:, i]`
+    // copied all of `t` first, 2.0ms for a 2048x2048 float32 matrix around a
+    // 19us gather.
+    let selects_all = indices.iter().zip(dims).all(|(index, &dim)| {
+        matches!(index, TensorIndex::Slice { start: 0, end, step: 1 } if *end == dim)
+    });
+    let mut base = if selects_all {
+        reference.clone()
+    } else {
+        reference.index(&indices).map_err(_convert_error)?
+    };
     for &pos in &newaxis_positions {
         base = base.unsqueeze(pos as isize).map_err(_convert_error)?;
     }
