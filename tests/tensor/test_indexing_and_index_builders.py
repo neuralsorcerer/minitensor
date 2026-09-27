@@ -53,6 +53,30 @@ def test_take_counts_negative_positions_from_the_end():
     )
 
 
+def test_negative_positions_read_and_route_gradients_like_positive_ones():
+    """`take` and `take_along_dim` read first and bring negative positions
+    round only when the kernel refuses them. That retry must give the answer
+    and the gradient the positions they stand for, and an index still out of
+    range after wrapping must be refused, not read."""
+
+    values = np.arange(5.0)
+    source = _t(values, requires_grad=True)
+    taken = mt.take(source, _i([-1, 0, -1, 2]))
+    taken.sum().backward()
+    np.testing.assert_array_equal(taken.numpy(), [4.0, 0.0, 4.0, 2.0])
+    np.testing.assert_array_equal(source.grad.numpy(), [1.0, 0.0, 1.0, 0.0, 2.0])
+
+    grid = _t(np.arange(6.0).reshape(2, 3), requires_grad=True)
+    along = mt.take_along_dim(grid, _i([[-1], [0]]), 1)
+    along.sum().backward()
+    np.testing.assert_array_equal(along.numpy().ravel(), [2.0, 3.0])
+    np.testing.assert_array_equal(grid.grad.numpy(), [[0, 0, 1], [1, 0, 0]])
+
+    for index in ([5], [-6], [1, 5, -1]):
+        with pytest.raises(IndexError):
+            mt.take(_t(values), _i(index))
+
+
 def test_take_keeps_the_index_s_shape_not_the_input_s():
     got = mt.take(_t(BASE), _i([[0, 1, 2]]))
     assert tuple(got.shape) == (1, 3)
