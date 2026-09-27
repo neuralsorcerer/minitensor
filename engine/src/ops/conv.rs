@@ -42,6 +42,12 @@ pub(crate) trait ConvScalar: Copy + Default + Send + Sync + std::ops::AddAssign 
     /// # Safety
     /// As [`Self::gemm`], with `a` read as `k * m` elements.
     unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
+    /// Row-major `C[m, n] = A[m, k] @ B[n, k]^T`, with `b` holding the logical
+    /// `(k, n)` operand as `(n, k)`.
+    ///
+    /// # Safety
+    /// As [`Self::gemm`], with `b` read as `n * k` elements.
+    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
 }
 
 impl ConvScalar for f32 {
@@ -62,6 +68,10 @@ impl ConvScalar for f32 {
     unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_tn_f32(m, k, n, a, b, c) }
     }
+    #[inline]
+    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_nt_f32(m, k, n, a, b, c) }
+    }
 }
 
 impl ConvScalar for f64 {
@@ -81,6 +91,10 @@ impl ConvScalar for f64 {
     #[inline]
     unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_tn_f64(m, k, n, a, b, c) }
+    }
+    #[inline]
+    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_nt_f64(m, k, n, a, b, c) }
     }
 }
 
@@ -875,8 +889,8 @@ pub(crate) fn scatter_columns<T: ConvScalar>(
     destination
 }
 
-/// `source @ im2col(image)` -- the gradient a kernel accumulates from a signal
-/// and the grid it was gathered from.
+/// `source @ im2col(image)^T` -- the gradient a kernel accumulates from a
+/// signal and the grid it was gathered from.
 ///
 /// The other half of the pair: a convolution's weight gradient, and a
 /// transposed convolution's, which is the same sum with the two operands
@@ -889,46 +903,43 @@ pub(crate) fn column_weight_gradient<T: ConvScalar>(
     let ConvGeometry {
         batch_size: batch,
         in_channels,
-        input_height: in_h,
-        input_width: in_w,
         out_channels,
         kernel_h,
         kernel_w,
         output_height: out_h,
         output_width: out_w,
-        stride,
-        padding,
-        dilation,
         groups,
+        ..
     } = *geometry;
 
     let ohw = out_h * out_w;
     let kh_kw = kernel_h * kernel_w;
-    let group_in = in_channels / groups;
+    let k_dim = in_channels * kh_kw;
     let group_out = out_channels / groups;
-    let group_k = group_in * kh_kw;
+    let group_k = (in_channels / groups) * kh_kw;
 
     let mut gradient = vec![T::default(); out_channels * group_k];
     if ohw == 0 || batch == 0 {
         return gradient;
     }
 
-    // This lowering is transposed relative to the forward's -- one row per
-    // output position -- so a group's `k` values are a column-block rather than
-    // a row-block and cannot be handed to a GEMM by pointer offset. It is built
-    // per group, and a block of images at a time: `[block*OH*OW, group_k]`
-    // rather than `[N*OH*OW, group_k]`, which for a 32x3x224x224 stem is a few
-    // megabytes of scratch instead of 944.
+    // The image is lowered exactly as the forward lowers it, `[K, positions]`,
+    // and the multiply reads that transposed. This used to build the
+    // transpose itself, one row per output position with a bounds test on
+    // every tap -- a scattered gather that cost more than the multiply, and
+    // was repeated for every group. Here a group's `k` values are a row-block,
+    // so one lowering serves all of them by pointer offset.
     //
-    // A block rather than one image because the multiply is what this costs:
-    // a first layer's weight gradient is `[32, OH*OW] @ [OH*OW, 27]`, and 64 of
-    // those run at a fraction of the rate one `[32, 64*OH*OW] @ [.., 27]` does.
+    // A block of images at a time, so the scratch stays bounded, and a block
+    // rather than one image because the multiply is what this costs: a first
+    // layer's weight gradient is `[32, OH*OW] @ [OH*OW, 27]`, and 64 of those
+    // run at a fraction of the rate one `[32, 64*OH*OW] @ [.., 27]` does.
     //
     // The sum over blocks runs in image order, so the answer does not move with
     // the thread count.
     let span_image = out_channels * ohw;
-    let images = images_per_block::<T>(batch, ohw * group_k, span_image);
-    let mut columns = vec![T::default(); images * ohw * group_k];
+    let images = images_per_block::<T>(batch, k_dim * ohw, span_image);
+    let mut columns = vec![T::default(); images * ohw * k_dim];
     let mut signal = vec![T::default(); images * span_image];
     let mut partial = vec![T::default(); group_out * group_k];
 
@@ -938,47 +949,21 @@ pub(crate) fn column_weight_gradient<T: ConvScalar>(
         let span = (last - first) * ohw;
         let block = &mut signal[..out_channels * span];
         block_channel_major::<T>(source, block, first, last, out_channels, ohw);
+        lower_positions::<T>(image, &mut columns, first * ohw, last * ohw, geometry);
 
         for g in 0..groups {
-            // `k` is walked as nested `(ic, ky, kx)` loops rather than
-            // decomposed: three divisions per element, over millions of them.
-            // The buffer is reused between blocks, so the taps that fall in the
-            // padding have to be cleared rather than left as the last block's.
-            par_out_chunks(&mut columns[..span * group_k], group_k, &|start, row| {
-                row.fill(T::default());
-                let position = start / group_k;
-                let n = first + position / ohw;
-                let p = position % ohw;
-                let oh = p / out_w;
-                let ow = p % out_w;
-                let mut k = 0usize;
-                for ic in g * group_in..(g + 1) * group_in {
-                    let grid = (n * in_channels + ic) * in_h * in_w;
-                    for ky in 0..kernel_h {
-                        let ih = oh * stride.0 + ky * dilation.0;
-                        let row_ok = ih >= padding.0 && ih < in_h + padding.0;
-                        let ih = ih.wrapping_sub(padding.0);
-                        for kx in 0..kernel_w {
-                            let iw = ow * stride.1 + kx * dilation.1;
-                            if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
-                                row[k] = image[grid + ih * in_w + (iw - padding.1)];
-                            }
-                            k += 1;
-                        }
-                    }
-                }
-            });
             // SAFETY: `block` rows `[g*group_out, ..)` form a
-            // `[group_out, span]` block, `columns` is `[span, group_k]` in full
-            // and `partial` is `[group_out, group_k]`. All contiguous
-            // row-major.
+            // `[group_out, span]` block and `columns` rows `[g*group_k, ..)` a
+            // `[group_k, span]` one, read transposed; `partial` is
+            // `[group_out, group_k]`. Each is a row-block of a contiguous
+            // row-major buffer at least `groups` times its size.
             unsafe {
-                T::gemm(
+                T::gemm_nt(
                     group_out,
                     span,
                     group_k,
                     block.as_ptr().add(g * group_out * span),
-                    columns.as_ptr(),
+                    columns.as_ptr().add(g * group_k * span),
                     partial.as_mut_ptr(),
                 );
             }
@@ -1015,6 +1000,146 @@ pub(crate) fn channel_sums<T: ConvScalar>(
     sums
 }
 
+/// Lower output positions `[first, last)` into `cols`, one row per
+/// kernel-input index `k` -- the `[K, last - first]` matrix a convolution's
+/// GEMM contracts, `K = C_in * kH * kW` running channel-major.
+///
+/// In `geometry` the `input_*` fields describe the grid being read and the
+/// `output_*` fields the positions. Every element of `cols` is written.
+fn lower_positions<T: ConvScalar>(
+    input_data: &[T],
+    cols: &mut [T],
+    first: usize,
+    last: usize,
+    geometry: &ConvGeometry,
+) {
+    let ConvGeometry {
+        in_channels,
+        input_height,
+        input_width,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+        dilation,
+        ..
+    } = *geometry;
+    let width = last - first;
+    let kh_kw = kernel_h * kernel_w;
+    let ohw = output_height * output_width;
+    // Whole rows whenever the block starts and ends on row boundaries: the
+    // in-bounds column range is then the same for all of them and each row
+    // lands at a fixed offset.
+    let row_aligned =
+        output_width > 0 && first.is_multiple_of(output_width) && last.is_multiple_of(output_width);
+    if width == 0 {
+        return;
+    }
+    // Build the block row by row (one row per kernel-input index `k`),
+    // so each row is written contiguously.
+    //
+    // The output position is walked rather than recovered from a flat
+    // counter: decomposing the counter needed four integer divisions
+    // per element -- by `ohw` and `output_width`, both runtime values,
+    // so they stay real divisions -- across 4.7M elements for a
+    // 16x32x32x32 conv.
+    //
+    // The in-bounds range of output positions is computed once per row
+    // instead of testing each element: padding only ever clips a prefix
+    // and a suffix. The buffer is reused between blocks, so those have
+    // to be cleared rather than merely left alone.
+    par_out_chunks(
+        &mut cols[..in_channels * kh_kw * width],
+        width,
+        &|start, row| {
+            row.fill(T::default());
+            let k = start / width;
+            let ic = k / kh_kw;
+            let rem = k % kh_kw;
+            let ky = rem / kernel_w;
+            let kx = rem % kernel_w;
+            // The tap's offset into the input is `ky * dilation`, so the
+            // in-bounds range is the undilated one evaluated at that offset
+            // -- `in_bounds_range` never needed to know about dilation.
+            let ky_off = ky * dilation.0;
+            let kx_off = kx * dilation.1;
+            let (oh_lo, oh_hi) =
+                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+            let (ow_lo, ow_hi) =
+                in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+            if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                return;
+            }
+            // Dilation moves where a run starts, not how it is spaced:
+            // consecutive output columns are still consecutive input
+            // columns when the stride is 1, so the contiguous copy
+            // survives in both walks below.
+            let mut copy = |n: usize, oh: usize, lo: usize, hi: usize, dst: usize| {
+                let span = hi - lo;
+                let ih = oh * stride.0 + ky_off - padding.0;
+                let src = ((n * in_channels + ic) * input_height + ih) * input_width;
+                if stride.1 == 1 {
+                    let s = src + lo + kx_off - padding.1;
+                    row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
+                } else {
+                    for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
+                        let iw = (lo + i) * stride.1 + kx_off - padding.1;
+                        *slot = input_data[src + iw];
+                    }
+                }
+            };
+
+            if row_aligned {
+                // Whole rows, which is every shape one row fits in. The
+                // in-bounds column range is then the same for all of them
+                // and each row lands at a fixed offset, so neither is
+                // recomputed -- this is the walk the row-blocked version
+                // did, kept because it is the common one.
+                for position in (first..last).step_by(output_width) {
+                    let row_index = position / output_width;
+                    let oh = row_index % output_height;
+                    if oh < oh_lo || oh >= oh_hi {
+                        continue;
+                    }
+                    let n = row_index / output_height;
+                    copy(n, oh, ow_lo, ow_hi, (position - first) + ow_lo);
+                }
+            } else {
+                // A row wider than the whole budget, so a block starts and
+                // ends part way along one. The position is carried forward
+                // rather than recovered from the counter: three divisions
+                // for the block instead of two for every row.
+                let mut position = first;
+                let mut n = first / ohw;
+                let mut oh = (first % ohw) / output_width;
+                let mut ow = (first % ohw) % output_width;
+                while position < last {
+                    let take = (output_width - ow).min(last - position);
+                    if oh >= oh_lo && oh < oh_hi {
+                        let lo = ow.max(ow_lo);
+                        let hi = (ow + take).min(ow_hi);
+                        if lo < hi {
+                            copy(n, oh, lo, hi, (position - first) + (lo - ow));
+                        }
+                    }
+                    position += take;
+                    ow += take;
+                    if ow == output_width {
+                        ow = 0;
+                        oh += 1;
+                        if oh == output_height {
+                            oh = 0;
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        },
+    );
+}
+
 /// Scratch the lowering may hold at once, in bytes.
 ///
 /// Large enough that the GEMM sees a few thousand columns, which is where it
@@ -1040,17 +1165,13 @@ fn conv2d_forward<T: ConvScalar>(
     let ConvGeometry {
         batch_size,
         in_channels,
-        input_height,
-        input_width,
         out_channels,
         kernel_h,
         kernel_w,
         output_height,
         output_width,
-        stride,
-        padding,
-        dilation,
         groups,
+        ..
     } = geom;
 
     let input_data = T::slice(input.data())
@@ -1117,103 +1238,7 @@ fn conv2d_forward<T: ConvScalar>(
             let last = (first + block_n).min(positions_total);
             let width = last - first;
 
-            // Build the block row by row (one row per kernel-input index `k`),
-            // so each row is written contiguously.
-            //
-            // The output position is walked rather than recovered from a flat
-            // counter: decomposing the counter needed four integer divisions
-            // per element -- by `ohw` and `output_width`, both runtime values,
-            // so they stay real divisions -- across 4.7M elements for a
-            // 16x32x32x32 conv.
-            //
-            // The in-bounds range of output positions is computed once per row
-            // instead of testing each element: padding only ever clips a prefix
-            // and a suffix. The buffer is reused between blocks, so those have
-            // to be cleared rather than merely left alone.
-            par_out_chunks(&mut cols[..k_dim * width], width, &|start, row| {
-                row.fill(T::default());
-                let k = start / width;
-                let ic = k / kh_kw;
-                let rem = k % kh_kw;
-                let ky = rem / kernel_w;
-                let kx = rem % kernel_w;
-                // The tap's offset into the input is `ky * dilation`, so the
-                // in-bounds range is the undilated one evaluated at that offset
-                // -- `in_bounds_range` never needed to know about dilation.
-                let ky_off = ky * dilation.0;
-                let kx_off = kx * dilation.1;
-                let (oh_lo, oh_hi) =
-                    in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-                let (ow_lo, ow_hi) =
-                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-                if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                    return;
-                }
-                // Dilation moves where a run starts, not how it is spaced:
-                // consecutive output columns are still consecutive input
-                // columns when the stride is 1, so the contiguous copy
-                // survives in both walks below.
-                let mut copy = |n: usize, oh: usize, lo: usize, hi: usize, dst: usize| {
-                    let span = hi - lo;
-                    let ih = oh * stride.0 + ky_off - padding.0;
-                    let src = ((n * in_channels + ic) * input_height + ih) * input_width;
-                    if stride.1 == 1 {
-                        let s = src + lo + kx_off - padding.1;
-                        row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
-                    } else {
-                        for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
-                            let iw = (lo + i) * stride.1 + kx_off - padding.1;
-                            *slot = input_data[src + iw];
-                        }
-                    }
-                };
-
-                if row_aligned {
-                    // Whole rows, which is every shape one row fits in. The
-                    // in-bounds column range is then the same for all of them
-                    // and each row lands at a fixed offset, so neither is
-                    // recomputed -- this is the walk the row-blocked version
-                    // did, kept because it is the common one.
-                    for position in (first..last).step_by(output_width) {
-                        let row_index = position / output_width;
-                        let oh = row_index % output_height;
-                        if oh < oh_lo || oh >= oh_hi {
-                            continue;
-                        }
-                        let n = row_index / output_height;
-                        copy(n, oh, ow_lo, ow_hi, (position - first) + ow_lo);
-                    }
-                } else {
-                    // A row wider than the whole budget, so a block starts and
-                    // ends part way along one. The position is carried forward
-                    // rather than recovered from the counter: three divisions
-                    // for the block instead of two for every row.
-                    let mut position = first;
-                    let mut n = first / ohw;
-                    let mut oh = (first % ohw) / output_width;
-                    let mut ow = (first % ohw) % output_width;
-                    while position < last {
-                        let take = (output_width - ow).min(last - position);
-                        if oh >= oh_lo && oh < oh_hi {
-                            let lo = ow.max(ow_lo);
-                            let hi = (ow + take).min(ow_hi);
-                            if lo < hi {
-                                copy(n, oh, lo, hi, (position - first) + (lo - ow));
-                            }
-                        }
-                        position += take;
-                        ow += take;
-                        if ow == output_width {
-                            ow = 0;
-                            oh += 1;
-                            if oh == output_height {
-                                oh = 0;
-                                n += 1;
-                            }
-                        }
-                    }
-                }
-            });
+            lower_positions::<T>(input_data, &mut cols, first, last, &geom);
 
             for g in 0..groups {
                 // SAFETY: within group `g`, `weight_data` offset by
