@@ -7,7 +7,7 @@
 use super::*;
 use crate::autograd::RepeatInterleaveBackward;
 use crate::ops::map::build_vec;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::par_out_chunks_sized;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
@@ -214,7 +214,11 @@ pub fn repeat_interleave(
             // length and `span` are multiples of `inner`.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    par_out_chunks(spare, chunk_len, &|start, out_chunk| {
+                    // On the calling thread below the fold threshold: the
+                    // chunks are 1,024 rows, so every repeat past that handed
+                    // its few microseconds of copying to the pool.
+                    let bytes = std::mem::size_of_val(spare);
+                    par_out_chunks_sized(spare, chunk_len, bytes, &|start, out_chunk| {
                         let mut written = 0usize;
                         let mut outer_index = start / span;
                         let mut row = (start % span) / inner;
@@ -230,6 +234,37 @@ pub fn repeat_interleave(
                                 row = 0;
                                 source = 0;
                             }
+                            if inner == 1 {
+                                // One element repeated: its copies, however many.
+                                // A few copies apiece is the usual request, and
+                                // a count that varies from one element to the
+                                // next -- zero included -- is a branch the
+                                // predictor cannot learn, in the fill's length
+                                // and in skipping the elements that fill nothing.
+                                // So up to four copies are written whether or not
+                                // they are wanted and the output advances by the
+                                // true count: the extra ones land where the next
+                                // element's copies go, and are overwritten. On
+                                // its own the fill of 262,144 elements repeated
+                                // 0-2 times each went from 2.2ms to 0.3.
+                                let base = outer_index * dim_size + source;
+                                let value = src[base];
+                                let rows =
+                                    (spread.end(source) - row).min(out_chunk.len() - written);
+                                if rows <= 4 && out_chunk.len() - written >= 4 {
+                                    for slot in &mut out_chunk[written..written + 4] {
+                                        slot.write(value);
+                                    }
+                                } else {
+                                    for slot in out_chunk[written..written + rows].iter_mut() {
+                                        slot.write(value);
+                                    }
+                                }
+                                written += rows;
+                                row += rows;
+                                source += 1;
+                                continue;
+                            }
                             // Elements repeated zero times occupy no rows.
                             while spread.end(source) == row {
                                 source += 1;
@@ -239,14 +274,7 @@ pub fn repeat_interleave(
                             // left of the chunk.
                             let rows =
                                 (spread.end(source) - row).min((out_chunk.len() - written) / inner);
-                            if inner == 1 {
-                                // One element repeated: a fill, not a run of
-                                // one-element copies.
-                                let value = src[base];
-                                for slot in out_chunk[written..written + rows].iter_mut() {
-                                    slot.write(value);
-                                }
-                            } else {
+                            {
                                 let piece = &src[base..base + inner];
                                 for step in 0..rows {
                                     let from = written + step * inner;

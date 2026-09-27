@@ -351,6 +351,20 @@ impl PyTensor {
             return Ok(Self::from_tensor(result));
         }
 
+        // A tensor before a sequence: a tensor is one, so extracting it as a
+        // `Vec` succeeds -- one element at a time, each a tensor of its own
+        // asked for its integer, which took longer than the repeat itself.
+        if let Ok(py_tensor) = repeats.extract::<PyRef<PyTensor>>() {
+            let result = engine::ops::shape_ops::repeat_interleave(
+                &self.inner,
+                RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
+                dim,
+                output_size,
+            )
+            .map_err(_convert_error)?;
+            return Ok(Self::from_tensor(result));
+        }
+
         if let Ok(seq) = repeats.extract::<Vec<i64>>() {
             let mut converted = Vec::with_capacity(seq.len());
             for value in seq {
@@ -367,17 +381,6 @@ impl PyTensor {
             let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Slice(&converted),
-                dim,
-                output_size,
-            )
-            .map_err(_convert_error)?;
-            return Ok(Self::from_tensor(result));
-        }
-
-        if let Ok(py_tensor) = repeats.extract::<PyRef<PyTensor>>() {
-            let result = engine::ops::shape_ops::repeat_interleave(
-                &self.inner,
-                RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
                 dim,
                 output_size,
             )

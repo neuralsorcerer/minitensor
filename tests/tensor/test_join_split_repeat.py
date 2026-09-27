@@ -323,6 +323,33 @@ def test_repeat_interleave_tensor_repeats():
     assert np.array_equal(r.numpy(), np_r)
 
 
+@pytest.mark.parametrize("dtype", ["int32", "int64", "bool"])
+@pytest.mark.parametrize(
+    "shape,dim", [((7,), 0), ((5, 3), 0), ((5, 3), 1), ((2, 3, 4), 2), ((300_007,), 0)]
+)
+def test_repeat_interleave_tensor_counts_match_numpy(dtype, shape, dim):
+    """A tensor of counts is read directly rather than as a Python sequence,
+    and a count of one, two or none varies from element to element -- the
+    case the fill handles without branching on the count. Both have to give
+    NumPy's answer, on either side of the size at which the copy is split."""
+
+    rng = np.random.default_rng(len(shape) * 10 + dim)
+    values = rng.standard_normal(shape)
+    high = 2 if dtype == "bool" else 3
+    counts = rng.integers(0, high, size=shape[dim]).astype(dtype)
+    got = mt.repeat_interleave(mt.from_numpy(values), mt.from_numpy(counts), dim=dim)
+    np.testing.assert_array_equal(
+        got.numpy(), np.repeat(values, counts.astype(np.int64), axis=dim)
+    )
+
+
+def test_repeat_interleave_a_one_element_tensor_repeats_every_element():
+    values = np.arange(5.0)
+    for counts in (np.array([2]), np.array([2], dtype=np.int32)):
+        got = mt.repeat_interleave(mt.from_numpy(values), mt.from_numpy(counts))
+        np.testing.assert_array_equal(got.numpy(), np.repeat(values, 2))
+
+
 def test_repeat_interleave_output_size_validation():
     t = mt.arange(0, 4)
     repeats = mt.Tensor([1, 0, 2, 1], dtype="int64")

@@ -1552,6 +1552,13 @@ pub(crate) fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> R
         ));
     }
 
+    // One count for the whole axis, as a one-element list of counts is: the
+    // binding reads a tensor directly now rather than as a Python sequence,
+    // and the two spellings must mean the same thing.
+    if tensor.numel() == 1 && dim_size != 1 {
+        let single = collect_repeats_from_tensor(tensor, 1)?;
+        return Ok(vec![single[0]; dim_size]);
+    }
     if tensor.numel() != dim_size {
         return Err(MinitensorError::invalid_operation(
             "repeat_interleave: repeats tensor must have the same number of elements as the selected dimension"
@@ -1560,6 +1567,14 @@ pub(crate) fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> R
     }
 
     match tensor.dtype() {
+        DataType::Bool => {
+            let slice = tensor.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave: repeats tensor must be contiguous".to_string(),
+                )
+            })?;
+            Ok(slice.iter().map(|&value| usize::from(value)).collect())
+        }
         DataType::Int32 => {
             let slice = tensor.data().as_i32_slice().ok_or_else(|| {
                 MinitensorError::invalid_operation(
