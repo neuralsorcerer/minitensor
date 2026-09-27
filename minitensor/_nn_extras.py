@@ -34,6 +34,7 @@ import operator as _operator
 import numpy as _np
 
 from . import _core as _C
+from ._derived import _require_float
 from ._sampling import bernoulli as _bernoulli
 from ._shape import (
     _atleast_tensor,
@@ -951,16 +952,17 @@ def _affine(
     return normalized
 
 
-def _normalized_groups(
-    op: str, tensor: Tensor, groups: int, eps: float
-) -> tuple[Tensor, Tensor, Tensor]:
-    """`tensor` with each group centred and scaled, and the statistics used.
+def _normalized_groups(op: str, tensor: Tensor, groups: int, eps: float) -> Tensor:
+    """`tensor` with each group centred and scaled.
 
     The groups are `(batch, groups, everything else)`, so one reshape puts every
-    element a group owns on a single axis and the mean and variance are one
-    reduction each. Which elements a group owns -- some channels and all of
-    their positions -- is the whole difference between this, `layer_norm` and
-    `batch_norm`; the arithmetic afterwards is the same in all three.
+    element a group owns on a single axis. Which elements a group owns -- some
+    channels and all of their positions -- is the whole difference between
+    this, `layer_norm` and `batch_norm`, and normalizing that axis is
+    `layer_norm`'s own kernel: the statistics and the scaling in one pass over
+    each row, and a backward of its own. Composed from `mean`, `var`, a
+    subtraction and a division it was five passes over the data, 489us for a
+    (16, 32, 16, 16) float32 input where NumPy's formula takes 262.
     """
 
     sizes = [int(size) for size in tensor.shape]
@@ -971,12 +973,8 @@ def _normalized_groups(
             f"of groups ({groups})"
         )
     per_group = (channels // groups) * _math.prod(sizes[2:])
-    grouped = tensor.reshape(batch, groups, per_group)
-
-    mean = _F.mean(grouped, -1, True)
-    variance = _F.var(grouped, -1, False, True)
-    centred = (grouped - mean) / _F.sqrt(variance + float(eps))
-    return centred.reshape(sizes), mean, variance
+    grouped = _require_float(tensor, op).reshape(batch, groups, per_group)
+    return _F.layer_norm(grouped, [per_group], None, None, float(eps)).reshape(sizes)
 
 
 def group_norm(
@@ -1007,7 +1005,7 @@ def group_norm(
     groups = _operator.index(num_groups)
     if groups < 1:
         raise ValueError(f"group_norm requires at least one group, got {num_groups}")
-    normalized, _mean, _variance = _normalized_groups("group_norm", tensor, groups, eps)
+    normalized = _normalized_groups("group_norm", tensor, groups, eps)
     return _affine(normalized, weight, bias, "group_norm")
 
 
@@ -1057,9 +1055,7 @@ def instance_norm(
         normalized = (tensor - mean) / _F.sqrt(variance + float(eps))
         return _affine(normalized, weight, bias, "instance_norm")
 
-    normalized, _mean, _variance = _normalized_groups(
-        "instance_norm", tensor, channels, eps
-    )
+    normalized = _normalized_groups("instance_norm", tensor, channels, eps)
     if running_mean is not None or running_var is not None:
         _update_running(
             tensor.reshape(sizes[0], channels, positions),
