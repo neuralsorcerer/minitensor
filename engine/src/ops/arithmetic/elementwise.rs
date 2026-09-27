@@ -716,6 +716,113 @@ pub fn fmod(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     modulus(lhs, rhs, ModulusConvention::Truncated)
 }
 
+/// The first difference along `dim`: `x[.., i + 1, ..] - x[.., i, ..]`, one
+/// shorter along that axis. No gradient is recorded -- a caller that needs
+/// one subtracts two narrowed views, which the tape can follow.
+///
+/// Along an axis every output block is the input block shifted by one row
+/// minus the same block unshifted, so each is a single element-wise
+/// subtraction of two ranges of one buffer: no copy of either operand, and
+/// the same one subtraction per element NumPy's `diff` makes, which gives the
+/// same bits. NumPy's runs on one thread; this is the engine's parallel map.
+/// Integers wrap, as the engine's `-` does; a bool tensor is refused, as it
+/// is there.
+pub fn first_difference(tensor: &Tensor, dim: usize) -> Result<Tensor> {
+    let dims = tensor.shape().dims();
+    if dim >= dims.len() {
+        return Err(MinitensorError::invalid_argument(format!(
+            "first_difference: dimension {dim} out of range for {} dimensions",
+            dims.len()
+        )));
+    }
+    let outer: usize = dims[..dim].iter().product();
+    let inner: usize = dims[dim + 1..].iter().product();
+    let rows = dims[dim].saturating_sub(1);
+    let mut out_dims = dims.to_vec();
+    out_dims[dim] = rows;
+    let (block_in, block_out) = ((rows + 1) * inner, rows * inner);
+    let source = tensor.contiguous()?;
+
+    fn shifted<T>(
+        values: &[T],
+        outer: usize,
+        inner: usize,
+        block_in: usize,
+        block_out: usize,
+        subtract: impl Fn(T, T) -> T + Send + Sync + Copy,
+    ) -> Vec<T>
+    where
+        T: Copy + Send + Sync + Default,
+    {
+        if block_out == 0 {
+            return Vec::new();
+        }
+        if outer == 1 {
+            return crate::ops::map::binary_map(
+                &values[inner..inner + block_out],
+                &values[..block_out],
+                subtract,
+            );
+        }
+        let mut out = vec![T::default(); outer * block_out];
+        crate::ops::map::par_out_chunks_sized(
+            &mut out,
+            block_out,
+            std::mem::size_of_val(values),
+            &|start, piece: &mut [T]| {
+                for (offset, block) in piece.chunks_mut(block_out).enumerate() {
+                    let base = (start / block_out + offset) * block_in;
+                    let (later, earlier) = (
+                        &values[base + inner..base + inner + block_out],
+                        &values[base..base + block_out],
+                    );
+                    for ((o, &a), &b) in block.iter_mut().zip(later).zip(earlier) {
+                        *o = subtract(a, b);
+                    }
+                }
+            },
+        );
+        out
+    }
+
+    let device = tensor.device();
+    let data = source.data();
+    macro_rules! arm {
+        ($accessor:ident, $from_vec:ident, $subtract:expr) => {{
+            let values = data.$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "first_difference: failed to read the input with ",
+                    stringify!($accessor)
+                ))
+            })?;
+            TensorData::$from_vec(
+                shifted(values, outer, inner, block_in, block_out, $subtract),
+                device,
+            )
+        }};
+    }
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => arm!(as_f32_slice, from_vec_f32, |a: f32, b: f32| a - b),
+        DataType::Float64 => arm!(as_f64_slice, from_vec_f64, |a: f64, b: f64| a - b),
+        DataType::Int32 => arm!(as_i32_slice, from_vec_i32, |a: i32, b: i32| a
+            .wrapping_sub(b)),
+        DataType::Int64 => arm!(as_i64_slice, from_vec_i64, |a: i64, b: i64| a
+            .wrapping_sub(b)),
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "first_difference is not defined for boolean tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        Shape::new(out_dims),
+        tensor.dtype(),
+        device,
+        false,
+    ))
+}
+
 // Helper functions for type-specific operations
 
 #[cfg(test)]
@@ -765,6 +872,58 @@ mod modulus_tests {
         for (i, (&dividend, &divisor)) in wide(&a).iter().zip(&wide(&b)).enumerate() {
             assert!((q[i] * divisor + r[i] - dividend).abs() < 1e-15, "{i}");
         }
+    }
+
+    /// The first difference along each axis of a 2x3x4 block against the
+    /// definition, element by element: the one-block path (axis 0 of a
+    /// vector-like leading axis) and the per-block one alike, integers
+    /// wrapping at the end of their range, and bool refused.
+    #[test]
+    fn the_first_difference_is_the_next_row_minus_this_one() {
+        let dims = [2usize, 3, 4];
+        let values: Vec<f64> = (0..24).map(|v| (v * v) as f64 * 0.5).collect();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f64(values.clone(), Device::cpu())),
+            Shape::new(dims.to_vec()),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let strides = [12usize, 4, 1];
+        for axis in 0..3 {
+            let got = first_difference(&tensor, axis).unwrap();
+            let mut out_dims = dims;
+            out_dims[axis] -= 1;
+            assert_eq!(got.shape().dims(), &out_dims);
+            let got = wide(&got);
+            let mut k = 0;
+            for i in 0..out_dims[0] {
+                for j in 0..out_dims[1] {
+                    for l in 0..out_dims[2] {
+                        let at = i * strides[0] + j * strides[1] + l * strides[2];
+                        assert_eq!(got[k], values[at + strides[axis]] - values[at]);
+                        k += 1;
+                    }
+                }
+            }
+        }
+
+        let ends = i64_tensor(vec![i64::MIN, 1]);
+        let wrapped = first_difference(&ends, 0).unwrap();
+        assert_eq!(
+            wrapped.data().as_i64_slice().unwrap(),
+            &[1i64.wrapping_sub(i64::MIN)]
+        );
+
+        let truth = Tensor::new(
+            Arc::new(TensorData::from_vec_bool(vec![true, false], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        assert!(first_difference(&truth, 0).is_err());
+        assert!(first_difference(&ends, 1).is_err());
     }
 
     /// A remainder of zero takes the divisor's sign, as Python's `%` and

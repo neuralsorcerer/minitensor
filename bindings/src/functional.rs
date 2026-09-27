@@ -170,6 +170,19 @@ pub fn narrow(input: &Bound<PyAny>, dim: isize, start: usize, length: usize) -> 
     tensor.narrow(dim, start, length)
 }
 
+/// `input[.., 1:, ..] - input[.., :-1, ..]` along `dim`, which must already be
+/// non-negative, in one parallel pass and with no gradient recorded -- see
+/// `engine::ops::first_difference`. Private to the Python package, whose
+/// `diff` is the public spelling.
+#[pyfunction]
+#[pyo3(name = "_first_difference", signature = (input, dim))]
+pub fn first_difference(input: &Bound<PyAny>, dim: usize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    engine::ops::first_difference(tensor.tensor(), dim)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Drop dimensions of size 1, or just the one named by `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
@@ -2060,6 +2073,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(reshape, parent)?)?;
     parent.add_function(wrap_pyfunction!(view, parent)?)?;
     parent.add_function(wrap_pyfunction!(narrow, parent)?)?;
+    parent.add_function(wrap_pyfunction!(first_difference, parent)?)?;
     parent.add_function(wrap_pyfunction!(squeeze, parent)?)?;
     parent.add_function(wrap_pyfunction!(unsqueeze, parent)?)?;
     parent.add_function(wrap_pyfunction!(transpose, parent)?)?;

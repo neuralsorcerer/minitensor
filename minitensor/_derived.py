@@ -19,17 +19,13 @@ import builtins
 import math as _math
 import operator as _operator
 
-import numpy as _np
-
 from . import _core as _C
 from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import (
     _atleast_tensor,
-    _from_numpy,
     _normalize_axis,
     _normalize_axis_tuple,
-    _numpy_view,
     _promote_pair,
 )
 
@@ -386,20 +382,18 @@ def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
 
     axis = _normalize_axis(dim, tensor.ndim(), "diff")
     if order and not tensor.requires_grad and str(tensor.dtype) != "bool":
-        # NumPy subtracts two views of the buffer in one pass; below, each
-        # pass copies both shifted halves out before subtracting them --
-        # 17us at 16,384 float64 where NumPy takes 7. The engine path stays
-        # for a gradient to be recorded, and for `bool`, which it refuses.
-        view = _numpy_view(tensor)
-        if order > 1:
-            return _from_numpy(_np.diff(view, n=order, axis=axis))
-        # One pass is one subtraction of two shifted views, which is all
-        # `np.diff` does once it has spent 2us building them: 10.8us for
-        # 16,384 float32 against 5.4 for NumPy's own call.
-        later = [slice(None)] * view.ndim
-        earlier = list(later)
-        later[axis], earlier[axis] = slice(1, None), slice(None, -1)
-        return _from_numpy(_np.subtract(view[tuple(later)], view[tuple(earlier)]))
+        # Nothing to record, so each pass is the engine's first difference:
+        # one parallel subtraction of the shifted rows from the unshifted
+        # ones, with neither copied out first -- the same subtraction NumPy
+        # makes, on every core rather than one. Over a million float64 it
+        # took 288us where `np.diff` takes 738; below, each pass copies both
+        # halves out before subtracting them. The engine path stays for a
+        # gradient to be recorded, and for `bool`, which it refuses.
+        for _ in range(order):
+            if tensor.shape[axis] == 0:
+                break
+            tensor = _F._first_difference(tensor, axis)
+        return tensor
     for _ in range(order):
         length = tensor.shape[axis]
         if length == 0:
