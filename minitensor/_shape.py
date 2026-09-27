@@ -900,19 +900,19 @@ def _checked_positions(
     return wrapped
 
 
-def _partition_positions(kth: object, length: int, name: str) -> list[int]:
-    """The `kth` argument as a list of positions, checked against the axis."""
+def _partition_positions(kth: object, length: int, name: str) -> _np.ndarray:
+    """The `kth` argument as an array of positions, checked against the axis.
+
+    Handed to NumPy as they are: it sorts the positions itself, and repeats
+    change nothing. Deduplicating them first was for the engine's selection
+    kernel, which NumPy's replaced; kept, it cost more than the partition --
+    a hash-based `unique` of 1,024 positions for a 1,024-element slice.
+    """
 
     raw = _position_array(kth, name)
     if raw.size == 0:
         raise ValueError(f"{name} needs at least one position to partition around")
-    # Resolved, sorted and distinct, which is exactly what the kernel does to
-    # them next -- so this changes no answer, it only decides where the work
-    # happens. `partition(x, kth)` with one position per element is a real
-    # call, and crossing into Rust with a million positions to be reduced to
-    # seven costs more than the selection: 61 ms against 24 for NumPy, where
-    # handing over the seven costs 26.
-    return _np.unique(_checked_positions(raw, length, name, length)).tolist()
+    return _checked_positions(raw, length, name, length)
 
 
 def partition(input: object, kth: object, dim: int = -1) -> Tensor:
@@ -958,7 +958,7 @@ def argpartition(input: object, kth: object, dim: int = -1) -> Tensor:
 
 def _selection_operands(
     input: object, kth: object, dim: int | None, name: str
-) -> tuple[_np.ndarray, list[int], int]:
+) -> tuple[_np.ndarray, _np.ndarray, int]:
     """`(array, positions, axis)` for NumPy's selection, the positions checked."""
 
     tensor = _atleast_tensor(input)
