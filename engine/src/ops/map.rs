@@ -113,10 +113,16 @@ pub(crate) const FOLD_PAR_BYTES: usize = 2 << 20; // 2 MiB
 ///   parallel     0.66 ns/elem + 26.1 us fixed   -> they cross at N ~ 18500
 /// ```
 ///
-/// Same convention as [`PAR_THRESHOLD`]: sit just below the measured crossover,
-/// so hosts with more cores -- where the parallel side is cheaper per element
-/// and repays sooner -- are not held back.
-pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
+/// That fixed cost is a best case, the pool woken by the call before it. A
+/// real workload wakes it between other work -- back to back from Python the
+/// wake is nearer 45us, as [`BINARY_PAR_THRESHOLD`] records -- which moves
+/// the crossover to about 30000. This sat at 16384 until measured that way:
+/// a 64x256 activation, exactly 16384 elements, went to the pool, and over
+/// five interleaved rounds running it on one core instead took float32
+/// `tanh` called in a loop from 30.6us to 20.5, a five-op `tanh`/`gelu`
+/// chain from 176us to 92, and a `gelu(dense_layer(..))` training step at
+/// that width from 1055us to 942.
+pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
 
 /// Element count above which binary/broadcast kernels parallelize.
 ///
