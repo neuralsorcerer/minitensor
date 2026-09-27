@@ -378,13 +378,60 @@ where
     N: Fn(f32, f32) -> f32 + Send + Sync,
     W: Fn(f64, f64) -> f64 + Send + Sync,
 {
+    float_binary_with(lhs, rhs, partials, |l, r, dtype, shape| {
+        float_binary_data_with(l, r, dtype, shape, narrow, wide)
+    })
+}
+
+/// [`float_binary_mono`] for a kernel that is mostly selects, whose operands,
+/// when neither needs broadcasting, go through
+/// [`crate::ops::map::binary_map_selecting`] and so get the AVX-512 build.
+/// `fmin` and `fmax` are three compares and three selects a lane.
+fn float_binary_selecting<N, W>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    narrow: N,
+    wide: W,
+    partials: [FloatBinaryKernel; 2],
+) -> Result<Tensor>
+where
+    N: Fn(f32, f32) -> f32 + Send + Sync,
+    W: Fn(f64, f64) -> f64 + Send + Sync,
+{
+    use crate::ops::map::binary_map_selecting;
+    float_binary_with(lhs, rhs, partials, |l, r, dtype, shape| {
+        if l.shape().dims() == shape.dims() && r.shape().dims() == shape.dims() {
+            let device = l.device();
+            if let (Some(a), Some(b)) = (l.data().as_f32_slice(), r.data().as_f32_slice()) {
+                let out = binary_map_selecting(a, b, narrow);
+                return Ok(TensorData::from_vec::<f32>(out, DataType::Float32, device));
+            }
+            if let (Some(a), Some(b)) = (l.data().as_f64_slice(), r.data().as_f64_slice()) {
+                let out = binary_map_selecting(a, b, wide);
+                return Ok(TensorData::from_vec::<f64>(out, DataType::Float64, device));
+            }
+        }
+        float_binary_data_with(l, r, dtype, shape, narrow, wide)
+    })
+}
+
+/// The part every float binary op shares: promote and broadcast the operands,
+/// compute the forward with `data`, and record the backward from `partials`.
+fn float_binary_with<D>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    partials: [FloatBinaryKernel; 2],
+    data: D,
+) -> Result<Tensor>
+where
+    D: FnOnce(&Tensor, &Tensor, DataType, &Shape) -> Result<TensorData>,
+{
     let (lhs_cast, rhs_cast, dtype, output_shape) =
         coerce_and_broadcast(lhs, rhs, BinaryOpKind::Div)?;
     let lhs_tensor = lhs_cast.into_owned();
     let rhs_tensor = rhs_cast.into_owned();
 
-    let output_data =
-        float_binary_data_with(&lhs_tensor, &rhs_tensor, dtype, &output_shape, narrow, wide)?;
+    let output_data = data(&lhs_tensor, &rhs_tensor, dtype, &output_shape)?;
     attach_float_binary_grad(
         lhs,
         rhs,
@@ -641,7 +688,7 @@ pub fn fmax(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
         return crate::ops::minmax::maximum(lhs, rhs);
     }
-    float_binary_mono(lhs, rhs, fmax_f32, fmax_f64, [FMAX_D_X, FMAX_D_Y])
+    float_binary_selecting(lhs, rhs, fmax_f32, fmax_f64, [FMAX_D_X, FMAX_D_Y])
 }
 
 /// Element-wise smaller of two tensors, ignoring a NaN in either operand. NaN
@@ -650,7 +697,7 @@ pub fn fmin(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if !lhs.dtype().is_float() && !rhs.dtype().is_float() {
         return crate::ops::minmax::minimum(lhs, rhs);
     }
-    float_binary_mono(lhs, rhs, fmin_f32, fmin_f64, [FMIN_D_X, FMIN_D_Y])
+    float_binary_selecting(lhs, rhs, fmin_f32, fmin_f64, [FMIN_D_X, FMIN_D_Y])
 }
 
 float_binary_op!(

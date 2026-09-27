@@ -365,6 +365,10 @@ straight from a mask, so at 16,384 elements float64 `isnan` went from 6.3 µs
 to 2.6, float64 `>` from 7.1 to 4.0, int64 `signbit` from 5.2 to 2.8. Every
 same-width map ran 10–25% *slower* on the wider registers, the same way the
 folds above did, so those never get the build; it costs the binary 58 KB.
+The exceptions are maps made of selects, which AVX-512 does under a mask where
+AVX2 blends, and which ask for the build by name: `fmin` and `fmax` over
+16,384 float64 went from 13.5 µs to 6.1 (NumPy 6.4), `nan_to_num` from 9.3 to
+4.1.
 
 ### Two of them were not slow. They were wrong.
 

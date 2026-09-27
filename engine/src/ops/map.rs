@@ -979,9 +979,10 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
 /// helper measured the same on simple maps but left `nan_to_num`'s branches
 /// scalar, at a nanosecond an element.
 ///
-/// [`map_into`] and [`zip_into`] have a third, AVX-512 build, taken only where
-/// [`wide_lanes_pay`] says so.
-fn map_into<T, U, F>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
+/// [`map_into`] and [`zip_into`] have a third, AVX-512 build, taken where
+/// [`wide_lanes_pay`] says so or the caller asked for it with `SELECTS` (see
+/// [`unary_map_selecting`]).
+fn map_into<T, U, F, const SELECTS: bool>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
 where
     T: Copy,
     F: Fn(T) -> U,
@@ -1004,7 +1005,7 @@ where
         body(input, out, op)
     }
     #[cfg(target_arch = "x86_64")]
-    if wide_lanes_pay::<T, U>() && crate::ops::simd::simd_capabilities().avx512bw {
+    if (SELECTS || wide_lanes_pay::<T, U>()) && crate::ops::simd::simd_capabilities().avx512bw {
         // SAFETY: the AVX-512 subsets named above were detected on this CPU.
         return unsafe { body_avx512(input, out, op) };
     }
@@ -1035,7 +1036,8 @@ where
 /// only to its element splits a cache line every time. A few same-width maps
 /// did gain (float64 `fmin` and `nan_to_num` 2x, int64 `clip` 1.3x, from
 /// masked selects and the 64-bit integer minimum AVX2 lacks), but not by
-/// anything visible from the element types.
+/// anything visible from the element types, so those ask for the build by
+/// name through [`unary_map_selecting`] and [`binary_map_selecting`].
 ///
 /// The condition is a constant per instantiation, so a map that does not
 /// narrow never has an AVX-512 copy compiled at all: the twins cost the
@@ -1048,8 +1050,12 @@ const fn wide_lanes_pay<T, U>() -> bool {
 
 /// Sequential core: write `op(lhs[i], rhs[i])` into every element of `out`.
 /// Compiled twice, as [`map_into`] is.
-fn zip_into<A, B, U, F>(lhs: &[A], rhs: &[B], out: &mut [MaybeUninit<U>], op: &F)
-where
+fn zip_into<A, B, U, F, const SELECTS: bool>(
+    lhs: &[A],
+    rhs: &[B],
+    out: &mut [MaybeUninit<U>],
+    op: &F,
+) where
     A: Copy,
     B: Copy,
     F: Fn(A, B) -> U,
@@ -1088,7 +1094,7 @@ where
         body(lhs, rhs, out, op)
     }
     #[cfg(target_arch = "x86_64")]
-    if wide_lanes_pay::<A, U>() && crate::ops::simd::simd_capabilities().avx512bw {
+    if (SELECTS || wide_lanes_pay::<A, U>()) && crate::ops::simd::simd_capabilities().avx512bw {
         // SAFETY: the AVX-512 subsets named above were detected on this CPU.
         return unsafe { body_avx512(lhs, rhs, out, op) };
     }
@@ -1151,6 +1157,33 @@ where
     U: Copy + Send + Sync,
     F: Fn(T) -> U + Send + Sync,
 {
+    unary_map_with::<T, U, F, false>(input, threshold, op)
+}
+
+/// [`unary_map`] for a map that is mostly selects: always offered the AVX-512
+/// build, which [`wide_lanes_pay`] withholds from a map that does not narrow.
+///
+/// A handful of same-width maps are the exception to that rule, and nothing
+/// about their types says so. They choose between values -- NaN-aware
+/// extrema, replacing the non-finite ones -- and AVX-512 does that with a
+/// compare into a mask register and a masked move, where AVX2 needs a compare
+/// and a blend for every condition. `nan_to_num` over 16,384 float64 went from
+/// 9.2us to 4.1 on the AVX-512 build, float32 from 4.6 to 2.3.
+pub(crate) fn unary_map_selecting<T, U, F>(input: &[T], op: F) -> Vec<U>
+where
+    T: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(T) -> U + Send + Sync,
+{
+    unary_map_with::<T, U, F, true>(input, PAR_THRESHOLD, op)
+}
+
+fn unary_map_with<T, U, F, const SELECTS: bool>(input: &[T], threshold: usize, op: F) -> Vec<U>
+where
+    T: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(T) -> U + Send + Sync,
+{
     let len = input.len();
     // SAFETY: both branches write every element of the spare slice —
     // `map_into` walks the full zip of equal-length slices, and the parallel
@@ -1158,9 +1191,11 @@ where
     unsafe {
         build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
             if len < threshold {
-                map_into(input, spare, &op);
+                map_into::<T, U, F, SELECTS>(input, spare, &op);
             } else {
-                par_zip_chunks(input, spare, PAR_CHUNK, &|ic, oc| map_into(ic, oc, &op));
+                par_zip_chunks(input, spare, PAR_CHUNK, &|ic, oc| {
+                    map_into::<T, U, F, SELECTS>(ic, oc, &op)
+                });
             }
             Ok(())
         })
@@ -1258,6 +1293,29 @@ where
     U: Copy + Send + Sync,
     F: Fn(A, B) -> U + Send + Sync,
 {
+    binary_map_with::<A, B, U, F, false>(lhs, rhs, op)
+}
+
+/// [`binary_map`] for a map that is mostly selects; see
+/// [`unary_map_selecting`]. A float64 `fmin` over 16,384 pairs went from
+/// 12.8us to 6.6 on the AVX-512 build, float32 from 6.6 to 3.9.
+pub(crate) fn binary_map_selecting<A, B, U, F>(lhs: &[A], rhs: &[B], op: F) -> Vec<U>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(A, B) -> U + Send + Sync,
+{
+    binary_map_with::<A, B, U, F, true>(lhs, rhs, op)
+}
+
+fn binary_map_with<A, B, U, F, const SELECTS: bool>(lhs: &[A], rhs: &[B], op: F) -> Vec<U>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(A, B) -> U + Send + Sync,
+{
     // A real check, not a debug one: the output is sized by `lhs` and filled
     // by zipping, which stops at the shorter input, so a mismatch would leave
     // a tail marked initialized that nothing wrote.
@@ -1267,10 +1325,10 @@ where
     unsafe {
         build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
             if len < BINARY_PAR_THRESHOLD {
-                zip_into(lhs, rhs, spare, &op);
+                zip_into::<A, B, U, F, SELECTS>(lhs, rhs, spare, &op);
             } else {
                 par_zip_chunks2(lhs, rhs, spare, PAR_CHUNK, &|lc, rc, oc| {
-                    zip_into(lc, rc, oc, &op)
+                    zip_into::<A, B, U, F, SELECTS>(lc, rc, oc, &op)
                 });
             }
             Ok(())
