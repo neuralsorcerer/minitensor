@@ -83,6 +83,36 @@ def test_delete_removes_what_it_names(values, obj, dim):
     np.testing.assert_allclose(got, np.delete(values, obj, dim))
 
 
+@pytest.mark.parametrize("tracked", [False, True], ids=["plain", "tracked"])
+@pytest.mark.parametrize(
+    "obj",
+    [0, -1, [], [1, 1, 3], slice(1, None), slice(None, None, -1), slice(3, 0, -1)],
+    ids=["first", "last", "nothing", "repeated", "tail", "reversed", "back"],
+)
+@pytest.mark.parametrize("dim", [None, 0, 1])
+def test_deleting_a_few_positions_copies_the_runs_between_them(obj, dim, tracked):
+    """A few positions, or one contiguous slice, are removed by joining what
+    is left around them -- through NumPy when nothing asks for a gradient and
+    through the engine when something does. Both have to give NumPy's answer,
+    and the tracked one has to send each kept element's gradient home."""
+
+    values = np.random.default_rng(113).standard_normal((4, 5))
+    tensor = mt.from_numpy(values)
+    tensor.requires_grad_(tracked)
+    got = mt.delete(tensor, obj, dim)
+    want = np.delete(values, obj, dim)
+    assert tuple(got.shape) == want.shape
+    np.testing.assert_array_equal(got.detach().numpy(), want)
+    if tracked and want.size:
+        got.sum().backward()
+        kept = np.delete(np.arange(values.size).reshape(values.shape), obj, dim)
+        expected = np.zeros(values.size)
+        expected[kept.reshape(-1)] = 1.0
+        np.testing.assert_array_equal(
+            tensor.grad.numpy(), expected.reshape(values.shape)
+        )
+
+
 def test_delete_takes_a_mask_and_refuses_a_position_that_is_not_there(values):
     mask = np.array([True, False, True, False])
     np.testing.assert_allclose(
@@ -91,6 +121,8 @@ def test_delete_takes_a_mask_and_refuses_a_position_that_is_not_there(values):
     )
     with pytest.raises(IndexError, match="out of bounds"):
         mt.delete(mt.from_numpy(values), 4, 0)
+    with pytest.raises(IndexError, match="out of bounds"):
+        mt.delete(mt.from_numpy(values), -5, 0)
 
 
 @pytest.mark.parametrize(

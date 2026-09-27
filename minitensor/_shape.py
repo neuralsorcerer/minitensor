@@ -1119,6 +1119,49 @@ def _positions_along(
     return _checked_positions(raw, length, name, limit)
 
 
+#: Deleted positions up to which `delete` copies the runs between them rather
+#: than compacting through a mask; each position adds at most one run.
+_DELETE_BY_RUNS_UP_TO = 32
+
+
+def _kept_runs(cuts: list[int], length: int) -> list[tuple[int, int]]:
+    """The `[first, last)` runs of an axis of `length` left between the sorted,
+    distinct positions `cuts`."""
+
+    runs, first = [], 0
+    for cut in cuts:
+        runs.append((first, cut))
+        first = cut + 1
+    runs.append((first, length))
+    return runs
+
+
+def _contiguous_deletion(obj: object, length: int) -> list[tuple[int, int]] | None:
+    """The runs left by deleting one position, or a slice of step 1 or -1,
+    each of which removes one contiguous block; `None` for anything else.
+
+    Answered without building an array of positions, which for one position
+    was most of the call.
+    """
+
+    if isinstance(obj, (int, _np.integer)) and not isinstance(obj, (bool, _np.bool_)):
+        position = _operator.index(obj)
+        if not -length <= position < length:
+            raise IndexError(
+                f"delete position {position} is out of bounds for an axis of {length}"
+            )
+        position %= length
+        return [(0, position), (position + 1, length)]
+    if not isinstance(obj, slice):
+        return None
+    start, stop, step = obj.indices(length)
+    if step == -1:
+        start, stop = stop + 1, start + 1
+    elif step != 1:
+        return None
+    return [(0, start), (max(start, stop), length)]
+
+
 def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
     """`input` without the positions `obj` names along `dim`.
 
@@ -1135,11 +1178,47 @@ def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
         axis = _normalize_axis(dim, tensor.ndim(), "delete")
 
     length = tensor.shape[axis]
+    runs = _contiguous_deletion(obj, length)
+    positions = None
+    if runs is None:
+        positions = _positions_along(obj, length, "delete")
+        if positions.size <= _DELETE_BY_RUNS_UP_TO:
+            cuts = positions if positions.size < 2 else _np.unique(positions)
+            runs = _kept_runs(cuts.tolist(), length)
+    if runs is not None:
+        # What is left is a handful of runs, so it is copied as runs: two
+        # slices for one deleted position, where the mask below reads and
+        # tests every element to find them -- 445us against NumPy's 73 to
+        # take one element out of 262,144.
+        runs = [(first, last) for first, last in runs if last > first]
+        if tensor.requires_grad:
+            # Through the engine, which records how to route the gradient.
+            if not runs:
+                return _C.functional.narrow(tensor, axis, 0, 0)
+            return _C.functional.cat(
+                [
+                    _C.functional.narrow(tensor, axis, first, last - first)
+                    for first, last in runs
+                ],
+                axis,
+            )
+        # Otherwise NumPy joins views of the runs in one copy, into an array
+        # the result then owns, where each `narrow` would copy its run first.
+        source = _numpy_view(tensor)
+        lead = (slice(None),) * axis
+        return _from_numpy(
+            _np.concatenate(
+                [source[lead + (slice(first, last),)] for first, last in runs]
+                or [source[lead + (slice(0, 0),)]],
+                axis=axis,
+            )
+        )
+
     # A mask rather than a set: what is kept is the complement of what was
     # named, and taking that complement by testing a million positions against
     # a Python set costs more than the copy it is setting up.
     keep = _np.ones(length, dtype=bool)
-    keep[_positions_along(obj, length, "delete")] = False
+    keep[positions] = False
     if tensor.ndim() == 1:
         # The complement is already a mask, and a mask is compacted in one pass
         # -- so handing it over as one is cheaper than writing down where every
