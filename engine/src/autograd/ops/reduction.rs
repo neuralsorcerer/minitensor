@@ -6,10 +6,10 @@
 
 use super::*;
 use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_map_indexed, par_out_chunks_gated};
+use crate::ops::normalization::lane_sum_zip;
 use crate::ops::shape_ops;
 use crate::{
     error::{MinitensorError, Result},
-    ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -25,7 +25,8 @@ pub struct LayerNormBackward {
     pub bias_id: Option<TensorId>,
     pub normalized: Tensor,
     pub inv_std: Tensor,
-    pub weight_broadcast: Option<Tensor>,
+    /// The weight as given, `normalized_shape` wide.
+    pub weight: Option<Tensor>,
     pub normalized_shape: Vec<usize>,
     pub axis_start: usize,
     pub element_count: usize,
@@ -33,6 +34,54 @@ pub struct LayerNormBackward {
     pub weight_requires_grad: bool,
     pub bias_requires_grad: bool,
 }
+
+/// `layer_norm`'s input gradient, a row at a time:
+/// `inv_std * (gh - mean(gh) - xhat * mean(gh * xhat))`, with `gh = g * w`.
+///
+/// This was twelve tensor operations -- two broadcasting multiplies, two
+/// reductions, five element-wise passes and the scalars between them -- each
+/// allocating and walking a tensor the size of the input. Here each row is
+/// read and written while it is in L1, and its two sums run in eight lanes.
+/// `gh` is formed in the input's dtype, as the product it replaces was.
+macro_rules! layer_norm_input_grad {
+    ($name:ident, $ty:ty) => {
+        fn $name(
+            grad: &[$ty],
+            normalized: &[$ty],
+            inv_std: &[$ty],
+            weight: Option<&[$ty]>,
+            norm: usize,
+        ) -> Vec<$ty> {
+            let mut grad_input = vec![0 as $ty; grad.len()];
+            if norm == 0 {
+                return grad_input;
+            }
+            let recip = 1.0 / norm as f64;
+            par_out_chunks_gated(&mut grad_input, norm, PAR_THRESHOLD, &|start, gi| {
+                let g = &grad[start..start + norm];
+                let xhat = &normalized[start..start + norm];
+                match weight {
+                    Some(w) => {
+                        for ((slot, &gv), &wv) in gi.iter_mut().zip(g).zip(w) {
+                            *slot = gv * wv;
+                        }
+                    }
+                    None => gi.copy_from_slice(g),
+                }
+                let mean_g = lane_sum_zip(gi, gi, |v, _| v as f64) * recip;
+                let mean_gx = lane_sum_zip(gi, xhat, |v, x| v as f64 * x as f64) * recip;
+                let scale = inv_std[start / norm] as f64;
+                for (slot, &x) in gi.iter_mut().zip(xhat) {
+                    *slot = (scale * (*slot as f64 - mean_g - x as f64 * mean_gx)) as $ty;
+                }
+            });
+            grad_input
+        }
+    };
+}
+
+layer_norm_input_grad!(layer_norm_input_grad_f32, f32);
+layer_norm_input_grad!(layer_norm_input_grad_f64, f64);
 
 impl GradientFunction for LayerNormBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
@@ -78,29 +127,51 @@ impl GradientFunction for LayerNormBackward {
         }
 
         if self.input_requires_grad {
-            let mut grad_output_hat = if let Some(weight) = &self.weight_broadcast {
-                arithmetic::mul(&grad_output_detached, weight)?
-            } else {
-                grad_output_detached.clone()
+            let grad = grad_output_detached.contiguous()?;
+            let weight = self.weight.as_ref().map(|w| w.contiguous()).transpose()?;
+            let norm = self.element_count;
+            let device = grad.device();
+            macro_rules! arm {
+                ($accessor:ident, $ty:ty, $variant:ident, $kernel:ident) => {{
+                    let bad = |what: &str| {
+                        MinitensorError::internal_error(format!(
+                            "layer_norm backward: bad {what} slice"
+                        ))
+                    };
+                    let g = grad.data().$accessor().ok_or_else(|| bad("gradient"))?;
+                    let xhat = normalized
+                        .data()
+                        .$accessor()
+                        .ok_or_else(|| bad("normalized"))?;
+                    let inv = self
+                        .inv_std
+                        .data()
+                        .$accessor()
+                        .ok_or_else(|| bad("inv_std"))?;
+                    let w = match &weight {
+                        Some(w) => Some(w.data().$accessor().ok_or_else(|| bad("weight"))?),
+                        None => None,
+                    };
+                    let values = $kernel(g, xhat, inv, w, norm);
+                    TensorData::from_vec::<$ty>(values, DataType::$variant, device)
+                }};
+            }
+            let data = match grad.dtype() {
+                DataType::Float32 => arm!(as_f32_slice, f32, Float32, layer_norm_input_grad_f32),
+                DataType::Float64 => arm!(as_f64_slice, f64, Float64, layer_norm_input_grad_f64),
+                _ => {
+                    return Err(MinitensorError::invalid_operation(
+                        "layer_norm backward only supports floating point tensors",
+                    ));
+                }
             };
-
-            let axes: Vec<isize> = (self.axis_start..grad_output_hat.ndim())
-                .map(|d| d as isize)
-                .collect();
-            let sum_grad = reduction::sum(&grad_output_hat, Some(axes.clone()), true)?;
-            let grad_norm_mul = arithmetic::mul(&grad_output_hat, &normalized)?;
-            let sum_grad_norm = reduction::sum(&grad_norm_mul, Some(axes), true)?;
-
-            let count = self.element_count as f64;
-            let m_tensor = create_scalar_tensor(count, grad_output.dtype(), grad_output.device())?;
-            let inv_m_tensor =
-                create_scalar_tensor(1.0 / count, grad_output.dtype(), grad_output.device())?;
-            grad_output_hat = arithmetic::mul(&grad_output_hat, &m_tensor)?;
-            let tmp = arithmetic::sub(&grad_output_hat, &sum_grad)?;
-            let norm_term = arithmetic::mul(&normalized, &sum_grad_norm)?;
-            let numerator = arithmetic::sub(&tmp, &norm_term)?;
-            let grad_input = arithmetic::mul(&numerator, &self.inv_std)?;
-            let grad_input = arithmetic::mul(&grad_input, &inv_m_tensor)?;
+            let grad_input = Tensor::new(
+                Arc::new(data),
+                grad.shape().clone(),
+                grad.dtype(),
+                device,
+                false,
+            );
             accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         }
 

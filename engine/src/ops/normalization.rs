@@ -203,24 +203,6 @@ pub fn batch_norm(
     Ok(output)
 }
 
-/// Apply layer normalization to the input tensor.
-/// Fused LayerNorm forward, one row at a time.
-///
-/// The composed form this replaces cost six full-size tensor operations --
-/// `mean`, `sub`, `mul`, `mean`, `sqrt`, `div`, then two more for weight and
-/// bias -- each allocating and traversing a tensor the size of the input, and
-/// three of them going through the *broadcasting* path because the statistics
-/// have a trailing 1. On a 32x128x512 float32 tensor that measured 18.4ms
-/// against 0.47ms for a single `mean` over the same data.
-///
-/// The normalized dimensions are trailing and contiguous, so the input is just
-/// `[rows, norm]` in memory and each row can be reduced and written while it is
-/// still in L1. The three passes over a row cost far less than one pass over
-/// the whole tensor.
-///
-/// `normalized` and `inv_std` are produced here rather than recovered later
-/// because [`crate::autograd::LayerNormBackward`] saves both, so fusing the
-/// forward must not cost the backward its inputs.
 /// A row's sum of `term(v)`, in eight f64 lanes combined pairwise at the end.
 ///
 /// One accumulator is a chain of dependent adds the compiler may not reorder
@@ -229,15 +211,24 @@ pub fn batch_norm(
 /// no worse.
 #[inline(always)]
 fn lane_sum<T: Copy>(row: &[T], term: impl Fn(T) -> f64) -> f64 {
+    lane_sum_zip(row, row, |v, _| term(v))
+}
+
+/// [`lane_sum`] of `term(a[i], b[i])`, for a sum whose terms come from two
+/// rows of the same length.
+#[inline(always)]
+pub(crate) fn lane_sum_zip<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> f64 {
+    let b = &b[..a.len()];
     let mut acc = [0.0f64; 8];
-    let (blocks, rest) = row.as_chunks::<8>();
-    for block in blocks {
-        for (a, &v) in acc.iter_mut().zip(block) {
-            *a += term(v);
+    let (a_blocks, a_rest) = a.as_chunks::<8>();
+    let (b_blocks, b_rest) = b.as_chunks::<8>();
+    for (a_block, b_block) in a_blocks.iter().zip(b_blocks) {
+        for ((lane, &x), &y) in acc.iter_mut().zip(a_block).zip(b_block) {
+            *lane += term(x, y);
         }
     }
-    for (a, &v) in acc.iter_mut().zip(rest) {
-        *a += term(v);
+    for ((lane, &x), &y) in acc.iter_mut().zip(a_rest).zip(b_rest) {
+        *lane += term(x, y);
     }
     ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
 }
@@ -257,6 +248,23 @@ fn rows_per_task(rows: usize, norm: usize) -> usize {
     }
 }
 
+/// Fused LayerNorm forward, one row at a time.
+///
+/// The composed form this replaces cost six full-size tensor operations --
+/// `mean`, `sub`, `mul`, `mean`, `sqrt`, `div`, then two more for weight and
+/// bias -- each allocating and traversing a tensor the size of the input, and
+/// three of them going through the *broadcasting* path because the statistics
+/// have a trailing 1. On a 32x128x512 float32 tensor that measured 18.4ms
+/// against 0.47ms for a single `mean` over the same data.
+///
+/// The normalized dimensions are trailing and contiguous, so the input is just
+/// `[rows, norm]` in memory and each row can be reduced and written while it is
+/// still in L1. The three passes over a row cost far less than one pass over
+/// the whole tensor.
+///
+/// `normalized` and `inv_std` are produced here rather than recovered later
+/// because [`crate::autograd::LayerNormBackward`] saves both, so fusing the
+/// forward must not cost the backward its inputs.
 macro_rules! layer_norm_rows {
     ($name:ident, $ty:ty) => {
         fn $name(
@@ -370,6 +378,7 @@ macro_rules! layer_norm_rows {
 layer_norm_rows!(layer_norm_rows_f32, f32);
 layer_norm_rows!(layer_norm_rows_f64, f64);
 
+/// Apply layer normalization to the input tensor.
 pub fn layer_norm(
     input: &Tensor,
     normalized_shape: &[usize],
@@ -562,15 +571,6 @@ pub fn layer_norm(
         false,
     );
 
-    let mut weight_broadcast: Option<Tensor> = None;
-    if let Some(w) = weight {
-        let mut view = w.clone();
-        for _ in 0..axis_start {
-            view = view.unsqueeze(0)?;
-        }
-        weight_broadcast = Some(view.detach());
-    }
-
     let mut input_ids: SmallVec<[TensorId; 3]> = SmallVec::new();
     input_ids.push(input.id());
     if let Some(w) = weight {
@@ -587,7 +587,7 @@ pub fn layer_norm(
         bias_id: bias.map(|b| b.id()),
         normalized: normalized.detach(),
         inv_std: inv_std.detach(),
-        weight_broadcast,
+        weight: weight.map(|w| w.detach()),
         normalized_shape: normalized_shape.to_vec(),
         axis_start,
         element_count: normalized_shape.iter().product(),
