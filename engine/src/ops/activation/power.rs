@@ -910,6 +910,22 @@ rounding_op!(
     "f64"
 );
 rounding_op!(
+    round_even_f32,
+    f32,
+    Float32,
+    as_f32_slice,
+    round_even_f32_blocks,
+    "f32"
+);
+rounding_op!(
+    round_even_f64,
+    f64,
+    Float64,
+    as_f64_slice,
+    round_even_f64_blocks,
+    "f64"
+);
+rounding_op!(
     floor_f32,
     f32,
     Float32,
@@ -947,11 +963,17 @@ rounding_op!(frac_f32, f32, Float32, as_f32_slice, frac_f32_blocks, "f32");
 rounding_op!(frac_f64, f64, Float64, as_f64_slice, frac_f64_blocks, "f64");
 
 fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    round_f32_scaled(tensor, 10.0_f32.powi(decimals))
+    match decimals {
+        0 => round_even_f32(tensor, 0.0),
+        _ => round_f32_scaled(tensor, 10.0_f32.powi(decimals)),
+    }
 }
 
 fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    round_f64_scaled(tensor, 10.0_f64.powi(decimals))
+    match decimals {
+        0 => round_even_f64(tensor, 0.0),
+        _ => round_f64_scaled(tensor, 10.0_f64.powi(decimals)),
+    }
 }
 
 #[cfg(test)]

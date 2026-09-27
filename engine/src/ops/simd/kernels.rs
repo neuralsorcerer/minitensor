@@ -376,6 +376,19 @@ rounding_kernel!(
     frac_f64_blocks, f64, |x| x - x.trunc()
 );
 rounding_kernel!(
+    /// Round a block of f32 to the nearest integer, halves to even. `param`
+    /// is ignored.
+    ///
+    /// [`round_f32_blocks`] at zero decimals, where scaling by one is exact
+    /// and changes nothing -- but still cost a multiply and a divide per
+    /// element, and the divide made `round` twice the price of `floor`.
+    round_even_f32_blocks, f32, |x| x.round_ties_even()
+);
+rounding_kernel!(
+    /// [`round_even_f32_blocks`] for f64. `param` is ignored.
+    round_even_f64_blocks, f64, |x| x.round_ties_even()
+);
+rounding_kernel!(
     /// Round a block of f32 to `param` decimal places, halves to even.
     round_f32_blocks, f32, |x, m| (x * m).round_ties_even() / m
 );
