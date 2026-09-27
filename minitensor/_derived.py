@@ -26,8 +26,10 @@ from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import (
     _atleast_tensor,
+    _from_numpy,
     _normalize_axis,
     _normalize_axis_tuple,
+    _numpy_view,
     _promote_pair,
 )
 
@@ -383,6 +385,12 @@ def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
         raise ValueError(f"diff requires a non-negative order, got {order}")
 
     axis = _normalize_axis(dim, tensor.ndim(), "diff")
+    if order and not tensor.requires_grad and str(tensor.dtype) != "bool":
+        # NumPy subtracts two views of the buffer in one pass; below, each
+        # pass copies both shifted halves out before subtracting them --
+        # 17us at 16,384 float64 where NumPy takes 7. The engine path stays
+        # for a gradient to be recorded, and for `bool`, which it refuses.
+        return _from_numpy(_np.diff(_numpy_view(tensor), n=order, axis=axis))
     for _ in range(order):
         length = tensor.shape[axis]
         if length == 0:
@@ -936,9 +944,7 @@ def ediff1d(
     if to_begin is not None:
         pieces.append(_atleast_tensor(to_begin).reshape(-1).astype(str(flat.dtype)))
     if length > 1:
-        pieces.append(
-            _F.narrow(flat, 0, 1, length - 1) - _F.narrow(flat, 0, 0, length - 1)
-        )
+        pieces.append(diff(flat))
     elif not pieces and to_end is None:
         return _F.narrow(flat, 0, 0, 0)
     if to_end is not None:

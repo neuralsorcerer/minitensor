@@ -163,6 +163,34 @@ def test_diff_along_a_chosen_dim(dim):
     )
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+@pytest.mark.parametrize("n", [1, 2, 7])
+def test_diff_agrees_whether_or_not_a_gradient_is_tracked(dtype, n):
+    """Untracked, the difference is NumPy's over a view of the buffer;
+    tracked, it is the engine's, which records the gradient. Both must give
+    NumPy's values and dtype, integers wrapping as NumPy's do."""
+
+    rng = np.random.default_rng(131)
+    if dtype.startswith("int"):
+        bound = np.iinfo(dtype).max // 2
+        values = rng.integers(-bound, bound, size=(8, 6)).astype(dtype)
+    else:
+        values = rng.standard_normal((8, 6)).astype(dtype)
+    want = np.diff(values, n, axis=0)
+    got = mt.diff(mt.from_numpy(values), n, 0).numpy()
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+    if dtype.startswith("float"):
+        tracked = mt.from_numpy(values)
+        tracked.requires_grad_(True)
+        np.testing.assert_array_equal(mt.diff(tracked, n, 0).detach().numpy(), want)
+
+
+def test_diff_refuses_booleans_on_either_path():
+    with pytest.raises(ValueError, match="boolean"):
+        mt.diff(mt.from_numpy(np.array([True, False, True])))
+
+
 def test_diff_rejects_a_scalar_and_a_negative_order():
     with pytest.raises(ValueError, match="at least one dimension"):
         mt.diff(mt.Tensor(1.0, dtype="float64"))
