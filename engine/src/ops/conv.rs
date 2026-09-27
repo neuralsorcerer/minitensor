@@ -1238,29 +1238,30 @@ fn conv2d_forward<T: ConvScalar>(
 
             // Scatter [C_out, width] into [N, C_out, oh, ow], adding bias. A
             // block is a run of output positions, so within one image each
-            // channel takes a contiguous run of its plane; a block that reaches
-            // the end of an image carries on into the next one, which is why
-            // this walks images rather than assuming one.
-            let mut position = first;
-            while position < last {
-                let n = position / ohw;
-                let from = position % ohw;
-                let taken = (ohw - from).min(last - position);
-                let offset = position - first;
-                let image = &mut output_vec[n * out_channels * ohw..][..out_channels * ohw];
-                par_out_chunks(image, ohw, &|start, plane| {
-                    let oc = start / ohw;
-                    let source = &gemm_out[oc * width + offset..][..taken];
-                    let target = &mut plane[from..][..taken];
-                    for (o, &v) in target.iter_mut().zip(source) {
-                        *o = v;
-                        if let Some(bd) = bias_data {
-                            *o += bd[oc];
-                        }
+            // channel takes a contiguous run of its plane, and a block that
+            // reaches the end of an image carries on into the next. Every plane
+            // the block touches is one task of a single dispatch: dispatched
+            // image by image, a batch of eight 30x30 images paid the pool's
+            // round trip eight times -- most of an 850us 3-to-16 channel conv
+            // whose multiply takes 127.
+            let first_image = first / ohw;
+            let last_image = (last - 1) / ohw + 1;
+            let region =
+                &mut output_vec[first_image * out_channels * ohw..last_image * out_channels * ohw];
+            par_out_chunks(region, ohw, &|start, plane| {
+                let index = start / ohw;
+                let (n, oc) = (first_image + index / out_channels, index % out_channels);
+                let image_start = n * ohw;
+                let from = first.max(image_start) - image_start;
+                let to = last.min(image_start + ohw) - image_start;
+                let source = &gemm_out[oc * width + (image_start + from - first)..][..to - from];
+                for (o, &v) in plane[from..to].iter_mut().zip(source) {
+                    *o = v;
+                    if let Some(bd) = bias_data {
+                        *o += bd[oc];
                     }
-                });
-                position += taken;
-            }
+                }
+            });
 
             first = last;
         }
