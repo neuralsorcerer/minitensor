@@ -7,8 +7,46 @@
 use super::*;
 use crate::ops::map::par_out_chunks;
 use crate::tensor::{Shape, Strides};
+use std::mem::MaybeUninit;
 
-/// Generic transpose implementation
+/// Rows and columns in one tile of a matrix transpose.
+///
+/// A transpose reads down columns or writes down them, so one side of it
+/// touches a new cache line per element. Square tiles bound that to `TILE`
+/// lines a side, each reused `TILE` times: a 256x256 float32 matrix took 163us
+/// written column by column and 22 in tiles, 1024x1024 3.97ms and 0.62 on one
+/// thread -- where the column gather it replaced there took 0.57ms on four. 16
+/// was the best of 8 to 64 across float32 and float64 and shapes from square
+/// to 64x4096, and tiles won from 32x32 up.
+const TRANSPOSE_TILE: usize = 16;
+
+/// Output rows `first..first + out.len() / rows` of the transpose of one
+/// `rows x cols` matrix -- input columns, that is -- tile by tile.
+fn transpose_band<T: Copy>(
+    src: &[T],
+    rows: usize,
+    cols: usize,
+    first: usize,
+    out: &mut [MaybeUninit<T>],
+) {
+    let count = out.len() / rows;
+    assert!(src.len() == rows * cols && out.len() == count * rows && first + count <= cols);
+    let (src, out) = (src.as_ptr(), out.as_mut_ptr());
+    for i0 in (0..rows).step_by(TRANSPOSE_TILE) {
+        let i1 = (i0 + TRANSPOSE_TILE).min(rows);
+        for j0 in (0..count).step_by(TRANSPOSE_TILE) {
+            for j in j0..(j0 + TRANSPOSE_TILE).min(count) {
+                for i in i0..i1 {
+                    // SAFETY: `i < rows` and `j < count`, and the assertion
+                    // above puts `first + j < cols`, so both offsets are in
+                    // bounds. Indexing checked each and ran 1.7x slower.
+                    unsafe { (*out.add(j * rows + i)).write(*src.add(i * cols + first + j)) };
+                }
+            }
+        }
+    }
+}
+
 /// Transpose `input_data` (viewed as `input_shape`) into a fresh contiguous
 /// buffer of `output_shape` with `dim0`/`dim1` swapped. Every output element
 /// is written exactly once (no zeroing pass; see `ops::map`).
@@ -20,28 +58,40 @@ pub(crate) fn transpose_map<T: Copy + Send + Sync>(
     dim1: usize,
 ) -> Vec<T> {
     let numel = output_shape.numel();
+    let rank = input_shape.ndim();
 
-    // Fast path for 2D matrix transpose
-    if input_shape.ndim() == 2 && dim0 == 0 && dim1 == 1 {
-        let rows = input_shape.dims()[0];
-        let cols = input_shape.dims()[1];
-        // SAFETY: both paths write every element (each (i, j) pair exactly
-        // once; the parallel chunks are whole output columns).
+    // The last two axes swapped is a stack of matrix transposes -- `.T` of a
+    // matrix, `.mT` of a batch -- done in tiles; see `TRANSPOSE_TILE`.
+    if rank >= 2 && dim0.min(dim1) == rank - 2 && dim0.max(dim1) == rank - 1 {
+        if numel == 0 {
+            return Vec::new();
+        }
+        let (rows, cols) = (input_shape.dims()[rank - 2], input_shape.dims()[rank - 1]);
+        // The output is `numel / rows` rows of `rows`, one per input column,
+        // and any whole number of them is a task: one band of tiles, widened
+        // to 8K elements where the rows are short. Small tasks and many of
+        // them, because the caller works through them while the pool wakes --
+        // a 4096x64 matrix is only four bands.
+        let band = TRANSPOSE_TILE * (1usize << 13).div_ceil(TRANSPOSE_TILE * rows);
+        let work = |start: usize, out: &mut [MaybeUninit<T>]| {
+            let (mut row, mut out) = (start / rows, out);
+            while !out.is_empty() {
+                let (matrix, column) = (row / cols, row % cols);
+                let take = (cols - column).min(out.len() / rows);
+                let (here, rest) = out.split_at_mut(take * rows);
+                let src = &input_data[matrix * rows * cols..(matrix + 1) * rows * cols];
+                transpose_band(src, rows, cols, column, here);
+                (row, out) = (row + take, rest);
+            }
+        };
+        // SAFETY: every output row belongs to exactly one task, which writes
+        // all of it.
         return unsafe {
             crate::ops::map::build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
                 if numel < PAR_THRESHOLD {
-                    for i in 0..rows {
-                        for j in 0..cols {
-                            spare[j * rows + i].write(input_data[i * cols + j]);
-                        }
-                    }
+                    work(0, spare);
                 } else {
-                    par_out_chunks(spare, rows, &|start, col| {
-                        let j = start / rows;
-                        for (i, slot) in col.iter_mut().enumerate() {
-                            slot.write(input_data[i * cols + j]);
-                        }
-                    });
+                    par_out_chunks(spare, band * rows, &work);
                 }
                 Ok(())
             })
@@ -272,6 +322,48 @@ mod tests {
         // Transposed: [[1, 4], [2, 5], [3, 6]]
         assert_eq!(result_data, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
         assert_eq!(result.shape().dims(), &[3, 2]);
+    }
+
+    /// The tiled transpose against the definition, over the shapes that
+    /// exercise its edges: tiles cut short on either side, a single row or
+    /// column, a stack of matrices, and enough of them to split across the
+    /// pool with a task boundary falling inside a matrix.
+    #[test]
+    fn a_tiled_transpose_puts_every_element_where_the_definition_does() {
+        for dims in [
+            vec![1, 1],
+            vec![1, 37],
+            vec![37, 1],
+            vec![17, 33],
+            vec![64, 48],
+            vec![3, 5, 7],
+            vec![4, 16, 16],
+            vec![9, 130, 131],
+            vec![700, 300],
+        ] {
+            let rank = dims.len();
+            let (rows, cols) = (dims[rank - 2], dims[rank - 1]);
+            let numel: usize = dims.iter().product();
+            let values: Vec<i64> = (0..numel as i64).collect();
+            let input = tensor_of::<i64>(values.clone(), dims.clone(), false);
+            let got = transpose(&input, rank as isize - 1, rank as isize - 2).unwrap();
+            let mut want_dims = dims.clone();
+            want_dims.swap(rank - 2, rank - 1);
+            assert_eq!(got.shape().dims(), &want_dims[..]);
+            let got = got.data().as_i64_slice().unwrap();
+            for matrix in 0..numel / (rows * cols) {
+                let base = matrix * rows * cols;
+                for i in 0..rows {
+                    for j in 0..cols {
+                        assert_eq!(
+                            got[base + j * rows + i],
+                            values[base + i * cols + j],
+                            "{dims:?} at ({matrix}, {i}, {j})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
