@@ -1113,6 +1113,18 @@ fn zip_into<A, B, U, F, const SELECTS: bool>(
     body(lhs, rhs, out, op)
 }
 
+/// [`zip_into`] for a caller that owns the output and its blocking: the same
+/// multiversioned core [`binary_map`] runs, over one block, with no
+/// threshold or pool of its own.
+pub(crate) fn zip_slices_into<A, B, U, F>(lhs: &[A], rhs: &[B], out: &mut [MaybeUninit<U>], op: &F)
+where
+    A: Copy,
+    B: Copy,
+    F: Fn(A, B) -> U,
+{
+    zip_into::<A, B, U, F, false>(lhs, rhs, out, op)
+}
+
 /// Sequential core: write `op(a[i], b[i], c[i])` into every element of `out`.
 /// Compiled twice, as [`map_into`] is.
 fn zip3_into<A, B, C, U, F>(a: &[A], b: &[B], c: &[C], out: &mut [MaybeUninit<U>], op: &F)

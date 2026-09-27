@@ -752,7 +752,7 @@ pub fn first_difference(tensor: &Tensor, dim: usize) -> Result<Tensor> {
         subtract: impl Fn(T, T) -> T + Send + Sync + Copy,
     ) -> Vec<T>
     where
-        T: Copy + Send + Sync + Default,
+        T: Copy + Send + Sync,
     {
         if block_out == 0 {
             return Vec::new();
@@ -764,25 +764,29 @@ pub fn first_difference(tensor: &Tensor, dim: usize) -> Result<Tensor> {
                 subtract,
             );
         }
-        let mut out = vec![T::default(); outer * block_out];
-        crate::ops::map::par_out_chunks_sized(
-            &mut out,
-            block_out,
-            std::mem::size_of_val(values),
-            &|start, piece: &mut [T]| {
-                for (offset, block) in piece.chunks_mut(block_out).enumerate() {
-                    let base = (start / block_out + offset) * block_in;
-                    let (later, earlier) = (
-                        &values[base + inner..base + inner + block_out],
-                        &values[base..base + block_out],
-                    );
-                    for ((o, &a), &b) in block.iter_mut().zip(later).zip(earlier) {
-                        *o = subtract(a, b);
-                    }
-                }
-            },
-        );
-        out
+        // SAFETY: the chunks tile the output in whole blocks, and every block
+        // is written in full by `zip_slices_into`, which walks the whole zip
+        // of three slices of the block's length.
+        unsafe {
+            crate::ops::map::build_vec(outer * block_out, |spare| {
+                crate::ops::map::par_out_chunks_sized(
+                    spare,
+                    block_out,
+                    std::mem::size_of_val(values),
+                    &|start, piece: &mut [std::mem::MaybeUninit<T>]| {
+                        for (offset, block) in piece.chunks_mut(block_out).enumerate() {
+                            let base = (start / block_out + offset) * block_in;
+                            crate::ops::map::zip_slices_into(
+                                &values[base + inner..base + inner + block_out],
+                                &values[base..base + block_out],
+                                block,
+                                &subtract,
+                            );
+                        }
+                    },
+                )
+            })
+        }
     }
 
     let device = tensor.device();
