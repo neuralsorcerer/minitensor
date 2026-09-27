@@ -1228,6 +1228,23 @@ def test_bincount_counts_bool_and_integer_labels():
     assert np.array_equal(bool_counts.numpy(), np.array([1, 2, 0], dtype=np.int64))
 
 
+@pytest.mark.parametrize("length", [3, 4097, 300_003])
+@pytest.mark.parametrize("highest", [1, 7, 4100])
+@pytest.mark.parametrize("dtype", ["int32", "int64", "bool"])
+def test_bincount_matches_numpy_across_bands_and_bin_counts(length, highest, dtype):
+    """Past 131,072 labels the count is split into bands that merge
+    afterwards, and below 4,096 bins each band keeps four interleaved
+    tallies; both have to add up to NumPy's counts exactly."""
+
+    rng = np.random.default_rng(length + highest)
+    if dtype == "bool":
+        labels = rng.random(length) < 0.3
+    else:
+        labels = rng.integers(0, highest + 1, size=length).astype(dtype)
+    got = mt.bincount(mt.from_numpy(labels), minlength=5).numpy()
+    np.testing.assert_array_equal(got, np.bincount(labels, minlength=5))
+
+
 def test_bincount_weighted_and_empty_edge_cases():
     labels = mt.Tensor([0, 1, 1, 3], dtype="int32")
     weights = mt.Tensor([0.5, 1.25, 2.75, -1.0], dtype="float64")

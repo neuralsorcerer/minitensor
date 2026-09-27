@@ -311,7 +311,11 @@ const TALLY_PRIVATE_BINS: usize = 1 << 16;
 /// Both come from the value count alone -- never from the thread pool --
 /// because a weighted tally adds floats, and a sum whose grouping follows the
 /// pool answers differently on different machines.
-const TALLY_MIN_BAND: usize = 1 << 14;
+///
+/// 131,072 values, from 16,384: a band that short is tens of microseconds,
+/// less than the pool costs to wake from Python, and `bincount` of 65,536
+/// labels took 170-220us split four ways against NumPy's 80-100.
+const TALLY_MIN_BAND: usize = 1 << 17;
 const TALLY_BANDS: usize = 64;
 
 /// Add one contribution per value into `bins` slots.
@@ -329,6 +333,23 @@ where
     T: Copy + Send + Sync + std::ops::Add<Output = T>,
     F: Fn(usize) -> Option<(usize, T)> + Sync,
 {
+    tally_bands(count, bins, zero, |first, last, slots: &mut [T]| {
+        for position in first..last {
+            if let Some((slot, value)) = contribution(position) {
+                slots[slot] = slots[slot] + value;
+            }
+        }
+    })
+}
+
+/// [`tally`] with the band's loop supplied whole: `fill(first, last, slots)`
+/// adds everything in `first..last` into `slots`. For a caller whose loop is
+/// worth writing itself, as counting labels is.
+pub(crate) fn tally_bands<T, F>(count: usize, bins: usize, zero: T, fill: F) -> Vec<T>
+where
+    T: Copy + Send + Sync + std::ops::Add<Output = T>,
+    F: Fn(usize, usize, &mut [T]) + Sync,
+{
     if bins == 0 || count == 0 {
         return vec![zero; bins];
     }
@@ -336,25 +357,50 @@ where
     let bands = count.div_ceil(band);
     if bands < 2 || bins > TALLY_PRIVATE_BINS {
         let mut slots = vec![zero; bins];
-        for index in 0..count {
-            if let Some((slot, value)) = contribution(index) {
-                slots[slot] = slots[slot] + value;
-            }
-        }
+        fill(0, count, &mut slots);
         return slots;
     }
     let partials = par_map_indexed(bands, &|index| {
         let first = index * band;
         let last = (first + band).min(count);
         let mut slots = vec![zero; bins];
-        for position in first..last {
-            if let Some((slot, value)) = contribution(position) {
-                slots[slot] = slots[slot] + value;
-            }
-        }
+        fill(first, last, &mut slots);
         slots
     });
     pairwise_fold_vectors(partials, |a, b| a + b)
+}
+
+/// Count each of `labels` into `slots`, every label below `slots.len()`.
+///
+/// With few bins the same counter comes round again before its last
+/// increment has landed, and each increment waits for the one before it:
+/// sixteen thousand labels over seven bins took 37us, twice NumPy. So a
+/// short tally is kept four times over, label `i` going to copy `i % 4`, and
+/// the copies added at the end -- exact, since the counts are integers.
+fn count_labels<L: Copy>(labels: &[L], slots: &mut [i64], slot: impl Fn(L) -> usize) {
+    const SPLIT_BELOW: usize = 1 << 12;
+    let bins = slots.len();
+    if bins > SPLIT_BELOW {
+        for &label in labels {
+            slots[slot(label)] += 1;
+        }
+        return;
+    }
+    let mut copies = vec![0i64; 4 * bins];
+    let (quads, rest) = labels.as_chunks::<4>();
+    for quad in quads {
+        copies[slot(quad[0])] += 1;
+        copies[bins + slot(quad[1])] += 1;
+        copies[2 * bins + slot(quad[2])] += 1;
+        copies[3 * bins + slot(quad[3])] += 1;
+    }
+    for &label in rest {
+        copies[slot(label)] += 1;
+    }
+    for (bin, total) in slots.iter_mut().enumerate() {
+        *total +=
+            copies[bin] + copies[bins + bin] + copies[2 * bins + bin] + copies[3 * bins + bin];
+    }
 }
 
 /// The labels of a [`bincount`], borrowed rather than copied.
@@ -482,8 +528,11 @@ pub fn bincount(labels: &Tensor, weights: Option<&Tensor>, minlength: usize) -> 
     let device = labels.device();
 
     let Some(weights) = weights else {
-        let counts = tally(count, bins, 0i64, |index| {
-            Some((borrowed.at(index) as usize, 1i64))
+        // The dtype is settled once per band rather than once per label.
+        let counts = tally_bands(count, bins, 0i64, |first, last, slots| match &borrowed {
+            Labels::I64(values) => count_labels(&values[first..last], slots, |v| v as usize),
+            Labels::I32(values) => count_labels(&values[first..last], slots, |v| v as usize),
+            Labels::Bool(values) => count_labels(&values[first..last], slots, usize::from),
         });
         return Ok(counted_tensor(
             TensorData::from_vec_i64(counts, device),
