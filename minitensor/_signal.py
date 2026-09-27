@@ -166,8 +166,17 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         # its general convolution machinery for a single channel, 5-70x
         # NumPy's time on these shapes: 1.9ms against 0.3 for 16,384
         # samples and 64 taps.
+        first, second = _numpy_view(signal), _numpy_view(kernel)
+        if mode == "valid" and first.shape[0] == second.shape[0]:
+            # One overlap, which is one dot product. NumPy's sliding product
+            # copies an input it cannot write to, and these views are
+            # read-only by design: two 8MB copies made a 1M-sample
+            # correlation 4.9ms where the dot it amounts to takes 0.2.
+            return _from_numpy(
+                _np.array([_np.dot(first, second[::-1] if flip else second)])
+            )
         product = _np.convolve if flip else _np.correlate
-        return _from_numpy(product(_numpy_view(signal), _numpy_view(kernel), mode))
+        return _from_numpy(product(first, second, mode))
 
     length, taps = signal.shape[0], kernel.shape[0]
     if flip:
