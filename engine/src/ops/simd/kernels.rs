@@ -20,6 +20,11 @@ pub struct SimdCapabilities {
     pub avx: bool,
     pub avx2: bool,
     pub avx512: bool,
+    /// AVX-512 F with the byte/word, vector-length and doubleword/quadword
+    /// subsets: what the generic element maps need to narrow a comparison
+    /// into a `bool` byte per lane. Every AVX-512 CPU since Skylake-SP has all
+    /// four; Knights Landing, which has F alone, does not.
+    pub avx512bw: bool,
     pub sse4_1: bool,
     pub neon: bool,
     pub sve: bool,
@@ -36,6 +41,11 @@ impl SimdCapabilities {
             #[cfg(target_arch = "x86_64")]
             avx512: is_x86_feature_detected!("avx512f"),
             #[cfg(target_arch = "x86_64")]
+            avx512bw: is_x86_feature_detected!("avx512f")
+                && is_x86_feature_detected!("avx512bw")
+                && is_x86_feature_detected!("avx512vl")
+                && is_x86_feature_detected!("avx512dq"),
+            #[cfg(target_arch = "x86_64")]
             sse4_1: is_x86_feature_detected!("sse4.1"),
             #[cfg(not(target_arch = "x86_64"))]
             avx: false,
@@ -43,6 +53,8 @@ impl SimdCapabilities {
             avx2: false,
             #[cfg(not(target_arch = "x86_64"))]
             avx512: false,
+            #[cfg(not(target_arch = "x86_64"))]
+            avx512bw: false,
             #[cfg(not(target_arch = "x86_64"))]
             sse4_1: false,
 

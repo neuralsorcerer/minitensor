@@ -70,9 +70,10 @@ jobs:
         if: matrix.python-version == '3.12'
         shell: bash
         env:
-          # Measured at 12.16 MiB on rustc 1.98 / cp312: 10.64 on 1.94 before
+          # Measured at 12.23 MiB on rustc 1.98 / cp312: 10.64 on 1.94 before
           # the NumPy provider, the gemv path and the newer vector kernels,
-          # 11.78 before the element-wise map cores gained an AVX2 build.
+          # 11.78 before the element-wise map cores gained an AVX2 build,
+          # 12.17 before the narrowing ones gained an AVX-512 build.
           # The budget is set to catch a step change -- a dependency that does not get stripped, a
           # generic instantiated across every dtype -- and not to ration the
           # ordinary growth of the engine, so there is real headroom and a

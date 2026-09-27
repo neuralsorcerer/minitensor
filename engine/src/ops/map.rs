@@ -978,6 +978,9 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
 /// `#[target_feature]` twin. A closure run under one shared multiversioned
 /// helper measured the same on simple maps but left `nan_to_num`'s branches
 /// scalar, at a nanosecond an element.
+///
+/// [`map_into`] and [`zip_into`] have a third, AVX-512 build, taken only where
+/// [`wide_lanes_pay`] says so.
 fn map_into<T, U, F>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
 where
     T: Copy,
@@ -996,11 +999,51 @@ where
         body(input, out, op)
     }
     #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512dq")]
+    fn body_avx512<T: Copy, U, F: Fn(T) -> U>(input: &[T], out: &mut [MaybeUninit<U>], op: &F) {
+        body(input, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if wide_lanes_pay::<T, U>() && crate::ops::simd::simd_capabilities().avx512bw {
+        // SAFETY: the AVX-512 subsets named above were detected on this CPU.
+        return unsafe { body_avx512(input, out, op) };
+    }
+    #[cfg(target_arch = "x86_64")]
     if crate::ops::simd::simd_capabilities().avx2 {
         // SAFETY: avx2 was detected on this CPU.
         return unsafe { body_avx2(input, out, op) };
     }
     body(input, out, op)
+}
+
+/// Whether a map from `T` to `U` should take its AVX-512 build: whether it
+/// narrows.
+///
+/// Measured against the AVX2 build on one AVX-512 machine, at 16,384 and
+/// 65,536 elements, a map whose output is narrower than its input gains
+/// 1.2-2.5x. A float64 `isnan` narrows eight bytes to one bool; AVX2 has no
+/// instruction for that and packs lanes down in stages, where AVX-512
+/// compares into a mask and writes it out in one. At 16,384 elements `isnan`
+/// went from 6.3us to 2.6, a float64 `>` from 7.1 to 4.0, a float32 `>` from
+/// 3.0 to 2.4, `signbit` on int64 from 5.2 to 2.8, and an int64-to-float32
+/// cast from 9.2 to 3.7. The same-width maps beside them did not move.
+///
+/// Every other map stays on AVX2 because, as a class, it lost. Same-width
+/// maps -- float32 `add`, int32 `abs`, int64 `neg`, a bool `logical_and` --
+/// are already one instruction a lane there, and ran 10-25% slower on the
+/// wider registers, most likely because a 64-byte store into a buffer aligned
+/// only to its element splits a cache line every time. A few same-width maps
+/// did gain (float64 `fmin` and `nan_to_num` 2x, int64 `clip` 1.3x, from
+/// masked selects and the 64-bit integer minimum AVX2 lacks), but not by
+/// anything visible from the element types.
+///
+/// The condition is a constant per instantiation, so a map that does not
+/// narrow never has an AVX-512 copy compiled at all: the twins cost the
+/// binary 58KB, where one for every map cost 210KB.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+const fn wide_lanes_pay<T, U>() -> bool {
+    std::mem::size_of::<U>() < std::mem::size_of::<T>()
 }
 
 /// Sequential core: write `op(lhs[i], rhs[i])` into every element of `out`.
@@ -1033,6 +1076,21 @@ where
         op: &F,
     ) {
         body(lhs, rhs, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512dq")]
+    fn body_avx512<A: Copy, B: Copy, U, F: Fn(A, B) -> U>(
+        lhs: &[A],
+        rhs: &[B],
+        out: &mut [MaybeUninit<U>],
+        op: &F,
+    ) {
+        body(lhs, rhs, out, op)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if wide_lanes_pay::<A, U>() && crate::ops::simd::simd_capabilities().avx512bw {
+        // SAFETY: the AVX-512 subsets named above were detected on this CPU.
+        return unsafe { body_avx512(lhs, rhs, out, op) };
     }
     #[cfg(target_arch = "x86_64")]
     if crate::ops::simd::simd_capabilities().avx2 {

@@ -358,6 +358,14 @@ than the wider registers: `nan_to_num` captured its replacement values by
 reference, which kept its loop scalar under either build, 12 µs where moving
 them gives 3.
 
+AVX-512 earns a third build in exactly one case: a map whose output is
+narrower than its input. A comparison or `isnan` narrows each lane to a
+one-byte bool, which AVX2 can only pack down in stages and AVX-512 writes
+straight from a mask, so at 16,384 elements float64 `isnan` went from 6.3 µs
+to 2.6, float64 `>` from 7.1 to 4.0, int64 `signbit` from 5.2 to 2.8. Every
+same-width map ran 10–25% *slower* on the wider registers, the same way the
+folds above did, so those never get the build; it costs the binary 58 KB.
+
 ### Two of them were not slow. They were wrong.
 
 The float32 side of that module grew six kernels while this file was being
