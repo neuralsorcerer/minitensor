@@ -1257,38 +1257,74 @@ def insert(
     extra = _atleast_tensor(values)
     if str(extra.dtype) != str(tensor.dtype):
         extra = extra.astype(str(tensor.dtype))
-    # One value per position, shaped like a slice of the axis.
-    slice_shape = list(tensor.shape)
-    slice_shape[axis] = 1
-    if extra.ndim() == 0 or extra.numel() == 1:
-        pieces = [broadcast_to(extra.reshape([1] * tensor.ndim()), slice_shape)] * len(
-            at
-        )
-    else:
-        spread = list(tensor.shape)
-        spread[axis] = len(at)
-        if list(extra.shape) != spread:
-            extra = broadcast_to(
-                extra.reshape([1] * (tensor.ndim() - extra.ndim()) + list(extra.shape)),
-                spread,
-            )
-        pieces = list(unbind(extra, axis))
-        pieces = [piece.unsqueeze(axis) for piece in pieces]
+    # One value per position, shaped like a slice of the axis: a single value
+    # fills every position's slice, anything else is spread along the axis.
+    single = extra.ndim() == 0 or extra.numel() == 1
+    spread = list(tensor.shape)
+    spread[axis] = 1 if single else len(at)
+    shape = (
+        [1] * tensor.ndim()
+        if single
+        else [1] * (tensor.ndim() - extra.ndim()) + list(extra.shape)
+    )
 
-    order = sorted(range(len(at)), key=lambda index: at[index])
-    parts: list[Tensor] = []
+    # The output in order: a run of the input, `(first, last)`, or the value
+    # inserted at one position, by its index among the values.
+    layout: list[tuple[int, int] | int] = []
     previous = 0
-    for index in order:
-        position = at[index]
+    for index in sorted(range(len(at)), key=lambda index: at[index]):
+        position = int(at[index])
         if position > previous:
-            parts.append(
-                _C.functional.narrow(tensor, axis, previous, position - previous)
-            )
-        parts.append(pieces[index])
+            layout.append((previous, position))
+        layout.append(0 if single else index)
         previous = position
     if previous < length:
-        parts.append(_C.functional.narrow(tensor, axis, previous, length - previous))
-    return _C.functional.cat(parts, axis)
+        layout.append((previous, length))
+
+    if tensor.requires_grad or extra.requires_grad:
+        # Through the engine, which records how to route the gradient.
+        filled = extra.reshape(shape)
+        if list(filled.shape) != spread:
+            filled = broadcast_to(filled, spread)
+        return _C.functional.cat(
+            [
+                _C.functional.narrow(
+                    *(
+                        (tensor, axis, part[0], part[1] - part[0])
+                        if isinstance(part, tuple)
+                        else (filled, axis, part, 1)
+                    )
+                )
+                for part in layout
+            ],
+            axis,
+        )
+    # Otherwise in NumPy, over views: the values broadcast without being
+    # copied, and the runs and values are joined in one copy into an array
+    # the result then owns. Through the engine, each run and each broadcast
+    # value was a copy of its own before the join -- one value into 262,144
+    # float32 took 211us, where NumPy takes 83.
+    try:
+        filled = _np.broadcast_to(_numpy_view(extra).reshape(shape), spread)
+    except ValueError:
+        raise ValueError(
+            f"input shape {tuple(shape)} cannot be broadcast to {tuple(spread)}"
+        ) from None
+    source = _numpy_view(tensor)
+    lead = (slice(None),) * axis
+    return _from_numpy(
+        _np.concatenate(
+            [
+                (
+                    source[lead + (slice(*part),)]
+                    if isinstance(part, tuple)
+                    else filled[lead + (slice(part, part + 1),)]
+                )
+                for part in layout
+            ],
+            axis=axis,
+        )
+    )
 
 
 def resize(input: object, shape: object) -> Tensor:

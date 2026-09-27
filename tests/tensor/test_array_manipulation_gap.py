@@ -168,6 +168,41 @@ def test_insert_spreads_a_row_across_an_axis(values):
     )
 
 
+@pytest.mark.parametrize(
+    "obj,fill,dim",
+    [
+        (1, 9.0, 0),
+        ([1, 1], [7.0, 8.0], None),
+        ([0, 5], [1.0, 2.0], 1),
+        ([0, 2], np.arange(10.0).reshape(2, 5), 0),
+    ],
+    ids=["scalar", "repeated", "column-ends", "rows"],
+)
+def test_insert_gives_the_same_answer_with_and_without_a_gradient(obj, fill, dim):
+    """Untracked, the runs and the values are joined in NumPy; tracked, in the
+    engine, which also routes the gradient. The two must agree, and every
+    element of the input must get exactly its own gradient back."""
+
+    values = np.random.default_rng(127).standard_normal((4, 5))
+    want = np.insert(values, obj, fill, dim)
+    for tracked in (False, True):
+        tensor = mt.from_numpy(values)
+        tensor.requires_grad_(tracked)
+        got = mt.insert(tensor, obj, fill, dim)
+        np.testing.assert_array_equal(got.detach().numpy(), want)
+        if tracked:
+            got.sum().backward()
+            np.testing.assert_array_equal(tensor.grad.numpy(), np.ones_like(values))
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["plain", "tracked"])
+def test_insert_refuses_values_that_do_not_fit_the_positions(values, tracked):
+    tensor = mt.from_numpy(values)
+    tensor.requires_grad_(tracked)
+    with pytest.raises(ValueError, match="broadcast"):
+        mt.insert(tensor, [1, 2], [[1.0, 2.0, 3.0]], 0)
+
+
 def test_resize_repeats_rather_than_zero_filling(values):
     np.testing.assert_allclose(
         mt.resize(mt.from_numpy(values), (5, 6)).numpy(), np.resize(values, (5, 6))
