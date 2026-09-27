@@ -168,6 +168,15 @@ def broadcast_to(input: object, shape: object) -> Tensor:
     """
 
     tensor = _atleast_tensor(input)
+    if (
+        isinstance(shape, (list, tuple))
+        and all(type(size) is int for size in shape)
+        and tuple(shape) == tuple(tensor.shape)
+    ):
+        # Already that shape, and a shape the tensor has needs no validating:
+        # most callers broadcast an operand that usually fits, and normalizing
+        # and checking the shape was most of `take_along_dim` on 1,024 values.
+        return tensor
     target_shape = _normalize_shape_argument(shape, "shape")
     # Reuse the shared broadcast validator so error behavior is identical to
     # broadcast_shapes/broadcast_tensors before asking the backend to expand.
