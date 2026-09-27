@@ -70,8 +70,8 @@ use pyo3::exceptions::{
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyBool, PyDict, PyInt, PyList, PyModule, PySequence, PySequenceMethods, PySlice,
-    PyString, PyTuple,
+    PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PySequence, PySequenceMethods,
+    PySlice, PyString, PyTuple,
 };
 use pyo3::{Py, PyRefMut};
 use std::borrow::Cow;
@@ -94,15 +94,26 @@ fn register_leaf_tensor(tensor: &Tensor) {
 /// and once for the strides. Most callers only read, and the ones that need to
 /// own clone once from here instead of cloning a clone.
 ///
-/// `hasattr` and not `getattr` for the wrapper case: the miss is the common
-/// case -- every scalar operand of every binary op reaches here -- and a
-/// failed `getattr` raises, which means building and discarding a Python
-/// exception on a path that is only asking a question.
+/// The builtin scalars and sequences are turned away before the wrapper is
+/// asked for: they are the common miss -- every `x * 2.0` reaches here -- and
+/// neither can carry an attribute. Asking costs more than the op it serves.
+/// Before Python 3.13 an attribute is found missing by raising
+/// `AttributeError` and formatting its message, which `hasattr` then
+/// discards: 3,800 instructions, most of the 0.9us `x * 2.0` cost over
+/// `x * y`. Exact types only, since a subclass can carry one.
 pub(crate) fn borrow_wrapped_tensor<'py>(
     value: &'py Bound<'py, PyAny>,
 ) -> Option<PyRef<'py, PyTensor>> {
     if let Ok(py_tensor) = value.extract::<PyRef<PyTensor>>() {
         return Some(py_tensor);
+    }
+    if value.is_exact_instance_of::<PyFloat>()
+        || value.is_exact_instance_of::<PyInt>()
+        || value.is_exact_instance_of::<PyBool>()
+        || value.is_exact_instance_of::<PyList>()
+        || value.is_exact_instance_of::<PyTuple>()
+    {
+        return None;
     }
 
     let attr_name = intern!(value.py(), "_tensor");

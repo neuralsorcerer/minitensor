@@ -324,17 +324,14 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
         })
         .unwrap_or(reference.dtype());
 
-    if let Ok(py_tensor) = PyTensor::from_python_value_with_dtype(value, target_dtype) {
-        let mut tensor = py_tensor.inner;
+    // Built at the resolved dtype, so only the device can still differ. A
+    // wrapped tensor returned above, and asking again would repeat the
+    // wrapper lookup on every scalar operand.
+    if let Ok(mut tensor) = convert_python_data_to_tensor(value, target_dtype, Device::cpu(), false)
+    {
         if tensor.device() != reference.device() {
             tensor = tensor.to(reference.device()).map_err(_convert_error)?;
         }
-
-        // A wrapped tensor comes back unchanged, so it may still need the cast.
-        if tensor.dtype() != target_dtype {
-            tensor = tensor.astype(target_dtype).map_err(_convert_error)?;
-        }
-
         return Ok(tensor);
     }
 

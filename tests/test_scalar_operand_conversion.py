@@ -189,3 +189,24 @@ def test_a_float64_array_operand_is_not_narrowed():
     result = narrow + operand
     assert str(result.dtype) == "float64"
     np.testing.assert_array_equal(result.numpy(), operand)
+
+
+class WrapsATensor:
+    def __init__(self, tensor):
+        self._tensor = tensor
+
+
+class FloatCarryingATensor(float):
+    pass
+
+
+def test_an_operand_carrying_a_tensor_is_that_tensor():
+    """The builtin scalars skip the lookup for `_tensor`, which no `float` can
+    carry; a subclass can, and still has it read."""
+
+    other = mt.from_numpy(np.array([10.0, 20.0, 30.0]))
+    carrier = FloatCarryingATensor(0.5)
+    carrier._tensor = other
+    for operand in (WrapsATensor(other), carrier):
+        result = _tensor("float64") + operand
+        np.testing.assert_array_equal(result.numpy(), [11.0, 22.0, 33.0])
