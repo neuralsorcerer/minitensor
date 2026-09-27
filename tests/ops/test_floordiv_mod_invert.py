@@ -98,6 +98,36 @@ def test_floordiv_mod_identity():
     np.testing.assert_array_equal(q * INT_B + r, INT_A)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_quotient_that_rounds_onto_an_integer_is_floored_below_it(dtype):
+    """`1.0 / 0.1` is 9.99999999999999944... exactly and rounds to 10.0, so
+    flooring the rounded quotient said 10 where Python and NumPy say 9 -- and
+    then `(a // b) * b + a % b` was 1.1, not 1. Here and across a large
+    random set of quotients built to land within an ulp of an integer, the
+    answer is NumPy's while the quotient stays below 2**50 (past about 2**51
+    NumPy's own answer starts losing its last unit), and the identity holds
+    to the rounding of the product."""
+
+    rng = np.random.default_rng(7)
+    divisors = rng.standard_normal(200_000) * rng.choice([1e-3, 1.0, 1e3], 200_000)
+    counts = rng.integers(-1000, 1000, 200_000)
+    exact = (counts * divisors).astype(dtype)
+    nudged = np.nextafter(
+        exact, rng.choice([-np.inf, np.inf], exact.size).astype(dtype)
+    )
+    a = np.concatenate([[1.0, 0.3, 2.0, -1.0, 7.0], exact, nudged]).astype(dtype)
+    b = np.concatenate([[0.1, 0.1, 0.2, 0.1, 0.7], divisors, divisors]).astype(dtype)
+
+    q = mt.floor_divide(mt.from_numpy(a), mt.from_numpy(b)).numpy()
+    r = mt.remainder(mt.from_numpy(a), mt.from_numpy(b)).numpy()
+    want = np.floor_divide(a, b)
+    assert q[0] == 9.0
+    np.testing.assert_array_equal(q, want)
+    np.testing.assert_array_equal(np.signbit(q), np.signbit(want))
+    tolerance = 4 * np.finfo(dtype).eps * np.maximum(np.abs(a), np.abs(q * b))
+    assert np.all(np.abs(q.astype(np.float64) * b + r - a) <= tolerance)
+
+
 def test_int_floordiv_and_mod_exact():
     # Integer results stay integral (no float round-trip), so values beyond
     # float32's 2^24 mantissa stay exact.

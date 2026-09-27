@@ -749,6 +749,24 @@ mod modulus_tests {
         tensor.data().as_f64_slice().unwrap().to_vec()
     }
 
+    /// `1.0 / 0.1` rounds up onto 10.0 from just below it, so the floor of
+    /// the rounded quotient is one too many; the floored quotient is 9, and
+    /// with it `q * b + remainder(a, b)` gives back `a`.
+    #[test]
+    fn a_quotient_rounded_onto_an_integer_is_floored_below_it() {
+        let a = f64_tensor(vec![1.0, 0.3, 2.0, -1.0, 6.0]);
+        let b = f64_tensor(vec![0.1, 0.1, 0.2, 0.1, 3.0]);
+        assert_eq!(
+            wide(&floor_div(&a, &b).unwrap()),
+            vec![9.0, 2.0, 9.0, -10.0, 2.0]
+        );
+        let q = wide(&floor_div(&a, &b).unwrap());
+        let r = wide(&remainder(&a, &b).unwrap());
+        for (i, (&dividend, &divisor)) in wide(&a).iter().zip(&wide(&b)).enumerate() {
+            assert!((q[i] * divisor + r[i] - dividend).abs() < 1e-15, "{i}");
+        }
+    }
+
     /// A remainder of zero takes the divisor's sign, as Python's `%` and
     /// NumPy's `remainder` give it, while `fmod`'s zero keeps the dividend's.
     /// Both widths, since only float64 is ever handed to a provider: these

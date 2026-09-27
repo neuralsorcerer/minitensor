@@ -19,6 +19,10 @@ pub struct SimdCapabilities {
     /// registers without it.
     pub avx: bool,
     pub avx2: bool,
+    /// AVX2 together with FMA3. Every CPU with the first has the second, but
+    /// they are separate CPUID bits, and a build that fuses a multiply-add
+    /// has to have checked both.
+    pub avx2_fma: bool,
     pub avx512: bool,
     /// AVX-512 F with the byte/word, vector-length and doubleword/quadword
     /// subsets: what the generic element maps need to narrow a comparison
@@ -39,6 +43,8 @@ impl SimdCapabilities {
             #[cfg(target_arch = "x86_64")]
             avx2: is_x86_feature_detected!("avx2"),
             #[cfg(target_arch = "x86_64")]
+            avx2_fma: is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
+            #[cfg(target_arch = "x86_64")]
             avx512: is_x86_feature_detected!("avx512f"),
             #[cfg(target_arch = "x86_64")]
             avx512bw: is_x86_feature_detected!("avx512f")
@@ -51,6 +57,8 @@ impl SimdCapabilities {
             avx: false,
             #[cfg(not(target_arch = "x86_64"))]
             avx2: false,
+            #[cfg(not(target_arch = "x86_64"))]
+            avx2_fma: false,
             #[cfg(not(target_arch = "x86_64"))]
             avx512: false,
             #[cfg(not(target_arch = "x86_64"))]

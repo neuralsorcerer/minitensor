@@ -974,6 +974,13 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
 /// lanes at a time) went from 7.8us to 4.6us, and float32 `floor_divide` from
 /// 154us to 12us.
 ///
+/// The AVX2 build enables FMA with it, which every AVX2 CPU has. No result
+/// moves for that either -- Rust never fuses `a * b + c` on its own -- but a
+/// kernel that asks for `mul_add` gets the instruction rather than a call
+/// into `libm`, which stops the loop vectorizing. Floor division checks its
+/// quotient with one (see `ops::kernels::binary`): over 16,384 float32 that
+/// was 156us as a call and 21 as an instruction.
+///
 /// Each is spelled as a named `#[inline(always)]` body under a
 /// `#[target_feature]` twin. A closure run under one shared multiversioned
 /// helper measured the same on simple maps but left `nan_to_num`'s branches
@@ -995,7 +1002,7 @@ where
         }
     }
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma")]
     fn body_avx2<T: Copy, U, F: Fn(T) -> U>(input: &[T], out: &mut [MaybeUninit<U>], op: &F) {
         body(input, out, op)
     }
@@ -1010,8 +1017,8 @@ where
         return unsafe { body_avx512(input, out, op) };
     }
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::simd::simd_capabilities().avx2 {
-        // SAFETY: avx2 was detected on this CPU.
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
         return unsafe { body_avx2(input, out, op) };
     }
     body(input, out, op)
@@ -1074,7 +1081,7 @@ fn zip_into<A, B, U, F, const SELECTS: bool>(
         }
     }
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma")]
     fn body_avx2<A: Copy, B: Copy, U, F: Fn(A, B) -> U>(
         lhs: &[A],
         rhs: &[B],
@@ -1099,8 +1106,8 @@ fn zip_into<A, B, U, F, const SELECTS: bool>(
         return unsafe { body_avx512(lhs, rhs, out, op) };
     }
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::simd::simd_capabilities().avx2 {
-        // SAFETY: avx2 was detected on this CPU.
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
         return unsafe { body_avx2(lhs, rhs, out, op) };
     }
     body(lhs, rhs, out, op)
@@ -1131,7 +1138,7 @@ where
         }
     }
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma")]
     fn body_avx2<A: Copy, B: Copy, C: Copy, U, F: Fn(A, B, C) -> U>(
         a: &[A],
         b: &[B],
@@ -1142,8 +1149,8 @@ where
         body(a, b, c, out, op)
     }
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::simd::simd_capabilities().avx2 {
-        // SAFETY: avx2 was detected on this CPU.
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
         return unsafe { body_avx2(a, b, c, out, op) };
     }
     body(a, b, c, out, op)

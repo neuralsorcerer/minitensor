@@ -338,21 +338,64 @@ binary_kernel_simd!(
 //
 // Division by zero keeps its infinity (`inf // 0` is `inf`), which is what
 // both references give and what the float path is for.
+//
+// And for finite operands it was wrong one time in some, where both
+// references are right: `1.0 // 0.1` is 9 and this said 10. The exact
+// quotient is 9.99999999999999944..., which *rounds* to 10.0 before the
+// floor ever sees it -- so `floor_div(a, b) * b + remainder(a, b) == a`,
+// the identity the remainder kernels below are built to, failed. The fix
+// costs a product and a fused multiply-add per element rather than NumPy's
+// `fmod`, because the error has one shape only:
+//
+//   * `a / b` rounds to the float nearest the exact quotient `Q`, and every
+//     integer below 2**53 is a float, so the rounded quotient can never fall
+//     below `floor(Q)`: rounding is monotone and `floor(Q)` is a candidate.
+//   * It can land *on* `floor(Q) + 1`, when `Q` is within half an ulp of it.
+//     Then `q = floor(a / b)` is one too large, and `a - q * b` has the sign
+//     opposite to `b` -- where the right `q` leaves it `b`'s sign or zero.
+//   * That sign is known exactly. `p = q * b` rounds, but if `p != a` the
+//     exact product lies on the same side of `a` as `p` does, since `a` is a
+//     float too; and if `p == a`, `q * b - p` is the rounding error of that
+//     product, which a fused multiply-add computes without error.
+//
+// NaN from the check (an infinite divisor, or division by zero) fails both
+// sign tests and leaves `q` as it was, which is the answer those cases have.
+macro_rules! floored_quotient {
+    ($name:ident, $ty:ty) => {
+        // Every condition is computed and combined with `&`/`|`, never
+        // `&&` or an early return: those are branches, and on data whose
+        // quotients land either way they kept the float64 loop scalar.
+        #[inline(always)]
+        fn $name(a: $ty, b: $ty) -> $ty {
+            let q = (a / b).floor();
+            let p = q * b;
+            // The exact sign of `a - q * b`, as argued above.
+            let rest = if a == p { -q.mul_add(b, -p) } else { a - p };
+            let too_large = (rest < 0.0) & (b > 0.0) | (rest > 0.0) & (b < 0.0);
+            let q = if too_large { q - 1.0 } else { q };
+            let finite_nonzero = |x: $ty| x.is_finite() & (x != 0.0);
+            let no_quotient = a.is_infinite() & finite_nonzero(b);
+            let below_zero = b.is_infinite() & finite_nonzero(a) & ((a < 0.0) != (b < 0.0));
+            if no_quotient {
+                <$ty>::NAN
+            } else if below_zero {
+                -1.0
+            } else {
+                q
+            }
+        }
+    };
+}
+floored_quotient!(floored_quotient_f32, f32);
+floored_quotient!(floored_quotient_f64, f64);
+
 binary_kernel!(
     floordiv_f32_direct,
     as_f32_slice,
     f32,
     Float32,
     "f32",
-    |a: f32, b: f32| {
-        if a.is_infinite() && b.is_finite() && b != 0.0 {
-            f32::NAN
-        } else if b.is_infinite() && a.is_finite() && a != 0.0 && (a < 0.0) != (b < 0.0) {
-            -1.0
-        } else {
-            (a / b).floor()
-        }
-    }
+    floored_quotient_f32
 );
 binary_kernel!(
     floordiv_f64_direct,
@@ -360,15 +403,7 @@ binary_kernel!(
     f64,
     Float64,
     "f64",
-    |a: f64, b: f64| {
-        if a.is_infinite() && b.is_finite() && b != 0.0 {
-            f64::NAN
-        } else if b.is_infinite() && a.is_finite() && a != 0.0 && (a < 0.0) != (b < 0.0) {
-            -1.0
-        } else {
-            (a / b).floor()
-        }
-    }
+    floored_quotient_f64
 );
 binary_kernel!(
     floordiv_i32_direct,
