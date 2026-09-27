@@ -221,6 +221,27 @@ pub fn batch_norm(
 /// `normalized` and `inv_std` are produced here rather than recovered later
 /// because [`crate::autograd::LayerNormBackward`] saves both, so fusing the
 /// forward must not cost the backward its inputs.
+/// A row's sum of `term(v)`, in eight f64 lanes combined pairwise at the end.
+///
+/// One accumulator is a chain of dependent adds the compiler may not reorder
+/// -- an add's latency per element, the bulk of a 95us layer_norm forward over
+/// 64 rows of 512 -- and eight independent ones vectorise, with an error bound
+/// no worse.
+#[inline(always)]
+fn lane_sum<T: Copy>(row: &[T], term: impl Fn(T) -> f64) -> f64 {
+    let mut acc = [0.0f64; 8];
+    let (blocks, rest) = row.as_chunks::<8>();
+    for block in blocks {
+        for (a, &v) in acc.iter_mut().zip(block) {
+            *a += term(v);
+        }
+    }
+    for (a, &v) in acc.iter_mut().zip(rest) {
+        *a += term(v);
+    }
+    ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
+}
+
 macro_rules! layer_norm_rows {
     ($name:ident, $ty:ty) => {
         fn $name(
@@ -246,30 +267,9 @@ macro_rules! layer_norm_rows {
             /// Two reduction passes rather than one. `E[x^2] - E[x]^2` would
             /// halve the traffic and lose every significant digit when the mean
             /// dominates the spread, which is exactly the regime a
-            /// normalization layer sits in.
-            ///
-            /// Each pass keeps eight running sums, combined pairwise at the
-            /// end. One accumulator is a chain of dependent adds the compiler
-            /// may not reorder -- an add's latency per element, the bulk of a
-            /// 137us forward over 64 rows of 512 where NumPy's took 83 -- and
-            /// eight independent ones vectorise, with an error bound no worse.
+            /// normalization layer sits in. Each pass is a [`lane_sum`].
             #[inline(always)]
             fn stats(row: &[$ty], recip: f64, eps: f64) -> (f64, f64) {
-                #[inline(always)]
-                fn lane_sum(row: &[$ty], term: impl Fn($ty) -> f64) -> f64 {
-                    let mut acc = [0.0f64; 8];
-                    let mut blocks = row.chunks_exact(8);
-                    for block in &mut blocks {
-                        for (a, &v) in acc.iter_mut().zip(block) {
-                            *a += term(v);
-                        }
-                    }
-                    for (a, &v) in acc.iter_mut().zip(blocks.remainder()) {
-                        *a += term(v);
-                    }
-                    ((acc[0] + acc[4]) + (acc[2] + acc[6]))
-                        + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
-                }
                 let mean = lane_sum(row, |v| v as f64) * recip;
                 let sq = lane_sum(row, |v| {
                     let d = v as f64 - mean;
@@ -636,11 +636,10 @@ macro_rules! rms_norm_rows {
                     };
                     for r in 0..inv_rms.len() {
                         let row = &input[(first_row + r) * norm..][..norm];
-                        let mut sq = 0.0f64;
-                        for &v in row {
+                        let sq = lane_sum(row, |v| {
                             let d = v as f64;
-                            sq += d * d;
-                        }
+                            d * d
+                        });
                         let scale = 1.0 / (sq * recip + eps).sqrt();
                         inv_rms[r] = scale as $ty;
                         let o = &mut out[r * norm..][..norm];
