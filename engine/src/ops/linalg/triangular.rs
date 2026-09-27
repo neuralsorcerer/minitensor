@@ -6,50 +6,37 @@
 
 use super::*;
 use crate::ops::map::par_out_chunks;
-use crate::tensor::{Shape, Strides};
+use crate::tensor::Shape;
 use std::mem::MaybeUninit;
 
-/// Rows and columns in one tile of a matrix transpose.
+/// Rows and columns in one tile of a transpose.
 ///
 /// A transpose reads down columns or writes down them, so one side of it
 /// touches a new cache line per element. Square tiles bound that to `TILE`
-/// lines a side, each reused `TILE` times: a 256x256 float32 matrix took 163us
-/// written column by column and 22 in tiles, 1024x1024 3.97ms and 0.62 on one
-/// thread -- where the column gather it replaced there took 0.57ms on four. 16
-/// was the best of 8 to 64 across float32 and float64 and shapes from square
-/// to 64x4096, and tiles won from 32x32 up.
+/// lines a side, each reused `TILE` times: a 256x256 float32 matrix took 166us
+/// written column by column and 27 in tiles, and on one thread 1024x1024 took
+/// 3.97ms and 0.62 -- where the column gather it replaced there took 0.57ms on
+/// four. 16 was the best of 8 to 64 across float32 and float64 and shapes from
+/// square to 64x4096, and tiles won from 32x32 up.
 const TRANSPOSE_TILE: usize = 16;
-
-/// Output rows `first..first + out.len() / rows` of the transpose of one
-/// `rows x cols` matrix -- input columns, that is -- tile by tile.
-fn transpose_band<T: Copy>(
-    src: &[T],
-    rows: usize,
-    cols: usize,
-    first: usize,
-    out: &mut [MaybeUninit<T>],
-) {
-    let count = out.len() / rows;
-    assert!(src.len() == rows * cols && out.len() == count * rows && first + count <= cols);
-    let (src, out) = (src.as_ptr(), out.as_mut_ptr());
-    for i0 in (0..rows).step_by(TRANSPOSE_TILE) {
-        let i1 = (i0 + TRANSPOSE_TILE).min(rows);
-        for j0 in (0..count).step_by(TRANSPOSE_TILE) {
-            for j in j0..(j0 + TRANSPOSE_TILE).min(count) {
-                for i in i0..i1 {
-                    // SAFETY: `i < rows` and `j < count`, and the assertion
-                    // above puts `first + j < cols`, so both offsets are in
-                    // bounds. Indexing checked each and ran 1.7x slower.
-                    unsafe { (*out.add(j * rows + i)).write(*src.add(i * cols + first + j)) };
-                }
-            }
-        }
-    }
-}
 
 /// Transpose `input_data` (viewed as `input_shape`) into a fresh contiguous
 /// buffer of `output_shape` with `dim0`/`dim1` swapped. Every output element
 /// is written exactly once (no zeroing pass; see `ops::map`).
+///
+/// The input is read as `[outer, lo, between, hi, inner]` -- the two swapped
+/// axes, what lies between them and what follows -- and the output is
+/// `[outer, hi, between, lo, inner]`. Two shapes of work cover every case:
+///
+/// - `inner > 1`: the trailing axes move together, so each output run of
+///   `inner` elements is one contiguous run of the input and is copied whole.
+///   Walking them element by element took 80us to swap the leading axes of an
+///   (8, 64, 64) float32 tensor, where this takes 4.4 and NumPy 5.9.
+/// - `inner == 1`: the swapped axes are the two sides of a matrix, one for
+///   each position of `outer` and `between`, and are transposed in tiles; see
+///   [`TRANSPOSE_TILE`]. `between` is 1 for `.T` of a matrix and `.mT` of a
+///   batch; above it, a (32, 32, 32) `transpose(0, 2)` took 72us element by
+///   element and takes 20 in tiles, NumPy 25.
 pub(crate) fn transpose_map<T: Copy + Send + Sync>(
     input_data: &[T],
     input_shape: &Shape,
@@ -58,70 +45,114 @@ pub(crate) fn transpose_map<T: Copy + Send + Sync>(
     dim1: usize,
 ) -> Vec<T> {
     let numel = output_shape.numel();
-    let rank = input_shape.ndim();
+    if numel == 0 {
+        return Vec::new();
+    }
+    let dims = input_shape.dims();
+    let (lo, hi) = (dim0.min(dim1), dim0.max(dim1));
+    let (d_lo, d_hi) = (dims[lo], dims[hi]);
+    let between: usize = dims[lo + 1..hi].iter().product();
+    let inner: usize = dims[hi + 1..].iter().product();
+    assert_eq!(input_data.len(), numel);
 
-    // The last two axes swapped is a stack of matrix transposes -- `.T` of a
-    // matrix, `.mT` of a batch -- done in tiles; see `TRANSPOSE_TILE`.
-    if rank >= 2 && dim0.min(dim1) == rank - 2 && dim0.max(dim1) == rank - 1 {
-        if numel == 0 {
-            return Vec::new();
-        }
-        let (rows, cols) = (input_shape.dims()[rank - 2], input_shape.dims()[rank - 1]);
-        // The output is `numel / rows` rows of `rows`, one per input column,
-        // and any whole number of them is a task: one band of tiles, widened
-        // to 8K elements where the rows are short. Small tasks and many of
-        // them, because the caller works through them while the pool wakes --
-        // a 4096x64 matrix is only four bands.
-        let band = TRANSPOSE_TILE * (1usize << 13).div_ceil(TRANSPOSE_TILE * rows);
+    if inner > 1 {
+        // Output run `((a * d_hi + j) * between + b) * d_lo + i` is input run
+        // `((a * d_lo + i) * between + b) * d_hi + j`.
         let work = |start: usize, out: &mut [MaybeUninit<T>]| {
-            let (mut row, mut out) = (start / rows, out);
-            while !out.is_empty() {
-                let (matrix, column) = (row / cols, row % cols);
-                let take = (cols - column).min(out.len() / rows);
-                let (here, rest) = out.split_at_mut(take * rows);
-                let src = &input_data[matrix * rows * cols..(matrix + 1) * rows * cols];
-                transpose_band(src, rows, cols, column, here);
-                (row, out) = (row + take, rest);
+            let run = start / inner;
+            let (mut i, rest) = (run % d_lo, run / d_lo);
+            let (mut b, rest) = (rest % between, rest / between);
+            let (mut j, mut a) = (rest % d_hi, rest / d_hi);
+            for slot in out.chunks_exact_mut(inner) {
+                let from = (((a * d_lo + i) * between + b) * d_hi + j) * inner;
+                slot.write_copy_of_slice(&input_data[from..from + inner]);
+                i += 1;
+                if i == d_lo {
+                    i = 0;
+                    b += 1;
+                    if b == between {
+                        b = 0;
+                        j += 1;
+                        if j == d_hi {
+                            j = 0;
+                            a += 1;
+                        }
+                    }
+                }
             }
         };
-        // SAFETY: every output row belongs to exactly one task, which writes
-        // all of it.
-        return unsafe {
-            crate::ops::map::build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
-                if numel < PAR_THRESHOLD {
-                    work(0, spare);
-                } else {
-                    par_out_chunks(spare, band * rows, &work);
-                }
-                Ok(())
-            })
-            .unwrap_or_else(|e| match e {})
-        };
+        return fill_transpose(numel, inner, &work);
     }
 
-    // General case: gather through the swapped-stride view of the input.
-    // The output's element at output coordinates c reads the input at the
-    // same coordinates with dim0/dim1 swapped, which is exactly a strided
-    // gather with the input's contiguous strides permuted.
-    let input_strides = Strides::from_shape(input_shape);
-    let in_strides = input_strides.as_slice();
-    let out_dims = output_shape.dims();
-    let mut gather_strides: Vec<usize> = (0..out_dims.len())
-        .map(|dim| {
-            let in_dim = if dim == dim0 {
-                dim1
-            } else if dim == dim1 {
-                dim0
+    // One output "pair" is a position of `outer` and of `hi`: `between` rows
+    // of `d_lo`, the rows a tile of `hi` positions writes into.
+    let pair_len = between * d_lo;
+    let src_stride = between * d_hi;
+    let work = |start: usize, out: &mut [MaybeUninit<T>]| {
+        let (first, count) = (start / pair_len, out.len() / pair_len);
+        assert_eq!(out.len(), count * pair_len);
+        let (src, dst) = (input_data.as_ptr(), out.as_mut_ptr());
+        // The task's pairs, one position of `outer` at a time, swept a band
+        // of `lo` rows at a time: each band of input rows is read across
+        // before the next, which ran 10% faster than tile-columns first.
+        let mut pair = first;
+        while pair < first + count {
+            let (a, j_start) = (pair / d_hi, pair % d_hi);
+            let j_end = d_hi.min(j_start + first + count - pair);
+            for b in 0..between {
+                let src_base = a * d_lo * src_stride + b * d_hi;
+                for i0 in (0..d_lo).step_by(TRANSPOSE_TILE) {
+                    let i1 = (i0 + TRANSPOSE_TILE).min(d_lo);
+                    for j0 in (j_start..j_end).step_by(TRANSPOSE_TILE) {
+                        for j in j0..(j0 + TRANSPOSE_TILE).min(j_end) {
+                            let out_row = ((pair - first + j - j_start) * between + b) * d_lo;
+                            for i in i0..i1 {
+                                // SAFETY: `pair - first + j - j_start < count`
+                                // and `b < between`, `i < d_lo`, so the write
+                                // is inside `out`, whose length is asserted
+                                // above; the read is input position
+                                // (a, i, b, j), each below its extent, and the
+                                // input's length is asserted to be `numel`.
+                                // Indexing checked both and ran 1.7x slower.
+                                unsafe {
+                                    (*dst.add(out_row + i))
+                                        .write(*src.add(src_base + i * src_stride + j))
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            pair += j_end - j_start;
+        }
+    };
+    fill_transpose(numel, pair_len * TRANSPOSE_TILE, &work)
+}
+
+/// A fresh buffer of `numel` filled by `work` -- in tasks of whole multiples
+/// of `unit`, widened to 8K elements, above the parallel threshold.
+///
+/// Small tasks and many of them, because the caller works through them while
+/// the pool wakes: a 4096x64 matrix is only four bands of tiles.
+fn fill_transpose<T: Send>(
+    numel: usize,
+    unit: usize,
+    work: &(dyn Fn(usize, &mut [MaybeUninit<T>]) + Sync),
+) -> Vec<T> {
+    let task = unit * (1usize << 13).div_ceil(unit);
+    // SAFETY: the tasks tile the output, and `work` writes every element of
+    // the whole units it is given.
+    unsafe {
+        crate::ops::map::build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
+            if numel < PAR_THRESHOLD {
+                work(0, spare);
             } else {
-                dim
-            };
-            in_strides[in_dim]
+                par_out_chunks(spare, task, work);
+            }
+            Ok(())
         })
-        .collect();
-    if out_dims.is_empty() {
-        gather_strides.clear();
+        .unwrap_or_else(|e| match e {})
     }
-    crate::ops::map::strided_gather(input_data, out_dims, &gather_strides)
 }
 
 #[cfg(test)]
@@ -324,12 +355,13 @@ mod tests {
         assert_eq!(result.shape().dims(), &[3, 2]);
     }
 
-    /// The tiled transpose against the definition, over the shapes that
-    /// exercise its edges: tiles cut short on either side, a single row or
-    /// column, a stack of matrices, and enough of them to split across the
-    /// pool with a task boundary falling inside a matrix.
+    /// Every transpose against the definition, over the shapes that exercise
+    /// the edges of both kernels: tiles cut short on either side, a single
+    /// row or column, axes between the swapped two, trailing runs of one and
+    /// of several, axes of extent one, and enough elements to split across
+    /// the pool with a task boundary falling mid-matrix and mid-run.
     #[test]
-    fn a_tiled_transpose_puts_every_element_where_the_definition_does() {
+    fn a_transpose_puts_every_element_where_the_definition_does() {
         for dims in [
             vec![1, 1],
             vec![1, 37],
@@ -337,29 +369,36 @@ mod tests {
             vec![17, 33],
             vec![64, 48],
             vec![3, 5, 7],
+            vec![4, 16, 1],
             vec![4, 16, 16],
+            vec![5, 3, 17, 2],
+            vec![2, 19, 3, 21, 4],
             vec![9, 130, 131],
             vec![700, 300],
+            vec![70, 60, 40],
         ] {
             let rank = dims.len();
-            let (rows, cols) = (dims[rank - 2], dims[rank - 1]);
             let numel: usize = dims.iter().product();
             let values: Vec<i64> = (0..numel as i64).collect();
             let input = tensor_of::<i64>(values.clone(), dims.clone(), false);
-            let got = transpose(&input, rank as isize - 1, rank as isize - 2).unwrap();
-            let mut want_dims = dims.clone();
-            want_dims.swap(rank - 2, rank - 1);
-            assert_eq!(got.shape().dims(), &want_dims[..]);
-            let got = got.data().as_i64_slice().unwrap();
-            for matrix in 0..numel / (rows * cols) {
-                let base = matrix * rows * cols;
-                for i in 0..rows {
-                    for j in 0..cols {
-                        assert_eq!(
-                            got[base + j * rows + i],
-                            values[base + i * cols + j],
-                            "{dims:?} at ({matrix}, {i}, {j})"
-                        );
+            let strides: Vec<usize> = (0..rank).map(|d| dims[d + 1..].iter().product()).collect();
+            for d0 in 0..rank {
+                for d1 in d0 + 1..rank {
+                    let got = transpose(&input, d0 as isize, d1 as isize).unwrap();
+                    let mut out_dims = dims.clone();
+                    out_dims.swap(d0, d1);
+                    assert_eq!(got.shape().dims(), &out_dims[..]);
+                    let got = got.data().as_i64_slice().unwrap();
+                    let mut position = vec![0usize; rank];
+                    for (flat, value) in got.iter().enumerate() {
+                        let mut rest = flat;
+                        for d in (0..rank).rev() {
+                            position[d] = rest % out_dims[d];
+                            rest /= out_dims[d];
+                        }
+                        position.swap(d0, d1);
+                        let from: usize = position.iter().zip(&strides).map(|(p, s)| p * s).sum();
+                        assert_eq!(*value, values[from], "{dims:?} ({d0}, {d1}) at {flat}");
                     }
                 }
             }
