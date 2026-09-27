@@ -7,7 +7,9 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
-use crate::ops::map::{PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_mapped};
+use crate::ops::map::{
+    EXPENSIVE_PAR_THRESHOLD, PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_mapped,
+};
 use crate::ops::util::{
     accurate_indexed_sum, broadcast_mask_index, pairwise_fold_vectors, stable_sigmoid_f64,
 };
@@ -31,6 +33,10 @@ use std::mem::MaybeUninit;
 /// overflowing on a large input -- so the kernel takes it rather than leaving
 /// a subtraction behind for a scalar loop to do.
 pub(crate) trait ShiftedExp: Float {
+    /// Elements below which a softmax over this type runs on the calling
+    /// thread: the threshold of the `exp` kernel it spends its time in.
+    const SPLIT_THRESHOLD: usize;
+
     /// `out[i] = exp(input[i] - shift)`, for every element of `out`.
     ///
     /// `input` and `out` are the same length and are different buffers.
@@ -44,6 +50,8 @@ pub(crate) trait ShiftedExp: Float {
 }
 
 impl ShiftedExp for f32 {
+    const SPLIT_THRESHOLD: usize = crate::ops::map::VECTOR_F32_PAR_THRESHOLD;
+
     fn exp_shifted_into(input: &[f32], shift: f32, out: &mut [f32]) {
         // The kernel writes through `MaybeUninit` because its other callers
         // hand it a fresh allocation. This one is already initialized, and an
@@ -69,6 +77,8 @@ impl ShiftedExp for f32 {
 }
 
 impl ShiftedExp for f64 {
+    const SPLIT_THRESHOLD: usize = crate::ops::map::EXPENSIVE_PAR_THRESHOLD;
+
     fn exp_shifted_into(input: &[f64], shift: f64, out: &mut [f64]) {
         for (o, &v) in out.iter_mut().zip(input.iter()) {
             *o = (v - shift).exp();
@@ -733,6 +743,30 @@ fn banded_columns<T: ShiftedExp + Send + Sync>(
 }
 
 /// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
+/// Run `block` over every `group`-sized block of `out`: on the calling thread
+/// below `threshold` elements, a block to a task above it.
+///
+/// A block to a task at every size sent any softmax with more than one row to
+/// the pool, however small: a `(4, 10)` float32 softmax took 7.3us, 0.7 on
+/// the calling thread, and a `(128, 128)` one 122us against 58. Above the
+/// threshold a block stays one task, which is what keeps the pool balanced
+/// when its workers wake at different times -- sixteen tasks of 16384
+/// elements ran a `(256, 1024)` softmax 27% slower than 256 of 1024.
+fn par_blocks<T: Send>(
+    out: &mut [T],
+    group: usize,
+    threshold: usize,
+    block: &(dyn Fn(usize, &mut [T]) + Sync),
+) {
+    if out.len() < threshold {
+        for (index, out_block) in out.chunks_mut(group).enumerate() {
+            block(index * group, out_block);
+        }
+        return;
+    }
+    par_out_chunks(out, group, block);
+}
+
 fn softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
@@ -758,38 +792,43 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
-    par_out_chunks(output_slice, group, &|block_offset, out_block| {
-        let in_block = &input_data[block_offset..block_offset + out_block.len()];
-        if after == 1 {
-            // Softmax over the last (contiguous) dimension: each block is a
-            // single slice laid out contiguously.
-            let mut max_val = neg_inf;
-            for &v in in_block.iter() {
-                if v > max_val {
-                    max_val = v;
+    par_blocks(
+        output_slice,
+        group,
+        T::SPLIT_THRESHOLD,
+        &|block_offset, out_block| {
+            let in_block = &input_data[block_offset..block_offset + out_block.len()];
+            if after == 1 {
+                // Softmax over the last (contiguous) dimension: each block is a
+                // single slice laid out contiguously.
+                let mut max_val = neg_inf;
+                for &v in in_block.iter() {
+                    if v > max_val {
+                        max_val = v;
+                    }
                 }
+                if max_val == neg_inf {
+                    out_block.fill(T::zero());
+                    return;
+                }
+                T::exp_shifted_into(in_block, max_val, out_block);
+                // Blocked: a running total over a long axis loses the small terms,
+                // and every term here but the largest *is* small. Over a 250k-class
+                // vocabulary the probabilities came back summing to 1.0004 rather
+                // than 1, at 4.2e-4 relative error against NumPy's 1.0e-7.
+                let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
+                for o in out_block.iter_mut() {
+                    *o = *o / sum;
+                }
+            } else {
+                // Softmax over a non-last dimension: the block is a
+                // `[dim_size, after]` row-major matrix and the reduction runs
+                // down the rows. Column accumulators keep every pass contiguous
+                // instead of striding by `after` per element.
+                softmax_block_columnwise(in_block, out_block, after);
             }
-            if max_val == neg_inf {
-                out_block.fill(T::zero());
-                return;
-            }
-            T::exp_shifted_into(in_block, max_val, out_block);
-            // Blocked: a running total over a long axis loses the small terms,
-            // and every term here but the largest *is* small. Over a 250k-class
-            // vocabulary the probabilities came back summing to 1.0004 rather
-            // than 1, at 4.2e-4 relative error against NumPy's 1.0e-7.
-            let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
-            for o in out_block.iter_mut() {
-                *o = *o / sum;
-            }
-        } else {
-            // Softmax over a non-last dimension: the block is a
-            // `[dim_size, after]` row-major matrix and the reduction runs
-            // down the rows. Column accumulators keep every pass contiguous
-            // instead of striding by `after` per element.
-            softmax_block_columnwise(in_block, out_block, after);
-        }
-    });
+        },
+    );
 
     Ok(())
 }
@@ -818,44 +857,50 @@ fn masked_softmax_core<T: Float + Send + Sync>(
     // lookup out inline needed six copies of it.
     let walk = MaskWalk::new(mask_data, tensor_shape, mask_shape, dim, after);
 
-    par_out_chunks(output_slice, group, &|block_offset, out_block| {
-        let in_block = &input_data[block_offset..block_offset + out_block.len()];
-        for base in 0..after {
-            let row = walk.row(block_offset + base);
-            let mut max_val = neg_inf;
-            let mut has_unmasked = false;
-            for k in 0..dim_size {
-                if !walk.masked(row, k) {
-                    has_unmasked = true;
-                    let v = in_block[base + k * after];
-                    if v > max_val {
-                        max_val = v;
+    par_blocks(
+        output_slice,
+        group,
+        EXPENSIVE_PAR_THRESHOLD,
+        &|block_offset, out_block| {
+            let in_block = &input_data[block_offset..block_offset + out_block.len()];
+            for base in 0..after {
+                let row = walk.row(block_offset + base);
+                let mut max_val = neg_inf;
+                let mut has_unmasked = false;
+                for k in 0..dim_size {
+                    if !walk.masked(row, k) {
+                        has_unmasked = true;
+                        let v = in_block[base + k * after];
+                        if v > max_val {
+                            max_val = v;
+                        }
+                    }
+                }
+                if !has_unmasked || max_val == neg_inf {
+                    for k in 0..dim_size {
+                        out_block[base + k * after] = T::zero();
+                    }
+                    continue;
+                }
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    out_block[idx] = if walk.masked(row, k) {
+                        T::zero()
+                    } else {
+                        (in_block[idx] - max_val).exp()
+                    };
+                }
+                let sum =
+                    accurate_indexed_sum(dim_size, T::zero(), |k| out_block[base + k * after]);
+                if sum != T::zero() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = out_block[idx] / sum;
                     }
                 }
             }
-            if !has_unmasked || max_val == neg_inf {
-                for k in 0..dim_size {
-                    out_block[base + k * after] = T::zero();
-                }
-                continue;
-            }
-            for k in 0..dim_size {
-                let idx = base + k * after;
-                out_block[idx] = if walk.masked(row, k) {
-                    T::zero()
-                } else {
-                    (in_block[idx] - max_val).exp()
-                };
-            }
-            let sum = accurate_indexed_sum(dim_size, T::zero(), |k| out_block[base + k * after]);
-            if sum != T::zero() {
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] = out_block[idx] / sum;
-                }
-            }
-        }
-    });
+        },
+    );
 
     Ok(())
 }
@@ -951,66 +996,71 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
-    par_out_chunks(output_slice, group, &|block_offset, out_block| {
-        let in_block = &input_data[block_offset..block_offset + out_block.len()];
-        if after == 1 {
-            // Log-softmax over the last (contiguous) dimension.
-            let mut max_val = neg_inf;
-            for &v in in_block.iter() {
-                if v > max_val {
-                    max_val = v;
+    par_blocks(
+        output_slice,
+        group,
+        T::SPLIT_THRESHOLD,
+        &|block_offset, out_block| {
+            let in_block = &input_data[block_offset..block_offset + out_block.len()];
+            if after == 1 {
+                // Log-softmax over the last (contiguous) dimension.
+                let mut max_val = neg_inf;
+                for &v in in_block.iter() {
+                    if v > max_val {
+                        max_val = v;
+                    }
                 }
-            }
-            if max_val == neg_inf {
-                out_block.fill(neg_inf);
-                return;
-            }
-            // The exponentials are formed into `out_block` and summed from
-            // there rather than one at a time inside the sum: the vectorized
-            // kernel needs somewhere to write, and the block's own final
-            // values are computed from `in_block` below, so it is free to
-            // borrow until then.
-            T::exp_shifted_into(in_block, max_val, out_block);
-            let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
-            let logsum = sum.ln() + max_val;
-            for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                *o = v - logsum;
-            }
-        } else {
-            // Non-last dimension: process the `[dim_size, after]` block
-            // column-wise with `after`-sized accumulators so every pass is
-            // contiguous instead of striding by `after`.
-            let mut col_logsum = vec![neg_inf; after];
-            for k in 0..dim_size {
-                let row = &in_block[k * after..k * after + after];
-                for (m, &v) in col_logsum.iter_mut().zip(row) {
-                    if v > *m {
-                        *m = v;
+                if max_val == neg_inf {
+                    out_block.fill(neg_inf);
+                    return;
+                }
+                // The exponentials are formed into `out_block` and summed from
+                // there rather than one at a time inside the sum: the vectorized
+                // kernel needs somewhere to write, and the block's own final
+                // values are computed from `in_block` below, so it is free to
+                // borrow until then.
+                T::exp_shifted_into(in_block, max_val, out_block);
+                let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
+                let logsum = sum.ln() + max_val;
+                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                    *o = v - logsum;
+                }
+            } else {
+                // Non-last dimension: process the `[dim_size, after]` block
+                // column-wise with `after`-sized accumulators so every pass is
+                // contiguous instead of striding by `after`.
+                let mut col_logsum = vec![neg_inf; after];
+                for k in 0..dim_size {
+                    let row = &in_block[k * after..k * after + after];
+                    for (m, &v) in col_logsum.iter_mut().zip(row) {
+                        if v > *m {
+                            *m = v;
+                        }
+                    }
+                }
+                let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
+                // Fold each column's max into log(sum) + max; -inf columns stay
+                // -inf so their outputs are all -inf.
+                for a in 0..after {
+                    if col_logsum[a] != neg_inf {
+                        col_logsum[a] = col_sum[a].ln() + col_logsum[a];
+                    }
+                }
+                for k in 0..dim_size {
+                    let in_row = &in_block[k * after..k * after + after];
+                    let out_row = &mut out_block[k * after..k * after + after];
+                    for a in 0..after {
+                        let ls = col_logsum[a];
+                        out_row[a] = if ls == neg_inf {
+                            neg_inf
+                        } else {
+                            in_row[a] - ls
+                        };
                     }
                 }
             }
-            let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
-            // Fold each column's max into log(sum) + max; -inf columns stay
-            // -inf so their outputs are all -inf.
-            for a in 0..after {
-                if col_logsum[a] != neg_inf {
-                    col_logsum[a] = col_sum[a].ln() + col_logsum[a];
-                }
-            }
-            for k in 0..dim_size {
-                let in_row = &in_block[k * after..k * after + after];
-                let out_row = &mut out_block[k * after..k * after + after];
-                for a in 0..after {
-                    let ls = col_logsum[a];
-                    out_row[a] = if ls == neg_inf {
-                        neg_inf
-                    } else {
-                        in_row[a] - ls
-                    };
-                }
-            }
-        }
-    });
+        },
+    );
 
     Ok(())
 }
@@ -1040,45 +1090,50 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
     // copies of this lookup.
     let walk = MaskWalk::new(mask_data, tensor_shape, mask_shape, dim, after);
 
-    par_out_chunks(output_slice, group, &|block_offset, out_block| {
-        let in_block = &input_data[block_offset..block_offset + out_block.len()];
-        for base in 0..after {
-            let row = walk.row(block_offset + base);
-            let mut max_val = neg_inf;
-            let mut has_unmasked = false;
-            for k in 0..dim_size {
-                if !walk.masked(row, k) {
-                    has_unmasked = true;
-                    let v = in_block[base + k * after];
-                    if v > max_val {
-                        max_val = v;
+    par_blocks(
+        output_slice,
+        group,
+        EXPENSIVE_PAR_THRESHOLD,
+        &|block_offset, out_block| {
+            let in_block = &input_data[block_offset..block_offset + out_block.len()];
+            for base in 0..after {
+                let row = walk.row(block_offset + base);
+                let mut max_val = neg_inf;
+                let mut has_unmasked = false;
+                for k in 0..dim_size {
+                    if !walk.masked(row, k) {
+                        has_unmasked = true;
+                        let v = in_block[base + k * after];
+                        if v > max_val {
+                            max_val = v;
+                        }
                     }
                 }
-            }
-            if !has_unmasked || max_val == neg_inf {
+                if !has_unmasked || max_val == neg_inf {
+                    for k in 0..dim_size {
+                        out_block[base + k * after] = neg_inf;
+                    }
+                    continue;
+                }
+                let sum = accurate_indexed_sum(dim_size, T::zero(), |k| {
+                    if walk.masked(row, k) {
+                        T::zero()
+                    } else {
+                        (in_block[base + k * after] - max_val).exp()
+                    }
+                });
+                let logsum = sum.ln() + max_val;
                 for k in 0..dim_size {
-                    out_block[base + k * after] = neg_inf;
+                    let idx = base + k * after;
+                    out_block[idx] = if walk.masked(row, k) {
+                        neg_inf
+                    } else {
+                        in_block[idx] - logsum
+                    };
                 }
-                continue;
             }
-            let sum = accurate_indexed_sum(dim_size, T::zero(), |k| {
-                if walk.masked(row, k) {
-                    T::zero()
-                } else {
-                    (in_block[base + k * after] - max_val).exp()
-                }
-            });
-            let logsum = sum.ln() + max_val;
-            for k in 0..dim_size {
-                let idx = base + k * after;
-                out_block[idx] = if walk.masked(row, k) {
-                    neg_inf
-                } else {
-                    in_block[idx] - logsum
-                };
-            }
-        }
-    });
+        },
+    );
 
     Ok(())
 }
