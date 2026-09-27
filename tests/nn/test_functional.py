@@ -1527,3 +1527,41 @@ def test_bincount_weighted_totals_match_numpy():
     totals = mt.bincount(mt.from_numpy(labels), weights=mt.from_numpy(weights)).numpy()
     expected = np.bincount(labels, weights=weights)
     np.testing.assert_allclose(totals, expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_binary_cross_entropy_matches_its_definition(dtype, reduction):
+    """Against the formula, with saturated predictions clamped to a log of
+    -100 rather than an infinite loss, and a NaN that stays a NaN -- over
+    enough values to split across the pool."""
+
+    rng = np.random.default_rng(5)
+    predictions = rng.random(40_000).astype(dtype)
+    targets = (rng.random(40_000) > 0.5).astype(dtype)
+    predictions[:3] = [0.0, 1.0, np.nan]
+    targets[:3] = [1.0, 0.0, 1.0]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_p = np.maximum(np.log(predictions), -100.0)
+        log_q = np.maximum(np.log(1.0 - predictions), -100.0)
+    log_p[2] = log_q[2] = np.nan
+    want = 0.0 - (targets * log_p + (1.0 - targets) * log_q)
+
+    got = F.binary_cross_entropy(
+        mt.from_numpy(predictions), mt.from_numpy(targets), reduction=reduction
+    ).numpy()
+    assert np.isnan(got).any()
+    if reduction == "none":
+        np.testing.assert_array_equal(got[:2], want[:2].astype(dtype))
+        np.testing.assert_allclose(got[3:], want[3:], rtol=1e-6)
+    else:
+        clean = F.binary_cross_entropy(
+            mt.from_numpy(predictions[3:]),
+            mt.from_numpy(targets[3:]),
+            reduction=reduction,
+        ).numpy()
+        total = want[3:].sum()
+        np.testing.assert_allclose(
+            clean, total if reduction == "sum" else total / want[3:].size, rtol=1e-5
+        )

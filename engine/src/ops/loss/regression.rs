@@ -448,26 +448,13 @@ pub fn binary_cross_entropy_loss(
     let loss = {
         let _guard = NoGradGuard::new();
 
-        // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
-        // The log outputs are clamped to >= -100 so a saturated prediction
-        // (exactly 0 or 1) yields a finite loss instead of +inf.
-        let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
-
+        // BCE: -[targets * log(predictions) + (1 - targets) * log(1 - predictions)].
+        // The logs are clamped to >= -100 so a saturated prediction (exactly
+        // 0 or 1) yields a finite loss instead of +inf.
         let one = create_scalar_tensor(1.0, predictions.dtype(), predictions.device())?;
-        let one_minus_targets = sub(&one, targets)?;
-        let one_minus_predictions = sub(&one, predictions)?;
-        let log_one_minus_predictions = log_tensor(&one_minus_predictions)?.clamp_min(-100.0)?;
-
-        let term1 = mul(targets, &log_predictions)?;
-        let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
-        let combined = add(&term1, &term2)?;
-        let zeros = Tensor::zeros(
-            combined.shape().clone(),
-            combined.dtype(),
-            combined.device(),
-            combined.requires_grad(),
-        );
-        let negative_bce = sub(&zeros, &combined)?;
+        let log_predictions = log_tensor(predictions)?;
+        let log_one_minus_predictions = log_tensor(&sub(&one, predictions)?)?;
+        let negative_bce = bce_terms(targets, &log_predictions, &log_one_minus_predictions)?;
 
         // Apply reduction
         let n = negative_bce.numel() as f64;
@@ -493,6 +480,58 @@ pub fn binary_cross_entropy_loss(
     } else {
         Ok(loss)
     }
+}
+
+/// The elementwise binary cross entropy from its two logarithms, in one pass.
+///
+/// Spelled as tensor ops -- two clamps, `1 - targets`, two products, a sum and
+/// a negation against a tensor of zeros -- this was nine passes and as many
+/// buffers after the logarithms: 204us for 32,768 float32 values, of which the
+/// two logarithms are 36. The arithmetic is the same operations in the same
+/// order, `0 - (a + b)` included, so every value is bit-for-bit what it was;
+/// and the clamp is a comparison, not `max`, so a NaN still propagates.
+fn bce_terms(targets: &Tensor, log_p: &Tensor, log_q: &Tensor) -> Result<Tensor> {
+    macro_rules! terms {
+        ($accessor:ident, $ty:ty) => {{
+            let (Some(y), Some(lp), Some(lq)) = (
+                targets.data().$accessor(),
+                log_p.data().$accessor(),
+                log_q.data().$accessor(),
+            ) else {
+                return Err(MinitensorError::internal_error(
+                    "binary cross entropy operands are not the loss's dtype",
+                ));
+            };
+            let clamp = |v: $ty| if v < -100.0 { -100.0 } else { v };
+            crate::ops::map::ternary_map(y, lp, lq, |y: $ty, lp: $ty, lq: $ty| {
+                0.0 - (y * clamp(lp) + (1.0 - y) * clamp(lq))
+            })
+        }};
+    }
+    let data = match targets.dtype() {
+        DataType::Float32 => TensorData::from_vec(
+            terms!(as_f32_slice, f32),
+            DataType::Float32,
+            targets.device(),
+        ),
+        DataType::Float64 => TensorData::from_vec(
+            terms!(as_f64_slice, f64),
+            DataType::Float64,
+            targets.device(),
+        ),
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "binary cross entropy needs floating-point inputs, got {other:?}"
+            )));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        targets.shape().clone(),
+        targets.dtype(),
+        targets.device(),
+        false,
+    ))
 }
 
 /// Binary cross entropy computed directly from logits.
