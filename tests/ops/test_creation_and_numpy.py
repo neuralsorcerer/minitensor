@@ -969,6 +969,32 @@ def test_as_tensor_and_from_numpy_agree_on_widened_dtypes(source_dtype, expected
     assert mt.from_numpy(source).dtype == expected
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (np.array(2.5), "float64"),
+        (np.array(2.5, dtype=np.float32), "float32"),
+        (np.array(True), "bool"),
+        (np.array(5, dtype=np.int32), "int32"),
+        (np.array(3, dtype=np.uint8), "int32"),
+        (np.float64(0.1), "float64"),
+        (np.int32(3), "int32"),
+        (np.bool_(True), "bool"),
+    ],
+    ids=repr,
+)
+def test_as_tensor_keeps_the_width_of_a_zero_dimensional_array_or_scalar(
+    value, expected
+):
+    """A 0-d array or NumPy scalar keeps its own dtype, as `from_numpy` and
+    arithmetic operands do. These were once asked for a Python scalar first:
+    a 0-d float64 array came back float32, and a 0-d bool array as 1.0."""
+
+    got = mt.as_tensor(value)
+    assert got.dtype == expected
+    assert got.tolist() == np.asarray(value).astype(expected).tolist()
+
+
 @pytest.mark.parametrize("source_dtype", ["uint64", "longdouble"])
 def test_dtypes_that_cannot_widen_exactly_are_rejected_with_guidance(source_dtype):
     # uint64 above int64's max, and longdouble's wider mantissa, cannot survive

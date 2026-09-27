@@ -6,6 +6,7 @@
 
 use super::*;
 use numpy::{PyArrayDescrMethods, PyUntypedArray};
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyFloat;
 
 /// Build a tensor from a Python object, then mark it trainable.
@@ -47,6 +48,34 @@ pub(crate) fn convert_python_data_to_tensor(
     } else {
         Ok(tensor)
     }
+}
+
+/// [`convert_python_data_to_tensor`] at `dtype`, or at the dtype `data`
+/// infers to when there is none.
+///
+/// A list or tuple is read by NumPy once for both: inferring its dtype and
+/// then converting it called `numpy.asarray` twice, half the 64us `as_tensor`
+/// of a 1,000-element list took.
+pub(crate) fn convert_python_data_inferring(
+    data: &Bound<PyAny>,
+    dtype: Option<DataType>,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    if dtype.is_none()
+        && (data.cast::<PyList>().is_ok() || data.cast::<PyTuple>().is_ok())
+        && let Some(tensor) = sequence_via_numpy(data, None, device, false)
+    {
+        return Ok(if requires_grad && engine::autograd::is_grad_enabled() {
+            tensor.requires_grad_(true)
+        } else {
+            tensor
+        });
+    }
+    let dtype = dtype
+        .or_else(|| infer_python_value_dtype(data))
+        .unwrap_or_else(dtype::default_dtype);
+    convert_python_data_to_tensor(data, dtype, device, requires_grad)
 }
 
 fn build_tensor_from_python(
@@ -92,7 +121,7 @@ fn build_tensor_from_python(
         // represent as a dtype this crate supports (ragged nesting, object
         // arrays, strings) returns `None` and falls through to the traversal
         // below, so its behaviour and error messages are unchanged.
-        if let Some(tensor) = sequence_via_numpy(data, dtype, device, requires_grad) {
+        if let Some(tensor) = sequence_via_numpy(data, Some(dtype), device, requires_grad) {
             return Ok(tensor);
         }
 
@@ -431,26 +460,21 @@ fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
         return Some(py_tensor.inner.dtype());
     }
 
-    if value.extract::<bool>().is_ok() {
+    // By type before by extraction. An extraction a value refuses raises and
+    // formats an exception, three of them for a list before it was recognised
+    // as one: `as_tensor` of three floats took 4.1us, of an array 5.1.
+    if value.is_exact_instance_of::<PyBool>() {
         return Some(DataType::Bool);
     }
-
-    if value.extract::<i64>().is_ok() {
-        return Some(DataType::Int64);
-    }
-
-    if value.extract::<f64>().is_ok() {
+    if value.is_exact_instance_of::<PyFloat>() {
         return Some(dtype::default_dtype());
     }
 
-    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy")
-        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
-        && let Ok(true) = value.is_instance(&ndarray_type)
-    {
-        if let Ok(dtype_obj) = value.getattr("dtype")
-            && let Ok(dtype_str) = dtype_obj.str()
-            && let Ok(dtype) = dtype::parse_dtype(&dtype_str.to_str().ok()?.to_ascii_lowercase())
-        {
+    // An array answers with its own dtype, 0-d ones included: asked for a
+    // Python scalar first, a 0-d float64 array came back float32, a 0-d bool
+    // array 1.0 and a 0-d int32 one int64, where `from_numpy` kept all three.
+    if let Ok(array) = value.cast::<PyUntypedArray>() {
+        if let Some(dtype) = crate::share::dtype_from_type_num(array.dtype().num()) {
             return Some(dtype);
         }
         // A dtype the engine does not carry directly still has an answer when
@@ -482,6 +506,23 @@ fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
         }
     }
 
+    // A NumPy scalar keeps its width too, as it does as an operand.
+    if let Some(dtype) = crate::dtype::numpy_scalar_dtype(value) {
+        return Some(dtype);
+    }
+
+    if value.extract::<bool>().is_ok() {
+        return Some(DataType::Bool);
+    }
+
+    if value.extract::<i64>().is_ok() {
+        return Some(DataType::Int64);
+    }
+
+    if value.extract::<f64>().is_ok() {
+        return Some(dtype::default_dtype());
+    }
+
     None
 }
 
@@ -493,15 +534,39 @@ fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
 /// float dtype, so `[1.0, 2.0]` infers `float32` here where NumPy would say
 /// `float64`.
 fn sequence_dtype_via_numpy(value: &Bound<PyAny>) -> Option<DataType> {
-    let numpy = PyModule::import(value.py(), "numpy").ok()?;
-    let array = numpy.call_method1("asarray", (value,)).ok()?;
-    let kind = array.getattr("dtype").ok()?.getattr("kind").ok()?;
-    match kind.extract::<String>().ok()?.as_str() {
-        "b" => Some(DataType::Bool),
-        "i" | "u" => Some(DataType::Int64),
-        "f" => Some(dtype::default_dtype()),
+    sequence_kind(&numpy_asarray(value)?)
+}
+
+/// The dtype of a sequence NumPy has read into `array`, by the rule
+/// [`sequence_dtype_via_numpy`] states.
+fn sequence_kind(array: &Bound<PyAny>) -> Option<DataType> {
+    match array.cast::<PyUntypedArray>().ok()?.dtype().kind() {
+        b'b' => Some(DataType::Bool),
+        b'i' | b'u' => Some(DataType::Int64),
+        b'f' => Some(dtype::default_dtype()),
         _ => None,
     }
+}
+
+/// `numpy.asarray`, looked up once for the two sequence paths that call it.
+static ASARRAY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// `numpy.asarray(value)`, or `None` where NumPy refuses it -- ragged
+/// nesting, say -- or cannot be imported.
+fn numpy_asarray<'py>(value: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    let py = value.py();
+    let asarray = match ASARRAY.get(py) {
+        Some(asarray) => asarray,
+        None => {
+            let found = PyModule::import(py, "numpy")
+                .ok()?
+                .getattr(intern!(py, "asarray"))
+                .ok()?
+                .unbind();
+            ASARRAY.get_or_init(py, || found)
+        }
+    };
+    asarray.bind(py).call1((value,)).ok()
 }
 
 fn infer_sequence_dtype<'py, I>(iter: I, depth: usize) -> Option<DataType>
@@ -1599,20 +1664,25 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
 /// so the caller can fall back to the element-by-element traversal and keep its
 /// exact errors. The requested `dtype` still governs the result: a list of
 /// Python floats becomes the library's default float dtype, not NumPy's
-/// float64, because the caller resolved that before calling.
+/// float64, because the caller resolved that before calling -- or, with no
+/// `dtype`, because [`sequence_kind`] reads it off the array that holds the
+/// values.
 fn sequence_via_numpy(
     data: &Bound<PyAny>,
-    dtype: DataType,
+    dtype: Option<DataType>,
     device: Device,
     requires_grad: bool,
 ) -> Option<Tensor> {
     if !device.is_cpu() {
         return None;
     }
-    let numpy = PyModule::import(data.py(), "numpy").ok()?;
     // Ragged input raises here in NumPy 2; that is a fall-through, not an
     // error, so the message the slow path produces is the one users see.
-    let array = numpy.call_method1("asarray", (data,)).ok()?;
+    let array = numpy_asarray(data)?;
+    let dtype = match dtype {
+        Some(dtype) => dtype,
+        None => sequence_kind(&array)?,
+    };
     // `convert_numpy_to_tensor` reaches into the array's buffer, which panics
     // rather than erroring if the capsule is unavailable -- the same guard the
     // ndarray branch above uses.

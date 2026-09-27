@@ -505,7 +505,9 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let copy = copy.unwrap_or(false);
 
-        if let Ok(py_tensor) = data.extract::<PyRef<PyTensor>>() {
+        // A tensor, or a value wrapping one as `_tensor`, is adapted rather
+        // than converted.
+        if let Some(py_tensor) = borrow_wrapped_tensor(data) {
             let source = py_tensor.tensor();
             let target_dtype = match dtype {
                 Some(name) => dtype::parse_dtype(name)?,
@@ -523,36 +525,12 @@ impl PyTensor {
             return Ok(Self::from_tensor(tensor));
         }
 
-        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor"))
-            && let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>()
-        {
-            let source = py_tensor.tensor();
-            let target_dtype = match dtype {
-                Some(name) => dtype::parse_dtype(name)?,
-                None => source.dtype(),
-            };
-            let target_device = resolve_device_or(device, source.device())?;
-            let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
-            let tensor = adapt_tensor_for_as_tensor(
-                source,
-                target_dtype,
-                target_device,
-                target_requires_grad,
-                copy,
-            )?;
-            return Ok(Self::from_tensor(tensor));
-        }
-
-        let target_dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => infer_python_value_dtype(data).unwrap_or_else(dtype::default_dtype),
-        };
-
+        let target_dtype = dtype.map(dtype::parse_dtype).transpose()?;
         let target_device = resolve_device(device)?;
         let target_requires_grad = requires_grad.unwrap_or(false);
 
         let tensor =
-            convert_python_data_to_tensor(data, target_dtype, target_device, target_requires_grad)?;
+            convert_python_data_inferring(data, target_dtype, target_device, target_requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }
 }
