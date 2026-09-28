@@ -257,6 +257,11 @@ fn set_default_dtype(dtype: &str) -> PyResult<()> {
 }
 
 /// Seed the global random number generator, making `randn` and friends reproducible.
+///
+/// There is one stream per process. A forked child carries on from where its
+/// parent's stream stood, so worker processes forked together draw the same
+/// numbers until each is seeded apart, with `manual_seed(base + rank)` or the
+/// like.
 #[pyfunction]
 fn manual_seed(seed: u64) -> PyResult<()> {
     engine::manual_seed(seed);

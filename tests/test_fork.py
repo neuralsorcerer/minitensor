@@ -132,6 +132,33 @@ def test_a_forked_child_runs_every_parallel_path_and_agrees_with_its_parent():
     assert report == "", f"the forked child disagreed with its parent on: {report}"
 
 
+def test_a_forked_child_continues_its_parents_random_stream():
+    # One stream per process, documented on `manual_seed`: a child carries on
+    # from where the parent's stream stood, and seeding tells children apart.
+    mt.manual_seed(11)
+    mt.randn([8])
+    expected = mt.randn([8]).numpy()
+    mt.manual_seed(11)
+    mt.randn([8])
+
+    read, write = os.pipe()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the child
+        os.close(read)
+        continued = np.array_equal(mt.randn([8]).numpy(), expected)
+        mt.manual_seed(12)
+        reseeded = not np.array_equal(mt.randn([8]).numpy(), expected)
+        os.write(write, b"%d%d" % (continued, reseeded))
+        os._exit(0)
+    os.close(write)
+    assert _wait(pid) == 0
+    report = os.read(read, 16)
+    os.close(read)
+    assert report == b"11"
+
+
 def test_a_child_of_a_child_still_has_a_pool():
     matrix = _inputs()["matrix"]
     expected = F.softmax(matrix, dim=-1).numpy()
