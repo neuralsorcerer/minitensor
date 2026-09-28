@@ -22,7 +22,9 @@
 //! the cache back before trying again.
 //!
 //! The cache is a fixed array behind a spin lock, so the allocator never
-//! allocates, and its critical sections are a scan of that array.
+//! allocates, and its critical sections are a scan of that array. `fork` takes
+//! the lock before it copies the process, so a child never starts with the
+//! lock held by a thread it does not have, or with the array half updated.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
@@ -79,6 +81,15 @@ static CACHE: Cache = Cache {
 
 impl Cache {
     fn with<R>(&self, f: impl FnOnce(&mut Blocks) -> R) -> R {
+        register_fork_handlers();
+        self.lock();
+        // SAFETY: holding `busy` makes this the only reference.
+        let result = f(unsafe { &mut *self.blocks.get() });
+        self.unlock();
+        result
+    }
+
+    fn lock(&self) {
         while self
             .busy
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -86,12 +97,33 @@ impl Cache {
         {
             std::hint::spin_loop();
         }
-        // SAFETY: holding `busy` makes this the only reference.
-        let result = f(unsafe { &mut *self.blocks.get() });
+    }
+
+    fn unlock(&self) {
         self.busy.store(false, Ordering::Release);
-        result
     }
 }
+
+/// Hold the lock across `fork`, released on both sides once it returns.
+#[cfg(unix)]
+fn register_fork_handlers() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    extern "C" fn lock() {
+        CACHE.lock();
+    }
+    extern "C" fn unlock() {
+        CACHE.unlock();
+    }
+    REGISTER.call_once(|| {
+        // SAFETY: the handlers only take and release a spin lock, which is
+        // async-signal-safe as a forked child requires, and never allocate.
+        let status = unsafe { libc::pthread_atfork(Some(lock), Some(unlock), Some(unlock)) };
+        debug_assert_eq!(status, 0, "pthread_atfork failed");
+    });
+}
+
+#[cfg(not(unix))]
+fn register_fork_handlers() {}
 
 /// A cached block of exactly `layout`, if there is one.
 fn take(layout: Layout) -> Option<*mut u8> {
@@ -295,5 +327,60 @@ mod tests {
             release_cached_blocks();
             assert_eq!(cached_bytes(), 0);
         }
+
+        #[cfg(unix)]
+        a_child_forked_while_the_lock_is_busy_can_still_allocate(big);
+    }
+
+    /// A thread keeps taking the lock while the process forks, over and over.
+    /// A child that inherited it held would spin on its first large block.
+    #[cfg(unix)]
+    fn a_child_forked_while_the_lock_is_busy_can_still_allocate(big: Layout) {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    unsafe {
+                        let block = BlockCachingAllocator.alloc(big);
+                        BlockCachingAllocator.dealloc(block, big);
+                    }
+                }
+            })
+        };
+        for _ in 0..100 {
+            // SAFETY: the child only allocates, frees and exits.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                unsafe {
+                    let block = BlockCachingAllocator.alloc(big);
+                    BlockCachingAllocator.dealloc(block, big);
+                    libc::_exit(0);
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut status = 0;
+            loop {
+                // SAFETY: waits on the child forked above.
+                let done = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if done == pid {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("a forked child could not take the cache's lock");
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        release_cached_blocks();
     }
 }
