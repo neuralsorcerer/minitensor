@@ -3160,6 +3160,22 @@ impl Tensor {
 
     pub fn copy_(&mut self, source: &Tensor) -> Result<()> {
         self.ensure_not_consumed_by_graph("copy_")?;
+        self.write_values_from(source)?;
+        self.refresh_autograd_metadata();
+        if self.requires_grad {
+            autograd::add_to_graph(self, None)?;
+        }
+        Ok(())
+    }
+
+    /// `copy_`'s write, without the new identity `copy_` gives its target.
+    ///
+    /// Loading a state dict writes values into a layer's parameters and must
+    /// leave each one the tensor it was: an optimizer keys a parameter by its
+    /// identity, and a new one would leave it stepping a tensor the layer no
+    /// longer holds. The caller is responsible for the check `copy_` makes
+    /// first, that no pending backward pass still reads the old values.
+    pub(crate) fn write_values_from(&mut self, source: &Tensor) -> Result<()> {
         if self.shape != *source.shape() {
             return Err(MinitensorError::invalid_argument(format!(
                 "copy_ expected source with shape {:?}, but received {:?}",
@@ -3278,12 +3294,6 @@ impl Tensor {
                 }
             }
         }
-
-        self.refresh_autograd_metadata();
-        if self.requires_grad {
-            autograd::add_to_graph(self, None)?;
-        }
-
         Ok(())
     }
 

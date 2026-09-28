@@ -303,45 +303,38 @@ pub trait Module: Layer {
     /// Checking happens before anything is written, so a load that fails leaves
     /// the layer exactly as it was. A caller that catches the error and falls
     /// back gets the model it had, not one with half a checkpoint in it.
+    ///
+    /// The values are written *into* the tensors the layer already holds, not
+    /// swapped in as new ones. An optimizer keys a parameter by its identity
+    /// and updates it through its own handle, so replacing the tensors left an
+    /// optimizer built before the load stepping tensors the layer no longer
+    /// had: every step succeeded and the model never changed. Writing in place
+    /// keeps each slot's identity, its storage and whether it trains, so every
+    /// handle to a parameter sees the loaded values. That write is refused,
+    /// like any other, while a pending backward pass still needs the old ones.
     fn load_state_dict(
         &mut self,
         state_dict: &crate::serialization::StateDict,
         device: Option<crate::device::Device>,
     ) -> Result<()> {
-        let mut missing: Vec<String> = Vec::new();
-        let mut mismatched: Vec<String> = Vec::new();
-        let mut mistyped: Vec<String> = Vec::new();
+        let mut problems = LoadProblems::default();
 
         // Pass one: look every slot up and compare shapes, through the shared
         // accessors so nothing is modified. `named_*` and `named_*_mut` are
         // required to produce the same names, so what passes here is what the
-        // assignment below will find.
+        // write below will find.
         {
             let named = self.named_parameters();
             if named.is_empty() {
                 for (i, param) in self.parameters().iter().enumerate() {
                     let name = format!("param_{}", i);
                     let loaded = state_dict.load_parameter(&name, device);
-                    check_loadable(
-                        name,
-                        param,
-                        loaded,
-                        &mut missing,
-                        &mut mismatched,
-                        &mut mistyped,
-                    );
+                    problems.check(name, param, loaded);
                 }
             } else {
                 for (name, param) in named {
                     let loaded = state_dict.load_parameter(&name, device);
-                    check_loadable(
-                        name,
-                        param,
-                        loaded,
-                        &mut missing,
-                        &mut mismatched,
-                        &mut mistyped,
-                    );
+                    problems.check(name, param, loaded);
                 }
             }
         }
@@ -351,70 +344,32 @@ pub trait Module: Layer {
                 for (i, buffer) in self.buffers().iter().enumerate() {
                     let name = format!("buffer_{}", i);
                     let loaded = state_dict.load_buffer(&name, device);
-                    check_loadable(
-                        name,
-                        buffer,
-                        loaded,
-                        &mut missing,
-                        &mut mismatched,
-                        &mut mistyped,
-                    );
+                    problems.check(name, buffer, loaded);
                 }
             } else {
                 for (name, buffer) in named {
                     let loaded = state_dict.load_buffer(&name, device);
-                    check_loadable(
-                        name,
-                        buffer,
-                        loaded,
-                        &mut missing,
-                        &mut mismatched,
-                        &mut mistyped,
-                    );
+                    problems.check(name, buffer, loaded);
                 }
             }
         }
+        problems.into_result()?;
 
-        let problems: Vec<String> = [
-            ("missing from the state dict", missing),
-            ("wrong shape", mismatched),
-            ("wrong dtype", mistyped),
-        ]
-        .into_iter()
-        .filter(|(_, names)| !names.is_empty())
-        .map(|(kind, mut names)| {
-            names.sort();
-            format!("{kind}: {}", names.join(", "))
-        })
-        .collect();
-        if !problems.is_empty() {
-            return Err(MinitensorError::invalid_operation(format!(
-                "load_state_dict: {}",
-                problems.join("; ")
-            )));
-        }
-
-        // Pass two: assign. Every lookup above succeeded at the right shape and
-        // dtype, so a failure here would mean the two accessors disagree.
-        //
-        // A load replaces values, not whether a slot trains: the loaded tensor
-        // carries whatever flag its source had, and a state dict built from
-        // plain tensors had none, so taking it froze every parameter it
-        // reached -- the layer stopped training without a word. A slot keeps
-        // its own flag, which also keeps a frozen layer frozen when the
-        // checkpoint was saved from a trainable one.
+        // Pass two: write. Every lookup above succeeded at the right shape and
+        // dtype with nothing holding the old values, so a failure here would
+        // mean the two accessors disagree.
         let mut named_params = self.named_parameters_mut();
         if named_params.is_empty() {
             let mut params = self.parameters_mut();
             for (i, param_ref) in params.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_parameter(&format!("param_{}", i), device) {
-                    **param_ref = keep_trainability(param_ref, loaded);
+                    write_loaded(param_ref, loaded)?;
                 }
             }
         } else {
             for (name, param_ref) in named_params.iter_mut() {
                 if let Ok(loaded) = state_dict.load_parameter(name, device) {
-                    **param_ref = keep_trainability(param_ref, loaded);
+                    write_loaded(param_ref, loaded)?;
                 }
             }
         }
@@ -426,13 +381,13 @@ pub trait Module: Layer {
             let mut bufs = self.buffers_mut();
             for (i, buf_ref) in bufs.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_buffer(&format!("buffer_{}", i), device) {
-                    **buf_ref = keep_trainability(buf_ref, loaded);
+                    write_loaded(buf_ref, loaded)?;
                 }
             }
         } else {
             for (name, buf_ref) in named_buffers.iter_mut() {
                 if let Ok(loaded) = state_dict.load_buffer(name, device) {
-                    **buf_ref = keep_trainability(buf_ref, loaded);
+                    write_loaded(buf_ref, loaded)?;
                 }
             }
         }
@@ -441,35 +396,94 @@ pub trait Module: Layer {
     }
 }
 
-/// `loaded`, taking `slot`'s place with `slot`'s `requires_grad`.
-fn keep_trainability(slot: &Tensor, loaded: Tensor) -> Tensor {
-    loaded.requires_grad_(slot.requires_grad())
+/// Put `loaded`'s values in `slot`.
+///
+/// Into the slot's own storage when both are on the CPU, which keeps its
+/// identity and every handle to it. A load onto another device moves the
+/// layer there, so that slot is replaced -- keeping its own `requires_grad`,
+/// because a load replaces values, not whether a slot trains: a state dict
+/// built from plain tensors carries no flag, and taking the loaded tensor's
+/// froze every parameter it reached.
+fn write_loaded(slot: &mut Tensor, loaded: Tensor) -> Result<()> {
+    if slot.device().is_cpu() && loaded.device() == slot.device() {
+        slot.write_values_from(&loaded)
+    } else {
+        *slot = loaded.requires_grad_(slot.requires_grad());
+        Ok(())
+    }
 }
 
-/// Record why `loaded` cannot go into `slot`, if it cannot. A wrong shape is
-/// reported before a wrong dtype, since it is the one that cannot be fixed by
-/// a conversion.
-fn check_loadable(
-    name: String,
-    slot: &Tensor,
-    loaded: Result<Tensor>,
-    missing: &mut Vec<String>,
-    mismatched: &mut Vec<String>,
-    mistyped: &mut Vec<String>,
-) {
-    match loaded {
-        Ok(tensor) if tensor.shape().dims() != slot.shape().dims() => mismatched.push(format!(
-            "{name} (expected {:?}, got {:?})",
-            slot.shape().dims(),
-            tensor.shape().dims()
-        )),
-        Ok(tensor) if tensor.dtype() != slot.dtype() => mistyped.push(format!(
-            "{name} (expected {}, got {})",
-            slot.dtype(),
-            tensor.dtype()
-        )),
-        Ok(_) => {}
-        Err(_) => missing.push(name),
+/// Why a state dict cannot be loaded, collected over every slot so that one
+/// message names every problem.
+#[derive(Default)]
+struct LoadProblems {
+    missing: Vec<String>,
+    mismatched: Vec<String>,
+    mistyped: Vec<String>,
+    in_use: Vec<String>,
+}
+
+impl LoadProblems {
+    /// Record why `loaded` cannot go into `slot`, if it cannot. A wrong shape
+    /// is reported before a wrong dtype, since it is the one that cannot be
+    /// fixed by a conversion.
+    ///
+    /// A slot a pending backward pass still reads cannot be written without
+    /// changing the gradients that pass will produce, which is the rule every
+    /// in-place write follows; it is checked here so the load is refused
+    /// before anything has been written rather than halfway through.
+    fn check(&mut self, name: String, slot: &Tensor, loaded: Result<Tensor>) {
+        match loaded {
+            Ok(tensor) if tensor.shape().dims() != slot.shape().dims() => {
+                self.mismatched.push(format!(
+                    "{name} (expected {:?}, got {:?})",
+                    slot.shape().dims(),
+                    tensor.shape().dims()
+                ))
+            }
+            Ok(tensor) if tensor.dtype() != slot.dtype() => self.mistyped.push(format!(
+                "{name} (expected {}, got {})",
+                slot.dtype(),
+                tensor.dtype()
+            )),
+            Ok(_) => {
+                if slot.requires_grad()
+                    && slot.is_leaf()
+                    && crate::autograd::is_consumed_by_live_graph(slot)
+                {
+                    self.in_use.push(name);
+                }
+            }
+            Err(_) => self.missing.push(name),
+        }
+    }
+
+    fn into_result(self) -> Result<()> {
+        let problems: Vec<String> = [
+            ("missing from the state dict", self.missing),
+            ("wrong shape", self.mismatched),
+            ("wrong dtype", self.mistyped),
+            (
+                "still needed by a pending backward pass (call backward() or \
+                 clear_autograd_graph() first)",
+                self.in_use,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(kind, mut names)| {
+            names.sort();
+            format!("{kind}: {}", names.join(", "))
+        })
+        .collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(MinitensorError::invalid_operation(format!(
+                "load_state_dict: {}",
+                problems.join("; ")
+            )))
+        }
     }
 }
 
@@ -600,5 +614,41 @@ mod parameter_view_tests {
         }
         Module::load_state_dict(&mut frozen, &state_of(true), None).unwrap();
         assert!(frozen.parameters().iter().all(|p| !p.requires_grad()));
+    }
+
+    /// A load writes into the tensors the layer holds. An optimizer steps
+    /// parameters through handles taken before the load, keyed by identity;
+    /// replacing the tensors left those handles pointing at storage the layer
+    /// no longer read, so training silently stopped.
+    #[test]
+    fn a_load_keeps_identity_and_reaches_every_handle() {
+        use super::Module;
+        use crate::serialization::StateDict;
+        use crate::tensor::{Shape, Tensor};
+
+        let dev = crate::device::Device::cpu();
+        let dt = crate::tensor::DataType::Float32;
+        let mut layer = DenseLayer::new(4, 3, true, dev, dt).unwrap();
+        let handles: Vec<Tensor> = layer.parameters().into_iter().cloned().collect();
+
+        let mut state = StateDict::new();
+        let ones = |dims: &[usize]| Tensor::ones(Shape::new(dims.to_vec()), dt, dev, false);
+        state
+            .add_parameter("weight".into(), &ones(&[3, 4]))
+            .unwrap();
+        state.add_parameter("bias".into(), &ones(&[3])).unwrap();
+        Module::load_state_dict(&mut layer, &state, None).unwrap();
+
+        for (handle, param) in handles.iter().zip(layer.parameters()) {
+            assert_eq!(handle.id(), param.id());
+            assert!(
+                handle
+                    .data()
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .all(|&v| v == 1.0)
+            );
+        }
     }
 }

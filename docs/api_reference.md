@@ -3649,6 +3649,37 @@ gets the model it had, not one holding half a checkpoint. There is no partial
 or non-strict mode; to load a subset deliberately, assign the tensors you want
 through the parameter itself.
 
+The values are written into the parameters and buffers the module already
+holds, so every handle to them sees the load — including an optimizer's. Build
+the optimizer and then restore the checkpoint, or the other way round; both
+train the restored model:
+
+```python
+import minitensor as mt
+from minitensor import nn, optim
+
+checkpoint = nn.DenseLayer(4, 3).state_dict()
+
+model = nn.DenseLayer(4, 3)
+optimizer = optim.SGD(model.parameters(), lr=0.1)
+model.load_state_dict(checkpoint)  # the optimizer steps the loaded weights
+
+optimizer.zero_grad()
+model(mt.ones(2, 4)).sum().backward()
+optimizer.step()
+print((model.state_dict()["bias"] - checkpoint["bias"]).tolist())
+```
+
+```text
+[-0.20000000298023224, -0.20000000298023224, -0.20000000298023224]
+```
+
+Because it writes in place, a load is refused while a recorded forward pass
+still needs the current values for its backward pass: call `backward()` on the
+result first, or let the result go. A load onto another device (`device=`)
+moves the module there, which gives it new tensors; build the optimizer after
+such a load.
+
 A custom `Layer` that does not override `named_parameters` falls back to
 positional keys (`param_0`, `param_1`, ...), which still load correctly but
 cannot be inspected or reordered.

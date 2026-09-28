@@ -35,6 +35,10 @@ falls back: they get the model they had, not one holding half a checkpoint.
 
 Every problem is reported at once, with the qualified name a nested module gives
 it (`1.bias`), rather than surfacing one per attempt.
+
+A load that passes writes the values into the parameters the layer already
+has. It used to swap new tensors in, which left an optimizer built before the
+load stepping tensors the layer no longer held.
 """
 
 from __future__ import annotations
@@ -72,6 +76,18 @@ def _state(dtype="float32", **tensors):
     for name, array in tensors.items():
         state.add_parameter(name, mt.from_numpy(np.asarray(array, dtype)))
     return state
+
+
+def _differently_initialised(build):
+    mt.manual_seed(0)
+    source = build()
+    mt.manual_seed(99)
+    target = build()
+    return source, target
+
+
+def _changed(before, after):
+    return any(not np.array_equal(before[name], after[name]) for name in before)
 
 
 # --- what must still work ---------------------------------------------------
@@ -250,6 +266,90 @@ def test_loading_plain_tensors_keeps_the_layer_trainable():
     assert not np.array_equal(before["bias"], after["bias"])
 
 
+# --- a load writes into the parameters the layer already has ----------------
+
+# An optimizer holds its own handles to the parameters and keys them by
+# identity. A load that swapped new tensors into the layer left those handles
+# on storage the layer no longer read: every step succeeded and the model never
+# moved. Building the optimizer first and restoring a checkpoint second is the
+# ordinary way to resume, so this was the common case, not a corner.
+
+TRAINED = {
+    "DenseLayer": (lambda: nn.DenseLayer(4, 3), (2, 4)),
+    "Sequential": (
+        lambda: nn.Sequential([nn.DenseLayer(4, 3), nn.BatchNorm1d(3), nn.ReLU()]),
+        (4, 4),
+    ),
+    "Conv2d": (lambda: nn.Conv2d(3, 4, 3), (2, 3, 6, 6)),
+    "LayerNorm": (lambda: nn.LayerNorm([4]), (2, 4)),
+    "LSTM": (lambda: nn.LSTM(4, 3), (5, 2, 4)),
+}
+
+
+def _inputs(shape):
+    rng = np.random.default_rng(3)
+    return mt.from_numpy(rng.standard_normal(shape).astype(np.float32))
+
+
+def _output(value):
+    return value[0] if isinstance(value, tuple) else value
+
+
+@pytest.mark.parametrize("name", list(TRAINED))
+@pytest.mark.parametrize("make", [mt.optim.SGD, mt.optim.Adam], ids=["SGD", "Adam"])
+def test_an_optimizer_built_before_the_load_trains_the_loaded_layer(name, make):
+    build, shape = TRAINED[name]
+    source, target = _differently_initialised(build)
+    optimizer = make(target.parameters(), lr=0.1)
+
+    target.load_state_dict(source.state_dict())
+    loaded = _snapshot(target)
+    optimizer.zero_grad()
+    (_output(target(_inputs(shape))) ** 2).sum().backward()
+    optimizer.step()
+
+    assert _changed(loaded, _snapshot(target)), "the step did not reach the layer"
+
+
+@pytest.mark.parametrize("name", list(TRAINED))
+def test_handles_taken_before_the_load_see_the_loaded_values(name):
+    source, target = _differently_initialised(TRAINED[name][0])
+    handles = target.parameters()
+
+    target.load_state_dict(source.state_dict())
+
+    for handle, param in zip(handles, source.parameters(), strict=True):
+        np.testing.assert_array_equal(handle.numpy(), param.numpy())
+
+
+def test_a_load_while_a_backward_pass_is_pending_is_refused():
+    """Writing a parameter that a recorded forward pass read would change the
+    gradients its backward pass produces. A load is refused for that the way
+    every in-place write is -- before anything is written."""
+    source, target = _source(), _target()
+    before = _snapshot(target)
+    loss = target(mt.Tensor(np.ones((2, 4), np.float32))).sum()
+
+    with pytest.raises(Exception, match="pending backward pass"):
+        target.load_state_dict(source.state_dict())
+    for name, values in before.items():
+        np.testing.assert_array_equal(_snapshot(target)[name], values, err_msg=name)
+
+    loss.backward()
+    target.load_state_dict(source.state_dict())
+    for name, values in _snapshot(source).items():
+        np.testing.assert_array_equal(_snapshot(target)[name], values, err_msg=name)
+
+
+def test_a_load_after_the_forward_pass_is_dropped_goes_through():
+    source, target = _source(), _target()
+    target(mt.Tensor(np.ones((2, 4), np.float32))).sum()
+
+    target.load_state_dict(source.state_dict())
+    for name, values in _snapshot(source).items():
+        np.testing.assert_array_equal(_snapshot(target)[name], values, err_msg=name)
+
+
 # --- a rejected load changes nothing ----------------------------------------
 
 
@@ -327,14 +427,6 @@ CATALOGUE = {
         [nn.DenseLayer(4, 3), nn.BatchNorm1d(3), nn.ReLU()]
     ),
 }
-
-
-def _differently_initialised(build):
-    mt.manual_seed(0)
-    source = build()
-    mt.manual_seed(99)
-    target = build()
-    return source, target
 
 
 @pytest.mark.parametrize("name", list(CATALOGUE), ids=list(CATALOGUE))
