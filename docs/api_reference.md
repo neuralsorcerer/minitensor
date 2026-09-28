@@ -3403,6 +3403,10 @@ print(rates)
 `Optimizer` is the shared base class; every optimizer above subclasses it, so
 `isinstance(opt, optim.Optimizer)` identifies any of them.
 
+All optimizer classes take their parameters as an iterable of tensors, each
+once: a parameter listed twice would have its gradient applied twice per
+step, so it is refused with a `ValueError` naming both positions.
+
 All optimizer classes share a common interface:
 
 - `step()` -- apply parameter updates and consume the gradients it applied.

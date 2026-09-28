@@ -311,17 +311,18 @@ impl PyOptimizer {
     }
 }
 
-/// A parameter's dtype, once it is known to be a tensor or to wrap one.
-fn parameter_dtype(value: &Bound<PyAny>) -> PyResult<DataType> {
+/// A parameter's identity and dtype, once it is known to be a tensor or to
+/// wrap one.
+fn parameter_identity(value: &Bound<PyAny>) -> PyResult<(engine::autograd::TensorId, DataType)> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
-        return Ok(tensor.tensor().dtype());
+        return Ok((tensor.tensor().id(), tensor.tensor().dtype()));
     }
 
     let py = value.py();
     if let Ok(inner) = value.getattr(intern!(py, "_tensor"))
         && let Ok(tensor) = inner.extract::<PyRef<PyTensor>>()
     {
-        return Ok(tensor.tensor().dtype());
+        return Ok((tensor.tensor().id(), tensor.tensor().dtype()));
     }
 
     Err(PyTypeError::new_err(
@@ -347,16 +348,27 @@ fn borrow_tensor_mut<'py>(
 fn collect_parameters(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
     let iterator = PyIterator::from_object(parameters)?;
     let mut collected: Vec<Py<PyAny>> = Vec::new();
+    let mut first_seen = std::collections::HashMap::new();
 
     for (index, item) in iterator.enumerate() {
         let value = item?;
         // Only a float tensor can have a gradient, so any other would never
         // be stepped -- refused here, by position, rather than skipped in
         // silence at every step.
-        let dtype = parameter_dtype(&value)?;
+        let (id, dtype) = parameter_identity(&value)?;
         if !dtype.is_float() {
             return Err(PyValueError::new_err(format!(
                 "optimizer parameters must be floating point tensors; parameter {index} is {dtype}"
+            )));
+        }
+        // A parameter listed twice has its gradient applied twice: the
+        // optimizer finds a gradient by the parameter's identity, and each
+        // handle to it finds the same one. A step then moved it twice as far,
+        // and its state was advanced twice per step.
+        if let Some(first) = first_seen.insert(id, index) {
+            return Err(PyValueError::new_err(format!(
+                "parameter {index} is the same tensor as parameter {first}; \
+                 give an optimizer each parameter once"
             )));
         }
         collected.push(value.unbind());
