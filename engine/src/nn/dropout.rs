@@ -11,23 +11,42 @@ use crate::{
     random,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rand_distr::{Bernoulli, Distribution};
+use rand::RngExt;
 use std::sync::Arc;
+
+/// A mask element chosen without a branch: all of the scale's bits, or none
+/// of them, which is `+0.0`. As a float select it lowered to a branch even
+/// apart from the draw, the baseline x86-64 target having no float
+/// conditional move.
+trait MaskValue: Copy {
+    fn kept_or_zero(kept: bool, scale: Self) -> Self;
+}
+
+impl MaskValue for f32 {
+    #[inline(always)]
+    fn kept_or_zero(kept: bool, scale: f32) -> f32 {
+        f32::from_bits(scale.to_bits() & u32::from(kept).wrapping_neg())
+    }
+}
+
+impl MaskValue for f64 {
+    #[inline(always)]
+    fn kept_or_zero(kept: bool, scale: f64) -> f64 {
+        f64::from_bits(scale.to_bits() & u64::from(kept).wrapping_neg())
+    }
+}
 
 /// Generate a dropout mask with values either `0` or `1/(1-p)`.
 ///
 /// This utility is used by both `Dropout` and `Dropout2d` to create
 /// Bernoulli masks that keep activations with probability `1-p`.
-fn generate_dropout_mask_data<T>(
+fn generate_dropout_mask_data<T: MaskValue>(
     numel: usize,
     keep_prob: f64,
     zero: T,
     one: T,
     scale: impl FnOnce(f64) -> T,
-) -> Result<Vec<T>>
-where
-    T: Copy,
-{
+) -> Result<Vec<T>> {
     if keep_prob >= 1.0 {
         return Ok(vec![one; numel]);
     }
@@ -35,13 +54,26 @@ where
         return Ok(vec![zero; numel]);
     }
 
-    let bernoulli =
-        Bernoulli::new(keep_prob).map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
+    // `Bernoulli::new(keep_prob)` and its `sample`, drawn the same way -- one
+    // `u64` per element, kept below `keep_prob * 2^64` -- in blocks: a block's
+    // draws first, then its values. Whether an element is kept is a coin flip,
+    // and in one loop with the draw the choice compiled to a branch however it
+    // was written, mispredicting about every other element -- over half of
+    // what a float32 dropout over 32768 elements cost at `p = 0.5`. On its own
+    // the choice vectorises.
+    let threshold = (keep_prob * 2f64.powi(64)) as u64;
     let scale = scale(keep_prob);
     let mut data = vec![zero; numel];
+    let mut draws = [0u64; 64];
     random::with_rng(|rng| {
-        for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
-            *v = if b { scale } else { zero };
+        for block in data.chunks_mut(draws.len()) {
+            let draws = &mut draws[..block.len()];
+            for draw in draws.iter_mut() {
+                *draw = rng.random::<u64>();
+            }
+            for (v, &draw) in block.iter_mut().zip(draws.iter()) {
+                *v = T::kept_or_zero(draw < threshold, scale);
+            }
         }
     });
     Ok(data)
