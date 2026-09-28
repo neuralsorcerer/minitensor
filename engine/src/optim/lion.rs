@@ -218,7 +218,7 @@ impl Optimizer for Lion {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("Lion", parameters.len())?;
+        state.check_compatible("Lion", parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
         self.step_count = state.step_count;
         Ok(())

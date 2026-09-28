@@ -575,14 +575,22 @@ impl OptimizerState {
         }
     }
 
-    /// Reject a state written by a different optimizer or for a different
-    /// number of parameters.
+    /// Reject a state written by a different optimizer, for a different number
+    /// of parameters, or whose buffers do not fit the parameters they are
+    /// matched to by position.
     ///
-    /// Both are silent corruption otherwise. A mismatched algorithm would load
+    /// Each is silent corruption otherwise. A mismatched algorithm would load
     /// whichever buffer names happened to coincide and leave the rest at their
     /// initial values; a mismatched count would leave the extra parameters
-    /// unrestored, which looks exactly like training that has not started.
-    pub fn check_compatible(&self, algorithm: &str, num_parameters: usize) -> Result<()> {
+    /// unrestored, which looks exactly like training that has not started; and
+    /// a buffer of another dtype -- state saved over float64 parameters, loaded
+    /// over float32 ones -- was accepted and panicked on the next step.
+    ///
+    /// Every buffer is checked here, from its recorded shape and dtype, before
+    /// an optimizer replaces anything: a load that fails leaves the optimizer's
+    /// own state as it was, rather than half replaced.
+    pub fn check_compatible(&self, algorithm: &str, parameters: &[&Tensor]) -> Result<()> {
+        let num_parameters = parameters.len();
         if self.algorithm != algorithm {
             return Err(MinitensorError::invalid_argument_with_suggestion(
                 format!(
@@ -607,6 +615,41 @@ impl OptimizerState {
                  constructed over the same parameters in the same order as when it was \
                  saved",
             ));
+        }
+        for (key, buffer) in &self.buffers {
+            let param = key
+                .split_once('.')
+                .and_then(|(slot, _)| slot.parse::<usize>().ok())
+                .and_then(|slot| parameters.get(slot));
+            let Some(param) = param else {
+                return Err(MinitensorError::serialization_error(format!(
+                    "optimizer state holds a buffer `{key}` for no parameter among the \
+                     {num_parameters} it was saved with"
+                )));
+            };
+            if buffer.shape.dims() != param.shape().dims() {
+                return Err(MinitensorError::invalid_argument_with_suggestion(
+                    format!(
+                        "optimizer state `{key}` has shape {:?}, but that parameter is {:?}",
+                        buffer.shape.dims(),
+                        param.shape().dims()
+                    ),
+                    "Per-parameter state is matched by position, so the optimizer must \
+                     be constructed over the same parameters in the same order as when \
+                     it was saved",
+                ));
+            }
+            if buffer.dtype != param.dtype() {
+                return Err(MinitensorError::invalid_argument_with_suggestion(
+                    format!(
+                        "optimizer state `{key}` is {}, but that parameter is {}",
+                        buffer.dtype,
+                        param.dtype()
+                    ),
+                    "Optimizer state is kept at its parameter's precision; resume with \
+                     the parameters in the dtype they had when it was saved",
+                ));
+            }
         }
         Ok(())
     }

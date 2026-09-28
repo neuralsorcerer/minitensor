@@ -200,7 +200,7 @@ impl Optimizer for Rprop {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("Rprop", parameters.len())?;
+        state.check_compatible("Rprop", parameters)?;
         load_param_buffers(state, "prev", &mut self.prev_grad, parameters)?;
         load_param_buffers(state, "step_size", &mut self.step_size, parameters)?;
         self.step_count = state.step_count;

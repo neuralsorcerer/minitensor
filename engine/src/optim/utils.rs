@@ -7,7 +7,7 @@
 use super::optimizer::LearningRateScheduler;
 use crate::{
     autograd::{self, TensorId},
-    error::{MinitensorError, Result},
+    error::Result,
     serialization::OptimizerState,
     tensor::Tensor,
 };
@@ -357,6 +357,10 @@ pub(crate) fn save_param_buffers(
 /// The map is cleared first. Leaving stale entries would keep the state of
 /// whatever parameters the optimizer had stepped before the load, which for a
 /// reused optimizer is state from a different run.
+///
+/// [`OptimizerState::check_compatible`] has already matched every buffer's
+/// shape and dtype to its parameter, so nothing here can reject a buffer
+/// after another has been replaced.
 pub(crate) fn load_param_buffers(
     state: &OptimizerState,
     name: &str,
@@ -366,19 +370,6 @@ pub(crate) fn load_param_buffers(
     buffers.clear();
     for (slot, param) in parameters.iter().enumerate() {
         if let Some(tensor) = state.take_buffer(slot, name, Some(param.device()))? {
-            if tensor.shape().dims() != param.shape().dims() {
-                return Err(MinitensorError::invalid_argument_with_suggestion(
-                    format!(
-                        "optimizer state for parameter {slot} has shape {:?}, but that \
-                         parameter is {:?}",
-                        tensor.shape().dims(),
-                        param.shape().dims()
-                    ),
-                    "Per-parameter state is matched by position, so the optimizer must \
-                     be constructed over the same parameters in the same order as when \
-                     it was saved",
-                ));
-            }
             buffers.insert(param.id(), tensor);
         }
     }

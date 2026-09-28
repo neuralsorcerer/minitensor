@@ -492,7 +492,7 @@ impl Optimizer for Adam {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible(self.algorithm_name(), parameters.len())?;
+        state.check_compatible(self.algorithm_name(), parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
         load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
         load_param_buffers(state, "max_exp_avg_sq", &mut self.v_hat, parameters)?;

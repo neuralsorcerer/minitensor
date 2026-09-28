@@ -308,7 +308,7 @@ impl Optimizer for RMSprop {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("RMSprop", parameters.len())?;
+        state.check_compatible("RMSprop", parameters)?;
         load_param_buffers(state, "square_avg", &mut self.square_avg, parameters)?;
         load_param_buffers(
             state,

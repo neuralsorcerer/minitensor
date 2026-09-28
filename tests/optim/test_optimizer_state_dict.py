@@ -225,6 +225,70 @@ def test_loading_into_differently_shaped_parameters_is_refused():
     assert "has shape" in str(excinfo.value)
 
 
+def _stepped(model, make_optimizer, dtype="float32", seed=0, steps=2):
+    rng = np.random.default_rng(seed)
+    optimizer = make_optimizer(model.parameters())
+    for _ in range(steps):
+        features = mt.from_numpy(rng.standard_normal((8, 16)).astype(dtype))
+        optimizer.zero_grad()
+        model(features).sum().backward()
+        optimizer.step()
+    return optimizer
+
+
+@pytest.mark.parametrize("name", sorted(OPTIMIZERS))
+def test_loading_state_of_another_dtype_is_refused(name):
+    """State saved over float64 parameters used to load over float32 ones, and
+    the next `step` panicked reading the buffers at the parameters' width."""
+    wide = nn.Sequential(
+        [
+            nn.DenseLayer(16, 32, dtype="float64"),
+            nn.ReLU(),
+            nn.DenseLayer(32, 4, dtype="float64"),
+        ]
+    )
+    saved = _stepped(wide, OPTIMIZERS[name], "float64").state_dict()
+    model = _model()
+    optimizer = _stepped(model, OPTIMIZERS[name])
+
+    with pytest.raises(Exception) as excinfo:
+        optimizer.load_state_dict(saved)
+    assert "is float64, but that parameter is float32" in str(excinfo.value)
+
+    optimizer.zero_grad()
+    model(mt.randn(8, 16)).sum().backward()
+    optimizer.step()
+
+
+@pytest.mark.parametrize("name", sorted(OPTIMIZERS))
+def test_a_rejected_load_leaves_the_optimizer_alone(name):
+    """The first two parameters of `other` match this model's and the last two
+    do not. Checked buffer by buffer as it was replaced, the load put the first
+    two in and then failed, leaving the optimizer holding half of another
+    run's state. A twin that never saw the load has to stay bit-identical."""
+    mt.manual_seed(3)
+    model, twin = _model(), _model()
+    twin.load_state_dict(model.state_dict())
+    optimizer = _stepped(model, OPTIMIZERS[name])
+    twin_optimizer = _stepped(twin, OPTIMIZERS[name])
+
+    other = nn.Sequential([nn.DenseLayer(16, 32), nn.ReLU(), nn.DenseLayer(32, 5)])
+    saved = _stepped(other, OPTIMIZERS[name], seed=9).state_dict()
+    with pytest.raises(Exception, match="has shape"):
+        optimizer.load_state_dict(saved)
+
+    features = mt.randn(8, 16)
+    for opt, net in ((optimizer, model), (twin_optimizer, twin)):
+        opt.zero_grad()
+        net(features).sum().backward()
+        opt.step()
+    for (name_a, a), (name_b, b) in zip(
+        model.state_dict().items(), twin.state_dict().items()
+    ):
+        assert name_a == name_b
+        np.testing.assert_array_equal(a.numpy(), b.numpy(), err_msg=name_a)
+
+
 def test_a_stepless_optimizer_saves_no_buffers():
     """Buffers are allocated on a parameter's first step. Writing zeros for a
     parameter that has never been stepped would resume it from a position it

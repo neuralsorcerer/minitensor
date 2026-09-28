@@ -165,7 +165,7 @@ impl Optimizer for Adadelta {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("Adadelta", parameters.len())?;
+        state.check_compatible("Adadelta", parameters)?;
         load_param_buffers(state, "square_avg", &mut self.square_avg, parameters)?;
         load_param_buffers(state, "acc_delta", &mut self.acc_delta, parameters)?;
         self.step_count = state.step_count;

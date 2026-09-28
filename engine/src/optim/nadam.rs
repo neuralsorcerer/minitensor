@@ -261,7 +261,7 @@ impl Optimizer for NAdam {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("NAdam", parameters.len())?;
+        state.check_compatible("NAdam", parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
         load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
         self.mu_product = state.scalars.get("mu_product").copied().unwrap_or(1.0);

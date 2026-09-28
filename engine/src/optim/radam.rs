@@ -219,7 +219,7 @@ impl Optimizer for RAdam {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("RAdam", parameters.len())?;
+        state.check_compatible("RAdam", parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.exp_avg, parameters)?;
         load_param_buffers(state, "exp_avg_sq", &mut self.exp_avg_sq, parameters)?;
         self.step_count = state.step_count;

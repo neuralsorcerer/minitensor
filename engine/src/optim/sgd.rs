@@ -287,7 +287,7 @@ impl Optimizer for SGD {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("SGD", parameters.len())?;
+        state.check_compatible("SGD", parameters)?;
         load_param_buffers(state, "momentum_buffer", &mut self.velocity, parameters)?;
         self.step_count = state.step_count;
         Ok(())

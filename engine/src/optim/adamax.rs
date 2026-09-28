@@ -172,7 +172,7 @@ impl Optimizer for Adamax {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("Adamax", parameters.len())?;
+        state.check_compatible("Adamax", parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.exp_avg, parameters)?;
         load_param_buffers(state, "exp_inf", &mut self.exp_inf, parameters)?;
         self.step_count = state.step_count;

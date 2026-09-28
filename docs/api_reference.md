@@ -3440,9 +3440,10 @@ print(round(resumed_optimizer.lr, 6))      # ... and now it does not
 Per-parameter state is matched by **position**, so the optimizer has to be
 constructed over the same parameters in the same order as when it was saved.
 Loading a state saved by a different algorithm, for a different number of
-parameters, or for differently shaped ones is refused rather than silently
-partially applied -- including Adam into AdamW, which share a buffer layout
-but not an update rule.
+parameters, or for parameters of another shape or dtype is refused rather than
+silently partially applied -- including Adam into AdamW, which share a buffer
+layout but not an update rule. Every buffer is checked before any is replaced,
+so a refused load leaves the optimizer's own state as it was.
 
 Every optimizer takes an iterable of parameter tensors, which is what
 `model.parameters()` returns. A training step is always the same four calls:

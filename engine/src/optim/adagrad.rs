@@ -243,7 +243,7 @@ impl Optimizer for Adagrad {
     }
 
     fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
-        state.check_compatible("Adagrad", parameters.len())?;
+        state.check_compatible("Adagrad", parameters)?;
         load_param_buffers(state, "sum", &mut self.state_sum, parameters)?;
         self.step_count = state.step_count;
         Ok(())
