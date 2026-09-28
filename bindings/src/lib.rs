@@ -44,7 +44,14 @@ use error::_convert_error;
 use tensor::{PyTensor, ShapeSequence};
 
 /// Python module for minitensor core
-#[pymodule]
+// The engine relies on the interpreter lock: an optimizer step updates a
+// parameter's storage in place through every handle that shares it, and is
+// sound because nothing else can be reading that storage while the lock is
+// held (see `engine::tensor::DataMut`). PyO3 declares a module free-threaded
+// unless told otherwise, and a free-threaded interpreter would then run two
+// threads' operations on one buffer at once. Declared, the interpreter turns
+// the lock back on when this module is imported, and says so.
+#[pymodule(gil_used = true)]
 fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Before anything can build a tensor: a single large dense product goes to
     // the BLAS `numpy` already brought rather than to the engine's own kernel.
