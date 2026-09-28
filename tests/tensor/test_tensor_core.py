@@ -498,13 +498,13 @@ def test_tensor_new_ones_defaults_to_reference_metadata():
 
 
 def test_tensor_new_full_respects_fill_and_defaults():
-    base = Tensor.ones((1,), dtype="int32", requires_grad=True)
+    base = Tensor.ones((1,), dtype="float32", requires_grad=True)
     result = base.new_full(5, 3)
 
     assert result.shape == (5,)
-    assert result.dtype == "int32"
+    assert result.dtype == "float32"
     assert result.requires_grad is True
-    np.testing.assert_array_equal(result.numpy(), np.full((5,), 3, dtype=np.int32))
+    np.testing.assert_array_equal(result.numpy(), np.full((5,), 3, dtype=np.float32))
 
 
 def test_tensor_new_tensor_defaults_to_reference_metadata():
@@ -1296,13 +1296,13 @@ def test_tensor_copy_raises_for_shape_mismatch():
 
 
 def test_tensor_fill_inplace_casts_scalar_to_tensor_dtype():
-    tensor = mt.ones((2, 3), dtype="int32", requires_grad=True)
+    tensor = mt.ones((2, 3), dtype="int32")
 
     returned = tensor.fill_(7.8)
 
     assert returned is tensor
     assert tensor.dtype == "int32"
-    assert tensor.requires_grad is True
+    assert tensor.requires_grad is False
     np.testing.assert_array_equal(tensor.numpy(), np.full((2, 3), 7, dtype=np.int32))
 
 

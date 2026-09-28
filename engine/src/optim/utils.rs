@@ -407,6 +407,14 @@ where
     F: FnMut(&mut crate::tensor::Tensor, &crate::tensor::Tensor) -> Result<()>,
 {
     for param in parameters.iter_mut() {
+        // Only a float tensor can require a gradient, so any other would be
+        // skipped by the check below on every step, in silence.
+        if !param.dtype().is_float() {
+            return Err(crate::error::MinitensorError::invalid_operation(format!(
+                "optimizer parameters must be floating point tensors, got {}",
+                param.dtype()
+            )));
+        }
         if !param.requires_grad() {
             continue;
         }

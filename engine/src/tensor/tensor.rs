@@ -440,8 +440,9 @@ impl Tensor {
             // tensors never require gradients. Callers that genuinely need a
             // trainable leaf inside a no-grad scope can opt back in with
             // `requires_grad_(true)`, which expresses explicit intent and is
-            // not gated.
-            requires_grad: requires_grad && autograd::is_grad_enabled(),
+            // not gated. Only a float can carry a gradient at all; see
+            // `requires_grad_`.
+            requires_grad: requires_grad && dtype.is_float() && autograd::is_grad_enabled(),
             grad_fn: None,
             grad: None,
             tensor_id: TensorId::new(),
@@ -685,8 +686,14 @@ impl Tensor {
 
     /// Enable gradient computation for this tensor
     #[inline(always)]
+    ///
+    /// Only a float tensor can require a gradient. An integer or bool one is
+    /// left not requiring one, the rule a cast to those dtypes already
+    /// follows: marked, it was tracked by some operations and not others, so
+    /// `x * x` handed back an integer gradient, `x * 0.5` a result with no
+    /// history, and `x ** 2` failed inside the backward pass.
     pub fn requires_grad_(mut self, requires_grad: bool) -> Self {
-        self.requires_grad = requires_grad;
+        self.requires_grad = requires_grad && self.dtype.is_float();
         self
     }
 

@@ -315,16 +315,11 @@ def test_the_learning_rate_is_readable_and_writable(name, build, kwargs):
 
 @pytest.mark.parametrize("name,build,kwargs", FAMILY, ids=[f[0] for f in FAMILY])
 def test_an_integer_parameter_is_refused_by_name(name, build, kwargs):
-    param = mt.Tensor(np.array([1, 2], dtype=np.int64), dtype="int64").requires_grad_(
-        True
-    )
-    opt = build([param], lr=0.1, **kwargs)
-    with pytest.raises(Exception, match="floating point"):
-        (
-            param * mt.Tensor(np.array([1, 1], dtype=np.int64), dtype="int64")
-        ).sum().backward()
-        opt.step()
-    mt.clear_autograd_graph()
+    # An integer tensor cannot require a gradient, so it would never be
+    # stepped: the optimizer refuses it up front instead of skipping it.
+    param = mt.Tensor(np.array([1, 2], dtype=np.int64), dtype="int64")
+    with pytest.raises(ValueError, match="floating point.*parameter 0 is int64"):
+        build([param], lr=0.1, **kwargs)
 
 
 @pytest.mark.parametrize("name,build,kwargs", FAMILY, ids=[f[0] for f in FAMILY])

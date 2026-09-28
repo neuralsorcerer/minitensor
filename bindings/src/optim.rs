@@ -10,7 +10,7 @@ use engine::optim::{
     Adadelta, Adagrad, Adam, AdamW, Adamax, Lion, NAdam, Optimizer, RAdam, RMSprop, Rprop, SGD,
 };
 use engine::serialization::{OptimizerState, SerializationFormat};
-use engine::{autograd, tensor::Tensor};
+use engine::{DataType, autograd, tensor::Tensor};
 use pyo3::Py;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -311,16 +311,17 @@ impl PyOptimizer {
     }
 }
 
-fn ensure_tensor_like(value: &Bound<PyAny>) -> PyResult<()> {
-    if value.extract::<PyRef<PyTensor>>().is_ok() {
-        return Ok(());
+/// A parameter's dtype, once it is known to be a tensor or to wrap one.
+fn parameter_dtype(value: &Bound<PyAny>) -> PyResult<DataType> {
+    if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
+        return Ok(tensor.tensor().dtype());
     }
 
     let py = value.py();
     if let Ok(inner) = value.getattr(intern!(py, "_tensor"))
-        && inner.extract::<PyRef<PyTensor>>().is_ok()
+        && let Ok(tensor) = inner.extract::<PyRef<PyTensor>>()
     {
-        return Ok(());
+        return Ok(tensor.tensor().dtype());
     }
 
     Err(PyTypeError::new_err(
@@ -347,9 +348,17 @@ fn collect_parameters(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
     let iterator = PyIterator::from_object(parameters)?;
     let mut collected: Vec<Py<PyAny>> = Vec::new();
 
-    for item in iterator {
+    for (index, item) in iterator.enumerate() {
         let value = item?;
-        ensure_tensor_like(&value)?;
+        // Only a float tensor can have a gradient, so any other would never
+        // be stepped -- refused here, by position, rather than skipped in
+        // silence at every step.
+        let dtype = parameter_dtype(&value)?;
+        if !dtype.is_float() {
+            return Err(PyValueError::new_err(format!(
+                "optimizer parameters must be floating point tensors; parameter {index} is {dtype}"
+            )));
+        }
         collected.push(value.unbind());
     }
 

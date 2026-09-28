@@ -64,13 +64,24 @@ impl PyTensor {
 
     /// Set `requires_grad` in place and return `self`, so calls chain:
     /// `x = mt.randn(2, 2).requires_grad_()`.
+    ///
+    /// Only a float tensor can require a gradient; asking it of an integer or
+    /// bool one raises, rather than returning a tensor that is tracked by some
+    /// operations and not others.
     #[pyo3(signature = (requires_grad=true))]
     pub fn requires_grad_<'py>(
         mut slf: PyRefMut<'py, Self>,
         requires_grad: bool,
-    ) -> PyRefMut<'py, Self> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let dtype = slf.inner.dtype();
+        if requires_grad && !dtype.is_float() {
+            return Err(PyValueError::new_err(format!(
+                "only floating point tensors can require gradients, and this one is {dtype}; \
+                 cast it with .astype('float32') first"
+            )));
+        }
         slf.inner = slf.inner.clone().requires_grad_(requires_grad);
-        slf
+        Ok(slf)
     }
 
     #[pyo3(signature = (source, *, non_blocking=false))]

@@ -266,3 +266,22 @@ def test_as_tensor_keeps_the_flag_it_was_given():
 def test_construction_inside_no_grad_is_unaffected():
     with mt.no_grad():
         assert mt.Tensor([1.0, 2.0], requires_grad=True).requires_grad is False
+
+
+# The same rule applies to a tensor made integer rather than cast to it. An
+# integer tensor that "required" a gradient used to be tracked by some
+# operations and not others: `x * x` handed back an integer gradient, `x * 0.5`
+# a result with no history at all, and `x ** 2` failed inside the backward pass.
+
+
+@pytest.mark.parametrize("dtype", NON_FLOAT_DTYPES)
+def test_asking_an_integer_or_bool_tensor_to_require_a_gradient_raises(dtype):
+    tensor = mt.zeros((2,), dtype=dtype)
+    with pytest.raises(ValueError, match="only floating point tensors"):
+        tensor.requires_grad_()
+    assert tensor.requires_grad_(False).requires_grad is False
+
+
+@pytest.mark.parametrize("dtype", NON_FLOAT_DTYPES)
+def test_an_integer_or_bool_tensor_is_never_built_requiring_a_gradient(dtype):
+    assert mt.zeros((2,), dtype=dtype, requires_grad=True).requires_grad is False

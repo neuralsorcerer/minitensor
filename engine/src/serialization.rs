@@ -1120,7 +1120,8 @@ mod tests {
 
             assert_eq!(restored.shape().dims(), shape.dims(), "{dtype:?}");
             assert_eq!(restored.dtype(), dtype, "{dtype:?}");
-            assert!(restored.requires_grad(), "{dtype:?}");
+            // Only a float can require a gradient; the flag survives for those.
+            assert_eq!(restored.requires_grad(), dtype.is_float(), "{dtype:?}");
 
             // Bit-exact, so signed zero and the dtype extremes survive.
             match dtype {
