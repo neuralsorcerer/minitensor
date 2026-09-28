@@ -389,11 +389,11 @@ for epoch in range(100):
 ```
 
 ```text
-Epoch 020 | Loss: 0.2520 | w: 2.545 | b: 0.407
-Epoch 040 | Loss: 0.0150 | w: 2.934 | b: 0.485
-Epoch 060 | Loss: 0.0103 | w: 2.988 | b: 0.498
-Epoch 080 | Loss: 0.0102 | w: 2.995 | b: 0.500
-Epoch 100 | Loss: 0.0102 | w: 2.996 | b: 0.501
+Epoch 020 | Loss: 0.3687 | w: 2.461 | b: 0.330
+Epoch 040 | Loss: 0.0192 | w: 2.925 | b: 0.470
+Epoch 060 | Loss: 0.0112 | w: 2.992 | b: 0.501
+Epoch 080 | Loss: 0.0110 | w: 3.002 | b: 0.507
+Epoch 100 | Loss: 0.0110 | w: 3.004 | b: 0.508
 ```
 
 ## Development & Testing

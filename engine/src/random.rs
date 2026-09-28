@@ -10,18 +10,26 @@
 //! cannot be deterministically seeded.  MiniTensor needs reproducible randomness
 //! across the entire stack so that Python callers can rely on `manual_seed`.
 //! This module owns a single
-//! [`StdRng`] protected by a `Mutex` and exposes helpers that allow the rest of
-//! the engine to draw random numbers while sharing the global state.
+//! [`Xoshiro256PlusPlus`] protected by a `Mutex` and exposes helpers that allow
+//! the rest of the engine to draw random numbers while sharing the global
+//! state.
+//!
+//! Xoshiro256++ rather than `StdRng`, which is ChaCha12: a cryptographic
+//! generator, and at about 2.6ns a word on this crate's baseline x86-64 target
+//! it was what `rand`, `randn`, dropout and every initializer spent most of
+//! their time in. Nothing here needs a cryptographic stream. Named directly
+//! rather than as `SmallRng`, which is a different generator on 32-bit
+//! targets, so a seed gives the same numbers on every platform.
 
 use parking_lot::Mutex;
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use std::sync::LazyLock;
 
 /// Global RNG used across the engine for deterministic sampling.
-static GLOBAL_RNG: LazyLock<Mutex<StdRng>> = LazyLock::new(|| {
+static GLOBAL_RNG: LazyLock<Mutex<Xoshiro256PlusPlus>> = LazyLock::new(|| {
     let mut thread_rng = rand::rng();
     let seed = thread_rng.random::<u64>();
-    Mutex::new(StdRng::seed_from_u64(seed))
+    Mutex::new(Xoshiro256PlusPlus::seed_from_u64(seed))
 });
 
 /// Execute a closure with exclusive access to the global RNG.
@@ -30,7 +38,7 @@ static GLOBAL_RNG: LazyLock<Mutex<StdRng>> = LazyLock::new(|| {
 /// callers observe deterministic behaviour once a manual seed is set.  The
 /// closure should avoid long-running work while holding the RNG lock.
 #[inline]
-pub fn with_rng<T>(f: impl FnOnce(&mut StdRng) -> T) -> T {
+pub fn with_rng<T>(f: impl FnOnce(&mut Xoshiro256PlusPlus) -> T) -> T {
     let mut guard = GLOBAL_RNG.lock();
     f(&mut guard)
 }
@@ -42,7 +50,7 @@ pub fn with_rng<T>(f: impl FnOnce(&mut StdRng) -> T) -> T {
 /// results.
 #[inline]
 pub fn manual_seed(seed: u64) {
-    *GLOBAL_RNG.lock() = StdRng::seed_from_u64(seed);
+    *GLOBAL_RNG.lock() = Xoshiro256PlusPlus::seed_from_u64(seed);
 }
 
 #[cfg(test)]
