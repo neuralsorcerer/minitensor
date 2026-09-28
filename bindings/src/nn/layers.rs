@@ -1583,11 +1583,11 @@ impl PySequential {
     /// layer is the same change. A layer belongs to at most one container.
     #[new]
     #[pyo3(signature = (layers=None))]
-    fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<PyClassInitializer<Self>> {
+    fn new(layers: Option<Vec<Bound<'_, PyModule>>>) -> PyResult<PyClassInitializer<Self>> {
         let mut module = PyModule::from_sequential(Sequential::new());
         let layers = layers.unwrap_or_default();
         for (index, layer) in layers.iter().enumerate() {
-            if layers[..index].iter().any(|earlier| earlier.is_same(layer)) {
+            if layers[..index].iter().any(|earlier| earlier.is(layer)) {
                 return Err(PyValueError::new_err(format!(
                     "layer {index} is also an earlier layer, and a module can \
                      belong to a Sequential only once; use copy.deepcopy(module) \
@@ -1597,7 +1597,7 @@ impl PySequential {
         }
         let mut children = Vec::with_capacity(layers.len());
         for layer in &layers {
-            children.push(layer.adopt_into(&module)?);
+            children.push(PyModule::adopt_into(layer, &module)?);
         }
         module.push_children(children)?;
 
@@ -1617,17 +1617,9 @@ impl PySequential {
                 "a Sequential cannot hold itself, or a module it is inside",
             ));
         }
-        let module = module.borrow();
-        let mut slf = slf.borrow_mut();
-        if !matches!(slf.as_ref().inner.get()?, ModuleType::Sequential(_)) {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Invalid layer type",
-            ));
-        }
-
-        let layer = module.adopt_into(slf.as_ref())?;
-
-        if let ModuleType::Sequential(seq) = slf.as_mut().inner.get_mut()? {
+        let mut this = slf.borrow_mut();
+        let layer = PyModule::adopt_into(module, this.as_ref())?;
+        if let ModuleType::Sequential(seq) = this.as_mut().inner.get_mut()? {
             seq.add_layer(layer);
             Ok(())
         } else {
@@ -1635,6 +1627,35 @@ impl PySequential {
                 "Invalid layer type",
             ))
         }
+    }
+
+    /// How many modules this holds.
+    fn __len__(slf: PyRef<'_, Self>) -> PyResult<usize> {
+        Ok(slf.as_ref().children(slf.py())?.len())
+    }
+
+    /// The module at `index`, the very object that was added there;
+    /// negative indices count from the end.
+    fn __getitem__(slf: PyRef<'_, Self>, index: isize) -> PyResult<Py<PyAny>> {
+        let children = slf.as_ref().children(slf.py())?;
+        let length = children.len() as isize;
+        let position = if index < 0 { index + length } else { index };
+        if !(0..length).contains(&position) {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "Sequential index {index} is out of range for {length} modules"
+            )));
+        }
+        Ok(children
+            .into_iter()
+            .nth(position as usize)
+            .expect("position checked against the length"))
+    }
+
+    /// The modules this holds, in order.
+    fn __iter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
+        let py = slf.py();
+        let children = slf.as_ref().children(py)?;
+        pyo3::types::PyList::new(py, children)?.as_any().try_iter()
     }
 }
 

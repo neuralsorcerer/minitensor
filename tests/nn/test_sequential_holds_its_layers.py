@@ -18,6 +18,9 @@ own flags and buffers, so the layer the caller kept was half of the same one:
 Now a change made through either one is made to both, because there is only
 one. That makes a module's place in a model a tree, which is checked: a module
 belongs to at most one `Sequential`, once, and never to one inside itself.
+
+It also makes the parts reachable through the model: `model[i]` is the module
+that was added there, not a copy of it.
 """
 
 from __future__ import annotations
@@ -189,3 +192,62 @@ def test_a_part_of_a_copied_model_can_be_added_elsewhere():
     and a copy of a part is free."""
     _, backbone, _ = _model()
     nn.Sequential([copy.deepcopy(backbone)])
+
+
+# --- reaching the parts through the model -----------------------------------
+
+
+def test_indexing_returns_the_very_module_that_was_added():
+    model, backbone, head = _model()
+    assert model[0] is backbone
+    assert model[1] is head
+    assert model[-1] is head
+    assert model[0][1] is backbone[1]
+
+
+def test_an_index_past_either_end_is_an_index_error():
+    model, _, _ = _model()
+    for index in (2, -3):
+        with pytest.raises(IndexError, match="out of range for 2 modules"):
+            model[index]
+
+
+def test_len_and_iteration_follow_what_was_added():
+    model, backbone, head = _model()
+    extra = nn.ReLU()
+    model.add_module("extra", extra)
+    assert len(model) == 3
+    assert list(model) == [backbone, head, extra]
+    assert len(nn.Sequential()) == 0
+
+
+def test_a_part_reached_by_index_is_frozen_in_the_model():
+    model, _, _ = _model()
+    model[1].requires_grad_(False)
+    assert [p.requires_grad for p in model.parameters()] == [True] * 4 + [False] * 2
+
+
+def test_the_repr_lists_every_part_under_its_index():
+    model = nn.Sequential([nn.DenseLayer(4, 3), nn.Sequential([nn.ReLU()])])
+    assert repr(model) == (
+        "Sequential(\n"
+        "  (0): DenseLayer(in_features=4, out_features=3)\n"
+        "  (1): Sequential(\n"
+        "    (0): ReLU()\n"
+        "  )\n"
+        ")"
+    )
+    assert repr(nn.Sequential()) == "Sequential()"
+
+
+def test_a_deep_copy_has_parts_of_its_own_that_can_be_indexed():
+    model, backbone, _ = _model()
+    copied = copy.deepcopy(model)
+
+    assert [type(part) for part in copied] == [nn.Sequential, nn.DenseLayer]
+    assert copied[0] is not backbone
+    assert len(copied[0]) == len(backbone)
+    copied[0].requires_grad_(False)
+    assert all(p.requires_grad for p in model.parameters())
+    with pytest.raises(ValueError, match="already belongs to a Sequential"):
+        nn.Sequential([copied[1]])

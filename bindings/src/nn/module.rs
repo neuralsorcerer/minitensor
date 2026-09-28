@@ -997,9 +997,16 @@ struct ModuleCell {
     tree: std::sync::Mutex<Arc<std::sync::atomic::AtomicBool>>,
     /// The `Sequential` this was added to, while it exists.
     parent: std::sync::Mutex<std::sync::Weak<ModuleCell>>,
-    /// The cells added to this one, for moving them onto the lock of
-    /// whatever this one is added to.
-    children: std::sync::Mutex<Vec<Arc<ModuleCell>>>,
+    /// What was added to this one, in order: each child's layer, for moving
+    /// it onto the lock of whatever this one is added to, and the Python
+    /// object it was added as, which is what indexing the `Sequential`
+    /// returns.
+    children: std::sync::Mutex<Vec<Child>>,
+}
+
+struct Child {
+    cell: Arc<ModuleCell>,
+    object: Py<PyAny>,
 }
 
 // SAFETY: see `ModuleCell`: concurrent access is excluded by the GIL, and a
@@ -1033,7 +1040,7 @@ impl ModuleCell {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .any(|child| child.contains(cell))
+                .any(|child| child.cell.contains(cell))
     }
 
     fn join_tree(&self, tree: &Arc<std::sync::atomic::AtomicBool>) {
@@ -1044,7 +1051,7 @@ impl ModuleCell {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
         {
-            child.join_tree(tree);
+            child.cell.join_tree(tree);
         }
     }
 
@@ -1071,7 +1078,9 @@ impl Drop for ModuleCell {
     fn drop(&mut self) {
         let children = self.children.get_mut().unwrap_or_else(|e| e.into_inner());
         for child in children.drain(..) {
-            child.join_tree(&Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            child
+                .cell
+                .join_tree(&Arc::new(std::sync::atomic::AtomicBool::new(false)));
         }
     }
 }
@@ -1142,8 +1151,8 @@ impl SharedModule {
     ///
     /// Refused for a module that already belongs to one, and for one that
     /// `parent` is inside: either would give the model two paths to one
-    /// layer.
-    fn adopt_into(&self, parent: &SharedModule) -> PyResult<Box<dyn Layer>> {
+    /// layer. `object` is the Python object this is held by.
+    fn adopt_into(&self, object: Py<PyAny>, parent: &SharedModule) -> PyResult<Box<dyn Layer>> {
         if self.0.in_forward() || parent.0.in_forward() {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "a module cannot be added to a Sequential while either is in a \
@@ -1171,7 +1180,10 @@ impl SharedModule {
             .children
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(self.0.clone());
+            .push(Child {
+                cell: self.0.clone(),
+                object,
+            });
         Ok(Box::new(SharedChild(self.0.clone())))
     }
 }
@@ -1546,7 +1558,7 @@ impl PyModule {
                     "GELU(approximate=\"none\")".to_string()
                 }
             }
-            ModuleType::Sequential(_) => "Sequential(...)".to_string(),
+            ModuleType::Sequential(_) => self.sequential_repr()?,
             ModuleType::Conv2d(layer) => format!(
                 "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",
                 layer.in_channels(),
@@ -1718,7 +1730,7 @@ impl PyModule {
     /// be copied this way; for any other model, build a second one and load
     /// the first one's weights with `load_state_dict(model.state_dict())`.
     fn __deepcopy__(slf: &Bound<'_, Self>, _memo: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let copy = slf.borrow().independent_copy()?;
+        let copy = slf.borrow().independent_copy(slf.py())?;
         rebuild_as(&slf.get_type(), copy)
     }
 
@@ -1792,7 +1804,27 @@ impl PyModule {
     /// the copy would move the original's weights too, and its state, keyed
     /// by tensor id, would treat the two as one parameter. The other tensors a
     /// layer holds are only ever read, so sharing them is safe.
-    fn independent_copy(&self) -> PyResult<Self> {
+    ///
+    /// A `Sequential` is copied child by child, each into a module object of
+    /// its own class, so the copy can be indexed like the original and each
+    /// of its parts belongs to it alone.
+    fn independent_copy(&self, py: Python<'_>) -> PyResult<Self> {
+        if let ModuleType::Sequential(_) = self.inner.get()? {
+            let mut copy = PyModule::from_sequential(Sequential::new());
+            let mut layers = Vec::new();
+            for child in self.children(py)? {
+                let child = child.bind(py);
+                let original = child.cast::<PyModule>()?;
+                let copied = original.borrow().independent_copy(py)?;
+                let copied = rebuild_as(&child.get_type(), copied)?;
+                layers.push(PyModule::adopt_into(
+                    copied.bind(py).cast::<PyModule>()?,
+                    &copy,
+                )?);
+            }
+            copy.push_children(layers)?;
+            return Ok(copy);
+        }
         fn independent(tensor: &engine::tensor::Tensor) -> engine::tensor::Tensor {
             engine::tensor::Tensor::new(
                 std::sync::Arc::new(tensor.data().clone_data()),
@@ -2005,9 +2037,46 @@ impl PyModule {
         }
     }
 
-    /// This module's layer, to be held by `parent`, a `Sequential`.
-    pub(crate) fn adopt_into(&self, parent: &PyModule) -> PyResult<Box<dyn Layer>> {
-        self.inner.adopt_into(&parent.inner)
+    /// A `Sequential` as the modules it holds, one per line, each under the
+    /// index that reaches it.
+    fn sequential_repr(&self) -> PyResult<String> {
+        Python::attach(|py| {
+            let children = self.children(py)?;
+            if children.is_empty() {
+                return Ok("Sequential()".to_string());
+            }
+            let mut text = String::from("Sequential(\n");
+            for (index, child) in children.iter().enumerate() {
+                let shown = child.bind(py).repr()?.to_string().replace('\n', "\n  ");
+                text.push_str(&format!("  ({index}): {shown}\n"));
+            }
+            text.push(')');
+            Ok(text)
+        })
+    }
+
+    /// `module`'s layer, to be held by `parent`, a `Sequential`.
+    pub(crate) fn adopt_into(
+        module: &Bound<'_, PyModule>,
+        parent: &PyModule,
+    ) -> PyResult<Box<dyn Layer>> {
+        let object = module.clone().into_any().unbind();
+        module.borrow().inner.adopt_into(object, &parent.inner)
+    }
+
+    /// The modules a `Sequential` holds, as the Python objects they were
+    /// added as.
+    pub(crate) fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner.check_idle()?;
+        Ok(self
+            .inner
+            .0
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|child| child.object.clone_ref(py))
+            .collect())
     }
 
     /// Append `children`, which `adopt_into` gave for this `Sequential`.
@@ -2018,11 +2087,6 @@ impl PyModule {
             }
         }
         Ok(())
-    }
-
-    /// Whether this is `other`, the same Python-visible module.
-    pub(crate) fn is_same(&self, other: &PyModule) -> bool {
-        Arc::ptr_eq(&self.inner.0, &other.inner.0)
     }
 }
 
@@ -2188,10 +2252,10 @@ mod shared_module_tests {
     #[test]
     fn a_model_in_a_forward_pass_is_closed_to_everything_else() {
         pyo3::Python::initialize();
-        Python::attach(|_| {
+        Python::attach(|py| {
             let mut parent = sequential();
             let mut child = relu();
-            let adopted = child.adopt_into(&parent).unwrap();
+            let adopted = child.adopt_into(py.None(), &parent).unwrap();
             if let ModuleType::Sequential(model) = parent.get_mut().unwrap() {
                 model.add_layer(adopted);
             }
@@ -2202,7 +2266,7 @@ mod shared_module_tests {
                     assert!(child.get().is_err());
                     assert!(child.get_mut().is_err());
                     assert!(child.forward(|_| ()).is_err());
-                    assert!(other.adopt_into(&child).is_err());
+                    assert!(other.adopt_into(py.None(), &child).is_err());
                     // A model the lock does not cover is untouched.
                     assert!(other.get().is_ok());
                 })
@@ -2216,16 +2280,16 @@ mod shared_module_tests {
     #[test]
     fn a_dropped_parent_gives_its_children_locks_of_their_own() {
         pyo3::Python::initialize();
-        Python::attach(|_| {
+        Python::attach(|py| {
             let mut first = relu();
             let second = relu();
             {
                 let parent = sequential();
-                drop(first.adopt_into(&parent).unwrap());
-                drop(second.adopt_into(&parent).unwrap());
+                drop(first.adopt_into(py.None(), &parent).unwrap());
+                drop(second.adopt_into(py.None(), &parent).unwrap());
             }
             first.forward(|_| assert!(second.get().is_ok())).unwrap();
-            assert!(second.adopt_into(&relu()).is_ok());
+            assert!(second.adopt_into(py.None(), &relu()).is_ok());
         });
     }
 }

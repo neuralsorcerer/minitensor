@@ -2946,6 +2946,10 @@ True
   cannot hold itself or one it is inside. Each is refused with a `ValueError`.
   Use `copy.deepcopy(module)` for a second, independent module. A module is
   free again once the `Sequential` holding it is gone.
+  `model[i]` is the module that was added at position `i` -- the same object,
+  so `model[0].requires_grad_(False)` freezes it in `model` -- with negative
+  indices counting from the end; `len(model)` and `for part in model` follow
+  the same order, and `repr(model)` lists each part under its index.
 
 #### Pooling layers
 
