@@ -120,6 +120,13 @@ the calling thread below 2 MiB of input and the equal-shape arithmetic below
 262,144 elements. None of those cutoffs changes an answer: the work is split
 into the same pieces either way.
 
+The pool is the engine's own rather than rayon's global one. It takes its size
+from `RAYON_NUM_THREADS` when that is set, and a forked child -- which is what
+`multiprocessing` starts by default on Linux before Python 3.14 -- builds a
+fresh pool the first time it needs one. A fork copies only the thread that
+called it, and on the global pool the child's first large operation waited
+forever on workers the fork had not copied.
+
 Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
 `log`, `sin`, `cos` and `tan` are bit-identical to the correctly-rounded
 float64 value on **all 2^32 float32 inputs**, checked exhaustively; `erf`,

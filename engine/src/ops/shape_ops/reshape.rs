@@ -368,7 +368,7 @@ pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Resu
 /// floor the whole output is one task and nothing is handed to rayon.
 fn concat_task_len(numel: usize) -> usize {
     const MIN_TASK: usize = 1 << 14;
-    let threads = rayon::current_num_threads().max(1);
+    let threads = crate::parallel::current_num_threads().max(1);
     numel.div_ceil(threads * 4).max(MIN_TASK)
 }
 
@@ -1300,16 +1300,18 @@ fn flip_rows(tensor: &Tensor, flipped: &[bool]) -> Result<Tensor> {
             // whole row, forwards or reversed.
             let out = unsafe {
                 build_vec::<$ty, _>(src.len(), |spare| {
-                    if spare.len() < PAR_THRESHOLD {
+                    if spare.len() < PAR_THRESHOLD || spare.len() <= row_len {
                         spare
                             .chunks_mut(row_len)
                             .enumerate()
                             .for_each(|(r, dst)| copy_row(r, dst));
                     } else {
-                        spare
-                            .par_chunks_mut(row_len)
-                            .enumerate()
-                            .for_each(|(r, dst)| copy_row(r, dst));
+                        crate::parallel::install(|| {
+                            spare
+                                .par_chunks_mut(row_len)
+                                .enumerate()
+                                .for_each(|(r, dst)| copy_row(r, dst))
+                        });
                     }
                 })
             };
@@ -1481,16 +1483,18 @@ fn roll_rows(tensor: &Tensor, shifts: &[usize]) -> Result<Tensor> {
             // halves of a whole row.
             let out = unsafe {
                 build_vec::<$ty, _>(src.len(), |spare| {
-                    if spare.len() < PAR_THRESHOLD {
+                    if spare.len() < PAR_THRESHOLD || spare.len() <= row_len {
                         spare
                             .chunks_mut(row_len)
                             .enumerate()
                             .for_each(|(r, dst)| copy_row(r, dst));
                     } else {
-                        spare
-                            .par_chunks_mut(row_len)
-                            .enumerate()
-                            .for_each(|(r, dst)| copy_row(r, dst));
+                        crate::parallel::install(|| {
+                            spare
+                                .par_chunks_mut(row_len)
+                                .enumerate()
+                                .for_each(|(r, dst)| copy_row(r, dst))
+                        });
                     }
                 })
             };

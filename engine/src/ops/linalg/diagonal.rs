@@ -714,7 +714,7 @@ fn optimized_matmul_f32(
         // withheld from worker threads, see `ops::provider`), and the serial
         // one would pay the crossing once per matrix, which at a batch of 256
         // costs more than the whole product.
-    } else if batch >= rayon::current_num_threads() {
+    } else if batch >= crate::parallel::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.
         par_out_chunks(output_data, m * n, &|start, chunk| {
@@ -812,7 +812,7 @@ fn optimized_matmul_f64(
         // withheld from worker threads, see `ops::provider`), and the serial
         // one would pay the crossing once per matrix, which at a batch of 256
         // costs more than the whole product.
-    } else if batch >= rayon::current_num_threads() {
+    } else if batch >= crate::parallel::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.
         par_out_chunks(output_data, m * n, &|start, chunk| {

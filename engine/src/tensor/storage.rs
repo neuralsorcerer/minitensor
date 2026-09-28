@@ -171,13 +171,20 @@ impl OwnedBytes {
                     destination.write_copy_of_slice(src);
                     return;
                 }
-                let chunk = (src.len() / rayon::current_num_threads().max(1)).max(1 << 16);
-                destination
-                    .par_chunks_mut(chunk)
-                    .zip(src.par_chunks(chunk))
-                    .for_each(|(destination, piece)| {
-                        destination.write_copy_of_slice(piece);
-                    });
+                let chunk =
+                    (src.len() / crate::parallel::current_num_threads().max(1)).max(1 << 16);
+                if chunk >= src.len() {
+                    destination.write_copy_of_slice(src);
+                    return;
+                }
+                crate::parallel::install(|| {
+                    destination
+                        .par_chunks_mut(chunk)
+                        .zip(src.par_chunks(chunk))
+                        .for_each(|(destination, piece)| {
+                            destination.write_copy_of_slice(piece);
+                        })
+                });
             })
         }
     }
@@ -440,17 +447,22 @@ impl TensorData {
         if std::mem::size_of_val(src) < PARALLEL_COPY_THRESHOLD {
             return src.to_vec();
         }
-        let chunk = (src.len() / rayon::current_num_threads().max(1)).max(1 << 16);
+        let chunk = (src.len() / crate::parallel::current_num_threads().max(1)).max(1 << 16);
+        if chunk >= src.len() {
+            return src.to_vec();
+        }
         // SAFETY: the chunks tile the output and each is written whole from the
         // matching piece of `src`, so all of it is initialized.
         unsafe {
             crate::ops::map::build_vec::<T, _>(src.len(), |spare| {
-                spare
-                    .par_chunks_mut(chunk)
-                    .zip(src.par_chunks(chunk))
-                    .for_each(|(destination, piece)| {
-                        destination.write_copy_of_slice(piece);
-                    });
+                crate::parallel::install(|| {
+                    spare
+                        .par_chunks_mut(chunk)
+                        .zip(src.par_chunks(chunk))
+                        .for_each(|(destination, piece)| {
+                            destination.write_copy_of_slice(piece);
+                        })
+                });
             })
         }
     }

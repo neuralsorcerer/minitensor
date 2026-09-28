@@ -210,7 +210,7 @@ fn sort_rows_with_parallel_sort<T, E, M>(
         for r in 0..inner {
             let base = o * outer_stride + r;
             let mut entries: Vec<E> = packed_entries(input, base, inner, dim_size, make);
-            entries.par_sort_unstable();
+            crate::parallel::sort_unstable_by(&mut entries, E::cmp);
             scatter_entries(&entries, input, values, indices, base, inner, dim_size);
         }
     }
@@ -300,7 +300,7 @@ fn sort_along_dim<T, E, M>(
     M: Fn(usize, T) -> E + Copy + Sync,
 {
     let slices = outer.saturating_mul(inner);
-    let threads = rayon::current_num_threads();
+    let threads = crate::parallel::current_num_threads();
     // `sort_along_dim_par` can only spread its work across `outer` positions,
     // so a tensor with few of them and many slices -- which is every sort along
     // the first axis, where `outer` is one -- leaves the pool idle. Rewriting
@@ -1147,10 +1147,12 @@ pub(crate) fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let prod: i64 = if data.len() >= 1024 {
-        data.par_chunks(8192)
-            .map(simd_prod_i64)
-            .reduce(|| 1, |a, b| a.acc_mul(b))
+    let prod: i64 = if data.len() > 8192 {
+        crate::parallel::install(|| {
+            data.par_chunks(8192)
+                .map(simd_prod_i64)
+                .reduce(|| 1, |a, b| a.acc_mul(b))
+        })
     } else {
         simd_prod_i64(data)
     };
@@ -1236,10 +1238,12 @@ pub(crate) fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let sum: i64 = if data.len() >= 1024 {
-        data.par_chunks(8192)
-            .map(simd_sum_i64)
-            .reduce(|| 0, |a, b| a.acc_add(b))
+    let sum: i64 = if data.len() > 8192 {
+        crate::parallel::install(|| {
+            data.par_chunks(8192)
+                .map(simd_sum_i64)
+                .reduce(|| 0, |a, b| a.acc_add(b))
+        })
     } else {
         simd_sum_i64(data)
     };
@@ -1323,14 +1327,16 @@ pub(crate) fn nanmean_all_f32(
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let partials: Vec<(f32, usize)> = data
-        .par_chunks(8192)
-        .map(|chunk| {
-            chunk.iter().fold((0.0_f32, 0usize), |(s, c), &v| {
-                if v.is_nan() { (s, c) } else { (s + v, c + 1) }
-            })
+    let count_chunk = |chunk: &[f32]| {
+        chunk.iter().fold((0.0_f32, 0usize), |(s, c), &v| {
+            if v.is_nan() { (s, c) } else { (s + v, c + 1) }
         })
-        .collect();
+    };
+    let partials: Vec<(f32, usize)> = if data.len() > 8192 {
+        crate::parallel::install(|| data.par_chunks(8192).map(count_chunk).collect())
+    } else {
+        data.chunks(8192).map(count_chunk).collect()
+    };
     let (sum, count) = pairwise_fold(partials, (0.0_f32, 0usize), |(s1, c1), (s2, c2)| {
         (s1 + s2, c1 + c2)
     });
@@ -1357,14 +1363,16 @@ pub(crate) fn nanmean_all_f64(
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let partials: Vec<(f64, usize)> = data
-        .par_chunks(8192)
-        .map(|chunk| {
-            chunk.iter().fold((0.0_f64, 0usize), |(s, c), &v| {
-                if v.is_nan() { (s, c) } else { (s + v, c + 1) }
-            })
+    let count_chunk = |chunk: &[f64]| {
+        chunk.iter().fold((0.0_f64, 0usize), |(s, c), &v| {
+            if v.is_nan() { (s, c) } else { (s + v, c + 1) }
         })
-        .collect();
+    };
+    let partials: Vec<(f64, usize)> = if data.len() > 8192 {
+        crate::parallel::install(|| data.par_chunks(8192).map(count_chunk).collect())
+    } else {
+        data.chunks(8192).map(count_chunk).collect()
+    };
     let (sum, count) = pairwise_fold(partials, (0.0_f64, 0usize), |(s1, c1), (s2, c2)| {
         (s1 + s2, c1 + c2)
     });

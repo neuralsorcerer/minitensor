@@ -472,7 +472,7 @@ const GEMM_MIN_SLICE: usize = 32;
 /// order, and no task touches an element another task writes.
 #[cfg(not(feature = "blas"))]
 fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
-    let threads = rayon::current_num_threads();
+    let threads = crate::parallel::current_num_threads();
     if threads < 2 || m.saturating_mul(k).saturating_mul(n) < min_macs {
         return GemmSplit::Whole;
     }
@@ -1825,7 +1825,7 @@ mod split_gemm_tests {
         // whole-product branch for everything, so only demand coverage where
         // there is a pool to spread across.
         assert!(whole >= 5, "expected the small shapes to stay whole");
-        if rayon::current_num_threads() >= 2 {
+        if crate::parallel::current_num_threads() >= 2 {
             assert!(rows >= 3, "expected the tall shapes to split by row");
             assert!(cols >= 3, "expected the wide shapes to split by column");
         }

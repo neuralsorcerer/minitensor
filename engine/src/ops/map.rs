@@ -294,10 +294,19 @@ fn par_zip_chunks<T, U>(
     T: Sync,
     U: Send + Sync,
 {
-    input
-        .par_chunks(chunk)
-        .zip(out.par_chunks_mut(chunk))
-        .for_each(|(input_chunk, out_chunk)| work(input_chunk, out_chunk));
+    debug_assert_eq!(input.len(), out.len());
+    if !splits(input.len(), chunk) {
+        if !input.is_empty() {
+            work(input, out);
+        }
+        return;
+    }
+    crate::parallel::install(|| {
+        input
+            .par_chunks(chunk)
+            .zip(out.par_chunks_mut(chunk))
+            .for_each(|(input_chunk, out_chunk)| work(input_chunk, out_chunk))
+    });
 }
 
 /// [`par_zip_chunks`] for the two-input maps.
@@ -312,10 +321,19 @@ fn par_zip_chunks2<A, B, U>(
     B: Sync,
     U: Send + Sync,
 {
-    lhs.par_chunks(chunk)
-        .zip(rhs.par_chunks(chunk))
-        .zip(out.par_chunks_mut(chunk))
-        .for_each(|((lhs_chunk, rhs_chunk), out_chunk)| work(lhs_chunk, rhs_chunk, out_chunk));
+    debug_assert!(lhs.len() == out.len() && rhs.len() == out.len());
+    if !splits(out.len(), chunk) {
+        if !out.is_empty() {
+            work(lhs, rhs, out);
+        }
+        return;
+    }
+    crate::parallel::install(|| {
+        lhs.par_chunks(chunk)
+            .zip(rhs.par_chunks(chunk))
+            .zip(out.par_chunks_mut(chunk))
+            .for_each(|((lhs_chunk, rhs_chunk), out_chunk)| work(lhs_chunk, rhs_chunk, out_chunk))
+    });
 }
 
 /// [`par_zip_chunks`] for the three-input maps.
@@ -332,11 +350,29 @@ fn par_zip_chunks3<A, B, C, U>(
     C: Sync,
     U: Send + Sync,
 {
-    a.par_chunks(chunk)
-        .zip(b.par_chunks(chunk))
-        .zip(c.par_chunks(chunk))
-        .zip(out.par_chunks_mut(chunk))
-        .for_each(|(((ac, bc), cc), oc)| work(ac, bc, cc, oc));
+    debug_assert!(a.len() == out.len() && b.len() == out.len() && c.len() == out.len());
+    if !splits(out.len(), chunk) {
+        if !out.is_empty() {
+            work(a, b, c, out);
+        }
+        return;
+    }
+    crate::parallel::install(|| {
+        a.par_chunks(chunk)
+            .zip(b.par_chunks(chunk))
+            .zip(c.par_chunks(chunk))
+            .zip(out.par_chunks_mut(chunk))
+            .for_each(|(((ac, bc), cc), oc)| work(ac, bc, cc, oc))
+    });
+}
+
+/// Whether cutting `len` items into `chunk`-sized pieces makes more than one,
+/// which is when there is anything to hand the pool. Below that the helpers
+/// here run their one piece on the calling thread: rayon would do the same,
+/// but only after [`crate::parallel::install`] had crossed to the pool.
+#[inline]
+fn splits(len: usize, chunk: usize) -> bool {
+    chunk > 0 && len > chunk
 }
 
 /// How many outputs to give one parallel task, when producing each output costs
@@ -429,10 +465,12 @@ pub(crate) fn fill_compaction<T: Send>(
         }
         return;
     }
-    pieces
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(band, piece)| fill(band, piece));
+    crate::parallel::install(|| {
+        pieces
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(band, piece)| fill(band, piece))
+    });
 }
 
 /// Write `value(i)` for every `i` below `len` where `keep(i)`, in order, into
@@ -495,7 +533,7 @@ pub(crate) fn reduction_band(outer: usize, inner: usize) -> usize {
     if outer != 1 || inner == 0 {
         return inner;
     }
-    let threads = rayon::current_num_threads().max(1);
+    let threads = crate::parallel::current_num_threads().max(1);
     inner.div_ceil(threads).max(REDUCTION_MIN_BAND).min(inner)
 }
 
@@ -545,9 +583,11 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         work(0, out);
         return;
     }
-    out.par_chunks_mut(chunk)
-        .enumerate()
-        .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
+    crate::parallel::install(|| {
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(index, out_chunk)| work(index * chunk, out_chunk))
+    });
 }
 
 /// [`par_out_chunks`] with a floor under the split: below `threshold` output
@@ -620,10 +660,12 @@ pub(crate) fn par_out_chunks_mapped<T: Send, R: Send>(
     if out.len() <= chunk || chunk == 0 {
         return vec![work(0, out)];
     }
-    out.par_chunks_mut(chunk)
-        .enumerate()
-        .map(|(index, out_chunk)| work(index * chunk, out_chunk))
-        .collect()
+    crate::parallel::install(|| {
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .map(|(index, out_chunk)| work(index * chunk, out_chunk))
+            .collect()
+    })
 }
 
 /// The state buffers one optimizer step writes, split to match a parameter
@@ -682,8 +724,13 @@ pub(crate) fn par_row_outputs<T: Send + Sync>(
     if rows == 0 {
         return;
     }
-    let owned: StateChunks<T> = outputs.iter_mut().map(|buffer| &mut **buffer).collect();
-    par_row_outputs_recurse(0, rows, row_chunk.max(1), owned, widths, work);
+    let row_chunk = row_chunk.max(1);
+    let mut owned: StateChunks<T> = outputs.iter_mut().map(|buffer| &mut **buffer).collect();
+    if rows <= row_chunk {
+        work(0, &mut owned);
+        return;
+    }
+    crate::parallel::install(|| par_row_outputs_recurse(0, rows, row_chunk, owned, widths, work));
 }
 
 fn par_row_outputs_recurse<T: Send + Sync>(
@@ -784,10 +831,15 @@ where
             .map(|(nth, block)| fold(nth * chunk, block))
             .fold(identity, combine);
     }
-    data.par_chunks(chunk)
-        .enumerate()
-        .map(|(nth, block)| fold(nth * chunk, block))
-        .reduce(|| identity, combine)
+    if !splits(data.len(), chunk) {
+        return combine(identity, fold(0, data));
+    }
+    crate::parallel::install(|| {
+        data.par_chunks(chunk)
+            .enumerate()
+            .map(|(nth, block)| fold(nth * chunk, block))
+            .reduce(|| identity, combine)
+    })
 }
 
 /// True when `test` holds for at least one chunk of `data`.
@@ -815,7 +867,12 @@ pub(crate) fn par_any_chunk<T: Sync>(
         return data.chunks(chunk).any(test);
     }
     let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
-    probe.chunks(chunk).any(test) || rest.par_chunks(chunk).any(test)
+    probe.chunks(chunk).any(test)
+        || if splits(rest.len(), chunk) {
+            crate::parallel::install(|| rest.par_chunks(chunk).any(test))
+        } else {
+            rest.chunks(chunk).any(test)
+        }
 }
 
 /// True when `test` holds for every chunk of `data`. The counterpart of
@@ -831,7 +888,12 @@ pub(crate) fn par_all_chunk<T: Sync>(
         return data.chunks(chunk).all(test);
     }
     let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
-    probe.chunks(chunk).all(test) && rest.par_chunks(chunk).all(test)
+    probe.chunks(chunk).all(test)
+        && if splits(rest.len(), chunk) {
+            crate::parallel::install(|| rest.par_chunks(chunk).all(test))
+        } else {
+            rest.chunks(chunk).all(test)
+        }
 }
 
 /// Chunks [`par_any_chunk`] and [`par_all_chunk`] try on the calling thread
@@ -860,9 +922,15 @@ where
             .zip(b.chunks(chunk.max(1)))
             .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk));
     }
-    a.par_chunks(chunk.max(1))
-        .zip(b.par_chunks(chunk.max(1)))
-        .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))
+    let chunk = chunk.max(1);
+    if !splits(a.len(), chunk) {
+        return test(a, b);
+    }
+    crate::parallel::install(|| {
+        a.par_chunks(chunk)
+            .zip(b.par_chunks(chunk))
+            .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))
+    })
 }
 
 /// Run `work(0..count)` in parallel for its effects.
@@ -873,7 +941,11 @@ where
 /// bands interleave by column.
 #[cfg(not(feature = "blas"))]
 pub(crate) fn par_for_indexed(count: usize, work: &(dyn Fn(usize) + Sync)) {
-    (0..count).into_par_iter().for_each(work);
+    if count < 2 {
+        (0..count).for_each(work);
+        return;
+    }
+    crate::parallel::install(|| (0..count).into_par_iter().for_each(work));
 }
 
 /// [`par_out_chunks`] for work that can fail, stopping at the first error.
@@ -891,10 +963,12 @@ pub(crate) fn try_par_out_chunks<T: Send, E: Send>(
     if out.len() <= chunk || chunk == 0 {
         return work(0, out);
     }
-    out.par_chunks_mut(chunk)
-        .enumerate()
-        .map(|(index, out_chunk)| work(index * chunk, out_chunk))
-        .collect()
+    crate::parallel::install(|| {
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .map(|(index, out_chunk)| work(index * chunk, out_chunk))
+            .collect()
+    })
 }
 
 /// [`try_par_out_chunks`] over two outputs whose per-item sizes differ.
@@ -926,12 +1000,14 @@ pub(crate) fn try_par_out_chunks_pair<T: Send, U: Send, E: Send>(
     if per_task >= items {
         return work(0, first, second);
     }
-    first
-        .par_chunks_mut(per_task * first_stride)
-        .zip(second.par_chunks_mut(per_task * second_stride))
-        .enumerate()
-        .map(|(group, (a, b))| work(group * per_task, a, b))
-        .collect()
+    crate::parallel::install(|| {
+        first
+            .par_chunks_mut(per_task * first_stride)
+            .zip(second.par_chunks_mut(per_task * second_stride))
+            .enumerate()
+            .map(|(group, (a, b))| work(group * per_task, a, b))
+            .collect()
+    })
 }
 
 /// [`try_par_out_chunks_pair`] over three outputs rather than two.
@@ -961,13 +1037,15 @@ pub(crate) fn try_par_out_chunks_triple<T: Send, E: Send>(
     if per_task >= items {
         return work(0, first, second, third);
     }
-    first
-        .par_chunks_mut(per_task * first_stride)
-        .zip(second.par_chunks_mut(per_task * second_stride))
-        .zip(third.par_chunks_mut(per_task * third_stride))
-        .enumerate()
-        .map(|(group, ((a, b), c))| work(group * per_task, a, b, c))
-        .collect()
+    crate::parallel::install(|| {
+        first
+            .par_chunks_mut(per_task * first_stride)
+            .zip(second.par_chunks_mut(per_task * second_stride))
+            .zip(third.par_chunks_mut(per_task * third_stride))
+            .enumerate()
+            .map(|(group, ((a, b), c))| work(group * per_task, a, b, c))
+            .collect()
+    })
 }
 
 /// Run `work(0..count)` in parallel and collect the results in index order.
@@ -977,7 +1055,10 @@ pub(crate) fn try_par_out_chunks_triple<T: Send, E: Send>(
 /// band count, not an element count — so the indirect call is charged once per
 /// task and the buffer each call fills is thousands of elements.
 pub(crate) fn par_map_indexed<T: Send>(count: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
-    (0..count).into_par_iter().map(work).collect()
+    if count < 2 {
+        return (0..count).map(work).collect();
+    }
+    crate::parallel::install(|| (0..count).into_par_iter().map(work).collect())
 }
 
 /// [`par_out_chunks`] over two outputs partitioned in step. Both slices must be
@@ -996,13 +1077,15 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
         work(0, values, indices);
         return;
     }
-    values
-        .par_chunks_mut(chunk)
-        .zip(indices.par_chunks_mut(chunk))
-        .enumerate()
-        .for_each(|(index, (value_chunk, index_chunk))| {
-            work(index * chunk, value_chunk, index_chunk)
-        });
+    crate::parallel::install(|| {
+        values
+            .par_chunks_mut(chunk)
+            .zip(indices.par_chunks_mut(chunk))
+            .enumerate()
+            .for_each(|(index, (value_chunk, index_chunk))| {
+                work(index * chunk, value_chunk, index_chunk)
+            })
+    });
 }
 
 /// Sequential core: write `op(input[i])` into every element of `out`.
@@ -1363,9 +1446,11 @@ where
     if out.len() < PAR_THRESHOLD {
         apply(out, input);
     } else {
-        out.par_chunks_mut(PAR_CHUNK)
-            .zip(input.par_chunks(PAR_CHUNK))
-            .for_each(|(o, i)| apply(o, i));
+        crate::parallel::install(|| {
+            out.par_chunks_mut(PAR_CHUNK)
+                .zip(input.par_chunks(PAR_CHUNK))
+                .for_each(|(o, i)| apply(o, i))
+        });
     }
 }
 
@@ -1615,7 +1700,7 @@ pub(crate) fn strided_gather<T: Copy + Send + Sync>(
             if numel < PAR_THRESHOLD {
                 walk(0, spare);
             } else {
-                let tasks = rayon::current_num_threads().max(1) * 4;
+                let tasks = crate::parallel::current_num_threads().max(1) * 4;
                 par_out_chunks(spare, numel.div_ceil(tasks).max(1 << 14), &walk);
             }
             Ok(())

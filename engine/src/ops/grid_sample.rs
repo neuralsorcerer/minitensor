@@ -570,15 +570,14 @@ pub fn grid_sample(
     // `chunks_mut` will not take a zero width, and a batch with no channels or
     // an empty grid has nothing to read anyway.
     if per_out > 0 {
-        out.par_chunks_mut(per_out)
-            .enumerate()
-            .for_each(|(index, into)| {
-                field.read(
-                    &values[index * per_input..(index + 1) * per_input],
-                    &coords[index * per_grid..(index + 1) * per_grid],
-                    into,
-                );
-            });
+        crate::ops::map::par_out_chunks(&mut out, per_out, &|start, into| {
+            let index = start / per_out;
+            field.read(
+                &values[index * per_input..(index + 1) * per_input],
+                &coords[index * per_grid..(index + 1) * per_grid],
+                into,
+            );
+        });
     }
 
     // Nothing above ran a tensor operation, so there is no primitive graph to
@@ -656,18 +655,20 @@ pub(crate) fn grid_sample_backward(
         let slots: Vec<Slots> = (0..layout.batch)
             .map(|_| (input_iter.next(), grid_iter.next()))
             .collect();
-        slots
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(index, (into_input, into_grid))| {
-                field.write(
-                    &values[index * per_input..(index + 1) * per_input],
-                    &coords[index * per_grid..(index + 1) * per_grid],
-                    &seeds[index * per_out..(index + 1) * per_out],
-                    into_input,
-                    into_grid,
-                );
-            });
+        let write = |(index, (into_input, into_grid)): (usize, Slots)| {
+            field.write(
+                &values[index * per_input..(index + 1) * per_input],
+                &coords[index * per_grid..(index + 1) * per_grid],
+                &seeds[index * per_out..(index + 1) * per_out],
+                into_input,
+                into_grid,
+            );
+        };
+        if slots.len() < 2 {
+            slots.into_iter().enumerate().for_each(write);
+        } else {
+            crate::parallel::install(|| slots.into_par_iter().enumerate().for_each(write));
+        }
     }
 
     let for_input = wanted[0]

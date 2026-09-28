@@ -33,6 +33,7 @@ pub mod memory;
 pub mod nn;
 pub mod ops;
 pub mod optim;
+pub mod parallel;
 pub mod plugins;
 pub mod random;
 pub mod serialization;

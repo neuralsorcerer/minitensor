@@ -248,7 +248,7 @@ pub(crate) fn offer_gemm_f64(request: Gemm<'_, f64>) -> bool {
 /// the engine's own pool, so handing work over never changes how much of the
 /// machine it is allowed.
 pub fn pool_threads() -> usize {
-    rayon::current_num_threads().max(1)
+    crate::parallel::current_num_threads().max(1)
 }
 
 /// `op` over `input` from the provider, or `None` to compute it here.

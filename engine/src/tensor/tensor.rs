@@ -377,8 +377,8 @@ impl SelectionPlan {
                     if output.len() < PAR_THRESHOLD {
                         output.write_copy_of_slice(block);
                     } else {
-                        let chunk =
-                            (block.len() / rayon::current_num_threads().max(1)).max(1 << 16);
+                        let chunk = (block.len() / crate::parallel::current_num_threads().max(1))
+                            .max(1 << 16);
                         par_out_chunks(output, chunk, &|start, dst| {
                             dst.write_copy_of_slice(&block[start..start + dst.len()]);
                         });
@@ -394,7 +394,7 @@ impl SelectionPlan {
                 // Hand each task a band of whole runs. Seeding its odometer
                 // costs one decomposition; every run after that is reached by
                 // addition.
-                let bands = rayon::current_num_threads().max(1);
+                let bands = crate::parallel::current_num_threads().max(1);
                 let per_band = self.runs.div_ceil(bands).max(1);
                 let band_width = per_band * self.contig;
                 par_out_chunks(output, band_width, &|start, dst| {

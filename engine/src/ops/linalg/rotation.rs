@@ -182,10 +182,18 @@ impl<T: Float + Send + Sync> Chain<T> {
             self.replay(matrix, stride);
             return;
         }
-        let per_task = rows.div_ceil(rayon::current_num_threads().max(1)).max(1);
-        matrix
-            .par_chunks_mut(per_task * stride)
-            .for_each(|block| self.replay(block, stride));
+        let per_task = rows
+            .div_ceil(crate::parallel::current_num_threads().max(1))
+            .max(1);
+        if per_task >= rows {
+            self.replay(matrix, stride);
+            return;
+        }
+        crate::parallel::install(|| {
+            matrix
+                .par_chunks_mut(per_task * stride)
+                .for_each(|block| self.replay(block, stride))
+        });
     }
 
     /// The chain against one contiguous band of rows, four rows at a time.

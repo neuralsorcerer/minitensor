@@ -178,7 +178,7 @@ pub(crate) fn row_band(rows: usize) -> Option<usize> {
 /// split by columns. Free to follow the thread count; see
 /// [`fold_column_band`].
 pub(crate) fn column_band(cols: usize) -> usize {
-    cols.div_ceil(rayon::current_num_threads().max(1))
+    cols.div_ceil(crate::parallel::current_num_threads().max(1))
         .max(DIM0_MIN_BLOCK)
 }
 

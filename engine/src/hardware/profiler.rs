@@ -219,16 +219,18 @@ impl HardwareProfiler {
         let iterations_per_thread = 100_000;
 
         // Parallel floating-point benchmark
-        let results: Vec<f64> = (0..num_cores)
-            .into_par_iter()
-            .map(|thread_id| {
-                let mut result = (thread_id + 1) as f64;
-                for i in 0..iterations_per_thread {
-                    result = result.sqrt() + (i as f64).sin();
-                }
-                result
-            })
-            .collect();
+        let results: Vec<f64> = crate::parallel::install(|| {
+            (0..num_cores)
+                .into_par_iter()
+                .map(|thread_id| {
+                    let mut result = (thread_id + 1) as f64;
+                    for i in 0..iterations_per_thread {
+                        result = result.sqrt() + (i as f64).sin();
+                    }
+                    result
+                })
+                .collect()
+        });
 
         // Prevent optimization
         std::hint::black_box(results);

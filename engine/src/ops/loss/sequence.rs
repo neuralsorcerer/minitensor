@@ -61,7 +61,6 @@ use crate::{
     ops::util::log_add_exp,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 const NEG_INF: f64 = f64::NEG_INFINITY;
@@ -382,30 +381,27 @@ pub fn ctc_loss(
 
     let want_gradient = manual_backward_needed(&[log_probs]);
     let plane = steps * classes;
-    let found: Vec<(f64, Vec<f64>)> = planes
-        .par_chunks(plane)
-        .enumerate()
-        .map(|(index, logs)| {
-            let mut extended = Vec::with_capacity(2 * rows[index].len() + 1);
+    let found: Vec<(f64, Vec<f64>)> = crate::ops::map::par_map_indexed(batch, &|index| {
+        let logs = &planes[index * plane..(index + 1) * plane];
+        let mut extended = Vec::with_capacity(2 * rows[index].len() + 1);
+        extended.push(blank);
+        for &symbol in &rows[index] {
+            extended.push(symbol);
             extended.push(blank);
-            for &symbol in &rows[index] {
-                extended.push(symbol);
-                extended.push(blank);
-            }
-            let (loss, gradient) = align(
-                &logs[..input_len[index] * classes],
-                &extended,
-                input_len[index],
-                classes,
-                want_gradient,
-            );
-            if zero_infinity && !loss.is_finite() {
-                (0.0, Vec::new())
-            } else {
-                (loss, gradient)
-            }
-        })
-        .collect();
+        }
+        let (loss, gradient) = align(
+            &logs[..input_len[index] * classes],
+            &extended,
+            input_len[index],
+            classes,
+            want_gradient,
+        );
+        if zero_infinity && !loss.is_finite() {
+            (0.0, Vec::new())
+        } else {
+            (loss, gradient)
+        }
+    });
 
     let device = log_probs.device();
     let dtype = log_probs.dtype();

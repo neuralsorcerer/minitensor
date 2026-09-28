@@ -689,7 +689,7 @@ macro_rules! arg_extremum_all_bool {
             let index = if data.len() < crate::ops::map::FOLD_PAR_BYTES {
                 data.iter().position(|&x| x == $wanted)
             } else {
-                data.par_iter().position_first(|&x| x == $wanted)
+                crate::parallel::install(|| data.par_iter().position_first(|&x| x == $wanted))
             }
             .unwrap_or(0);
             write_index(result_data, index)

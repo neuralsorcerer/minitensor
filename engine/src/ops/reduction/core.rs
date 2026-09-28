@@ -14,7 +14,6 @@ use crate::{
     ops::map::unary_map,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -1198,7 +1197,7 @@ pub(crate) fn order_for_quantiles<T: TotalCmp + Send>(
     if ranks.len() <= QUANTILE_SELECT_LIMIT {
         select_ranks(values, 0, &ranks);
     } else if parallel {
-        values.par_sort_unstable_by(|a, b| a.total_order(b));
+        crate::parallel::sort_unstable_by(values, |a, b| a.total_order(b));
     } else {
         // Unstable rather than stable: the order is total and equal elements
         // are read by index alone, so there is nothing for stability to

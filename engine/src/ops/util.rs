@@ -182,11 +182,12 @@ where
     F: Fn(&[T]) -> U + Send + Sync,
 {
     use rayon::prelude::*;
-    let partials: Vec<U> = if std::mem::size_of_val(data) < crate::ops::map::FOLD_PAR_BYTES {
-        data.chunks(chunk).map(&sum_chunk).collect()
-    } else {
-        data.par_chunks(chunk).map(&sum_chunk).collect()
-    };
+    let partials: Vec<U> =
+        if std::mem::size_of_val(data) < crate::ops::map::FOLD_PAR_BYTES || data.len() <= chunk {
+            data.chunks(chunk).map(&sum_chunk).collect()
+        } else {
+            crate::parallel::install(|| data.par_chunks(chunk).map(&sum_chunk).collect())
+        };
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
 
@@ -447,10 +448,12 @@ where
     }
     let partials: Vec<U> = if a.len() >= crate::ops::map::PAR_THRESHOLD {
         use rayon::prelude::*;
-        a.par_chunks(RUN_SUM_CHUNK)
-            .zip(b.par_chunks(RUN_SUM_CHUNK))
-            .map(|(x, y)| run(x, y))
-            .collect()
+        crate::parallel::install(|| {
+            a.par_chunks(RUN_SUM_CHUNK)
+                .zip(b.par_chunks(RUN_SUM_CHUNK))
+                .map(|(x, y)| run(x, y))
+                .collect()
+        })
     } else {
         a.chunks(RUN_SUM_CHUNK)
             .zip(b.chunks(RUN_SUM_CHUNK))

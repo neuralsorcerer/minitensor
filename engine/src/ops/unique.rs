@@ -122,11 +122,11 @@ fn walk_runs<T: Orderable, F: FnMut(usize, usize)>(values: &[T], mut visit: F) {
 fn in_order<T: Orderable + Send>(values: &[T], positions: bool) -> (Vec<T>, Vec<usize>) {
     if positions {
         let mut pairs: Vec<(T, usize)> = values.iter().copied().zip(0..).collect();
-        pairs.par_sort_unstable_by(|left, right| compare(left.0, right.0));
+        crate::parallel::sort_unstable_by(&mut pairs, |left, right| compare(left.0, right.0));
         pairs.into_iter().unzip()
     } else {
         let mut sorted = values.to_vec();
-        sorted.par_sort_unstable_by(|&left, &right| compare(left, right));
+        crate::parallel::sort_unstable_by(&mut sorted, |&left, &right| compare(left, right));
         (sorted, Vec::new())
     }
 }
@@ -326,7 +326,7 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
     // itself instead -- the same choice the tensor sort makes, and for the same
     // reason: `mode` of a two-million-element vector is one output, so the band
     // split below hands the whole sort to a single core. That took 248ms.
-    let spread = lanes < rayon::current_num_threads();
+    let spread = lanes < crate::parallel::current_num_threads();
 
     macro_rules! reduce {
         ($accessor:ident, $accessor_mut:ident, $key:expr) => {{
@@ -359,7 +359,7 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
                         lane.clear();
                         lane.extend(row.iter().copied().map(key));
                         if spread && sorts_in_parallel(std::mem::size_of_val(lane.as_slice())) {
-                            lane.par_sort_unstable();
+                            crate::parallel::install(|| lane.par_sort_unstable());
                         } else {
                             lane.sort_unstable();
                         }
