@@ -48,7 +48,7 @@ def _leaf(value, size=1):
 @pytest.mark.parametrize("mutate", ["fill_", "copy_"])
 def test_mutating_a_consumed_leaf_raises(mutate):
     a, b = _leaf(2.0), _leaf(3.0)
-    (a * b).sum()  # a is now an operand of a live backward node
+    loss = (a * b).sum()  # a is now an operand of a live backward node
 
     with pytest.raises(Exception, match="pending backward"):
         if mutate == "fill_":
@@ -120,12 +120,26 @@ def test_clamping_between_training_steps_is_allowed():
 
 def test_clearing_the_graph_unblocks_the_write():
     a, b = _leaf(2.0), _leaf(3.0)
-    (a * b).sum()
+    loss = (a * b).sum()
     with pytest.raises(Exception, match="pending backward"):
         a.fill_(99.0)
 
     mt.clear_autograd_graph()
     a.fill_(99.0)  # nothing pending now
+    np.testing.assert_allclose(a.numpy(), [99.0])
+    del loss
+
+
+def test_dropping_the_result_unblocks_the_write():
+    """Nothing can backpropagate through a result nobody holds, so nothing is
+    pending: the refusal lasts exactly as long as the result."""
+    a, b = _leaf(2.0), _leaf(3.0)
+    loss = (a * b).sum()
+    with pytest.raises(Exception, match="pending backward"):
+        a.fill_(99.0)
+
+    del loss
+    a.fill_(99.0)
     np.testing.assert_allclose(a.numpy(), [99.0])
 
 

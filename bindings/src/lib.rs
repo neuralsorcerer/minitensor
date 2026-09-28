@@ -220,12 +220,11 @@ fn empty_cache() {
 
 /// `(nodes, gradients)` currently held by the autograd graph.
 ///
-/// A graph is released when something asks for it to be: a `backward()`
-/// without `retain_graph` frees the subgraph it walked, and
-/// `clear_autograd_graph()` frees everything. A forward pass that records
-/// nodes and is never backpropagated -- an evaluation loop missing `no_grad`,
-/// most often -- leaves its nodes in place, holding every activation they
-/// saved. A node count that climbs across iterations is what that looks like.
+/// A node lives while some tensor can still backpropagate through it: a
+/// `backward()` without `retain_graph` frees the subgraph it walked, dropping
+/// a result frees the history only it could reach, and
+/// `clear_autograd_graph()` frees everything. A node count that climbs across
+/// iterations means results are being kept, each with the activations behind it.
 #[pyfunction]
 fn autograd_graph_size() -> PyResult<(usize, usize)> {
     Ok(engine::autograd::graph_size())

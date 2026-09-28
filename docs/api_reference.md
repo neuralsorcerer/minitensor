@@ -4020,31 +4020,18 @@ parameters it was given, and leaves interior entries alone.
 
 ### Run inference inside `no_grad()`
 
-A loop that only calls *forward* grows too, and for a different reason: every
-forward records its intermediates, and nothing releases them until a
-`backward()` walks the graph or `clear_autograd_graph()` empties it. Neither
-condition happens in an inference loop, so it grows without bound.
+A recorded forward pass holds its intermediates for as long as its result can
+still be backpropagated -- which is as long as something holds the result, or
+holds a later result computed from it. Discard the output and its history goes
+with it, saved activations included, so an inference loop that keeps nothing
+stays flat. Keep the outputs, by appending them to a list say, and each keeps
+the history that produced it. `model.eval()` changes neither: it switches
+Dropout off and freezes BatchNorm's running statistics, which is about what the
+layers compute, not about whether the computation is recorded.
 
-Two things that look like they should help do not. **Discarding the output does
-not release the graph** — recording is held in a graph the module owns, not by
-the output tensor, so a loop that keeps nothing still accumulates. And
-`model.eval()` does not either: it switches Dropout off and freezes BatchNorm's
-running statistics, which is about what the layers compute, not about whether
-the computation is recorded.
-
-Resident memory over 300 forwards of a two-layer `Sequential` with a 256-row
-batch, discarding every output, each row measured in its own process (a second
-measurement in the same process reads near zero — the allocator has already
-grown the heap and does not need to ask for more):
-
-| Width | Per forward | Over 300 forwards |
-| --- | --- | --- |
-| 32 | ~42 KB | ~12 MB |
-| 128 | ~162 KB | ~48 MB |
-| 512 | ~642 KB | ~188 MB |
-
-`no_grad()` removes it completely — no graph entries, no growth — and an
-inference loop has no use for the recording anyway:
+`no_grad()` is still the way to run inference. It skips the recording
+altogether, which saves building the nodes and keeps a kept result from
+holding anything:
 
 ```python
 import minitensor as mt
@@ -4059,22 +4046,17 @@ for _ in range(10):
     model(x)                       # the output is discarded every time
 print(mt.autograd_graph_size()[0])
 
-model.eval()                       # about layer behaviour, not recording
-mt.clear_autograd_graph()
-for _ in range(10):
-    model(x)
-print(mt.autograd_graph_size()[0])
+kept = [model(x) for _ in range(10)]   # each result holds its history
+print(mt.autograd_graph_size()[0] > 0)
 
-mt.clear_autograd_graph()
 with mt.no_grad():
-    for _ in range(10):
-        model(x)
+    kept = [model(x) for _ in range(10)]
 print(mt.autograd_graph_size()[0])
 ```
 
 ```text
-33
-33
+0
+True
 0
 ```
 

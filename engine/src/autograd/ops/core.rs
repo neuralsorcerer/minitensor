@@ -57,6 +57,12 @@ pub trait GradientFunction: Send + Sync {
             None => full,
         }
     }
+
+    /// Let go of the gradient functions before this one, once a backward pass
+    /// that does not retain the graph has used them. Only the links
+    /// [`with_grad_fn`] adds hold any; a function's own saved tensors are its
+    /// business.
+    fn release_upstream(&self) {}
 }
 
 pub use crate::autograd::graph::{BackwardStep, ComputationGraph, execute_backward_plan};
@@ -149,9 +155,23 @@ pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>)
 ///
 /// Taking the output by value is what makes the pair inseparable — there is no
 /// half-attached tensor to hold.
+///
+/// The output owns the node, linked to the nodes before it (see
+/// [`ComputationGraph::record`]);
+/// the graph only records where to find it.
 pub fn with_grad_fn(mut output: Tensor, grad_fn: Arc<dyn GradientFunction>) -> Result<Tensor> {
-    output.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output, Some(grad_fn))?;
+    if !is_grad_enabled() {
+        output.set_grad_fn(Some(grad_fn));
+        return Ok(output);
+    }
+    let requires_grad = output.requires_grad();
+    let linked = GLOBAL_GRAPH.with(|graph| {
+        graph
+            .borrow_mut()
+            .record(output.id(), grad_fn, requires_grad)
+    });
+    output.set_grad_fn(Some(linked));
+    reset_graph_consumed();
     Ok(output)
 }
 
@@ -239,7 +259,13 @@ pub fn is_consumed_by_live_graph(tensor: &Tensor) -> bool {
 /// bindings after a non-retaining backward pass so saved activations are freed
 /// immediately rather than at the next optimizer step.
 pub fn release_saved_subgraph(tensor: &Tensor) {
-    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().release_saved_subgraph(tensor.id()));
+    let released =
+        GLOBAL_GRAPH.with(|graph| graph.borrow_mut().release_saved_subgraph(tensor.id()));
+    // After the borrow: unlinking can drop the pass's history, and dropping
+    // can reach user code (a Python `Function`'s context) that records again.
+    for function in &released {
+        function.release_upstream();
+    }
 }
 
 /// Get the gradient for a tensor from the last backward pass
@@ -282,16 +308,15 @@ pub fn clear_graph() -> Result<()> {
 /// How many nodes the global graph currently holds, and how many gradients it
 /// has stored.
 ///
-/// This is the only way to see how much the autograd graph is holding. It
-/// matters because a graph is only released when something asks for it to be:
-/// a non-retaining `backward()` frees the subgraph it walked, and
-/// [`clear_graph`] frees everything. A forward pass that records nodes and is
-/// never backpropagated -- an evaluation loop that forgot `no_grad`, say --
-/// leaves its nodes in place, holding every activation they saved. Reading a
-/// node count that climbs across iterations is how that shows up.
+/// This is the way to see how much the autograd graph is holding. A node lives
+/// as long as some tensor can still backpropagate through it, so a count that
+/// climbs across iterations means results are being kept -- appended to a
+/// list, say -- each holding the history that produced it. Released nodes are
+/// swept before counting.
 pub fn graph_size() -> (usize, usize) {
     GLOBAL_GRAPH.with(|graph| {
-        let graph = graph.borrow();
+        let mut graph = graph.borrow_mut();
+        graph.sweep();
         (graph.num_nodes(), graph.num_gradients())
     })
 }
@@ -299,6 +324,13 @@ pub fn graph_size() -> (usize, usize) {
 #[cfg(test)]
 pub(crate) fn graph_node_count() -> usize {
     graph_size().0
+}
+
+/// Every entry the graph holds, released nodes included: what has been
+/// recorded, rather than what is still alive.
+#[cfg(test)]
+pub(crate) fn graph_entry_count() -> usize {
+    GLOBAL_GRAPH.with(|graph| graph.borrow().num_nodes())
 }
 
 /// How many gradients the graph currently stores. Used by the test that holds

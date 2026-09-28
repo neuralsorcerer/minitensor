@@ -566,9 +566,11 @@ mod tests {
         let x = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
 
         crate::autograd::clear_graph().unwrap();
-        let before = crate::autograd::graph_size().0;
-        let _ = execute_op(op.as_ref(), &[&x]).unwrap();
-        let added = crate::autograd::graph_size().0 - before;
+        let before = crate::autograd::graph_entry_count();
+        let _output = execute_op(op.as_ref(), &[&x]).unwrap();
+        // Entries rather than live nodes: an internal node would be released
+        // with the tensor the forward dropped, but recording it is the fault.
+        let added = crate::autograd::graph_entry_count() - before;
 
         // The input's placeholder and the operation's own node, and nothing
         // from the multiply inside the forward.

@@ -799,10 +799,9 @@ mod tests {
 
     #[test]
     fn test_repeated_forward_under_no_grad_does_not_grow_the_graph() {
-        // Inference loops must not accumulate graph nodes. The graph is only
-        // released when a backward pass consumes it, so without `NoGradGuard`
-        // a forward-only loop grows without bound -- see the `no_grad()`
-        // section of docs/performance.md.
+        // Inference loops must not record graph nodes at all under
+        // `NoGradGuard`: the results below are held for the whole loop, and
+        // anything recorded would be kept alive with them.
         clear_graph().unwrap();
 
         let x = Tensor::ones(
@@ -812,21 +811,22 @@ mod tests {
             true,
         );
 
+        let mut kept = Vec::new();
         let after_first = {
             let _guard = NoGradGuard::new();
             let y = activation::relu(&arithmetic::mul(&x, &x).unwrap()).unwrap();
-            let _ = reduction::sum(&y, None, false).unwrap();
-            graph_node_count()
+            kept.push(reduction::sum(&y, None, false).unwrap());
+            graph_entry_count()
         };
 
         for _ in 0..50 {
             let _guard = NoGradGuard::new();
             let y = activation::relu(&arithmetic::mul(&x, &x).unwrap()).unwrap();
-            let _ = reduction::sum(&y, None, false).unwrap();
+            kept.push(reduction::sum(&y, None, false).unwrap());
         }
 
         assert_eq!(
-            graph_node_count(),
+            graph_entry_count(),
             after_first,
             "no_grad forward passes must record nothing"
         );

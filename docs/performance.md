@@ -308,9 +308,10 @@ same:
 ## Wrap inference in `no_grad()`
 
 Any operation on a tensor that requires gradients records a node in the
-autograd graph, and that graph is released when a backward pass consumes it or
-when the optimizer steps. A loop that only runs forward passes does neither, so
-the graph keeps growing:
+autograd graph, and each node lives as long as the result it led to can still
+be backpropagated. A loop that discards every prediction therefore stays flat,
+but it still pays to build every node, and a loop that keeps its predictions
+keeps every activation behind each of them:
 
 ```python
 import minitensor as mt
@@ -320,27 +321,19 @@ model = mt.nn.Sequential(
 )
 validation_data = [mt.Tensor([[0.1, 0.2, 0.3, 0.4]]) for _ in range(3)]
 
-# Grows without bound -- the model's parameters require gradients, so every
-# forward records a graph that is never consumed.
+# Records a graph for every batch; each goes with its prediction.
 for batch in validation_data:
     predictions = model(batch)
 
-# Bounded -- nothing is recorded.
+# Holds every batch's graph, saved activations included, while the list lives.
+all_predictions = [model(batch) for batch in validation_data]
+
+# Records nothing.
 with mt.no_grad():
-    for batch in validation_data:
-        predictions = model(batch)
+    all_predictions = [model(batch) for batch in validation_data]
 ```
 
-Over 1000 forward passes of the model above, the first form leaves 5005 nodes
-in the graph -- five per pass, climbing linearly and never released -- while the
-second leaves none, as does a normal training loop that calls `backward()` and
-`optimizer.step()`.
-
-What that costs in memory depends on the model, since each node holds the
-tensors its backward would need: the 4-to-8-to-2 network above grows about
-2.7 MB over those 1000 passes, but a network with megabyte activations grows by
-megabytes per pass. The node count is the part that is stable enough to check,
-and `autograd_graph_size()` returns it:
+`autograd_graph_size()` reports how many nodes are still reachable:
 
 ```python
 import minitensor as mt
@@ -348,8 +341,9 @@ import minitensor as mt
 nodes, gradients = mt.autograd_graph_size()
 ```
 
-A count that rises across iterations of a loop is this bug; one that returns to
-the same value each iteration is not.
+A count that rises across iterations of a loop means results are being kept
+along with the histories that produced them; one that returns to the same value
+each iteration is not a leak.
 
 `model.eval()` does **not** imply this. It switches dropout and batch norm to
 inference behaviour and nothing else, so use both together:

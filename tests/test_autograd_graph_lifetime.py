@@ -326,42 +326,58 @@ def test_a_parameter_missed_by_one_pass_still_works_in_the_next():
     np.testing.assert_allclose(mt.get_gradient(skipped).numpy(), np.full((2, 2), 5.0))
 
 
-def test_a_forward_without_backward_still_shows_up_as_growth():
-    # The diagnostic the docs point at has to stay specific: constants no longer
-    # inflate it, but the case it exists to catch must still register.
+def test_kept_results_still_show_up_as_growth():
+    # The diagnostic the docs point at has to stay specific: constants do not
+    # inflate it, but results kept with their histories must still register.
     model = mt.nn.Sequential(
         [mt.nn.DenseLayer(4, 8), mt.nn.ReLU(), mt.nn.DenseLayer(8, 2)]
     )
     batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
 
-    sizes = []
+    kept, sizes = [], []
     for _ in range(5):
-        model(batch)
+        kept.append(model(batch))
         sizes.append(mt.autograd_graph_size()[0])
 
     assert sizes == sorted(sizes) and sizes[-1] > sizes[0], sizes
 
 
-# The growth above is what an inference loop does, and two instincts for
-# stopping it do not work. Both are worth pinning because the reference now
-# tells people to reach for `no_grad()` instead, and the reason it has to say so
-# is that neither of these is enough.
-
-
-def test_discarding_the_output_does_not_release_the_graph():
-    """Why the loop above grows at all. Where the output tensor owns its
-    history, dropping it frees the graph and a loop that keeps nothing stays
-    flat. Here the recording is held by the graph the module records into, and
-    binding nothing changes that."""
+def test_discarding_the_output_releases_its_history():
+    """A result owns the history that produced it. The graph used to own it
+    instead, so an inference loop that kept nothing still grew by every
+    activation of every forward until something cleared the graph; now the
+    history goes with the last tensor that could backpropagate through it."""
     model = mt.nn.Sequential([mt.nn.DenseLayer(4, 8), mt.nn.ReLU()])
     batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
 
     mt.clear_autograd_graph()
     for _ in range(10):
         model(batch)  # not bound to a name, not kept
-    gc.collect()
+    assert mt.autograd_graph_size()[0] == 0
 
-    assert mt.autograd_graph_size()[0] > 0
+
+def test_a_kept_result_can_still_be_backpropagated_after_its_inputs_are_gone():
+    """The other half: dropping intermediates must not cut a kept result off
+    from the history it depends on."""
+    weight = mt.Tensor(np.full((2, 2), 3.0), dtype="float64").requires_grad_(True)
+
+    def build():
+        hidden = mt.matmul(mt.Tensor(np.eye(2), dtype="float64"), weight)
+        return mt.sum(mt.tanh(hidden) * 2.0)  # `hidden` goes out of scope
+
+    loss = build()
+    loss.backward()
+    expected = 2.0 * (1.0 - np.tanh(3.0) ** 2)
+    np.testing.assert_allclose(weight.grad.numpy(), np.full((2, 2), expected))
+
+
+def test_a_long_history_is_released_without_recursing_down_it():
+    x = mt.Tensor(np.ones(1), dtype="float64").requires_grad_(True)
+    head = x
+    for _ in range(100_000):
+        head = head * 1.0
+    del head
+    assert mt.autograd_graph_size()[0] == 0
 
 
 def test_eval_mode_does_not_stop_the_recording():
@@ -373,19 +389,20 @@ def test_eval_mode_does_not_stop_the_recording():
 
     def growth():
         mt.clear_autograd_graph()
-        for _ in range(10):
-            model(batch)
-        return mt.autograd_graph_size()[0]
+        kept = [model(batch) for _ in range(10)]
+        size = mt.autograd_graph_size()[0]
+        del kept
+        return size
 
     training = growth()
+    assert training > 0
     model.eval()
     assert growth() == training
 
     # and the guard that does work, on the same model in the same mode
     mt.clear_autograd_graph()
     with mt.no_grad():
-        for _ in range(10):
-            model(batch)
+        kept = [model(batch) for _ in range(10)]
     assert mt.autograd_graph_size()[0] == 0
 
 

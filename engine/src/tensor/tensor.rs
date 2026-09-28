@@ -100,11 +100,19 @@ mod chain_release {
     }
 
     pub(super) fn release(grad_fn: Arc<dyn GradientFunction>) {
+        release_all(std::iter::once(grad_fn));
+    }
+
+    pub(super) fn release_all(grad_fns: impl IntoIterator<Item = Arc<dyn GradientFunction>>) {
+        let mut grad_fns = grad_fns.into_iter().peekable();
+        if grad_fns.peek().is_none() {
+            return;
+        }
         // During thread teardown the queue may already be gone. The closure is
-        // then dropped unrun, taking `grad_fn` with it: an ordinary drop, which
-        // is the only option left and still releases the chain.
+        // then dropped unrun, taking the functions with it: an ordinary drop,
+        // which is the only option left and still releases the chain.
         let _ = QUEUE.try_with(move |queue| {
-            queue.pending.borrow_mut().push(grad_fn);
+            queue.pending.borrow_mut().extend(grad_fns);
             if queue.draining.replace(true) {
                 // An outer drop on this thread is emptying the queue already.
                 return;
@@ -141,6 +149,12 @@ mod chain_release_tests {
         drop(head);
         crate::autograd::clear_graph().unwrap();
     }
+}
+
+/// Drop gradient functions through the queue a tensor's own drop uses, so a
+/// long chain of them is released without recursing down it.
+pub(crate) fn release_grad_fns(grad_fns: impl IntoIterator<Item = Arc<dyn GradientFunction>>) {
+    chain_release::release_all(grad_fns);
 }
 
 impl Drop for Tensor {

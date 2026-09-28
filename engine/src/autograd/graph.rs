@@ -9,7 +9,55 @@ use crate::{error::Result, ops::arithmetic, tensor::Tensor};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
+
+/// A gradient function together with the ones that produced its inputs.
+///
+/// The graph finds a recorded node by its output's id but does not keep it;
+/// this is what does. An output holds its node, each node holds the nodes
+/// before it, and so a tensor that can still be backpropagated keeps exactly
+/// its own history alive. Once the last such tensor is gone, so is the history
+/// and every activation it saved -- which is how a forward pass that is never
+/// backpropagated costs nothing once its result is dropped, as in PyTorch,
+/// rather than holding its activations until someone clears the graph.
+///
+/// Held links cannot form a cycle: a node only links to nodes that existed
+/// before it.
+struct Linked {
+    function: Arc<dyn GradientFunction>,
+    upstream: Mutex<SmallVec<[Arc<dyn GradientFunction>; 4]>>,
+}
+
+impl GradientFunction for Linked {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        self.function.backward(grad_output)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        self.function.input_ids()
+    }
+
+    fn name(&self) -> &'static str {
+        self.function.name()
+    }
+
+    fn release_upstream(&self) {
+        let links = std::mem::take(&mut *self.upstream.lock().unwrap_or_else(|p| p.into_inner()));
+        crate::tensor::release_grad_fns(links);
+    }
+}
+
+impl Drop for Linked {
+    fn drop(&mut self) {
+        // The links go through the release queue rather than being dropped
+        // here: a chain of them is as long as the forward pass was, and
+        // dropping it by recursion overflows the stack (see `Tensor`'s drop).
+        // The function itself can go inline -- the tensors it saved already
+        // release through that queue as they drop.
+        let links = std::mem::take(self.upstream.get_mut().unwrap_or_else(|p| p.into_inner()));
+        crate::tensor::release_grad_fns(links);
+    }
+}
 
 /// Statistics about the computation graph
 #[derive(Debug, Clone)]
@@ -28,14 +76,28 @@ pub struct GraphStats {
 pub struct GraphNode {
     /// Tensor ID
     pub tensor_id: TensorId,
-    /// Gradient function for backward pass
-    pub grad_fn: Option<Arc<dyn GradientFunction>>,
+    /// Gradient function for backward pass, and who keeps it alive.
+    function: NodeFunction,
     /// Input tensor IDs
     pub inputs: SmallVec<[TensorId; 4]>,
     /// Whether this node requires gradients
     pub requires_grad: bool,
     /// Optional name for debugging
     pub name: Option<String>,
+}
+
+/// Who keeps a node's gradient function alive.
+enum NodeFunction {
+    /// A leaf: nothing to run.
+    Leaf,
+    /// The graph does. For nodes added to it directly, as its own tests do.
+    Owned(Arc<dyn GradientFunction>),
+    /// The node's output tensor does, and so does every node downstream of it,
+    /// through the links `autograd::with_grad_fn` gives each function to the
+    /// ones before it. The graph only finds the node by id: once no tensor can
+    /// backpropagate through it, the function and everything it saved are
+    /// gone, and the entry is swept.
+    Tracked(Weak<dyn GradientFunction>),
 }
 
 impl GraphNode {
@@ -45,17 +107,55 @@ impl GraphNode {
         grad_fn: Option<Arc<dyn GradientFunction>>,
         requires_grad: bool,
     ) -> Self {
-        let mut inputs: SmallVec<[TensorId; 4]> = SmallVec::new();
-        if let Some(f) = grad_fn.as_ref() {
-            inputs.extend_from_slice(f.input_ids());
-        }
-
+        let inputs = Self::inputs_of(grad_fn.as_ref());
         Self {
             tensor_id,
-            grad_fn,
+            function: grad_fn.map_or(NodeFunction::Leaf, NodeFunction::Owned),
             inputs,
             requires_grad,
             name: None,
+        }
+    }
+
+    /// A node the graph finds but does not keep; see [`NodeFunction::Tracked`].
+    fn tracked(
+        tensor_id: TensorId,
+        grad_fn: &Arc<dyn GradientFunction>,
+        requires_grad: bool,
+    ) -> Self {
+        Self {
+            tensor_id,
+            function: NodeFunction::Tracked(Arc::downgrade(grad_fn)),
+            inputs: Self::inputs_of(Some(grad_fn)),
+            requires_grad,
+            name: None,
+        }
+    }
+
+    fn inputs_of(grad_fn: Option<&Arc<dyn GradientFunction>>) -> SmallVec<[TensorId; 4]> {
+        grad_fn.map_or_else(SmallVec::new, |f| SmallVec::from_slice(f.input_ids()))
+    }
+
+    /// The node's gradient function, if it has one and it is still alive.
+    pub fn grad_fn(&self) -> Option<Arc<dyn GradientFunction>> {
+        match &self.function {
+            NodeFunction::Leaf => None,
+            NodeFunction::Owned(function) => Some(Arc::clone(function)),
+            NodeFunction::Tracked(function) => function.upgrade(),
+        }
+    }
+
+    /// Whether the node was recorded with a gradient function, alive or not.
+    fn is_interior(&self) -> bool {
+        !matches!(self.function, NodeFunction::Leaf)
+    }
+
+    /// False once a tracked node's function is gone: nothing can reach it any
+    /// more, and it is waiting to be swept.
+    fn is_live(&self) -> bool {
+        match &self.function {
+            NodeFunction::Tracked(function) => function.strong_count() > 0,
+            _ => true,
         }
     }
 
@@ -72,7 +172,11 @@ impl GraphNode {
 
     /// Get the operation name from the gradient function
     pub fn operation_name(&self) -> &str {
-        self.grad_fn.as_ref().map(|f| f.name()).unwrap_or("leaf")
+        match &self.function {
+            NodeFunction::Leaf => "leaf",
+            NodeFunction::Owned(function) => function.name(),
+            NodeFunction::Tracked(function) => function.upgrade().map_or("released", |f| f.name()),
+        }
     }
 }
 
@@ -143,7 +247,14 @@ pub struct ComputationGraph {
     /// [`Self::release_saved_subgraph`] kept, so that a non-leaf `.grad` can
     /// still be read after the pass that produced it. Dropped one pass later.
     retained_interior: FxHashSet<TensorId>,
+    /// The node count at which [`Self::track`] next sweeps out released
+    /// nodes: twice what the last sweep left, so sweeping costs a constant
+    /// amount per node recorded.
+    sweep_at: usize,
 }
+
+/// The smallest graph worth sweeping.
+const MIN_SWEEP: usize = 4096;
 
 impl ComputationGraph {
     /// Create a new empty computation graph
@@ -152,7 +263,74 @@ impl ComputationGraph {
             nodes: FxHashMap::default(),
             gradients: FxHashMap::default(),
             retained_interior: FxHashSet::default(),
+            sweep_at: MIN_SWEEP,
         }
+    }
+
+    /// Record `tensor_id` as produced by `grad_fn`, and return the function the
+    /// tensor should own: `grad_fn` linked to the nodes that produced its
+    /// inputs (see [`Linked`]). The graph finds the node but does not keep it.
+    pub(crate) fn record(
+        &mut self,
+        tensor_id: TensorId,
+        grad_fn: Arc<dyn GradientFunction>,
+        requires_grad: bool,
+    ) -> Arc<dyn GradientFunction> {
+        // One lookup per input does both jobs: the placeholder a leaf needs,
+        // and the link a recorded input needs.
+        let mut upstream = SmallVec::new();
+        for &input_id in grad_fn.input_ids() {
+            let node = self
+                .nodes
+                .entry(input_id)
+                .or_insert_with(|| GraphNode::new(input_id, None, true));
+            upstream.extend(node.grad_fn());
+        }
+        let linked: Arc<dyn GradientFunction> = Arc::new(Linked {
+            function: grad_fn,
+            upstream: Mutex::new(upstream),
+        });
+        self.nodes.insert(
+            tensor_id,
+            GraphNode::tracked(tensor_id, &linked, requires_grad),
+        );
+        if self.nodes.len() >= self.sweep_at {
+            self.sweep();
+        }
+        linked
+    }
+
+    /// Drop the entries of nodes nothing can backpropagate through any more,
+    /// and the leaf placeholders only they referred to.
+    ///
+    /// A leaf is kept while a live node consumes it or a gradient is stored for
+    /// it, the same rule [`Self::release_saved_subgraph`] applies to the leaves
+    /// of a pass.
+    pub fn sweep(&mut self) {
+        self.nodes.retain(|_, node| node.is_live());
+        let consumed: FxHashSet<TensorId> = self
+            .nodes
+            .values()
+            .flat_map(|node| node.inputs.iter().copied())
+            .collect();
+        let gradients = &self.gradients;
+        self.nodes.retain(|id, node| {
+            node.is_interior() || consumed.contains(id) || gradients.contains_key(id)
+        });
+        self.sweep_at = (self.nodes.len() * 2).max(MIN_SWEEP);
+    }
+
+    fn add_input_placeholders(&mut self, input_ids: &[TensorId]) {
+        for &input_id in input_ids {
+            self.nodes
+                .entry(input_id)
+                .or_insert_with(|| GraphNode::new(input_id, None, true));
+        }
+    }
+
+    /// The node for `id`, unless it has been released.
+    fn live_node(&self, id: &TensorId) -> Option<&GraphNode> {
+        self.nodes.get(id).filter(|node| node.is_live())
     }
 
     /// Add a tensor to the computation graph
@@ -168,11 +346,7 @@ impl ComputationGraph {
         requires_grad: bool,
     ) {
         if let Some(ref f) = grad_fn {
-            for &input_id in f.input_ids() {
-                self.nodes
-                    .entry(input_id)
-                    .or_insert_with(|| GraphNode::new(input_id, None, true));
-            }
+            self.add_input_placeholders(f.input_ids());
         }
 
         let node = GraphNode::new(tensor_id, grad_fn, requires_grad);
@@ -199,7 +373,7 @@ impl ComputationGraph {
         start: TensorId,
         mut visit: impl FnMut(&GraphNode),
     ) -> Result<()> {
-        if !self.nodes.contains_key(&start) {
+        if self.live_node(&start).is_none() {
             return Ok(());
         }
 
@@ -223,7 +397,7 @@ impl ComputationGraph {
                 _ => unreachable!(),
             }
 
-            let inputs = match self.nodes.get(current_id) {
+            let inputs = match self.live_node(current_id) {
                 Some(node) => &node.inputs,
                 None => {
                     state.insert(*current_id, 2);
@@ -235,7 +409,7 @@ impl ComputationGraph {
             if *idx < inputs.len() {
                 let next = inputs[*idx];
                 *idx += 1;
-                if !self.nodes.contains_key(&next) {
+                if self.live_node(&next).is_none() {
                     continue;
                 }
                 match state.get(&next).copied().unwrap_or(0) {
@@ -256,7 +430,7 @@ impl ComputationGraph {
         }
 
         for id in post_order.into_iter().rev() {
-            if let Some(node) = self.nodes.get(&id) {
+            if let Some(node) = self.live_node(&id) {
                 visit(node);
             }
         }
@@ -272,7 +446,7 @@ impl ComputationGraph {
         self.visit_reachable_reverse_topo(start_tensor, |node| {
             plan.push(BackwardStep {
                 tensor_id: node.tensor_id,
-                grad_fn: node.grad_fn.clone(),
+                grad_fn: node.grad_fn(),
                 requires_grad: node.requires_grad,
             });
         })?;
@@ -320,13 +494,23 @@ impl ComputationGraph {
     /// saved operands) as soon as the pass is finished, instead of holding
     /// them until the next optimizer step. Leaf nodes and stored gradients are
     /// preserved so `get_gradient` keeps working.
-    pub fn release_saved_subgraph(&mut self, start: TensorId) {
+    ///
+    /// Returns the released gradient functions. A tracked one is not the
+    /// graph's to free -- its output and the nodes downstream own it -- so the
+    /// caller cuts their links to the nodes before them
+    /// ([`GradientFunction::release_upstream`]), after letting go of the
+    /// graph: that is what frees the pass's history while the loss that
+    /// started it is still held.
+    #[must_use = "the released functions still hold their history until unlinked"]
+    pub fn release_saved_subgraph(&mut self, start: TensorId) -> Vec<Arc<dyn GradientFunction>> {
         let mut interior = FxHashSet::default();
+        let mut released = Vec::new();
         let mut spent_leaves = Vec::new();
         // Ignore cycle errors here: releasing is best-effort cleanup.
         let _ = self.visit_reachable_reverse_topo(start, |node| {
-            if node.grad_fn.is_some() {
+            if node.is_interior() {
                 interior.insert(node.tensor_id);
+                released.extend(node.grad_fn());
             } else {
                 spent_leaves.push(node.tensor_id);
             }
@@ -371,6 +555,7 @@ impl ComputationGraph {
                 self.nodes.remove(&id);
             }
         }
+        released
     }
 
     /// Perform backward pass from a given tensor.
@@ -538,13 +723,13 @@ impl ComputationGraph {
     pub fn has_dependents(&self, tensor_id: TensorId) -> bool {
         self.nodes
             .values()
-            .any(|node| node.inputs.contains(&tensor_id))
+            .any(|node| node.inputs.contains(&tensor_id) && node.is_live())
     }
 
     pub fn get_dependents(&self, tensor_id: TensorId) -> Vec<TensorId> {
         self.nodes
             .values()
-            .filter(|node| node.inputs.contains(&tensor_id))
+            .filter(|node| node.inputs.contains(&tensor_id) && node.is_live())
             .map(|node| node.tensor_id)
             .collect()
     }
@@ -954,7 +1139,7 @@ mod tests {
         graph.backward(c, Some(grad)).unwrap();
         assert!(graph.get_gradient(a).is_some());
 
-        graph.release_saved_subgraph(c);
+        let _ = graph.release_saved_subgraph(c);
         // Interior node (with grad_fn) removed, leaves preserved.
         assert!(!graph.contains_tensor(c));
         assert!(graph.contains_tensor(a));
