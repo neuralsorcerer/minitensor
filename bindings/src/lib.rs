@@ -8,6 +8,11 @@
 
 use pyo3::prelude::*;
 
+/// Large blocks freed by one operation are kept for the next; see
+/// `engine::memory::block_cache`.
+#[global_allocator]
+static ALLOCATOR: engine::memory::BlockCachingAllocator = engine::memory::BlockCachingAllocator;
+
 mod custom_ops;
 mod debug;
 mod device;
