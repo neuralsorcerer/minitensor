@@ -395,20 +395,26 @@ pub trait Module: Layer {
         }
 
         // Pass two: assign. Every lookup above succeeded at the right shape and
-        // dtype, so
-        // a failure here would mean the two accessors disagree.
+        // dtype, so a failure here would mean the two accessors disagree.
+        //
+        // A load replaces values, not whether a slot trains: the loaded tensor
+        // carries whatever flag its source had, and a state dict built from
+        // plain tensors had none, so taking it froze every parameter it
+        // reached -- the layer stopped training without a word. A slot keeps
+        // its own flag, which also keeps a frozen layer frozen when the
+        // checkpoint was saved from a trainable one.
         let mut named_params = self.named_parameters_mut();
         if named_params.is_empty() {
             let mut params = self.parameters_mut();
             for (i, param_ref) in params.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_parameter(&format!("param_{}", i), device) {
-                    **param_ref = loaded;
+                    **param_ref = keep_trainability(param_ref, loaded);
                 }
             }
         } else {
             for (name, param_ref) in named_params.iter_mut() {
                 if let Ok(loaded) = state_dict.load_parameter(name, device) {
-                    **param_ref = loaded;
+                    **param_ref = keep_trainability(param_ref, loaded);
                 }
             }
         }
@@ -420,19 +426,24 @@ pub trait Module: Layer {
             let mut bufs = self.buffers_mut();
             for (i, buf_ref) in bufs.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_buffer(&format!("buffer_{}", i), device) {
-                    **buf_ref = loaded;
+                    **buf_ref = keep_trainability(buf_ref, loaded);
                 }
             }
         } else {
             for (name, buf_ref) in named_buffers.iter_mut() {
                 if let Ok(loaded) = state_dict.load_buffer(name, device) {
-                    **buf_ref = loaded;
+                    **buf_ref = keep_trainability(buf_ref, loaded);
                 }
             }
         }
 
         Ok(())
     }
+}
+
+/// `loaded`, taking `slot`'s place with `slot`'s `requires_grad`.
+fn keep_trainability(slot: &Tensor, loaded: Tensor) -> Tensor {
+    loaded.requires_grad_(slot.requires_grad())
 }
 
 /// Record why `loaded` cannot go into `slot`, if it cannot. A wrong shape is
@@ -551,5 +562,43 @@ mod parameter_view_tests {
                 "{name}: the two views name different tensors"
             );
         }
+    }
+
+    /// A load sets values, not whether a slot trains. A state dict built from
+    /// tensors that do not require a gradient used to freeze every parameter
+    /// it reached; the other direction -- a frozen layer loading a checkpoint
+    /// saved from a trainable one -- has to keep the layer frozen.
+    #[test]
+    fn a_load_keeps_each_slot_trainable_or_frozen_as_it_was() {
+        use super::Module;
+        use crate::serialization::StateDict;
+        use crate::tensor::{Shape, Tensor};
+
+        let dev = crate::device::Device::cpu();
+        let dt = crate::tensor::DataType::Float32;
+        let plain = |dims: &[usize], requires_grad: bool| {
+            Tensor::zeros(Shape::new(dims.to_vec()), dt, dev, false).requires_grad_(requires_grad)
+        };
+        let state_of = |requires_grad: bool| {
+            let mut state = StateDict::new();
+            state
+                .add_parameter("weight".into(), &plain(&[3, 4], requires_grad))
+                .unwrap();
+            state
+                .add_parameter("bias".into(), &plain(&[3], requires_grad))
+                .unwrap();
+            state
+        };
+
+        let mut trainable = DenseLayer::new(4, 3, true, dev, dt).unwrap();
+        Module::load_state_dict(&mut trainable, &state_of(false), None).unwrap();
+        assert!(trainable.parameters().iter().all(|p| p.requires_grad()));
+
+        let mut frozen = DenseLayer::new(4, 3, true, dev, dt).unwrap();
+        for p in frozen.parameters_mut() {
+            *p = p.clone().requires_grad_(false);
+        }
+        Module::load_state_dict(&mut frozen, &state_of(true), None).unwrap();
+        assert!(frozen.parameters().iter().all(|p| !p.requires_grad()));
     }
 }

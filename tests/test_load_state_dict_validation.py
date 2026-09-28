@@ -231,6 +231,25 @@ def test_every_kind_of_problem_is_reported_together():
     assert "wrong dtype: 0.bias" in message
 
 
+def test_loading_plain_tensors_keeps_the_layer_trainable():
+    """A load sets values, not whether a parameter trains. A state dict built
+    from tensors that do not require a gradient -- weights read from a file of
+    another format, say -- used to freeze every parameter it reached, and the
+    layer stopped training without a word."""
+    target = _target()
+    target.load_state_dict(_state(weight=np.ones((3, 4)), bias=np.zeros(3)))
+    assert all(p.requires_grad for p in target.parameters())
+
+    before = _snapshot(target)
+    optimizer = mt.optim.SGD(target.parameters(), lr=0.1)
+    optimizer.zero_grad()
+    target(mt.Tensor(np.ones((2, 4), np.float32))).sum().backward()
+    optimizer.step()
+    after = _snapshot(target)
+    assert not np.array_equal(before["weight"], after["weight"])
+    assert not np.array_equal(before["bias"], after["bias"])
+
+
 # --- a rejected load changes nothing ----------------------------------------
 
 
