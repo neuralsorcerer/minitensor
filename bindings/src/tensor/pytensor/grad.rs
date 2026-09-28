@@ -63,7 +63,8 @@ impl PyTensor {
     }
 
     /// Set `requires_grad` in place and return `self`, so calls chain:
-    /// `x = mt.randn(2, 2).requires_grad_(True)`.
+    /// `x = mt.randn(2, 2).requires_grad_()`.
+    #[pyo3(signature = (requires_grad=true))]
     pub fn requires_grad_<'py>(
         mut slf: PyRefMut<'py, Self>,
         requires_grad: bool,

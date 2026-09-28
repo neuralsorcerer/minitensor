@@ -59,6 +59,14 @@ def test_loss_functionals_default_reduction(t22):
         assert out.numel() == 1  # "mean" reduction by default
 
 
+def test_requires_grad_defaults_to_true(t22):
+    # `x.requires_grad_()` is the everyday spelling, and it raised TypeError.
+    x = t22.detach()
+    assert x.requires_grad_() is x
+    assert x.requires_grad
+    assert not x.requires_grad_(False).requires_grad
+
+
 def test_dense_layer_functional_bias_optional(t22):
     weight = mt.from_numpy(np.ones((3, 2), dtype=np.float32))
     out = nn.dense_layer(t22, weight)

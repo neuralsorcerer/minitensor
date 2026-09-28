@@ -447,6 +447,8 @@ _GRADCHECK_OPS = [
 _GRADCHECK_EXEMPT = {
     # Covered with explicit arguments by their own tests above.
     "backward",
+    # Sets a flag and hands its tensor back; there is nothing to differentiate.
+    "requires_grad_",
 }
 
 
