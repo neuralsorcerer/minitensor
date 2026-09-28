@@ -109,7 +109,7 @@ def test_the_vectors_are_orthonormal(shape):
 
 @pytest.mark.parametrize("shape", SHAPES)
 def test_the_eigenvalues_come_back_ascending(shape):
-    """LAPACK's order and NumPy's, and the one callers zip against."""
+    """Ascending, the order callers zip against."""
     values = _symmetric(shape, seed=7)
     got = mt.Tensor(values, dtype="float64").eigh()[0].numpy()
     assert np.all(np.diff(got, axis=-1) >= -1e-12)

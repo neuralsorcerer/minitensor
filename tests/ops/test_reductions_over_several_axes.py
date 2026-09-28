@@ -11,8 +11,7 @@ The reference said reductions take a list of dims, and ten of them did.
 `nanmedian`, `nanvar` -- twenty-two in total -- took an integer and answered a
 list with "'list' object cannot be interpreted as an integer", including
 `amax`, whose entire reason for existing next to `max` is that it has no index
-to tie it to one axis. NumPy takes a tuple for every one of them and PyTorch
-takes one for `amax`, `amin` and `count_nonzero`.
+to tie it to one axis.
 
 The line that remains is not about which op it is, it is about whether the
 forward reports an index: an index names a position along one axis, so `max`,
@@ -304,8 +303,8 @@ def test_an_axis_out_of_range_is_reported_as_one():
 
 
 def test_weighted_average_over_several_axes_needs_matching_weights():
-    """NumPy's rule: one-dimensional weights line up with a single reduced
-    axis, and there is no single axis to line them up with here."""
+    """One-dimensional weights line up with a single reduced axis, and there
+    is no single axis to line them up with here."""
     weights = _t(np.abs(VALUES) + 0.5)
     got = mt.average(_t(VALUES), [0, 1], weights).numpy()
     want = np.average(VALUES, axis=(0, 1), weights=np.abs(VALUES) + 0.5)

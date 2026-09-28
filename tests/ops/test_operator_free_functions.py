@@ -224,10 +224,9 @@ def test_a_float_valued_binary_takes_an_integer_pair(name, reference, dtype):
     result = getattr(mt, name)(
         mt.Tensor(values, dtype=dtype), mt.Tensor(other, dtype=dtype)
     )
-    # Two integers promote to float32, as they do for `/`; NumPy would widen
-    # further, which is the documented difference and not this one. The
-    # reference is taken in float64 for the same reason -- NumPy computes a
-    # bool pair in float16, which is coarser than the answer being checked.
+    # Two integers promote to float32, as they do for `/`. The reference is
+    # taken in float64 -- NumPy computes a bool pair in float16, which is
+    # coarser than the answer being checked.
     assert result.dtype == "float32"
     np.testing.assert_allclose(
         result.numpy(),
@@ -553,8 +552,7 @@ def test_fmax_and_fmin_broadcast_and_promote(name):
 
     # They do not inherit its promotion. An integer pair has no NaN to skip, so
     # it is a plain `maximum` and keeps its dtype, where this family turns two
-    # integers into a float the way `/` does -- and NumPy's `fmax` of two
-    # integers is an integer.
+    # integers into a float the way `/` does.
     left = np.array([1, 5], dtype=np.int64)
     right = np.array([3, 2], dtype=np.int64)
     result = getattr(mt, name)(mt.from_numpy(left), mt.from_numpy(right))

@@ -202,7 +202,7 @@ def test_bidirectional_concatenates_a_forward_and_a_backward_pass():
     np.testing.assert_allclose(got, want, atol=TOL)
 
 
-def test_the_parameter_names_are_the_ones_pytorch_uses():
+def test_the_parameter_names_follow_layer_and_direction():
     plain = set(nn.LSTM(INPUT, HIDDEN).state_dict().keys())
     assert plain == {"weight_ih_l0", "weight_hh_l0", "bias_ih_l0", "bias_hh_l0"}
 

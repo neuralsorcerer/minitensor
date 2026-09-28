@@ -80,9 +80,8 @@ def test_promotion_preserves_the_edge_cases(value):
 
     `f64` has more headroom, so anything that saturates in `f32` has to still
     saturate after rounding back down. The expected value is the correctly
-    rounded one rather than NumPy's: at `expm1(88)` NumPy is a full 1.3e-07
-    off while this returns the nearest representable `f32`, so asserting
-    equality with NumPy would fail on the improvement itself.
+    rounded one, computed in float64 and rounded once: at `expm1(88)` this
+    returns the nearest representable `f32`.
     """
     sample = np.array([value], dtype=np.float32)
     tensor = mt.from_numpy(sample)

@@ -220,7 +220,7 @@ def test_logsumexp_non_finite_rows():
     assert out_multi[1] == -np.inf
 
 
-def test_activation_methods_have_pytorch_defaults():
+def test_activation_methods_run_with_their_defaults():
     # These pymethods take Option-typed parameters; without an explicit
     # #[pyo3(signature)] PyO3 makes them required, breaking no-arg calls.
     data = np.array([[1.0, -2.0], [3.0, -0.25]], dtype=np.float32)

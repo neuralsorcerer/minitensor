@@ -235,8 +235,8 @@ def test_local_response_norm_matches_the_definition(shape, size):
 
 
 def test_an_even_window_reaches_one_further_below_than_above():
-    """An even window has no centre, and which side gets the extra channel is
-    the only place this could differ from `torch`. It takes it from below.
+    """An even window has no centre, so which side gets the extra channel is
+    a choice. It takes it from below.
 
     A single spike in channel 1 is therefore seen by channels 1 and 2, and not
     by 0 or 3: with `alpha` and `beta` at one and `k` at one, the divisor is

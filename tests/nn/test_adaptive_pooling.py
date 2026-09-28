@@ -18,7 +18,7 @@ The window comes from the ratio of the two extents:
 
     start(i) = floor(i * in / out)      end(i) = ceil((i + 1) * in / out)
 
-which is exactly PyTorch's rule, and the tests pin it rather than accepting any
+and the tests pin it rather than accepting any
 plausible neighbour. Two properties follow and are checked below. When `out`
 divides `in` it degenerates to a regular pool with kernel and stride both
 `in / out` -- checked against `avg_pool2d` for bit equality, not approximation.

@@ -4,7 +4,7 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The statistics NumPy has that this library did not.
+"""Statistics this library did not have.
 
 Each of these is a short arrangement of kernels that were already here --
 `quantile` in percent, two reductions for a span, a binary search for an
@@ -356,7 +356,7 @@ def test_bin_edges_skip_the_non_finite_at_every_lane_and_chunk_seam(dtype, lengt
             else (float(finite.min()), float(finite.max()))
         )
         # A range of no width -- one finite value, or all of them equal --
-        # is opened half a unit either side, the rule NumPy uses too.
+        # is opened half a unit either side.
         if low == high:
             low, high = low - 0.5, high + 0.5
         want = np.linspace(low, high, 9)

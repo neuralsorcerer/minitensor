@@ -21,7 +21,7 @@ refusing. The count goes into `int64`, and so does this now, with
 
 That widening is now the rule for every *accumulating* reduction rather than a
 special case for masks: `sum`, `prod`, `cumsum` and `cumprod` all report
-`int64` for a `bool` or `int32` input, which is what NumPy and PyTorch do. It
+`int64` for a `bool` or `int32` input. It
 covers a real defect, not only a tidiness one -- summing three billion-ish
 `int32` values used to return `1705032704`.
 
@@ -157,7 +157,7 @@ def test_the_reductions_that_already_worked_are_unchanged(name):
 def test_accumulating_reductions_report_the_accumulator_dtype(dtype, accumulated):
     """Narrow integers widen; floats do not. Promoting `float32` to `float64`
     would change every existing result and double the memory of the most common
-    reduction in the library, and NumPy does not do it either."""
+    reduction in the library."""
     array = np.arange(6).astype(dtype).reshape(2, 3)
     tensor = mt.Tensor(array, dtype=dtype)
 

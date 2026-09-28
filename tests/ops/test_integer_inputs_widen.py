@@ -155,7 +155,7 @@ _INTEGER_VALUED = {
 }
 
 # Takes probabilities, not values. An integer tensor of them is almost always
-# a mistake, PyTorch refuses it too, and the message says so.
+# a mistake, and the message says so.
 _REFUSES = {"bernoulli"}
 
 

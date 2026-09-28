@@ -236,7 +236,7 @@ def test_median_with_dim_returns_indices():
     np.testing.assert_array_equal(indices.numpy(), np.array([2, 2], dtype=np.int64))
 
 
-def test_median_keepdim_matches_pytorch_shape():
+def test_median_keepdim_keeps_a_unit_axis():
     x = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
     values, indices = x.median(dim=1, keepdim=True)
     assert values.shape == (2, 1)
@@ -779,8 +779,8 @@ def test_cumsum_cumprod():
 @pytest.mark.parametrize("shape", [(6,), (2, 3), (2, 3, 4), (1,), (0,), (3, 0)])
 @pytest.mark.parametrize("name", ["cumsum", "cumprod", "nancumsum", "nancumprod"])
 def test_a_scan_with_no_dim_runs_over_the_flattened_tensor(name, shape):
-    # NumPy's rule, and the one the NaN-skipping pair already followed on their
-    # own -- `cumsum` used to be the odd one out and simply refuse.
+    # The rule the NaN-skipping pair already followed on their own -- `cumsum`
+    # used to be the odd one out and simply refuse.
     values = np.arange(1, int(np.prod(shape)) + 1, dtype=np.float64).reshape(shape)
     tensor = mt.Tensor(values, dtype="float64")
     result = getattr(mt, name)(tensor)

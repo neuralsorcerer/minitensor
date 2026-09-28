@@ -429,8 +429,7 @@ def test_magnitudes_mixed_within_one_matrix():
     the largest and is not determined by the input at all -- what comes back for
     those is a legitimate answer for *some* matrix within rounding of this one.
 
-    NumPy does recover them, and that is not this algorithm being worse at the
-    same thing: a matrix that factors as `D1 @ A @ D2` for well-conditioned `A`
+    Recovering them would not be this algorithm doing the same thing better: a matrix that factors as `D1 @ A @ D2` for well-conditioned `A`
     is the case a one-sided Jacobi SVD gets to full relative accuracy, and this
     is not one. So the assertion is the contract that is actually offered, which
     would still catch a NaN, an infinity, a negative value, or a wrong answer

@@ -146,7 +146,7 @@ def test_a_read_only_array_is_refused(make):
 
 
 def test_from_numpy_normalises_bool_bytes():
-    """Copying reads each byte the way NumPy does: anything but zero is true."""
+    """Copying reads each byte as a truth value: anything but zero is true."""
 
     source = np.array([2, 0, 1, 255], dtype=np.uint8).view(bool)
     tensor = mt.Tensor.from_numpy(source)

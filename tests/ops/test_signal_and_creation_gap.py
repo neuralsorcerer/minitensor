@@ -8,9 +8,9 @@
 
 A window function is five lines of arithmetic over sample positions, and the
 *ends* are where a naive transcription goes wrong: a window meant for a
-spectrum repeats seamlessly (`periodic=True`, what an FFT wants and what
-`torch` defaults to) while one meant for filter design is symmetric about its
-middle (`periodic=False`, what NumPy's `hanning` gives). A one-sample window is
+spectrum repeats seamlessly (`periodic=True`, the default and what an FFT
+wants) while one meant for filter design is symmetric about its middle
+(`periodic=False`). A one-sample window is
 1, not whatever the cosine happens to be at position zero.
 
 `correlate` and `convolve` are the same sliding product read two ways -- the

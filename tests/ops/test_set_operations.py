@@ -14,7 +14,7 @@ through the sorted binary search `isin` already uses, so the cost is
 `(n + m) log m`.
 
 `unique` also learned to say where each distinct value first occurred, which is
-what `intersect1d(..., return_indices=True)` reports and what NumPy spells
+what `intersect1d(..., return_indices=True)` reports and what `unique` calls
 `return_index`. The sort underneath is unstable, so "first" has to be the
 smallest position in the run rather than whichever one the sort happened to
 leave at its head -- that is the part a test can catch.
@@ -165,8 +165,8 @@ def test_the_array_api_spellings_agree_with_unique():
         mt.unique_inverse(tensor).inverse_indices.numpy().reshape(-1),
         np.unique_inverse(values).inverse_indices.reshape(-1),
     )
-    # The standard leaves this order unspecified and NumPy returns it unsorted;
-    # these come back ascending, which `unique` already promised.
+    # The standard leaves this order unspecified; these come back ascending,
+    # which `unique` already promised.
     np.testing.assert_array_equal(mt.unique_values(tensor).numpy(), np.unique(values))
 
 

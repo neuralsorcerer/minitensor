@@ -135,8 +135,8 @@ def test_small_shapes_are_unchanged(shape, dim, op):
 
 
 def test_var_still_matches_numpy_on_the_biased_convention():
-    """`var` is unbiased by default, like PyTorch; NumPy's default is biased.
-    The blocking must not have quietly moved which one it computes."""
+    """`var` is unbiased by default and biased with `unbiased=False`. The
+    blocking must not have quietly moved which one it computes."""
     values = _data((4, 1000), seed=11)
     t = mt.Tensor(values, dtype="float32")
     np.testing.assert_allclose(

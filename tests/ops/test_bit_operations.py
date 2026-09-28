@@ -4,10 +4,10 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The bit-level operations NumPy has and this library did not.
+"""The bit-level operations this library did not have.
 
 Three of them are second spellings -- `left_shift`, `right_shift` and `invert`
-are NumPy's names for shifts and complement that already existed -- and the
+are other names for shifts and complement that already existed -- and the
 tests for those check the *identity* of the objects, because that is the whole
 claim: one implementation under two names cannot drift apart, and a copied one
 can.

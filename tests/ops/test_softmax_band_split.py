@@ -100,9 +100,9 @@ def test_a_column_with_no_answer_says_so_rather_than_returning_one():
     The column-wise kernel used to divide only where the total was positive,
     which left a poisoned column holding its raw exponentials -- and those look
     like an answer. `softmax([[1, 1], [nan, 2]], dim=0)` came back with 1.0 in
-    the first column: a column that sums to one and means nothing. NumPy and
-    PyTorch both answer NaN there, and so does this library's own contiguous
-    kernel, which is what the column-wise one now agrees with.
+    the first column: a column that sums to one and means nothing. This
+    library's own contiguous kernel answers NaN there, which is what the
+    column-wise one now agrees with.
     """
     for poison in (np.nan, np.inf):
         values = np.array([[1.0, 1.0], [poison, 2.0]], dtype=np.float32)

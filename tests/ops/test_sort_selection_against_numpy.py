@@ -36,7 +36,7 @@ documents them rather than against `np.median`:
   checked against NumPy.
 - `-0.0` and `0.0` compare **equal**, so they are ordered by input position
   rather than by sign bit. A total order over the bit patterns would separate
-  them; this does not, and neither does PyTorch.
+  them; this does not.
 
 Values are compared as bytes rather than with `==`, because `==` is blind to a
 dropped sign on zero and cries wolf on a faithful NaN.
@@ -286,14 +286,14 @@ def test_a_nan_row_reports_the_nans_own_position():
 
 
 def test_median_of_an_even_count_is_the_lower_not_the_average():
-    """The one place this deliberately parts company with `np.median`."""
+    """The lower middle value is an element of the input and has an index to
+    report; the average of the two middle values is neither."""
     values = np.array([4.0, 1.0, 3.0, 2.0], dtype=np.float32)
     tensor = mt.Tensor(values, dtype="float32")
     value, index = mt.median(tensor, 0, False)
     assert float(np.asarray(value)) == 2.0
     assert int(np.asarray(index)) == 3
-    assert float(np.median(values)) == 2.5  # what NumPy would have said
-    # ...and the interpolated definition is available, and agrees with NumPy.
+    # The interpolated definition is available too, and agrees with NumPy.
     interpolated = mt.quantile(tensor, 0.5, interpolation="linear")
     assert float(np.asarray(interpolated)) == pytest.approx(2.5)
 

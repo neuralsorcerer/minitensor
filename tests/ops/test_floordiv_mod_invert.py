@@ -101,7 +101,7 @@ def test_floordiv_mod_identity():
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_a_quotient_that_rounds_onto_an_integer_is_floored_below_it(dtype):
     """`1.0 / 0.1` is 9.99999999999999944... exactly and rounds to 10.0, so
-    flooring the rounded quotient said 10 where Python and NumPy say 9 -- and
+    flooring the rounded quotient said 10 where the true floor is 9 -- and
     then `(a // b) * b + a % b` was 1.1, not 1. Here and across a large
     random set of quotients built to land within an ulp of an integer, the
     answer is NumPy's while the quotient stays below 2**50 (past about 2**51

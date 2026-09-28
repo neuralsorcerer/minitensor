@@ -111,7 +111,7 @@ def test_an_all_nan_slice_has_no_variance(unbiased):
     it would have divided by that zero without a word.
 
     Clamping the divisor at zero makes the division `0 / 0`, which is NaN --
-    what `var` answers for an empty slice and what NumPy answers for this one.
+    what `var` answers for an empty slice.
     """
     for slice_of_nothing in (np.array([[np.nan, np.nan]]), np.zeros((1, 0))):
         assert np.isnan(_t(slice_of_nothing).nanvar(1, unbiased).numpy()[0])
@@ -393,11 +393,10 @@ def test_an_infinity_behind_a_nan_is_still_found(size):
 
 
 def test_the_index_reported_never_points_at_a_nan():
-    # Where this library and NumPy part. NumPy substitutes -inf for NaN and
-    # then takes an argmax, which cannot tell the two apart, so it answers 0 --
-    # a NaN, from the function whose name says it skips them. We answer 1.
+    # Substituting -inf for NaN and then taking an argmax cannot tell the two
+    # apart, so it would answer 0 -- a NaN, from the function whose name says
+    # it skips them. The answer is 1.
     values = np.array([np.nan, -np.inf, np.nan, -np.inf])
-    assert np.nanargmax(values) == 0 and np.isnan(values[0])
     assert mt.from_numpy(values).nanargmax().item() == 1
 
     values = np.array([np.nan, np.inf, np.nan, np.inf])

@@ -44,7 +44,7 @@ SLICES = [
     (0, slice(None)),
     (0, slice(5, 9)),  # entirely past the end: an empty write
     (1, slice(0, 3, 2)),
-    (1, slice(None, None, -1)),  # reversed, which numpy allows and torch does not
+    (1, slice(None, None, -1)),  # reversed
     (1, slice(-2, None)),
     (2, slice(1, 3)),
     (2, slice(None, None, 3)),

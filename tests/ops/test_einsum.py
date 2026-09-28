@@ -165,8 +165,8 @@ def test_a_label_shared_by_three_operands():
 )
 def test_implicit_output_matches_numpy(equation, shapes):
     """Without `->`, the result keeps every subscript used exactly once, in the
-    order the letters sort. That is NumPy's rule and there is no better one to
-    invent."""
+    order the letters sort, so the output order is fixed by the subscripts
+    alone."""
     _check(equation, *shapes)
 
 

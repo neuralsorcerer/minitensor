@@ -15,7 +15,7 @@ shape happened to split.
 
 Sizing the task by the output makes the split independent of which axis is
 being joined: 6.7ms on dimension 0 now, and eight 2MB pieces joined on
-dimension 0 went 1.33ms to 0.57ms, which is quicker than NumPy.
+dimension 0 went 1.33ms to 0.57ms.
 
 The cost is that a task no longer lines up with a source. It starts wherever
 the split put it -- part-way through one input, spanning the boundary into the

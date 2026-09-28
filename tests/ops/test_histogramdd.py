@@ -89,7 +89,7 @@ def test_histogramdd_matches_numpy(shape, bins):
     ids=["pairs", "flat"],
 )
 def test_both_spellings_of_the_range_are_taken(bounds):
-    """A sequence of pairs, and the flat form `torch.histogramdd` uses."""
+    """A sequence of pairs, and the flat form of `2 * dims` numbers."""
 
     sample = RNG.normal(size=(150, 2))
     counts, _ = mt.histogramdd(_t(sample), 6, bounds)

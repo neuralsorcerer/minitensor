@@ -17,17 +17,15 @@ are exactly equal:
   which element was selected.
 - The forms that **report no index** -- `amax`, `amin`, `nanmedian` -- divide
   the gradient **evenly** among everything equal to the extremum. That is the
-  mean subgradient, and what PyTorch's `amax` does. With no index to be
-  consistent with, there is no reason to prefer one tied element.
+  mean subgradient. With no index to be consistent with, there is no reason to
+  prefer one tied element.
 - `cummax`, `cummin` and `scatter_reduce`'s `"amax"`/`"amin"` give the whole
   gradient to the **first** element that won.
 
-Nothing pinned any of them, and the API reference asserted the opposite: it
-said `max` gave a tie to the first contributor "where PyTorch spreads a tie
-evenly", which was backwards, and named `mode`, which has no gradient at all.
-A convention nothing checks is a convention that drifts, and this one drifts
-silently -- every test built on distinct values passes either way, which is
-the last test here.
+Nothing pinned any of them, and the API reference described them wrongly and
+named `mode`, which has no gradient at all. A convention nothing checks is a
+convention that drifts, and this one drifts silently -- every test built on
+distinct values passes either way, which is the last test here.
 
 Until recently every one of these reductions took the split, so `max(dim)`
 returned index 1 and then fed the gradient to positions 1 *and* 2. Either half

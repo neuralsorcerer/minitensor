@@ -137,7 +137,7 @@ def test_scatter_and_scatter_add_are_two_of_these():
 
 def test_mean_over_integers_is_refused():
     """It would truncate every average, which is a surprise rather than a
-    result. PyTorch allows it; saying so plainly is better than a wrong number."""
+    result. Saying so plainly is better than a wrong number."""
     with pytest.raises(Exception, match="mean"):
         mt.scatter_reduce(_i([1, 2, 3]), 0, _i([0, 1]), _i([4, 5]), "mean", True)
 
@@ -253,9 +253,8 @@ def test_the_extremum_gradient_goes_to_the_winner():
 
 def test_an_extremum_tie_goes_to_the_first_contributor():
     """A tie has no natural winner, so the rule is fixed here -- and it is the
-    same one `max`, `mode` and `cummax` follow in this library. PyTorch spreads
-    a tie evenly instead; one convention across the library beats matching
-    another project one operation at a time."""
+    same one `max`, `mode` and `cummax` follow in this library: one
+    convention across the library."""
     base = np.array([0.0])
     index = np.array([0, 0, 0])
     src = np.array([5.0, 5.0, 1.0])

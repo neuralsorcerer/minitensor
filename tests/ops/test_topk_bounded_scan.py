@@ -10,11 +10,10 @@
 `select_nth_unstable_by` over the lot. That is the right algorithm when `k` is
 a decent fraction of the slice and badly wrong when it is not: the top 100 of
 two million float32 meant allocating and writing 32MB of pairs -- four times
-the tensor -- to look at 100 of them. It measured 36.7ms against NumPy's 6.9ms
-for the same work.
+the tensor -- to look at 100 of them, 36.7ms of work.
 
 A bounded heap of `k` reads the input once and touches nothing else, and takes
-that case to 5.5ms, which is quicker than NumPy. It stops paying once the heap
+that case to 5.5ms. It stops paying once the heap
 leaves cache, so the select path is still there for large `k` and the choice
 between them is made on the heap's footprint.
 

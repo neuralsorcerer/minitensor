@@ -192,7 +192,7 @@ def test_a_large_norm_type_approaches_the_maximum_magnitude():
 
 
 def test_a_negative_window_has_a_real_norm_at_an_odd_norm_type():
-    """Where `torch` takes the root of a negative number, this takes `abs` first."""
+    """`abs` comes before the power, so the root is never of a negative number."""
 
     values = -np.ones((1, 1, 4))
     np.testing.assert_allclose(

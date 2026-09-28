@@ -19,8 +19,8 @@ name the position one past the end -- inserting before the end is a real place
 to insert, and deleting the element after the last one is not a real place to
 delete.
 
-`resize` is NumPy's and not PyTorch's: it returns a new tensor and *repeats*
-the elements to fill a larger shape rather than zero-filling.
+`resize` returns a new tensor and *repeats* the elements to fill a larger
+shape rather than zero-filling.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def test_resize_repeats_rather_than_zero_filling(values):
     np.testing.assert_allclose(
         mt.resize(mt.from_numpy(values), (2, 3)).numpy(), np.resize(values, (2, 3))
     )
-    # Nothing to repeat, so it fills with zeros -- as NumPy does.
+    # Nothing to repeat, so it fills with zeros.
     empty = np.array([], dtype=np.float64)
     np.testing.assert_allclose(
         mt.resize(mt.from_numpy(empty), (2, 2)).numpy(), np.resize(empty, (2, 2))
@@ -292,9 +292,9 @@ def test_appending_a_wide_float_to_a_narrow_one_keeps_the_width():
     assert joined.numpy()[-1] == 2.0**40 + 0.5
 
 
-def test_insert_follows_numpy_and_casts_what_it_inserts():
-    """The one in this family that does truncate, because NumPy does: the
-    inserted values take the array's dtype."""
+def test_insert_casts_what_it_inserts():
+    """The one in this family that does truncate: the inserted values take the
+    array's dtype, because they become part of that array."""
     integers = mt.from_numpy(np.array([1, 2, 3]))
     got = mt.insert(integers, 1, mt.from_numpy(np.array([2.5]))).numpy()
     np.testing.assert_array_equal(got, np.insert(np.array([1, 2, 3]), 1, 2.5))

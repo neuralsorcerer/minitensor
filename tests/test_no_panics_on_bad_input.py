@@ -500,7 +500,7 @@ def test_layers_with_empty_or_absurd_sizes_decline_or_build(label, build):
 
 
 def test_a_layer_with_no_inputs_starts_from_a_zero_bias():
-    # PyTorch's rule for a fan-in of zero: the bound is zero, not infinite.
+    # A fan-in of zero gives a bound of zero, not an infinite one.
     np.testing.assert_array_equal(nn.DenseLayer(0, 5).bias.numpy(), np.zeros(5))
 
 

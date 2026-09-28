@@ -12,13 +12,12 @@ cell of. Widening the integer accumulation in `sum`/`prod` came close to doing
 exactly that -- the reductions changed their output dtype deliberately, and
 nothing would have complained if binary arithmetic had drifted with them.
 
-The table also encodes a deliberate divergence from NumPy that is worth having
-stated in a test rather than only in prose: an integer operand takes the *float
-operand's width*, so `int64 + float32` is `float32`. NumPy promotes that pair
-to `float64` on the grounds that `int64` does not fit in `float32`. PyTorch
-does what this library does, and for an array library aimed at models it is the
-better trade -- the NumPy rule silently doubles the memory and halves the speed
-of any expression that mixes an index tensor into an activation.
+The table also encodes a deliberate choice that is worth having stated in a
+test rather than only in prose: an integer operand takes the *float operand's
+width*, so `int64 + float32` is `float32`, even though `int64` does not fit in
+`float32`. For a library aimed at models it is the better trade -- widening to
+`float64` would silently double the memory and halve the speed of any
+expression that mixes an index tensor into an activation.
 
 **The numerical limits.** `softmax`, `sigmoid`, `log1p` and `expm1` all exist in
 a specific form because the obvious form loses. Written naively they overflow to
@@ -40,8 +39,8 @@ DTYPES = ["bool", "int32", "int64", "float32", "float64"]
 #
 # Symmetric by construction, and the ordering is a total one: bool < int32 <
 # int64 < float32 < float64, with the *wider category* winning outright rather
-# than the wider *width*. That last part is the NumPy divergence: NumPy would
-# put `float64` in the four (int32|int64, float32) cells.
+# than the wider *width*. That last part is deliberate: the four
+# (int32|int64, float32) cells are `float32`, as the module docstring says.
 EXPECTED = {
     "bool": {
         "bool": "bool",
@@ -80,7 +79,7 @@ EXPECTED = {
     },
 }
 
-NUMPY_DIVERGES = {
+NARROW_FLOAT_PAIRS = {
     ("int32", "float32"),
     ("float32", "int32"),
     ("int64", "float32"),
@@ -123,17 +122,16 @@ def test_the_values_match_numpy_once_the_dtype_is_accounted_for(left, right):
     np.testing.assert_allclose(got.numpy(), want, rtol=1e-6)
 
 
-@pytest.mark.parametrize("pair", sorted(NUMPY_DIVERGES))
-def test_the_numpy_divergence_is_real_and_deliberate(pair):
-    """Pins the disagreement itself. If NumPy ever adopts the PyTorch rule this
-    test fails, which is the moment to revisit the prose in the API reference
-    rather than to quietly follow along."""
+@pytest.mark.parametrize("pair", sorted(NARROW_FLOAT_PAIRS))
+def test_an_integer_takes_the_float_operands_width(pair):
+    """Pins the choice itself, apart from the table: an integer beside a
+    `float32` stays `float32` even where it does not fit, and changing that is
+    a decision to take deliberately rather than by drift."""
     left, right = pair
-    a_np, a = _operand(left)
-    b_np, b = _operand(right)
+    _, a = _operand(left)
+    _, b = _operand(right)
 
     assert str((a + b).dtype) == "float32"
-    assert (a_np + b_np).dtype.name == "float64"
 
 
 def test_promotion_is_symmetric():

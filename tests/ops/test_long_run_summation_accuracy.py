@@ -92,12 +92,12 @@ def test_the_long_run_sum_beats_a_naive_accumulator(n):
 
 @pytest.mark.parametrize("n", [100_000, 2_000_000])
 def test_float32_norm_is_the_correctly_rounded_one(n):
-    """`norm` used to be far worse than NumPy here: 2.3e-5 against 8.1e-7 at 2M
-    elements, because it summed the scaled squares with the same lane
-    accumulator. Then it was an ulp either side of the right answer, which
-    Accelerate's `snrm2` beat on macOS. It accumulates in float64 now, where
-    the squares are exact, and rounds once -- so the answer is the float32
-    nearest the true norm, which no library can improve on."""
+    """`norm` used to be far less accurate here: a relative error of 2.3e-5 at
+    2M elements, because it summed the scaled squares with the same lane
+    accumulator. Then it was an ulp either side of the right answer. It
+    accumulates in float64 now, where the squares are exact, and rounds once --
+    so the answer is the float32 nearest the true norm, which nothing can
+    improve on."""
     rng = np.random.default_rng(7)
     values = ((rng.random(n) - 0.5) * 10).astype(np.float32)
     exact = float(np.linalg.norm(values.astype(np.float64)))

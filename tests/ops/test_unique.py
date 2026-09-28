@@ -21,7 +21,7 @@ anything and is not equal to itself, so the two obvious implementations are both
 wrong in different ways: a comparison sort over raw floating-point order has no
 defined result, and a run detector over `==` emits every NaN as its own distinct
 value. One comparison fixes both by putting NaN after every number and calling
-it equal to itself, which is what NumPy does and what the tests below pin.
+it equal to itself, which is what the tests below pin.
 """
 
 from __future__ import annotations
@@ -93,8 +93,8 @@ def test_asking_for_everything():
 
 
 def test_asking_for_nothing_extra_returns_a_bare_tensor():
-    """NumPy and PyTorch both vary their arity with the flags; forcing a caller
-    to unpack a one-tuple would be a gratuitous difference."""
+    """The arity varies with the flags; forcing a caller to unpack a
+    one-tuple would be gratuitous."""
     result = mt.unique(_t(np.array([1.0, 2.0])))
     assert not isinstance(result, tuple)
     assert result.numpy().shape == (2,)
@@ -144,7 +144,7 @@ def test_nothing_here_carries_a_gradient():
 
 def test_nans_collapse_to_one_and_sort_last():
     """`NaN != NaN`, so a run detector over `==` would emit every one of these
-    separately. They are one value here, at the end, as NumPy has them."""
+    separately. They are one value here, at the end."""
     data = np.array([np.nan, 1.0, np.nan, 0.0, np.nan])
     got = mt.unique(_t(data)).numpy()
     want = np.unique(data)

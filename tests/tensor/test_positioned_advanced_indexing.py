@@ -14,8 +14,7 @@ that job.
 
 With exactly one advanced index the answer does not depend on the order the
 basic and advanced parts are applied in, and the selected axis stays where it
-was written -- NumPy's rule about advanced indices moving to the front needs
-two of them, separated. These tests pin that against NumPy for every way the
+was written. These tests pin that against NumPy for every way the
 one index can be spelled and every basic entry it can be mixed with. Two
 advanced indices mean something else (they pair up elementwise) and are
 refused by name. Assignment takes the same forms: reading ``t[:, idx]``

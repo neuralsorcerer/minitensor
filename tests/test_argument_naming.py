@@ -6,11 +6,10 @@
 
 """One name for one thing, across the whole surface.
 
-The axis argument is `dim` and keeping it is `keepdim` -- PyTorch's names,
-used even on the functions NumPy contributed, where NumPy would say `axis` and
-`keepdims`. The exception is a function whose own name says which word it
-wants: `swapaxes`, `take_along_axis` and `put_along_axis` take `axis`, and
-`swapdims` takes `dim`, exactly as PyTorch spells each of them.
+The axis argument is `dim` and keeping it is `keepdim`, on every function.
+The exception is a function whose own name says which word it wants:
+`swapaxes`, `take_along_axis` and `put_along_axis` take `axis`, and `swapdims`
+takes `dim`.
 
 This is checked rather than remembered because it is the kind of rule that
 drifts one function at a time. `trim_zeros` was added with NumPy's `axis` and
@@ -195,9 +194,10 @@ _DIFFERENT_BY_DESIGN = {
     # `mt.where(condition, input, other)` picks between two tensors, while
     # `t.where(condition, other)` makes `t` the "if true" branch -- so the
     # method's argument list is the free function's with `input` removed from
-    # the middle rather than the front. PyTorch is arranged the same way.
+    # the middle rather than the front.
     "where",
-    # `mt.polygamma(order, input)` takes the order first, as NumPy and SciPy do.
+    # `mt.polygamma(order, input)` takes the order first, the way the
+    # function is written.
     "polygamma",
     # These take the tensor under a name of their own (`a`, `b`, `factor`),
     # which the method supplies as `self` from a different position.
@@ -411,8 +411,8 @@ def test_no_signature_hides_a_default_behind_none():
         "threshold",
     )
     # `logit`'s `eps` is the exception that proves the rule: `None` there means
-    # "do not clamp", which is a value of the argument and what PyTorch's
-    # `logit` means by it too, so it has no hidden default to reveal.
+    # "do not clamp", which is a value of the argument, so it has no hidden
+    # default to reveal.
     allowed = {"minitensor.logit", "Tensor.logit", "functional.logit"}
     offenders = []
     for label, function in _every_public_callable():

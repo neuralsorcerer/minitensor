@@ -18,8 +18,8 @@ against NumPy's particular arrangement. `argpartition` is pinned the only way
 it can be: the positions it reports must select the values `partition` gives.
 
 `lexsort` is the other half: one stable sort per key, least significant first,
-so the last key is the primary one. That is NumPy's convention and the one that
-reads correctly when the keys are a table's columns.
+so the last key is the primary one, the order that reads correctly when the
+keys are a table's columns.
 """
 
 from __future__ import annotations

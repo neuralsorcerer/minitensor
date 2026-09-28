@@ -221,7 +221,7 @@ def test_a_single_spatial_axis_works():
     )
 
 
-def test_three_spatial_axes_work_where_torch_stops_at_two():
+def test_three_spatial_axes_work():
     values = _t(RNG.normal(size=(1, 2, 4, 5, 6)))
     columns = F.unfold(values, (2, 2, 2))
     assert tuple(columns.shape) == (1, 2 * 8, 3 * 4 * 5)

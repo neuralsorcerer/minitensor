@@ -10,13 +10,13 @@ Reversing an axis is an index remapping, the same as rolling one: output
 position `i` along a reversed dimension reads input position `size - 1 - i`. It
 was done a dimension at a time through `index_select`, which allocates and
 copies a whole intermediate tensor for each, and left a gradient edge per
-dimension as well. On 4096x1024 float32, against NumPy and against a plain
-contiguous copy of the same tensor as the floor:
+dimension as well. On 4096x1024 float32, against a plain contiguous copy of
+the same tensor as the floor:
 
-                    before     after    NumPy    copy
-    flip dim 1     4.22 ms   1.36 ms   2.27 ms   1.20 ms
-    flip dim 0     2.13 ms   1.27 ms   1.54 ms
-    flip both     11.70 ms   1.26 ms   2.20 ms
+                    before     after     copy
+    flip dim 1     4.22 ms   1.36 ms   1.20 ms
+    flip dim 0     2.13 ms   1.27 ms
+    flip both     11.70 ms   1.26 ms
 
 Flipping both axes now costs what flipping one does, which is the point: the
 work is one pass whatever the dimension count.

@@ -15,8 +15,7 @@ accumulation in `ops::util`.
 
 The same chain is also why it could not vectorize: floating point addition is
 not associative, so the compiler may not split one accumulator into eight
-without being told to. It ran 7.5 times slower than NumPy's `sdot` on the same
-65,536 elements.
+without being told to.
 
 `simd_dot_f32`/`simd_dot_f64` supply the eight (four, for f64) lanes, and
 `accurate_pair_sum` blocks and folds them. The tests below pin the accuracy

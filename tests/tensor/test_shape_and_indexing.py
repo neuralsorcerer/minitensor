@@ -408,9 +408,9 @@ def test_mT_refuses_a_tensor_with_no_matrix_in_it(shape):
 
 
 def test_the_three_transposes_mean_three_different_things():
-    # `t()` is PyTorch's and refuses a batch, `mT` is the array API's and keeps
-    # the batch axes, `T` is NumPy's and reverses everything. A caller reaching
-    # for one of them by name is asking for that one.
+    # `t()` refuses a batch, `mT` keeps the batch axes, `T` reverses
+    # everything. A caller reaching for one of them by name is asking for that
+    # one.
     cube = mt.Tensor(np.arange(24.0).reshape(2, 3, 4), dtype="float64")
     assert tuple(cube.T.shape) == (4, 3, 2)
     assert tuple(cube.mT.shape) == (2, 4, 3)
@@ -1153,8 +1153,7 @@ def test_index_select_wraps_from_one_outer_position_to_the_next(shape, dim):
 
 
 # A scalar has no axes to name, but flattening one still means something: the
-# single value as a length-one vector, which is what NumPy's `ravel` and
-# `torch.flatten` both give. `flatten` refused it while `reshape`, `tile`,
+# single value as a length-one vector. `flatten` refused it while `reshape`, `tile`,
 # `unsqueeze` and `atleast_1d` on the same tensor did not, and everything built
 # on `flatten` -- `ravel`, and `repeat_interleave` with no dimension named --
 # inherited the refusal.

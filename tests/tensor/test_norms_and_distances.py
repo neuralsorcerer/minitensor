@@ -19,10 +19,9 @@ to the norm instead would shrink all of them, and the length is asserted to be
 1 to the last few bits.
 
 `pairwise_distance` adds `eps` to the difference, which biases every distance
-upward. That is PyTorch's behaviour and it is kept for compatibility, but the
-reason PyTorch needs it does not hold here: a `p`-norm has no derivative at the
-origin, and where PyTorch would produce NaN, this library's `norm` answers with
-a zero gradient. The test below pins that, because it is what makes `eps=0.0`
+upward. The gradient does not need it: a `p`-norm has no derivative at the
+origin, and where that would produce NaN, this library's `norm` answers with a
+zero gradient. The test below pins that, because it is what makes `eps=0.0`
 -- the true distance -- a safe choice.
 """
 
@@ -157,12 +156,12 @@ def test_eps_biases_the_distance_upward_by_a_known_amount():
 @pytest.mark.parametrize("eps", [1e-6, 0.0])
 @pytest.mark.parametrize("p", [1.0, 2.0, 3.0])
 def test_coincident_rows_have_a_finite_gradient_with_or_without_eps(p, eps):
-    """What makes `eps=0.0` safe here, where in torch it would not be.
+    """What makes `eps=0.0` safe.
 
-    A `p`-norm has no derivative at the origin. PyTorch needs `eps` so that a
-    loss pulling two rows together does not produce NaN at the moment it
-    succeeds; this library's `norm` answers zero for that gradient instead, so
-    the shift is a compatibility default and not a requirement.
+    A `p`-norm has no derivative at the origin, which could make a loss
+    pulling two rows together produce NaN at the moment it succeeds; this
+    library's `norm` answers zero for that gradient instead, so the shift is a
+    default and not a requirement.
     """
 
     same = _t([[1.0, 2.0, 3.0]], requires_grad=True)

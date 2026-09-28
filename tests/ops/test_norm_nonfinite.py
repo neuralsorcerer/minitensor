@@ -27,7 +27,7 @@ the second into the first loses exactly the information the call was for.
 There is nothing to scale by when the maximum magnitude is zero or infinite, so
 one now stands in for it: the accumulation runs unscaled, `inf` survives it, and
 multiplying by one at the end keeps it. A NaN anywhere in the slice still
-poisons the sum and wins over an infinity, which is what NumPy does too.
+poisons the sum and wins over an infinity.
 
 The tests check against NumPy rather than against a hand-written expectation,
 and they keep the overflow guard pinned in the same file, because the two pull

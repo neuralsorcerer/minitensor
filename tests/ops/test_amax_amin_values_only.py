@@ -16,9 +16,6 @@ So a caller who writes `t.max(dim=1)[0]` -- which is the ordinary way to spell
 "row maxima" -- was paying about 7.6x for an index tensor they then dropped.
 The values-only reduction already existed in the engine (`logsumexp` uses it to
 take the column max for stability); it simply had no name in the Python API.
-
-`amax`/`amin` are what NumPy and PyTorch both call this, so the name is not a
-new idea to learn.
 """
 
 from __future__ import annotations

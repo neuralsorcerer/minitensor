@@ -7,10 +7,9 @@
 """`max`/`min` fold over several accumulators, so the lane seams need testing.
 
 A single running `best` makes the compare-and-select a serial dependency chain
-that cannot vectorize; `max` was the one f32 reduction slower than NumPy while
-`sum`, which already split its accumulator, was four times quicker. Splitting
-the fold the same way made f32 `max` 6.4x faster (0.807ms -> 0.126ms over 2M
-elements) and turned a 1.96x deficit against NumPy into a 3.3x lead.
+that cannot vectorize; `max` lagged far behind `sum`, which already split its
+accumulator. Splitting the fold the same way made f32 `max` 6.4x faster
+(0.807ms -> 0.126ms over 2M elements).
 
 The risk that buys is a class of off-by-one bug the old loop could not have:
 lengths that do not divide the lane count leave a remainder handled by separate

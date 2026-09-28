@@ -54,8 +54,8 @@ def test_nonzero_matches_numpy(shape):
 
 @pytest.mark.parametrize("shape", SHAPES)
 def test_the_indices_read_back_to_the_nonzero_values(shape):
-    """The property that makes the result useful, checked without reference to
-    NumPy's ordering: indexing the input by the returned rows must give exactly
+    """The property that makes the result useful, checked without a reference
+    implementation: indexing the input by the returned rows must give exactly
     the non-zero elements, in the order they appear."""
     values = _sparse(shape, seed=3)
     indices = mt.Tensor(values, dtype="float64").nonzero().numpy()

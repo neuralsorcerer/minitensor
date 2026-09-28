@@ -21,9 +21,9 @@ copied five times has five gradients arriving at it, and dropping four would be
 a silent under-count of exactly the elements padding touched.
 
 `padding` is flat and innermost-axis-first -- `[left, right]` pads the last
-axis -- which is PyTorch's convention and the reverse of NumPy's. The reference
-below converts explicitly rather than relying on either, because getting that
-backwards produces a plausible-looking tensor of the wrong shape.
+axis, the reverse of a shape's order. The reference below converts explicitly,
+because getting that backwards produces a plausible-looking tensor of the
+wrong shape.
 """
 
 from __future__ import annotations

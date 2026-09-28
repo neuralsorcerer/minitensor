@@ -61,7 +61,7 @@ def test_division_by_zero_follows_ieee_754(dtype):
     np.testing.assert_array_equal(broadcast, expected)
 
 
-def test_boolean_arithmetic_matches_pytorch():
+def test_boolean_arithmetic_stays_boolean_where_it_can():
     a = mt.Tensor([True, False], dtype="bool")
     b = mt.Tensor([False, True], dtype="bool")
 
@@ -317,7 +317,7 @@ def test_tensor_pow_promotes_a_mixed_pair_like_the_other_arithmetic():
 @pytest.mark.parametrize("dtype", ["int32", "int64"])
 def test_an_integer_power_is_the_true_power_modulo_the_width(dtype):
     # An integer power is a chain of multiplications and each one wraps, so
-    # the answer is exact modulo 2**N -- which is what NumPy gives too. The
+    # the answer is exact modulo 2**N. The
     # 2**40 exponent is the case a `u32` exponent would answer `1` for.
     info = np.iinfo(dtype)
     base = np.array([2, 3, -2, 7, 10, 0, 1, -1], dtype=dtype)
@@ -333,7 +333,7 @@ def test_an_integer_power_is_the_true_power_modulo_the_width(dtype):
 @pytest.mark.parametrize("dtype", ["int32", "int64"])
 def test_an_integer_cannot_be_raised_to_a_negative_power(dtype):
     # There is no integer answer -- `2 ** -1` is a half -- so it is refused
-    # rather than rounded, which is where NumPy and PyTorch both stop.
+    # rather than rounded.
     base = mt.Tensor(np.array([2, 3], dtype=dtype), dtype=dtype)
     exponent = mt.Tensor(np.array([1, -1], dtype=dtype), dtype=dtype)
     with pytest.raises(ValueError, match="negative power"):
@@ -810,9 +810,8 @@ def test_reciprocal_backward_propagates_gradients():
 
 @pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
 def test_reciprocal_widens_an_integer(dtype, widened):
-    # `1/2` is a half, so the argument widens. NumPy reads this as integer
-    # division instead and answers 0 for every magnitude above 1; PyTorch
-    # widens, and so does the rest of this family.
+    # `1/2` is a half, so the argument widens, as the rest of this family
+    # does. Integer division would answer 0 for every magnitude above 1.
     values = np.array([1, 2, 4], dtype=dtype)
     result = mt.Tensor(values, dtype=dtype).reciprocal()
     assert result.dtype == widened
@@ -928,8 +927,8 @@ def test_frac_of_a_non_finite_input_is_nan():
 @pytest.mark.parametrize("dtype", ["int32", "int64"])
 def test_rounding_an_integer_leaves_it_alone(name, dtype):
     # An integer is already whole, so these are the identity on one rather
-    # than an error -- which is what NumPy answers, and what `relu`, `abs` and
-    # `sign` already did here. The dtype stays: the answer is an integer.
+    # than an error -- which is what `relu`, `abs` and `sign` already did
+    # here. The dtype stays: the answer is an integer.
     values = np.array([-3, -1, 0, 2, 5], dtype=dtype)
     result = getattr(mt.Tensor(values, dtype=dtype), name)()
     assert result.dtype == dtype

@@ -4,7 +4,7 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The kernel every reduction bottoms out in has to fold like NumPy's.
+"""The kernel every reduction bottoms out in has to fold pairwise.
 
 `simd_sum_f32` walked a slice with eight accumulator lanes. The lanes are what
 let it vectorize, and they divide the error by eight -- but eight lanes over

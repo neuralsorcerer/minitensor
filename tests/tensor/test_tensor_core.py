@@ -1541,7 +1541,7 @@ def test_item_returns_native_python_scalar():
     assert value == 7
 
 
-def test_item_error_matches_pytorch_message():
+def test_item_error_names_the_element_count():
     tensor = mt.Tensor([1.0, 2.0, 3.0])
 
     with pytest.raises(RuntimeError) as exc_info:

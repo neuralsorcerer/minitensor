@@ -396,8 +396,8 @@ def test_constant_data_is_opened_out_around_its_value(value, bins):
 
 
 def test_constant_data_still_produces_bins():
-    """A range of no width has to be opened somehow, and NumPy's rule is half a
-    unit either side -- the only one that puts the sample somewhere sensible."""
+    """A range of no width has to be opened somehow: half a unit either side,
+    which puts the sample in the middle bin."""
     data = np.array([2.0, 2.0, 2.0])
     counts, edges = mt.histogram(_t(data), 3)
     want_counts, want_edges = np.histogram(data, bins=3)
@@ -486,7 +486,7 @@ def test_histc_with_explicit_bounds_drops_what_is_outside():
 
 
 def test_histc_spans_the_data_when_the_bounds_are_equal():
-    """PyTorch's rule, and the reason `histc` is not simply `histogram`: equal
+    """The reason `histc` is not simply `histogram`: equal
     bounds mean "use the data's own range" rather than "an empty range"."""
     data = np.random.default_rng(11).standard_normal(300)
     got = mt.histc(_t(data), 10).numpy()

@@ -19,8 +19,8 @@ is masked where the target is zero, which also covers a zero target sitting
 opposite a zero prediction, where the log difference is `-inf - -inf`.
 
 A separate defect, fixed at the same time: this takes *probabilities*, and its
-docstring said log-probabilities. Passing what the docstring asked for -- which
-is also what PyTorch's `kl_div` takes -- gave `inf`, silently. The engine, its
+docstring said log-probabilities. Passing what the docstring asked for gave
+`inf`, silently. The engine, its
 Rust tests, the Python tests and the backward all agree on probabilities, so
 the documentation was the thing that was wrong; the cases below pin the
 convention so it cannot drift again.
@@ -98,7 +98,7 @@ def test_nan_in_the_target_still_propagates():
 
 @pytest.mark.parametrize("reduction", ["sum", "mean", "batchmean", "none"])
 def test_the_convention_is_probabilities_not_log_probabilities(reduction):
-    """Both arguments are probabilities. If this ever moves to PyTorch's
+    """Both arguments are probabilities. If this ever moves to a
     log-probability convention it has to move deliberately, not by drift."""
     rng = np.random.default_rng(5)
     prediction = rng.dirichlet(np.ones(6), size=8)
