@@ -3587,13 +3587,18 @@ appended for the backward direction of a bidirectional stack. `Sequential`
 prefixes each child with its index (`0.weight`, `2.bias`), recursing so a
 nested layer keeps its own names.
 
-`load_state_dict` requires every one of those names to be present and shaped
-like the slot it lands in, and raises naming all the problems at once if not:
+`load_state_dict` requires every one of those names to be present, shaped like
+the slot it lands in and of its dtype, and raises naming all the problems at
+once if not:
 
 ```text
 load_state_dict: missing from the state dict: 0.bias; wrong shape: 1.weight
-(expected [5], got [3])
+(expected [5], got [3]); wrong dtype: 2.weight (expected float32, got float64)
 ```
+
+A dtype is not converted on the way in, because that would choose the
+precision for you: to load a float64 checkpoint into a float32 model, build the
+model in float64, or cast the state dict's tensors first.
 
 Nothing is written unless every entry checks out, so a load that raises leaves
 the module exactly as it was — a caller that catches the error and falls back

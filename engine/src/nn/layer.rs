@@ -254,9 +254,10 @@ pub trait Module: Layer {
 
     /// Load state dictionary
     ///
-    /// Every entry the layer expects has to be present and shaped like the slot
-    /// it lands in. Both checks used to be `if let Ok(..)`, which discarded the
-    /// error, and each failure was silent in its own way:
+    /// Every entry the layer expects has to be present, shaped like the slot
+    /// it lands in and of its dtype. The first two checks used to be
+    /// `if let Ok(..)`, which discarded the error, and each failure was silent
+    /// in its own way:
     ///
     /// - a name the state dict did not carry -- a renamed parameter, a
     ///   truncated checkpoint, an empty state dict -- left that slot at whatever
@@ -267,7 +268,12 @@ pub trait Module: Layer {
     ///   reported success and the first forward pass failed on a shape it never
     ///   mentions loading, pointing at the wrong place entirely.
     ///
-    /// Both now collect and report, so one message names every problem rather
+    /// A tensor of the right shape and another dtype -- a float64 checkpoint
+    /// loaded into a float32 layer -- changed the layer's dtype in place, and
+    /// the first forward pass then refused its float32 input. Converting on the
+    /// way in would decide the precision for the caller, so it is reported too.
+    ///
+    /// All three collect and report, so one message names every problem rather
     /// than making the caller rediscover them one at a time.
     ///
     /// Checking happens before anything is written, so a load that fails leaves
@@ -280,6 +286,7 @@ pub trait Module: Layer {
     ) -> Result<()> {
         let mut missing: Vec<String> = Vec::new();
         let mut mismatched: Vec<String> = Vec::new();
+        let mut mistyped: Vec<String> = Vec::new();
 
         // Pass one: look every slot up and compare shapes, through the shared
         // accessors so nothing is modified. `named_*` and `named_*_mut` are
@@ -291,12 +298,26 @@ pub trait Module: Layer {
                 for (i, param) in self.parameters().iter().enumerate() {
                     let name = format!("param_{}", i);
                     let loaded = state_dict.load_parameter(&name, device);
-                    check_loadable(name, param, loaded, &mut missing, &mut mismatched);
+                    check_loadable(
+                        name,
+                        param,
+                        loaded,
+                        &mut missing,
+                        &mut mismatched,
+                        &mut mistyped,
+                    );
                 }
             } else {
                 for (name, param) in named {
                     let loaded = state_dict.load_parameter(&name, device);
-                    check_loadable(name, param, loaded, &mut missing, &mut mismatched);
+                    check_loadable(
+                        name,
+                        param,
+                        loaded,
+                        &mut missing,
+                        &mut mismatched,
+                        &mut mistyped,
+                    );
                 }
             }
         }
@@ -306,36 +327,51 @@ pub trait Module: Layer {
                 for (i, buffer) in self.buffers().iter().enumerate() {
                     let name = format!("buffer_{}", i);
                     let loaded = state_dict.load_buffer(&name, device);
-                    check_loadable(name, buffer, loaded, &mut missing, &mut mismatched);
+                    check_loadable(
+                        name,
+                        buffer,
+                        loaded,
+                        &mut missing,
+                        &mut mismatched,
+                        &mut mistyped,
+                    );
                 }
             } else {
                 for (name, buffer) in named {
                     let loaded = state_dict.load_buffer(&name, device);
-                    check_loadable(name, buffer, loaded, &mut missing, &mut mismatched);
+                    check_loadable(
+                        name,
+                        buffer,
+                        loaded,
+                        &mut missing,
+                        &mut mismatched,
+                        &mut mistyped,
+                    );
                 }
             }
         }
 
-        if !missing.is_empty() || !mismatched.is_empty() {
-            missing.sort();
-            mismatched.sort();
-            let mut report = String::from("load_state_dict: ");
-            if !missing.is_empty() {
-                report.push_str(&format!(
-                    "missing from the state dict: {}",
-                    missing.join(", ")
-                ));
-            }
-            if !mismatched.is_empty() {
-                if !missing.is_empty() {
-                    report.push_str("; ");
-                }
-                report.push_str(&format!("wrong shape: {}", mismatched.join(", ")));
-            }
-            return Err(MinitensorError::invalid_operation(report));
+        let problems: Vec<String> = [
+            ("missing from the state dict", missing),
+            ("wrong shape", mismatched),
+            ("wrong dtype", mistyped),
+        ]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(kind, mut names)| {
+            names.sort();
+            format!("{kind}: {}", names.join(", "))
+        })
+        .collect();
+        if !problems.is_empty() {
+            return Err(MinitensorError::invalid_operation(format!(
+                "load_state_dict: {}",
+                problems.join("; ")
+            )));
         }
 
-        // Pass two: assign. Every lookup above succeeded at the right shape, so
+        // Pass two: assign. Every lookup above succeeded at the right shape and
+        // dtype, so
         // a failure here would mean the two accessors disagree.
         let mut named_params = self.named_parameters_mut();
         if named_params.is_empty() {
@@ -375,21 +411,29 @@ pub trait Module: Layer {
     }
 }
 
-/// Record why `loaded` cannot go into `slot`, if it cannot.
+/// Record why `loaded` cannot go into `slot`, if it cannot. A wrong shape is
+/// reported before a wrong dtype, since it is the one that cannot be fixed by
+/// a conversion.
 fn check_loadable(
     name: String,
     slot: &Tensor,
     loaded: Result<Tensor>,
     missing: &mut Vec<String>,
     mismatched: &mut Vec<String>,
+    mistyped: &mut Vec<String>,
 ) {
     match loaded {
-        Ok(tensor) if tensor.shape().dims() == slot.shape().dims() => {}
-        Ok(tensor) => mismatched.push(format!(
+        Ok(tensor) if tensor.shape().dims() != slot.shape().dims() => mismatched.push(format!(
             "{name} (expected {:?}, got {:?})",
             slot.shape().dims(),
             tensor.shape().dims()
         )),
+        Ok(tensor) if tensor.dtype() != slot.dtype() => mistyped.push(format!(
+            "{name} (expected {}, got {})",
+            slot.dtype(),
+            tensor.dtype()
+        )),
+        Ok(_) => {}
         Err(_) => missing.push(name),
     }
 }

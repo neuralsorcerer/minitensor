@@ -68,6 +68,10 @@ impl PyTensor {
     /// Only a float tensor can require a gradient; asking it of an integer or
     /// bool one raises, rather than returning a tensor that is tracked by some
     /// operations and not others.
+    ///
+    /// On the result of an operation, `requires_grad_(False)` detaches it in
+    /// place: operations on it afterwards are not recorded, so no gradient
+    /// reaches what produced it through them.
     #[pyo3(signature = (requires_grad=true))]
     pub fn requires_grad_<'py>(
         mut slf: PyRefMut<'py, Self>,

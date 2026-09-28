@@ -23,7 +23,13 @@ throws the error away, and each failure was silent in a different way:
 
       Shape mismatch: expected [7, 4], got [2, 4]
 
-Both are checked now, before anything is written, so a rejected load leaves the
+- **The right shape in another dtype** -- a float64 checkpoint loaded into a
+  float32 layer -- replaced the slot too, turning the layer float64 in place.
+  The next forward pass refused its float32 input with a dtype error that
+  again says nothing about loading. Converting on the way in would choose the
+  precision for the caller, so this is reported like the other two.
+
+All three are checked now, before anything is written, so a rejected load leaves the
 layer exactly as it was. That matters for the caller who catches the error and
 falls back: they get the model they had, not one holding half a checkpoint.
 
@@ -61,10 +67,10 @@ def _snapshot(module):
     return {name: tensor.numpy().copy() for name, tensor in module.state_dict().items()}
 
 
-def _state(**tensors):
+def _state(dtype="float32", **tensors):
     state = S.StateDict()
     for name, array in tensors.items():
-        state.add_parameter(name, mt.Tensor(np.asarray(array, np.float32)))
+        state.add_parameter(name, mt.from_numpy(np.asarray(array, dtype)))
     return state
 
 
@@ -169,6 +175,62 @@ def test_a_nested_mismatch_is_named_by_its_path():
     assert "1." in str(excinfo.value), str(excinfo.value)
 
 
+def test_a_wrong_dtype_is_reported_with_both_dtypes():
+    with pytest.raises(Exception) as excinfo:
+        _target().load_state_dict(
+            _state("float64", weight=np.zeros((3, 4)), bias=np.zeros(3)),
+        )
+    message = str(excinfo.value)
+    assert "wrong dtype" in message
+    assert "bias (expected float32, got float64)" in message
+    assert "weight (expected float32, got float64)" in message
+
+
+def test_a_float64_checkpoint_no_longer_reaches_the_forward_pass(tmp_path):
+    """Through a file, the way it happens: a float64 model saved and loaded
+    into a float32 one. The load used to succeed and turn the layer float64."""
+    path = str(tmp_path / "wide.json")
+    nn.DenseLayer(4, 3, dtype="float64").save(path)
+    target = _target()
+
+    with pytest.raises(Exception, match="wrong dtype"):
+        target.load_state_dict(nn.DenseLayer.load_state_from(path))
+
+    out = target(mt.Tensor(np.ones((2, 4), np.float32)))
+    assert out.dtype == "float32"
+
+
+def test_integer_running_statistics_are_refused():
+    norm = nn.BatchNorm1d(3)
+    state = norm.state_dict()
+    integral = S.StateDict()
+    for name in state.parameter_names():
+        integral.add_parameter(name, state.get_parameter(name))
+    for name in state.buffer_names():
+        integral.add_buffer(name, mt.from_numpy(np.zeros(3, np.int64)))
+
+    with pytest.raises(Exception) as excinfo:
+        norm.load_state_dict(integral)
+    message = str(excinfo.value)
+    assert "running_mean (expected float32, got int64)" in message
+    assert "running_var (expected float32, got int64)" in message
+
+
+def test_every_kind_of_problem_is_reported_together():
+    target = nn.Sequential([nn.DenseLayer(4, 3), nn.DenseLayer(3, 2)])
+    renamed = S.StateDict()
+    renamed.add_parameter("0.weight", mt.from_numpy(np.zeros((7, 9), np.float32)))
+    renamed.add_parameter("0.bias", mt.from_numpy(np.zeros(3, np.float64)))
+    renamed.add_parameter("1.weight", mt.from_numpy(np.zeros((2, 3), np.float32)))
+
+    with pytest.raises(Exception) as excinfo:
+        target.load_state_dict(renamed)
+    message = str(excinfo.value)
+    assert "missing from the state dict: 1.bias" in message
+    assert "wrong shape: 0.weight" in message
+    assert "wrong dtype: 0.bias" in message
+
+
 # --- a rejected load changes nothing ----------------------------------------
 
 
@@ -179,8 +241,9 @@ def test_a_nested_mismatch_is_named_by_its_path():
         lambda: _state(weight=np.zeros((3, 4))),
         lambda: _state(weight=np.zeros((7, 9)), bias=np.zeros(9)),
         lambda: _state(wieght=np.zeros((3, 4)), bias=np.zeros(3)),
+        lambda: _state("float64", weight=np.zeros((3, 4)), bias=np.zeros(3)),
     ],
-    ids=["empty", "half", "wrong_shape", "misspelled"],
+    ids=["empty", "half", "wrong_shape", "misspelled", "wrong_dtype"],
 )
 def test_a_rejected_load_leaves_the_module_alone(build):
     """`weight` sorts before `bias` in neither order reliably, so a load that
