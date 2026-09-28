@@ -3216,6 +3216,9 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
   parameter's storage and identity, so a step through it is the layer's step,
   but its `requires_grad` flag is its own: setting it does not freeze the
   layer.
+- `layer.train(mode=True)` and `layer.eval()` set the mode and return the
+  module; `layer.training` reads it back. A module starts in training mode,
+  and setting the mode of a `Sequential` sets it on everything inside.
 - `layer.named_parameters()` returns `(name, handle)` pairs in the order
   `parameters()` gives, under the names `state_dict()` uses -- `1.0.bias` for
   the bias of the first layer of a `Sequential`'s second part.

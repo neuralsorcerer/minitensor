@@ -1002,6 +1002,10 @@ struct ModuleCell {
     /// object it was added as, which is what indexing the `Sequential`
     /// returns.
     children: std::sync::Mutex<Vec<Child>>,
+    /// Whether the module is in training mode. Only some layers behave
+    /// differently in the two modes and keep a flag of their own, so the
+    /// mode of any module is kept here, where every module has one.
+    training: std::sync::atomic::AtomicBool,
 }
 
 struct Child {
@@ -1021,11 +1025,21 @@ impl ModuleCell {
             tree: std::sync::Mutex::new(Arc::new(std::sync::atomic::AtomicBool::new(false))),
             parent: std::sync::Mutex::new(std::sync::Weak::new()),
             children: std::sync::Mutex::new(Vec::new()),
+            training: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
     fn tree(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.tree.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_training(&self, training: bool) {
+        self.training
+            .store(training, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn in_forward(&self) -> bool {
@@ -1241,10 +1255,12 @@ impl Layer for SharedChild {
     }
 
     fn train(&mut self) {
+        self.0.set_training(true);
         self.layer_mut().train()
     }
 
     fn eval(&mut self) {
+        self.0.set_training(false);
         self.layer_mut().eval()
     }
 
@@ -1461,15 +1477,37 @@ impl PyModule {
     }
 
     /// Set module to training mode
-    fn train(&mut self) -> PyResult<()> {
-        self.inner.get_mut()?.as_module_mut().train();
-        Ok(())
+    ///
+    /// `train(False)` is `eval()`. Returns the module, so a call can end a
+    /// chain: `model = build().train()`.
+    #[pyo3(signature = (mode=true))]
+    fn train(slf: Bound<'_, Self>, mode: bool) -> PyResult<Bound<'_, Self>> {
+        {
+            let mut this = slf.borrow_mut();
+            let layer = this.inner.get_mut()?.as_module_mut();
+            if mode {
+                layer.train()
+            } else {
+                layer.eval()
+            }
+            this.inner.0.set_training(mode);
+        }
+        Ok(slf)
     }
 
     /// Set module to evaluation mode
-    fn eval(&mut self) -> PyResult<()> {
-        self.inner.get_mut()?.as_module_mut().eval();
-        Ok(())
+    ///
+    /// Returns the module, as `train` does.
+    fn eval(slf: Bound<'_, Self>) -> PyResult<Bound<'_, Self>> {
+        Self::train(slf, false)
+    }
+
+    /// Whether the module is in training mode: `True` from construction
+    /// until `eval()`, and again after `train()`. Setting either on a
+    /// `Sequential` sets it on everything inside, which reads it back here.
+    #[getter]
+    fn training(&self) -> bool {
+        self.inner.0.is_training()
     }
 
     /// Get number of parameters
@@ -1849,6 +1887,7 @@ impl PyModule {
                 )?);
             }
             copy.push_children(layers)?;
+            copy.inner.0.set_training(self.inner.0.is_training());
             return Ok(copy);
         }
         fn independent(tensor: &engine::tensor::Tensor) -> engine::tensor::Tensor {
@@ -1872,9 +1911,11 @@ impl PyModule {
         for tensor in inner.as_layer_mut().buffers_mut() {
             *tensor = independent(tensor);
         }
-        Ok(Self {
+        let copy = Self {
             inner: SharedModule::new(inner),
-        })
+        };
+        copy.inner.0.set_training(self.inner.0.is_training());
+        Ok(copy)
     }
 
     pub fn from_dense_layer(dense_layer: DenseLayer) -> Self {
