@@ -1389,6 +1389,32 @@ impl PyModule {
             .collect())
     }
 
+    /// `(name, parameter)` for every parameter, in the order `parameters()`
+    /// gives them and under the names `state_dict()` uses -- `0.weight` for
+    /// the weight of a `Sequential`'s first layer -- so a part can be found,
+    /// frozen or inspected by name. Each is a handle, as `parameters()`
+    /// returns.
+    fn named_parameters(&self) -> PyResult<Vec<(String, PyTensor)>> {
+        let layer = self.inner.get()?.as_layer();
+        let names: std::collections::HashMap<_, _> = layer
+            .named_parameters()
+            .into_iter()
+            .map(|(name, tensor)| (tensor.id(), name))
+            .collect();
+        Ok(layer
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(index, tensor)| {
+                let name = names
+                    .get(&tensor.id())
+                    .cloned()
+                    .unwrap_or_else(|| format!("param_{index}"));
+                (name, PyTensor::from_tensor(tensor.clone()))
+            })
+            .collect())
+    }
+
     /// Clear the gradient of every trainable tensor this module owns.
     ///
     /// The reference has promised this since the module surface was written,

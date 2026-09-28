@@ -3216,6 +3216,9 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
   parameter's storage and identity, so a step through it is the layer's step,
   but its `requires_grad` flag is its own: setting it does not freeze the
   layer.
+- `layer.named_parameters()` returns `(name, handle)` pairs in the order
+  `parameters()` gives, under the names `state_dict()` uses -- `1.0.bias` for
+  the bias of the first layer of a `Sequential`'s second part.
 - `layer.requires_grad_(False)` freezes the module and returns it;
   `layer.requires_grad_()` unfreezes it. A frozen module records nothing for
   its parameters, a backward pass leaves them without a gradient, and an
