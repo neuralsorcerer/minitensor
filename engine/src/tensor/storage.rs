@@ -413,6 +413,16 @@ impl TensorData {
     /// data, and that access is externally synchronized (in practice: the
     /// Python GIL serializes optimizer steps, and gradient functions only
     /// read their saved operands before the step runs).
+    ///
+    /// The GIL leaves one window open. NumPy releases it inside the calls a
+    /// provider makes (`ops::provider`), and the float64 ufunc path releases it
+    /// to split a call across threads, so an operand NumPy is reading can
+    /// overlap a shared write from another Python thread -- an optimizer step
+    /// running beside a forward pass, as Hogwild-style training does. NumPy
+    /// then reads a mix of old and new element values, as PyTorch would in
+    /// that race. It never reads freed memory: its own handle keeps the buffer
+    /// alive, and a shared write never reallocates it. No engine kernel is in
+    /// that window; they all run with the GIL held.
     #[inline(always)]
     unsafe fn data_ptr_shared(&self) -> *mut u8 {
         // A transient `&mut TensorBuffer` scoped to this expression is the
