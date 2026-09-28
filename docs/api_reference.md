@@ -3199,7 +3199,20 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 
 ### Common utilities
 
-- `layer.parameters()` returns tensors for optimizers.
+- `layer.parameters()` returns handles for optimizers. Each shares its
+  parameter's storage and identity, so a step through it is the layer's step,
+  but its `requires_grad` flag is its own: setting it does not freeze the
+  layer.
+- `layer.requires_grad_(False)` freezes the module and returns it;
+  `layer.requires_grad_()` unfreezes it. A frozen module records nothing for
+  its parameters, a backward pass leaves them without a gradient, and an
+  optimizer holding them steps past them -- weight decay included, so an
+  optimizer built over the whole model can be kept while part of it is
+  frozen, and it trains that part again once unfrozen, even if a checkpoint
+  was loaded into it in between. Gradients still flow through a frozen module to its input, and its
+  buffers still update in training mode; `eval()` is what stops those.
+  Freeze a layer of a `Sequential` before adding it: the `Sequential` takes
+  its own copy of each layer's flags.
 - `layer.zero_grad(set_to_none=False)` clears the gradient of every trainable
   tensor the module owns -- `optimizer.zero_grad()` without an optimizer, for
   zeroing one branch of a model or for a loop that does its own stepping. Both
@@ -3386,7 +3399,10 @@ All optimizer classes share a common interface:
 - `step()` -- apply parameter updates and consume the gradients it applied.
   Gradients belonging to parameters this optimizer does not hold are left
   alone, so several optimizers can step off one backward pass.
-- `zero_grad(set_to_none: bool = False)` -- reset gradients.
+- `zero_grad(set_to_none: bool = False)` -- clear the gradients of the
+  parameters it holds. A parameter without one is left without one, so a
+  parameter the next backward pass does not reach is skipped by `step()`
+  rather than stepped with a zero gradient.
 - `lr` property -- read/write learning rate.
 - `step_count` property -- how many steps have been applied.
 - `state_dict()` / `load_state_dict(state)` -- snapshot and restore the
@@ -3850,9 +3866,10 @@ for _ in range(60):
     optimizer.zero_grad()
     loss = mt.sum(scale.forward([x])[0] ** 2)
     loss.backward()
+    reached = gain.grad is not None
     optimizer.step()
 
-print(gain.grad is not None)
+print(reached)
 print(bool(loss.item() < start / 1000))
 ```
 
@@ -3913,9 +3930,10 @@ for _ in range(40):
     optimizer.zero_grad()
     loss = mt.sum(scale.forward([dense(x)])[0] ** 2)
     loss.backward()
+    reached = gain.grad is not None
     optimizer.step()
 
-print(gain.grad is not None)
+print(reached)
 print(bool(loss.item() < 1e-6))
 ```
 

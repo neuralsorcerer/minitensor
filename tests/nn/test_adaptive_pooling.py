@@ -365,6 +365,7 @@ def test_a_classifier_head_now_takes_any_input_size():
         if first is None:
             first = loss.item()
         loss.backward()
+        reached = [p.grad is not None for p in parameters]
         optimizer.step()
     assert loss.item() < first * 0.7
-    assert all(p.grad is not None for p in parameters)
+    assert all(reached)

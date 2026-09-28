@@ -309,9 +309,10 @@ pub trait Module: Layer {
     /// and updates it through its own handle, so replacing the tensors left an
     /// optimizer built before the load stepping tensors the layer no longer
     /// had: every step succeeded and the model never changed. Writing in place
-    /// keeps each slot's identity, its storage and whether it trains, so every
-    /// handle to a parameter sees the loaded values. That write is refused,
-    /// like any other, while a pending backward pass still needs the old ones.
+    /// keeps each slot's identity and whether it trains, and a parameter's
+    /// storage too, trainable or frozen, so every handle to a parameter sees
+    /// the loaded values. That write is refused, like any other, while a
+    /// pending backward pass still needs the old ones.
     fn load_state_dict(
         &mut self,
         state_dict: &crate::serialization::StateDict,
@@ -329,12 +330,12 @@ pub trait Module: Layer {
                 for (i, param) in self.parameters().iter().enumerate() {
                     let name = format!("param_{}", i);
                     let loaded = state_dict.load_parameter(&name, device);
-                    problems.check(name, param, loaded);
+                    problems.check(name, param, loaded, true);
                 }
             } else {
                 for (name, param) in named {
                     let loaded = state_dict.load_parameter(&name, device);
-                    problems.check(name, param, loaded);
+                    problems.check(name, param, loaded, true);
                 }
             }
         }
@@ -344,12 +345,12 @@ pub trait Module: Layer {
                 for (i, buffer) in self.buffers().iter().enumerate() {
                     let name = format!("buffer_{}", i);
                     let loaded = state_dict.load_buffer(&name, device);
-                    problems.check(name, buffer, loaded);
+                    problems.check(name, buffer, loaded, false);
                 }
             } else {
                 for (name, buffer) in named {
                     let loaded = state_dict.load_buffer(&name, device);
-                    problems.check(name, buffer, loaded);
+                    problems.check(name, buffer, loaded, false);
                 }
             }
         }
@@ -363,13 +364,13 @@ pub trait Module: Layer {
             let mut params = self.parameters_mut();
             for (i, param_ref) in params.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_parameter(&format!("param_{}", i), device) {
-                    write_loaded(param_ref, loaded)?;
+                    write_loaded(param_ref, loaded, true)?;
                 }
             }
         } else {
             for (name, param_ref) in named_params.iter_mut() {
                 if let Ok(loaded) = state_dict.load_parameter(name, device) {
-                    write_loaded(param_ref, loaded)?;
+                    write_loaded(param_ref, loaded, true)?;
                 }
             }
         }
@@ -381,13 +382,13 @@ pub trait Module: Layer {
             let mut bufs = self.buffers_mut();
             for (i, buf_ref) in bufs.iter_mut().enumerate() {
                 if let Ok(loaded) = state_dict.load_buffer(&format!("buffer_{}", i), device) {
-                    write_loaded(buf_ref, loaded)?;
+                    write_loaded(buf_ref, loaded, false)?;
                 }
             }
         } else {
             for (name, buf_ref) in named_buffers.iter_mut() {
                 if let Ok(loaded) = state_dict.load_buffer(name, device) {
-                    write_loaded(buf_ref, loaded)?;
+                    write_loaded(buf_ref, loaded, false)?;
                 }
             }
         }
@@ -399,14 +400,20 @@ pub trait Module: Layer {
 /// Put `loaded`'s values in `slot`.
 ///
 /// Into the slot's own storage when both are on the CPU, which keeps its
-/// identity and every handle to it. A load onto another device moves the
-/// layer there, so that slot is replaced -- keeping its own `requires_grad`,
-/// because a load replaces values, not whether a slot trains: a state dict
-/// built from plain tensors carries no flag, and taking the loaded tensor's
-/// froze every parameter it reached.
-fn write_loaded(slot: &mut Tensor, loaded: Tensor) -> Result<()> {
+/// identity. A parameter is written `through` its storage even while frozen:
+/// an optimizer built before the load holds a handle to that storage, and a
+/// frozen parameter given storage of its own would leave the optimizer
+/// stepping the old one once the parameter was unfrozen. A buffer is stepped
+/// by nothing, so it follows the ordinary copy-on-write rule.
+///
+/// A load onto another device moves the layer there, so that slot is
+/// replaced -- keeping its own `requires_grad`, because a load replaces
+/// values, not whether a slot trains: a state dict built from plain tensors
+/// carries no flag, and taking the loaded tensor's froze every parameter it
+/// reached.
+fn write_loaded(slot: &mut Tensor, loaded: Tensor, through: bool) -> Result<()> {
     if slot.device().is_cpu() && loaded.device() == slot.device() {
-        slot.write_values_from(&loaded)
+        slot.write_values_from(&loaded, through)
     } else {
         *slot = loaded.requires_grad_(slot.requires_grad());
         Ok(())
@@ -428,11 +435,13 @@ impl LoadProblems {
     /// is reported before a wrong dtype, since it is the one that cannot be
     /// fixed by a conversion.
     ///
-    /// A slot a pending backward pass still reads cannot be written without
-    /// changing the gradients that pass will produce, which is the rule every
-    /// in-place write follows; it is checked here so the load is refused
-    /// before anything has been written rather than halfway through.
-    fn check(&mut self, name: String, slot: &Tensor, loaded: Result<Tensor>) {
+    /// A slot a pending backward pass still reads cannot be written in place
+    /// without changing the gradients that pass will produce, which is the
+    /// rule every in-place write follows; it is checked here so the load is
+    /// refused before anything has been written rather than halfway through.
+    /// Written `through` (see [`write_loaded`]), a frozen parameter is written
+    /// in place too, and a pass reads it as an operand all the same.
+    fn check(&mut self, name: String, slot: &Tensor, loaded: Result<Tensor>, through: bool) {
         match loaded {
             Ok(tensor) if tensor.shape().dims() != slot.shape().dims() => {
                 self.mismatched.push(format!(
@@ -447,10 +456,8 @@ impl LoadProblems {
                 tensor.dtype()
             )),
             Ok(_) => {
-                if slot.requires_grad()
-                    && slot.is_leaf()
-                    && crate::autograd::is_consumed_by_live_graph(slot)
-                {
+                let in_place = through || slot.requires_grad();
+                if in_place && slot.is_leaf() && crate::autograd::is_consumed_by_live_graph(slot) {
                     self.in_use.push(name);
                 }
             }

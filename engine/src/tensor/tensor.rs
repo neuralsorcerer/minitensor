@@ -571,6 +571,23 @@ impl Tensor {
         DataMut::Shared(self.data.as_ref())
     }
 
+    /// Mutable access that writes through shared storage whether or not this
+    /// tensor requires a gradient.
+    ///
+    /// For a layer's parameter, which every handle to it -- an optimizer's
+    /// among them -- has to keep seeing. `data_mut` gives a frozen parameter
+    /// storage of its own on its first write, and a handle taken before that
+    /// then updates storage the layer no longer reads once it is unfrozen.
+    /// The caller upholds [`DataMut`]'s contract, including that no pending
+    /// backward pass reads the old values.
+    pub(crate) fn data_mut_through(&mut self) -> DataMut<'_> {
+        debug_assert!(self.grad_fn.is_none(), "only a leaf is written through");
+        if Arc::get_mut(&mut self.data).is_some() {
+            return DataMut::Unique(Arc::get_mut(&mut self.data).expect("uniqueness just checked"));
+        }
+        DataMut::Shared(self.data.as_ref())
+    }
+
     /// Create a deep copy of the tensor data while preserving autograd history.
     #[inline]
     pub fn deep_clone(&self) -> Result<Self> {
@@ -744,6 +761,13 @@ impl Tensor {
     /// tensor and its entry in the global gradient map. (Earlier versions
     /// wiped every gradient on the thread, so zeroing one tensor silently
     /// cleared unrelated models' gradients.)
+    ///
+    /// A gradient that exists is zeroed; one that does not is not created.
+    /// An optimizer skips a parameter with no gradient and applies one it
+    /// finds, so a zero made here for a parameter the next backward pass never
+    /// reached -- a frozen layer, an unused branch -- was applied as if that
+    /// pass had produced it, and weight decay shrank a parameter that took no
+    /// part in the step.
     #[inline(always)]
     pub fn zero_grad(&mut self, set_to_none: bool) {
         autograd::clear_gradient(self);
@@ -752,42 +776,18 @@ impl Tensor {
             return;
         }
 
-        // If gradient exists, zero it in place
-        if let Some(g) = self.grad_mut() {
-            match g.dtype() {
-                DataType::Float32 => {
-                    if let Some(slice) = g.data_mut().as_f32_slice_mut() {
-                        slice.fill(0.0);
-                    }
-                }
-                DataType::Float64 => {
-                    if let Some(slice) = g.data_mut().as_f64_slice_mut() {
-                        slice.fill(0.0);
-                    }
-                }
-                DataType::Int32 => {
-                    if let Some(slice) = g.data_mut().as_i32_slice_mut() {
-                        slice.fill(0);
-                    }
-                }
-                DataType::Int64 => {
-                    if let Some(slice) = g.data_mut().as_i64_slice_mut() {
-                        slice.fill(0);
-                    }
-                }
-                DataType::Bool => {
-                    if let Some(slice) = g.data_mut().as_bool_slice_mut() {
-                        slice.fill(false);
-                    }
-                }
-            }
-        } else if self.requires_grad {
-            // If gradient doesn't exist but is required, create a zero tensor
-            let zero = Tensor::zeros(self.shape.clone(), self.dtype, self.device, false);
-            self.grad = Some(Arc::new(zero));
-        } else {
-            self.grad = None;
-        }
+        // Replaced by zeros rather than zeroed in place, so anything else
+        // holding the old gradient keeps the values it had.
+        let Some(existing) = &self.grad else {
+            return;
+        };
+        let zeros = Tensor::zeros(
+            existing.shape.clone(),
+            existing.dtype,
+            existing.device,
+            false,
+        );
+        self.grad = Some(Arc::new(zeros));
     }
 
     /// Check if this tensor has a gradient
@@ -3160,7 +3160,7 @@ impl Tensor {
 
     pub fn copy_(&mut self, source: &Tensor) -> Result<()> {
         self.ensure_not_consumed_by_graph("copy_")?;
-        self.write_values_from(source)?;
+        self.write_values_from(source, false)?;
         self.refresh_autograd_metadata();
         if self.requires_grad {
             autograd::add_to_graph(self, None)?;
@@ -3175,7 +3175,11 @@ impl Tensor {
     /// identity, and a new one would leave it stepping a tensor the layer no
     /// longer holds. The caller is responsible for the check `copy_` makes
     /// first, that no pending backward pass still reads the old values.
-    pub(crate) fn write_values_from(&mut self, source: &Tensor) -> Result<()> {
+    ///
+    /// `through` writes into shared storage even when this tensor does not
+    /// require a gradient (see [`Self::data_mut_through`]); otherwise the
+    /// write follows `data_mut`.
+    pub(crate) fn write_values_from(&mut self, source: &Tensor, through: bool) -> Result<()> {
         if self.shape != *source.shape() {
             return Err(MinitensorError::invalid_argument(format!(
                 "copy_ expected source with shape {:?}, but received {:?}",
@@ -3225,7 +3229,11 @@ impl Tensor {
 
         let dtype = self.dtype;
         {
-            let dst_data = self.data_mut();
+            let dst_data = if through {
+                self.data_mut_through()
+            } else {
+                self.data_mut()
+            };
             match dtype {
                 DataType::Float32 => {
                     let dst = dst_data.as_f32_slice_mut().ok_or_else(|| {

@@ -1057,7 +1057,13 @@ impl PyModule {
         self.forward(input)
     }
 
-    /// Get all parameters of the module
+    /// Handles to every parameter of the module.
+    ///
+    /// Each handle shares its parameter's storage and identity, so an update
+    /// made through it -- an optimizer's step -- is the module's update. Its
+    /// `requires_grad` flag is the handle's own, though: setting it changes
+    /// what that handle does, not whether the module trains. Freeze or
+    /// unfreeze the module itself with `requires_grad_`.
     fn parameters(&self) -> Vec<PyTensor> {
         self.inner
             .as_layer()
@@ -1080,6 +1086,26 @@ impl PyModule {
             let mut owned = parameter.clone();
             owned.zero_grad(set_to_none);
         }
+    }
+
+    /// Set whether every parameter of this module takes a gradient, and
+    /// return the module.
+    ///
+    /// `requires_grad_(False)` freezes it: a forward pass records nothing for
+    /// its parameters, a backward pass leaves them without a gradient, and an
+    /// optimizer holding them steps past them. `requires_grad_()` makes it
+    /// trainable again. The parameters keep their identity and storage, so an
+    /// optimizer built before the change still reaches them after it.
+    ///
+    /// This is the way to freeze: the handles `parameters()` returns carry
+    /// flags of their own, and setting one does not reach the module. Buffers
+    /// never take a gradient and are left alone.
+    #[pyo3(signature = (requires_grad=true))]
+    fn requires_grad_<'py>(slf: Bound<'py, Self>, requires_grad: bool) -> Bound<'py, Self> {
+        for parameter in slf.borrow_mut().inner.as_layer_mut().parameters_mut() {
+            *parameter = parameter.clone().requires_grad_(requires_grad);
+        }
+        slf
     }
 
     /// Set module to training mode

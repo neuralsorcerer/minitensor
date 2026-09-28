@@ -98,9 +98,10 @@ def test_a_custom_layer_trains_alongside_a_built_in_one():
         if step == 0:
             first = loss.item()
         loss.backward()
+        reached = gain.grad is not None
         optimizer.step()
 
-    assert gain.grad is not None, "gradient never reached the custom parameter"
+    assert reached, "gradient never reached the custom parameter"
     assert loss.item() < first / 1000
     mt.clear_autograd_graph()
 

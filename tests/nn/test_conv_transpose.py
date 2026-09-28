@@ -540,11 +540,10 @@ def test_a_decoder_can_now_be_built_and_trained():
         if first is None:
             first = loss.item()
         loss.backward()
+        reached = [p.grad is not None for p in parameters]
         optimizer.step()
     assert loss.item() < first * 0.7, "the decoder has to actually learn"
-    assert all(
-        p.grad is not None for p in parameters
-    ), "every parameter gets a gradient"
+    assert all(reached), "every parameter gets a gradient"
 
 
 def test_an_encoder_decoder_round_trips_the_shape():
