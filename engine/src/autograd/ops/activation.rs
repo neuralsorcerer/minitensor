@@ -1054,7 +1054,7 @@ pub(crate) fn softmax_backward<T: Float + Send + Sync>(
     );
 }
 /// `log_softmax` backward: `dx = dy - exp(log_y) * sum_k(dy_k)` along `dim`.
-pub(crate) fn log_softmax_backward<T: Float + Send + Sync>(
+pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send + Sync>(
     grad_output: &[T],
     log_y: &[T],
     grad_input: &mut [T],
@@ -1071,6 +1071,18 @@ pub(crate) fn log_softmax_backward<T: Float + Send + Sync>(
         grad_input,
         group,
         |_, go_block, log_block, out_block| {
+            if after == 1 {
+                // Along the last axis a block is one contiguous row, so its
+                // probabilities come from the forward's `exp` kernel -- the
+                // vectorised one for float32 -- in one call, where the loop
+                // below takes a scalar `exp` per element.
+                let sum = go_block.iter().fold(T::zero(), |acc, &g| acc + g);
+                T::exp_shifted_into(log_block, T::zero(), out_block);
+                for (out, &g) in out_block.iter_mut().zip(go_block) {
+                    *out = g - *out * sum;
+                }
+                return;
+            }
             for base in 0..after {
                 let mut sum = T::zero();
                 for k in 0..dim_size {
