@@ -345,3 +345,37 @@ def test_integer_inputs_are_rejected():
         F.soft_margin_loss(ints, ints)
     with pytest.raises(ValueError):
         mt.cosine_similarity(ints.reshape(2, 2), ints.reshape(2, 2))
+
+
+# --- operands are paired element by element, not broadcast ------------------
+
+# A column of predictions against a row of targets used to broadcast into a
+# square, scoring every prediction against every target, and the mean of that
+# came back as the loss: a plausible number and a wrong one.
+COLUMN = _tensor([[0.2], [-0.5], [0.7]])
+ROW = _tensor([1.0, -1.0, 1.0])
+
+MISMATCHED = {
+    "soft_margin_loss": lambda: F.soft_margin_loss(COLUMN, ROW),
+    "poisson_nll_loss": lambda: F.poisson_nll_loss(COLUMN, ROW),
+    "hinge_embedding_loss": lambda: F.hinge_embedding_loss(COLUMN, ROW),
+    "margin_ranking_loss": lambda: F.margin_ranking_loss(COLUMN, ROW, ROW),
+    "triplet_margin_loss": lambda: F.triplet_margin_loss(
+        _tensor(LEFT), _tensor(RIGHT), _tensor(LEFT[:1])
+    ),
+    "cosine_embedding_loss inputs": lambda: F.cosine_embedding_loss(
+        _tensor(LEFT), _tensor(RIGHT[:1]), _tensor(SIGNS)
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(MISMATCHED))
+def test_operands_of_different_shapes_are_refused(name):
+    with pytest.raises(ValueError, match="must have the same shape"):
+        MISMATCHED[name]()
+
+
+@pytest.mark.parametrize("target", [SIGNS.reshape(3, 1), SIGNS[:1], SIGNS[0]])
+def test_cosine_embedding_loss_takes_one_target_per_pair(target):
+    with pytest.raises(ValueError, match=r"target must have shape \[3\]"):
+        F.cosine_embedding_loss(_tensor(LEFT), _tensor(RIGHT), _tensor(target))

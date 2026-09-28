@@ -51,6 +51,29 @@ fn check_operands(name: &str, operands: &[&Tensor]) -> Result<()> {
     Ok(())
 }
 
+/// Rejects operands of a loss whose shapes differ.
+///
+/// Each of these losses pairs its operands element by element, and they were
+/// broadcast into one another instead: an input of shape `(n, 1)` against a
+/// target of `(n,)` became `(n, n)`, every prediction scored against every
+/// target, and the mean of that came back as the loss -- a plausible number,
+/// and a wrong one, with nothing to say so.
+fn check_same_shape(name: &str, operands: &[(&str, &Tensor)]) -> Result<()> {
+    let (first_name, first) = operands[0];
+    for &(other_name, other) in &operands[1..] {
+        if other.shape() != first.shape() {
+            return Err(MinitensorError::invalid_argument(format!(
+                "{name} pairs `{first_name}` and `{other_name}` element by element, \
+                 so they must have the same shape, but `{first_name}` is {:?} and \
+                 `{other_name}` is {:?}",
+                first.shape().dims(),
+                other.shape().dims()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Broadcasts two operands to their common shape, so a reduction over one of
 /// them counts the same elements the product does.
 fn align(lhs: &Tensor, rhs: &Tensor) -> Result<(Tensor, Tensor, Shape)> {
@@ -110,6 +133,10 @@ pub fn margin_ranking_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("margin_ranking_loss", &[x1, x2, target])?;
+    check_same_shape(
+        "margin_ranking_loss",
+        &[("input1", x1), ("input2", x2), ("target", target)],
+    )?;
     let signed = mul(&neg(target)?, &sub(x1, x2)?)?;
     let values = relu(&add(&signed, &scalar(margin, &signed)?)?)?;
     reduce_loss(values, reduction)
@@ -126,6 +153,10 @@ pub fn hinge_embedding_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("hinge_embedding_loss", &[input, target])?;
+    check_same_shape(
+        "hinge_embedding_loss",
+        &[("input", input), ("target", target)],
+    )?;
     let similar = target_is_positive(target)?;
     let apart = relu(&sub(&scalar(margin, input)?, input)?)?;
     reduce_loss(where_op(&similar, input, &apart)?, reduction)
@@ -147,10 +178,24 @@ pub fn cosine_embedding_loss(
         )));
     }
 
+    check_same_shape("cosine_embedding_loss", &[("input1", x1), ("input2", x2)])?;
+
     // The similarity runs along the feature axis, which is the last one for a
     // 1-D input and the second for the usual `(batch, features)`.
-    let dim = if x1.ndim() <= 1 { 0 } else { 1 };
-    let cosine = cosine_similarity(x1, x2, dim, 1e-8)?;
+    let dim: usize = if x1.ndim() <= 1 { 0 } else { 1 };
+    // One target per pair: the inputs' shape without that axis. A target
+    // shaped like anything else was broadcast against the similarities.
+    let mut pairs = x1.shape().dims().to_vec();
+    pairs.remove(dim);
+    if target.shape().dims() != pairs.as_slice() {
+        return Err(MinitensorError::invalid_argument(format!(
+            "cosine_embedding_loss takes one target per pair of inputs, so for \
+             inputs of shape {:?} the target must have shape {pairs:?}, but it is {:?}",
+            x1.shape().dims(),
+            target.shape().dims()
+        )));
+    }
+    let cosine = cosine_similarity(x1, x2, dim as isize, 1e-8)?;
 
     let similar = target_is_positive(target)?;
     let pull = sub(&scalar(1.0, &cosine)?, &cosine)?;
@@ -175,6 +220,14 @@ pub fn triplet_margin_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("triplet_margin_loss", &[anchor, positive, negative])?;
+    check_same_shape(
+        "triplet_margin_loss",
+        &[
+            ("anchor", anchor),
+            ("positive", positive),
+            ("negative", negative),
+        ],
+    )?;
     if p.is_nan() || p <= 0.0 {
         return Err(MinitensorError::invalid_argument(format!(
             "triplet_margin_loss requires a positive norm order p, got {p}"
@@ -198,6 +251,7 @@ pub fn triplet_margin_loss(
 /// `log(1 + exp(-target * input))`, for a `target` of `+1` or `-1`.
 pub fn soft_margin_loss(input: &Tensor, target: &Tensor, reduction: &str) -> Result<Tensor> {
     check_operands("soft_margin_loss", &[input, target])?;
+    check_same_shape("soft_margin_loss", &[("input", input), ("target", target)])?;
     // `softplus` rather than `log1p(exp(...))`: it takes the linear tail above
     // its threshold, where the exponential would overflow to infinity and the
     // logarithm would hand back that infinity instead of the value it converges
@@ -221,6 +275,7 @@ pub fn poisson_nll_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("poisson_nll_loss", &[input, target])?;
+    check_same_shape("poisson_nll_loss", &[("input", input), ("target", target)])?;
     if eps < 0.0 || eps.is_nan() {
         return Err(MinitensorError::invalid_argument(format!(
             "poisson_nll_loss requires a non-negative eps, got {eps}"
