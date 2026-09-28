@@ -14,17 +14,33 @@ size is unmapped as it is freed. Nothing could ask for that memory back, so a
 process done with its large tensors held up to 256 MiB for good.
 """
 
-import os
+import subprocess
 import sys
 
 import pytest
 
 import minitensor as mt
 
+# In a fresh process: resident memory is only a clean measure of one block
+# before the heap has history. Late in a test run the system allocator can hold
+# a large free region that is already resident, and carve the tensor from it
+# without the count moving at all.
+_MEASURE = """
+import os
+import minitensor as mt
 
-def _resident_bytes():
+def resident():
     with open("/proc/self/statm") as statm:
         return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+
+size = 64 << 20
+before = resident()
+tensor = mt.ones([size // 4])
+del tensor
+held = resident()
+mt.empty_cache()
+print(held - before, held - resident())
+"""
 
 
 @pytest.mark.skipif(
@@ -32,15 +48,13 @@ def _resident_bytes():
 )
 def test_a_freed_large_tensor_stays_resident_until_the_cache_is_emptied():
     size = 64 << 20
-    mt.empty_cache()
-    before = _resident_bytes()
-    tensor = mt.ones([size // 4])
-    del tensor
-    held = _resident_bytes()
-    assert held - before >= size // 2, "the freed block was not kept"
-
-    mt.empty_cache()
-    assert held - _resident_bytes() >= size // 2, "empty_cache kept the block"
+    result = subprocess.run(
+        [sys.executable, "-c", _MEASURE], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    kept, released = (int(value) for value in result.stdout.split())
+    assert kept >= size // 2, "the freed block was not kept"
+    assert released >= size // 2, "empty_cache kept the block"
 
 
 def test_emptying_the_cache_leaves_live_tensors_alone():
