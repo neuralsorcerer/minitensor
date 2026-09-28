@@ -114,8 +114,10 @@ def test_the_composition_limits_are_what_they_are():
     with pytest.raises(TypeError, match="Module"):
         nn.Sequential([layer])
 
+    # A Sequential nests: its children copy themselves through
+    # `Layer::clone_layer`, and the names nest with them.
     inner = nn.Sequential([nn.DenseLayer(4, 4), nn.ReLU()])
-    with pytest.raises(TypeError, match="Nested Sequential"):
-        nn.Sequential([inner])
-    with pytest.raises(TypeError, match="Nested Sequential"):
-        nn.Sequential([nn.DenseLayer(4, 4)]).add_module("block", inner)
+    assert sorted(nn.Sequential([inner]).state_dict().keys()) == [
+        "0.0.bias",
+        "0.0.weight",
+    ]

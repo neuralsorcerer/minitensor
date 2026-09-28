@@ -3627,7 +3627,8 @@ biases) for attention, and `weight_ih_l{k}` / `weight_hh_l{k}` /
 `bias_ih_l{k}` / `bias_hh_l{k}` for the recurrent layers, with `_reverse`
 appended for the backward direction of a bidirectional stack. `Sequential`
 prefixes each child with its index (`0.weight`, `2.bias`), recursing so a
-nested layer keeps its own names.
+nested layer keeps its own names: a `Sequential` can hold another, and the
+first layer of a block at position 1 saves as `1.0.weight`.
 
 `load_state_dict` requires every one of those names to be present, shaped like
 the slot it lands in and of its dtype, and raises naming all the problems at

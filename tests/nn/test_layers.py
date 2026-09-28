@@ -14,6 +14,7 @@ from minitensor.nn import (
     DenseLayer,
     Dropout,
     Dropout2d,
+    ReLU,
     Sequential,
 )
 from minitensor.tensor import Tensor
@@ -105,30 +106,65 @@ def test_dropout2d_all_zero_when_p_one():
     assert np.allclose(y.numpy(), 0.0)
 
 
-ERROR_NESTED_SEQUENTIAL = "Nested Sequential modules are not supported"
+def test_a_sequential_nests_inside_another():
+    inner = Sequential([DenseLayer(3, 4), ReLU()])
+    outer = Sequential([inner, DenseLayer(4, 2)])
+
+    assert sorted(outer.state_dict().keys()) == [
+        "0.0.bias",
+        "0.0.weight",
+        "1.bias",
+        "1.weight",
+    ]
+    assert len(list(outer.parameters())) == 4
+    assert tuple(outer(Tensor(np.ones((5, 3), np.float32))).shape_vec()) == (5, 2)
 
 
-def test_sequential_rejects_nested_sequential_modules_cleanly():
-    inner = Sequential([DenseLayer(3, 4)])
-
-    with pytest.raises(TypeError, match=ERROR_NESTED_SEQUENTIAL):
-        Sequential([DenseLayer(3, 4), inner])
-
-
-def test_sequential_add_module_rejects_nested_sequential_modules_cleanly():
+def test_add_module_takes_a_sequential_too():
     outer = Sequential()
-    inner = Sequential([DenseLayer(3, 4)])
+    outer.add_module("nested", Sequential([Sequential([DenseLayer(3, 4)])]))
 
-    with pytest.raises(TypeError, match=ERROR_NESTED_SEQUENTIAL):
-        outer.add_module("nested", inner)
+    assert sorted(outer.state_dict().keys()) == ["0.0.0.bias", "0.0.0.weight"]
+    assert tuple(outer(Tensor(np.ones((2, 3), np.float32))).shape_vec()) == (2, 4)
+
+
+def test_training_reaches_every_level_of_a_nested_sequential():
+    model = Sequential([Sequential([DenseLayer(3, 4), ReLU()]), DenseLayer(4, 2)])
+    before = {k: v.numpy().copy() for k, v in model.state_dict().items()}
+
+    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    optimizer.zero_grad()
+    model(Tensor(np.ones((5, 3), np.float32))).sum().backward()
+    optimizer.step()
+
+    after = model.state_dict()
+    for name, values in before.items():
+        assert not np.array_equal(after[name].numpy(), values), name
+
+
+def test_eval_reaches_a_nested_batch_norm():
+    """In eval mode a row's output no longer depends on the rest of its
+    batch, which is only true if the mode reached the BatchNorm inside."""
+    model = Sequential(
+        [Sequential([DenseLayer(4, 6), BatchNorm1d(6)]), DenseLayer(6, 2)]
+    )
+    rng = np.random.default_rng(0)
+    batch = rng.standard_normal((8, 4)).astype(np.float32)
+    rescaled = batch.copy()
+    rescaled[1:] *= 10.0
+
+    model.eval()
+    first = model(Tensor(batch)).numpy()[0]
+    second = model(Tensor(rescaled)).numpy()[0]
+    np.testing.assert_allclose(first, second, rtol=1e-6)
 
 
 def test_sequential_add_module_failure_does_not_mutate_existing_modules():
     outer = Sequential([DenseLayer(2, 3)])
     base_params = outer.num_parameters()
 
-    with pytest.raises(TypeError, match=ERROR_NESTED_SEQUENTIAL):
-        outer.add_module("nested", Sequential([DenseLayer(3, 4)]))
+    with pytest.raises(TypeError):
+        outer.add_module("bad", object())
 
     assert outer.num_parameters() == base_params
 
@@ -136,8 +172,8 @@ def test_sequential_add_module_failure_does_not_mutate_existing_modules():
 def test_sequential_add_module_still_accepts_valid_layer_after_failed_insert():
     outer = Sequential([DenseLayer(2, 3)])
 
-    with pytest.raises(TypeError, match=ERROR_NESTED_SEQUENTIAL):
-        outer.add_module("nested", Sequential([DenseLayer(3, 4)]))
+    with pytest.raises(TypeError):
+        outer.add_module("bad", object())
 
     outer.add_module("next", DenseLayer(3, 5))
     assert outer.num_parameters() == (2 * 3 + 3) + (3 * 5 + 5)

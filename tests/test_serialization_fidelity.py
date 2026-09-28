@@ -154,7 +154,31 @@ def test_values_a_text_format_cannot_spell_survive(tmp_path, fmt):
     assert row[6] == LARGEST_FINITE
 
 
-def test_a_nested_sequential_is_refused_rather_than_half_saved():
-    """The one shape that is not supported says so, instead of losing layers."""
-    with pytest.raises(TypeError, match="Nested Sequential"):
-        nn.Sequential([nn.DenseLayer(4, 4), nn.Sequential([nn.DenseLayer(4, 4)])])
+@pytest.mark.parametrize("extension", ["json", "bin", "msgpack"])
+def test_a_nested_sequential_saves_and_loads_whole(extension, tmp_path):
+    """Every level is saved under its nested name and every level is restored,
+    BatchNorm's running statistics included."""
+
+    def build():
+        return nn.Sequential(
+            [
+                nn.Sequential([nn.DenseLayer(4, 6), nn.BatchNorm1d(6), nn.ReLU()]),
+                nn.DenseLayer(6, 2),
+            ]
+        )
+
+    mt.manual_seed(0)
+    model = build()
+    features = mt.from_numpy(
+        np.random.default_rng(1).standard_normal((8, 4)).astype(np.float32)
+    )
+    model(features)  # moves the running statistics off their initial values
+    path = str(tmp_path / f"nested.{extension}")
+    model.save(path)
+
+    mt.manual_seed(1)
+    restored = build()
+    restored.load_state_dict(nn.Sequential.load_state_from(path))
+    model.eval()
+    restored.eval()
+    np.testing.assert_array_equal(model(features).numpy(), restored(features).numpy())

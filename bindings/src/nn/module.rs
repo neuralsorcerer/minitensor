@@ -1658,7 +1658,10 @@ impl PyModule {
         }
     }
 
-    /// Clone the inner layer into a boxed trait object. Written out per variant rather than derived from `module_types!` because `Sequential` is not `Clone` and is rejected outright.
+    /// Clone the inner layer into a boxed trait object, sharing its tensors as
+    /// any clone does. Written out per variant rather than derived from
+    /// `module_types!` because `Sequential` is not `Clone`: it copies itself
+    /// through its children's `clone_layer`.
     pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
         let layer: Box<dyn Layer> = match &self.inner {
             ModuleType::DenseLayer(layer) => layer.clone(),
@@ -1669,11 +1672,9 @@ impl PyModule {
             ModuleType::LeakyReLU(layer) => layer.clone(),
             ModuleType::Elu(layer) => layer.clone(),
             ModuleType::Gelu(layer) => layer.clone(),
-            ModuleType::Sequential(_) => {
-                return Err(PyTypeError::new_err(
-                    "Nested Sequential modules are not supported",
-                ));
-            }
+            ModuleType::Sequential(model) => Box::new(model.try_clone().ok_or_else(|| {
+                PyTypeError::new_err("this Sequential holds a layer that cannot be copied")
+            })?),
             ModuleType::Conv2d(layer) => layer.clone(),
             ModuleType::BatchNorm1d(layer) => layer.clone(),
             ModuleType::BatchNorm2d(layer) => layer.clone(),
