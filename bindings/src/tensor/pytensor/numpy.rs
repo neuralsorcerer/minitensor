@@ -128,15 +128,27 @@ impl PyTensor {
     /// Pickling support, which `copy.copy` and `copy.deepcopy` use as well.
     ///
     /// A tensor pickles as a copy of its values and its `requires_grad` flag,
-    /// and comes back as a new leaf rebuilt by `Tensor.from_numpy`: the same
+    /// and comes back as a new leaf rebuilt by `Tensor._from_pickle`: the same
     /// values, dtype and shape, on the CPU. What produced it and its `.grad`
     /// are not carried, because neither means anything apart from the graph
     /// and the run it belongs to.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Reduced<'py>> {
         let rebuild = py
             .get_type::<PyTensor>()
-            .getattr(intern!(py, "from_numpy"))?;
+            .getattr(intern!(py, "_from_pickle"))?;
         Ok((rebuild, (self.numpy(py)?, self.inner.requires_grad())))
+    }
+
+    /// The other half of [`Self::__reduce__`].
+    ///
+    /// Not `from_numpy`, which builds its tensor under the grad mode in force:
+    /// inside `no_grad()` -- where a model is usually snapshotted -- that
+    /// cleared the flag, and a copied parameter came back frozen. The flag
+    /// here is the saved one, set after the tensor exists, whatever the mode.
+    #[staticmethod]
+    fn _from_pickle(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
+        let tensor = convert_numpy_to_tensor(array, false)?.requires_grad_(requires_grad);
+        Ok(Self::from_tensor(tensor))
     }
 
     #[pyo3(signature = (dtype=None))]

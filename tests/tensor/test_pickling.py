@@ -67,6 +67,22 @@ def test_requires_grad_is_kept(how):
     assert ROUND_TRIPS[how](tensor).requires_grad
 
 
+@pytest.mark.parametrize("how", list(ROUND_TRIPS))
+def test_a_copy_made_under_no_grad_keeps_requires_grad(how):
+    """`no_grad` is where a snapshot is usually taken, and a tensor built there
+    does not require a gradient unless told to after the fact."""
+    tensor = mt.Tensor([1.0, 2.0], requires_grad=True)
+    with mt.no_grad():
+        copied = ROUND_TRIPS[how](tensor)
+    assert copied.requires_grad
+
+
+def test_unpickling_under_no_grad_keeps_requires_grad():
+    saved = pickle.dumps(mt.Tensor([1.0], requires_grad=True))
+    with mt.no_grad():
+        assert pickle.loads(saved).requires_grad
+
+
 def test_the_copy_is_an_independent_leaf():
     weight = mt.Tensor([1.0, 2.0], requires_grad=True)
     (weight * 3.0).sum().backward()
