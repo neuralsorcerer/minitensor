@@ -6,6 +6,10 @@
 
 use super::*;
 
+/// What [`PyTensor::__reduce__`] hands pickle: the callable that rebuilds a
+/// tensor and the arguments it takes, a NumPy array and `requires_grad`.
+type Reduced<'py> = (Bound<'py, PyAny>, (Py<PyAny>, bool));
+
 /// The NumPy type string for a dtype, in this machine's byte order.
 ///
 /// Single-byte types take `|`, which says the question does not arise; every
@@ -119,6 +123,20 @@ impl PyTensor {
     /// comes back read-only.
     fn numpy(&self, py: Python) -> PyResult<Py<PyAny>> {
         convert_tensor_to_numpy(&self.inner, py)
+    }
+
+    /// Pickling support, which `copy.copy` and `copy.deepcopy` use as well.
+    ///
+    /// A tensor pickles as a copy of its values and its `requires_grad` flag,
+    /// and comes back as a new leaf rebuilt by `Tensor.from_numpy`: the same
+    /// values, dtype and shape, on the CPU. What produced it and its `.grad`
+    /// are not carried, because neither means anything apart from the graph
+    /// and the run it belongs to.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Reduced<'py>> {
+        let rebuild = py
+            .get_type::<PyTensor>()
+            .getattr(intern!(py, "from_numpy"))?;
+        Ok((rebuild, (self.numpy(py)?, self.inner.requires_grad())))
     }
 
     #[pyo3(signature = (dtype=None))]

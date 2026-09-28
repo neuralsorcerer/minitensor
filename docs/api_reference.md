@@ -998,6 +998,40 @@ True
 [[4.0, 6.0], [8.0, 10.0]]
 ```
 
+### Copying and pickling
+
+A tensor pickles as a copy of its values and its `requires_grad` flag, which is
+what lets it cross to a worker process and back, and what `copy.copy` and
+`copy.deepcopy` use. It comes back as a new leaf on the CPU with the same
+values, dtype and shape; what produced it and its `.grad` are not carried,
+because both belong to the run they were recorded in.
+
+```python
+import copy
+import pickle
+
+import minitensor as mt
+
+weight = mt.Tensor([1.0, 2.0], requires_grad=True)
+(weight * 3.0).sum().backward()
+
+restored = pickle.loads(pickle.dumps(weight))
+print(restored.numpy().tolist(), restored.requires_grad, restored.grad is None)
+
+twin = copy.deepcopy(weight)
+twin[0] = 9.0
+print(weight.numpy().tolist(), twin.numpy().tolist())
+```
+
+```text
+[1.0, 2.0] True True
+[1.0, 2.0] [9.0, 2.0]
+```
+
+Layers do not pickle. To copy a model, build a second one of the same
+architecture and load the first one's weights into it:
+`twin.load_state_dict(model.state_dict())`.
+
 ## 4) Tensor instance methods
 
 The following instance methods are exercised by the test suite and are available
