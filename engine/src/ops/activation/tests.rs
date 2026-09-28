@@ -390,7 +390,7 @@ fn test_pow_promotes_a_mixed_dtype_pair() {
 }
 
 #[test]
-fn test_pow_raises_integers_and_wraps_like_numpy() {
+fn test_pow_raises_integers_exactly_modulo_the_width() {
     let base = Tensor::new(
         Arc::new(TensorData::from_vec(
             vec![2i64, 3, -2, 0],
@@ -415,7 +415,7 @@ fn test_pow_raises_integers_and_wraps_like_numpy() {
     );
     let result = pow(&base, &exp).unwrap();
     assert_eq!(result.dtype(), DataType::Int64);
-    // The values NumPy gives: exact modulo 2^64, and `x ** 0` is 1.
+    // Exact modulo 2^64, and `x ** 0` is 1.
     assert_eq!(
         result.data().as_i64_slice().unwrap(),
         &[0, -2984622845537545263, 0, 1]

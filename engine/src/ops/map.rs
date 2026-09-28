@@ -240,7 +240,7 @@ where
 /// module exists to remove all the same: `vec![T::default(); n]` zeroes the
 /// whole output and then `copy_from_slice` overwrites every byte of it. Two
 /// passes to move data once, which on a concatenation of two million-element
-/// float32 arrays was most of the difference against NumPy.
+/// float32 arrays was most of its time.
 ///
 /// # Safety
 ///
@@ -402,8 +402,7 @@ pub(crate) fn outputs_per_task(width: usize) -> usize {
 /// 131,072 elements, from 16,384. A band that short is 20-40us of work, less
 /// than a pool round trip from Python costs, so two of them ran slower split
 /// than one core took for both: `flatnonzero` of 32,768 float32 took 180us
-/// split, 44 on one core, against NumPy's 82. At this width every size from
-/// 16,384 to a million measured at or ahead of NumPy for both compactions.
+/// split, 44 on one core.
 pub(crate) const COMPACT_MIN_BAND: usize = 1 << 17;
 pub(crate) const COMPACT_BANDS: usize = 64;
 
@@ -445,7 +444,7 @@ pub(crate) fn compaction_bands(
 /// On the calling thread when there is one band, which is every compaction
 /// below two bands' worth of input. Handing a single band to rayon still sent
 /// it to the pool and back: `nonzero` of 16,384 elements took 68us, most of it
-/// that round trip, where NumPy takes 41.
+/// that round trip.
 pub(crate) fn fill_compaction<T: Send>(
     out: &mut [T],
     starts: &[usize],
@@ -856,7 +855,7 @@ where
 /// goes to the pool, because a scan that settles at once is the common case
 /// for `any` of a dense mask and `all` of one with a hole, and the pool's
 /// round trip cost more than the answer: `any` of a random four-million-flag
-/// mask took 8.4us, NumPy's 1.6.
+/// mask took 8.4us for a scan that settles in the first chunk.
 pub(crate) fn par_any_chunk<T: Sync>(
     data: &[T],
     chunk: usize,
@@ -1613,8 +1612,7 @@ where
 /// as one arithmetic progression are merged into a single run, which is then
 /// copied whole (step 1), filled (step 0, a broadcast), or read with its step.
 /// Walked element by element, advancing an index per element, `expand` of a
-/// 2048-float row to 2048 rows took 2.96ms where NumPy's copy of the
-/// broadcast takes 0.66.
+/// 2048-float row to 2048 rows took 2.96ms.
 pub(crate) fn strided_gather<T: Copy + Send + Sync>(
     src: &[T],
     dims: &[usize],

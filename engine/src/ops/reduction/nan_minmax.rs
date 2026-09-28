@@ -600,9 +600,9 @@ macro_rules! arg_lane_fold {
 /// going to the lowest index -- position 0, which is what the fallback gives.
 ///
 /// The one input that loses by locating the NaN rather than carrying it is an
-/// array whose *first* element is NaN, where NumPy returns immediately and we
-/// still scan: a hundredth of its speed on a pathological input, for twice its
-/// speed on every ordinary one.
+/// array whose *first* element is NaN, which could be answered at once and is
+/// still scanned: a slow answer on a pathological input, for a fast one on
+/// every ordinary one.
 macro_rules! arg_extremum_all_lanes {
     ($name:ident, $accessor:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr, $nan:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
@@ -803,8 +803,8 @@ float_extremum_row!(min_row_skip_f64, f64, f64::INFINITY, <, 4, false);
 ///
 /// The generic walk this replaces carried the value, the index and a NaN
 /// short-circuit through one branchy scalar loop, which could not vectorize:
-/// `argmax` along the rows of a `(1024, 4096)` float32 matrix took 1.56ms
-/// where NumPy takes 0.67. Here each row is the whole-tensor `argmax`'s two
+/// `argmax` along the rows of a `(1024, 4096)` float32 matrix took 1.56ms.
+/// Here each row is the whole-tensor `argmax`'s two
 /// passes in small -- the extremum by the lane fold `max` along a row uses,
 /// then a search for the first element equal to it, the row still in cache.
 /// The first match is the tie-break the walk had, lowest index, and signed
@@ -930,7 +930,7 @@ float_arg_rows!(
 /// Slabs narrower than `BLOCKED_INNER_MIN` went one output at a time down the
 /// generic strided walk, a branchy comparison per element `inner` apart: `max`
 /// down the rows of a `(200000, 33)` float32 matrix took 12.7ms where `sum`
-/// took 0.42, and NumPy 7.1. Wider ones had a column walk of their own that
+/// took 0.42. Wider ones had a column walk of their own that
 /// measured 2-4x slower than this on float32. Both now go through the fold
 /// `sum` uses for a slab -- rows streamed in
 /// memory order, narrow ones several to an accumulator row, split across the
@@ -1004,8 +1004,7 @@ const EXTREMUM_MIN_SLABS: usize = 4;
 /// The walks this replaces carried the value, the index and the NaN rule
 /// through one branchy comparison per element -- down each output's column
 /// `inner` apart when the slab was narrow, which put `max(dim=0)` of a
-/// `(200000, 33)` float32 matrix at 8.8ms against `amax`'s 0.56 and NumPy's
-/// 27.
+/// `(200000, 33)` float32 matrix at 8.8ms against `amax`'s 0.56.
 ///
 /// Now the slab is cut into blocks of rows, and each block's column extrema
 /// are taken by [`slab_extremum`]'s fold (a NaN-skipping one for

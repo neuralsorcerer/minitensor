@@ -22,8 +22,8 @@ NaN cases picked out -- and they are the counter-example. Picking those cases
 out took two `isnan` and two `where` around the comparison, five passes and
 four full-size temporaries, and a `where` whose mask the branch predictor
 cannot guess costs six times one it can. They are one kernel now, in
-`ops::binary_math`, and the arrangement was also answering `-0.0` where NumPy
-answers `0.0`.
+`ops::binary_math`, and the arrangement was also answering `-0.0` for
+`fmax(-0.0, 0.0)`, where the larger is `0.0`.
 """
 
 from __future__ import annotations
@@ -242,7 +242,7 @@ def isreal(input: object) -> Tensor:
 
     Every dtype in this library is real, so the answer is always true -- NaN
     included, since it has no imaginary part either. The name exists because
-    code written against NumPy asks, and a missing attribute is a worse answer
+    generic numeric code asks, and a missing attribute is a worse answer
     than the correct one. A constant, not a test of the values: comparing each
     element with itself twice and joining the two took three passes to say so.
     """
@@ -312,10 +312,10 @@ _ELEMENTWISE = (
     "sub",
 )
 
-#: Second spellings of operations that already exist. NumPy and PyTorch each
-#: settled on a different name for several of these, and code moving between
-#: them writes whichever it learned; one object under two names costs nothing
-#: and a missing attribute costs the caller a rewrite.
+#: Second spellings of operations that already exist. Several of these have
+#: two names in common use, and a caller writes whichever it learned; one object
+#: under two names costs nothing and a missing attribute costs the caller a
+#: rewrite.
 _ALIASES = {
     "absolute": "abs",
     "concat": "cat",
@@ -339,8 +339,7 @@ _ALIASES = {
 def positive(input: object) -> Tensor:
     """`+input`: a copy, for symmetry with `negative`.
 
-    NumPy has it and PyTorch has it, and both for the same reason -- code that
-    picks an operation by name needs the identity to have one.
+    Code that picks an operation by name needs the identity to have one.
     """
 
     return _atleast_tensor(input) * 1
@@ -367,8 +366,8 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
     Zero, infinity and NaN come back as themselves with an exponent of zero.
     C pins that only for zero; for infinity and NaN it leaves the exponent
     *unspecified*, and platforms differ -- glibc answers 0 and the Microsoft
-    runtime answers -1, so `numpy.frexp` gives one on Linux and the other on
-    Windows. This gives zero everywhere, which is the same number on every
+    runtime answers -1, so a call through the C library gives one on Linux and
+    the other on Windows. This gives zero everywhere, which is the same number on every
     machine and the one that makes the round trip read as a round trip. Either
     choice reconstructs the value, since scaling an infinity or a NaN by any
     power of two leaves it alone.

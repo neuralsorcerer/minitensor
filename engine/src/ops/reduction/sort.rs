@@ -230,7 +230,7 @@ fn sort_rows_with_parallel_sort<T, E, M>(
 /// the other kernel's outer positions do, and a second pass lays the result back
 /// down the axis it came from. That pass is one strided copy against a sort, and
 /// it buys the whole pool: 400ms to 117ms on a 2048-by-2048 sorted down its
-/// columns, which is quicker than NumPy doing the same thing.
+/// columns.
 #[allow(clippy::too_many_arguments)]
 fn sort_along_dim_transposed<T, E, M>(
     input: &[T],
@@ -912,7 +912,7 @@ fn var_fused_single_axis(
                 // orders worse than the `mean` it subtracts on data with a
                 // large offset -- 3.4e-6 against 2.5e-10 at an offset of 1e12,
                 // where the second figure is the floor set by the mean's own
-                // rounding and is what NumPy reaches.
+                // rounding.
                 let run = |first: usize, chunk: &mut [$ty]| {
                     for (i, slot) in chunk.iter_mut().enumerate() {
                         let base = (first + i) * dim_size;
@@ -1572,7 +1572,7 @@ mod var_layout_tests {
     /// The previous code reduced each block with a scalar `sum()` where `sum`
     /// itself uses a lane-and-tree one, which left it four orders above the
     /// floor -- 3.4e-6 against 2.5e-10 at an offset of 1e12, where the floor
-    /// is the square of the mean's own rounding and is what NumPy reaches.
+    /// is the square of the mean's own rounding.
     #[test]
     fn variance_does_not_move_when_the_data_does() {
         // Deterministic, spread over the whole range, and every value a whole
@@ -1610,8 +1610,7 @@ mod var_layout_tests {
         }
 
         // At `2^40` the sum is near `2^52` and the mean carries a rounding of
-        // its own, which squares into the answer. That floor is 1.1e-8 here,
-        // and NumPy sits on it too.
+        // its own, which squares into the answer. That floor is 1.1e-8 here.
         let shifted: Vec<f64> = base.iter().map(|v| v + (1u64 << 40) as f64).collect();
         let got = variance(shifted);
         let relative = ((got - reference) / reference).abs();

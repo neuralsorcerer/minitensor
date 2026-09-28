@@ -9,8 +9,8 @@
 //! Two families live here because one is written in terms of the other. The
 //! bitwise ops (`&`, `|`, `^`, `~`, `<<`, `>>`) act on the promoted integer or
 //! boolean dtype and keep it. The logical ops accept any dtype, reduce each
-//! operand to a truth value (`x != 0`, so NaN is true and -0.0 is false, as in
-//! NumPy and PyTorch) and hand the resulting booleans to the bitwise op with
+//! operand to a truth value (`x != 0`, so NaN is true and -0.0 is false) and
+//! hand the resulting booleans to the bitwise op with
 //! the same truth table -- so `logical_and` adds no kernel of its own.
 //!
 //! None of these are differentiable: their outputs are integers or booleans,
@@ -141,7 +141,7 @@ pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
 
 /// The number of set bits in the *absolute value* of each element, as int32.
 ///
-/// The absolute value is NumPy's choice, and the right one: the popcount of a
+/// The absolute value is the right thing to count: the popcount of a
 /// negative in two's complement is the width of the dtype less the count of its
 /// magnitude minus one, which describes the storage rather than the number, and
 /// would answer differently for the same value at int32 and int64.
@@ -234,8 +234,7 @@ shift_fns!(shl_i64, shr_i64, i64, u64);
 ///
 /// A per-element shift count is one instruction with AVX2 (`vpsllvd`,
 /// `vpsravd`) and has none before it, so the baseline x86-64 build shifted
-/// one element at a time: 1.1ns an element where `&` takes 0.24, and 4-5x
-/// behind NumPy, which dispatches the same way. aarch64 has variable vector
+/// one element at a time: 1.1ns an element where `&` takes 0.24. aarch64 has variable vector
 /// shifts in its baseline, so there the plain loop vectorizes already.
 ///
 /// Each block also returns the OR of every count it read, which is negative

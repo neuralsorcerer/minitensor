@@ -31,8 +31,7 @@ use std::sync::Arc;
 
 /// `base` raised to `exponent`, modulo 2^N for the integer dtypes.
 ///
-/// Exact, and the same answer NumPy gives: an integer power is a chain of
-/// multiplications and each one wraps, so the result is the true power taken
+/// Exact: an integer power is a chain of multiplications and each one wraps, so the result is the true power taken
 /// modulo the width. Written as binary exponentiation over the whole exponent
 /// rather than over a truncated `u32`, which would answer `1` for `2 ** 2^40`
 /// where the true value is `0` modulo `2^64`.
@@ -143,7 +142,7 @@ impl PowKernels for f32 {
     }
 }
 
-/// Float64 offers each form to the installed provider first -- NumPy's
+/// Float64 offers each form to the installed provider first -- a vectorized
 /// `power`, 5.7x faster than the scalar `powf` over ten thousand elements --
 /// and computes it here only if that declines.
 impl PowKernels for f64 {
@@ -296,7 +295,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     ///
     /// A negative exponent is refused rather than rounded: `2 ** -1` is a half,
     /// which no integer dtype holds, and answering `0` would be a wrong answer
-    /// rather than a missing one. NumPy and PyTorch both stop here too.
+    /// rather than a missing one.
     macro_rules! integer_pow_arm {
         ($accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $power:ident) => {{
             let b = base.data().$accessor().ok_or_else(|| {

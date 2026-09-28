@@ -252,7 +252,7 @@ impl SelectionPlan {
         // Where not even the innermost output dimension is contiguous, it is
         // still a run -- a strided one. Taken one element at a time, as runs
         // of one, `x[:, ::2]` of a 2048x2048 float32 matrix made four million
-        // one-element copies and ran at 2.3x NumPy's time.
+        // one-element copies.
         let mut inner_step = 1;
         if run_dims == 0 && ndim_out > 0 {
             let j = ndim_out - 1;

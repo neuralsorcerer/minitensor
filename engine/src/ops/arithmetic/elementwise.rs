@@ -599,9 +599,9 @@ impl ModulusConvention {
     /// it here.
     ///
     /// The engine's float64 modulus is `libm`'s scalar `fmod`, one element at
-    /// a time, where NumPy's is a vectorized loop -- 28ns an element against
-    /// 18 over 100,000 -- and a modulus is exact, so the answer does not
-    /// depend on who computes it. Offered only when each operand is the
+    /// a time, where a provider's can be a vectorized loop -- 28ns an element
+    /// against 18 over 100,000 -- and a modulus is exact, so the answer does
+    /// not depend on who computes it. Offered only when each operand is the
     /// output's length or a single element, the two layouts a provider takes.
     fn offer(self, lhs: &Tensor, rhs: &Tensor, len: usize) -> Option<Vec<f64>> {
         use crate::ops::provider::{Ufunc, offer_binary_f64};
@@ -722,11 +722,9 @@ pub fn fmod(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 ///
 /// Along an axis every output block is the input block shifted by one row
 /// minus the same block unshifted, so each is a single element-wise
-/// subtraction of two ranges of one buffer: no copy of either operand, and
-/// the same one subtraction per element NumPy's `diff` makes, which gives the
-/// same bits. NumPy's runs on one thread; this is the engine's parallel map.
-/// Integers wrap, as the engine's `-` does; a bool tensor is refused, as it
-/// is there.
+/// subtraction of two ranges of one buffer: no copy of either operand, one
+/// subtraction per element, run on the engine's parallel map. Integers wrap,
+/// as the engine's `-` does; a bool tensor is refused, as it is there.
 pub fn first_difference(tensor: &Tensor, dim: usize) -> Result<Tensor> {
     let dims = tensor.shape().dims();
     if dim >= dims.len() {
@@ -930,8 +928,8 @@ mod modulus_tests {
         assert!(first_difference(&ends, 1).is_err());
     }
 
-    /// A remainder of zero takes the divisor's sign, as Python's `%` and
-    /// NumPy's `remainder` give it, while `fmod`'s zero keeps the dividend's.
+    /// A remainder of zero takes the divisor's sign, as Python's `%` gives it,
+    /// while `fmod`'s zero keeps the dividend's.
     /// Both widths, since only float64 is ever handed to a provider: these
     /// run on a bare engine with none installed, which is the engine's own
     /// kernel either way.

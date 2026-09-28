@@ -6,8 +6,8 @@
 
 """`gradient`: the numerical derivative of a sampled function.
 
-Not the autograd gradient -- that is `backward`. This is NumPy's `gradient`,
-the second-order central difference over data you already have, for the case
+Not the autograd gradient -- that is `backward`. This is the second-order
+central difference over data you already have, for the case
 where the function was measured rather than written down.
 
 The edge formulas are the non-uniform ones, with uniform spacing handled by
@@ -21,11 +21,10 @@ which is exactly zero on a uniform grid -- and `0 * x` is zero for every `x`
 the arithmetic has, except the two it does not: `0 * NaN` and `0 * inf` are
 both NaN. So a single NaN in the data spread to its neighbours, which the
 central difference never touches: `gradient([1, nan, 3, 4])` answered
-`[nan, nan, nan, 1]` where the derivative at the second point is `(3 - 1) / 2`,
-a number NumPy reports. NumPy separates the uniform case for the same reason,
-and the two now agree on NaN and infinity as well as on values. Non-uniform
-coordinates keep the general stencil, where the middle weight is not zero and
-the contamination is real: NumPy gives NaN there too.
+`[nan, nan, nan, 1]` where the derivative at the second point is
+`(3 - 1) / 2`, a number. The uniform case is separated for that reason.
+Non-uniform coordinates keep the general stencil, where the middle weight is
+not zero and the contamination is real.
 """
 
 from __future__ import annotations
@@ -50,8 +49,8 @@ def _is_step(spacing: object) -> bool:
 def _constant_step(positions: Tensor) -> float | None:
     """The single step a coordinate vector describes, if its gaps are equal.
 
-    NumPy does this before it starts, with the comment that it "brings a
-    consistent speedup", and it decides more than speed: the uniform stencil
+    Deciding this first is faster, and it decides more than speed: the
+    uniform stencil
     is the one that does not read the point it is centred on, so reducing to
     it is what keeps a missing sample from spreading. Without the check,
     `gradient(x, h)` and `gradient(x, h * arange(n))` -- the same grid written
@@ -138,7 +137,7 @@ def _along(
 
     A scalar spacing is a uniform grid by construction. A coordinate vector
     may describe one as well, and is reduced to its step when it does -- which
-    is what NumPy does, and what makes the two spellings of one grid agree.
+    is what makes the two spellings of one grid agree.
     """
 
     if _is_step(spacing):
@@ -169,7 +168,7 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
     interior_ahead = _slice(behind, 0, 1, length - 2)
     span = interior_behind + interior_ahead
 
-    # NumPy's second-order non-uniform stencil. With equal gaps the outer
+    # The second-order non-uniform stencil. With equal gaps the outer
     # coefficients collapse to +-1/(2h) and the middle one to zero, which is
     # the familiar central difference.
     before = -interior_ahead / (interior_behind * span)
@@ -191,7 +190,7 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
             _slice(values, axis, length - 1, 1) - _slice(values, axis, length - 2, 1)
         ) / _broadcastable(_slice(behind, 0, length - 2, 1), axis, rank)
     else:
-        # The second-order one-sided stencils, again NumPy's.
+        # The second-order one-sided stencils.
         first_gap = _slice(behind, 0, 0, 1)
         second_gap = _slice(behind, 0, 1, 1)
         total = first_gap + second_gap
@@ -253,11 +252,11 @@ def _one_axis_uniform(
             _slice(values, axis, length - 1, 1) - _slice(values, axis, length - 2, 1)
         ) / step
     else:
-        # NumPy's second-order one-sided stencils with equal gaps: the general
+        # The second-order one-sided stencils with equal gaps: the general
         # weights collapse to -3/2, 2, -1/2 and their mirror. Each is divided
-        # by the step *before* it multiplies, which is the order NumPy uses --
-        # dividing the sum instead rounds differently, and the two answers
-        # then differ in the last bit.
+        # by the step *before* it multiplies, which is the order the large
+        # untracked path below computes in -- dividing the sum instead rounds
+        # differently, and the two paths then differ in the last bit.
         first = (
             (-1.5 / step) * _slice(values, axis, 0, 1)
             + (2.0 / step) * _slice(values, axis, 1, 1)
@@ -284,8 +283,8 @@ def gradient(
     ends. `spacing` is a step, a coordinate vector, or one of either per axis;
     the coordinates need not be evenly spaced.
 
-    Returns one tensor when a single axis is asked for and a tuple otherwise,
-    which is what `numpy.gradient` does. This is the derivative of *data*, not
+    Returns one tensor when a single axis is asked for and a tuple otherwise.
+    This is the derivative of *data*, not
     of a computation -- for that, call `backward`.
     """
 

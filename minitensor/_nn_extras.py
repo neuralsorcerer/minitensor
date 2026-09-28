@@ -360,8 +360,7 @@ def _unpool_size(
 
     Pooling loses the remainder, so several input sizes give the same output
     and the inverse is not determined -- `output_size` is how a caller says
-    which one they had. Without it the smallest is assumed, which is what
-    `torch` does too.
+    which one they had. Without it the smallest is assumed.
 
     Read the same way as `kernel_size` and `stride`: one integer means that
     size on every spatial axis, which is the only spelling a 1-D unpool has
@@ -615,8 +614,8 @@ def embedding(input: object, weight: object, padding_idx: int | None = None) -> 
     one shared between two models.
 
     `padding_idx` names a row that takes no gradient. The forward is unaffected
-    -- the row is whatever it holds -- and only the gradient is masked, which
-    is `torch.nn.functional.embedding`'s contract. The mask is arithmetic
+    -- the row is whatever it holds -- and only the gradient is masked. The
+    mask is arithmetic
     rather than a special case in a backward: the row is read through a
     detached copy of itself, which is the same number and no longer a path the
     gradient can take.
@@ -677,9 +676,9 @@ def embedding_bag(
 
     `mode` is `"sum"`, `"mean"` or `"max"`. An empty bag reduces to zero in all
     three, having nothing else to reduce to. `per_sample_weights` scales each
-    row before it is summed and is meaningful only for `"sum"`, which is what
-    `torch` says too -- a weighted mean would need the weights in the divisor
-    as well, and that is a different operation.
+    row before it is summed and is meaningful only for `"sum"`: a weighted
+    mean would need the weights in the divisor as well, and that is a
+    different operation.
     """
 
     if mode not in ("sum", "mean", "max"):
@@ -821,9 +820,9 @@ def _lp_pool(
     )
 
     # `abs` before the power, which is what makes this the L_p norm of the
-    # window at every `norm_type` rather than only at even ones. `torch` raises
-    # `x` itself to the power, so an odd norm over negative values gives it the
-    # root of a negative number; the two agree wherever that one is defined.
+    # window at every `norm_type` rather than only at even ones. Raising `x`
+    # itself to the power would give an odd norm over negative values the root
+    # of a negative number.
     raised = _F.abs(tensor) ** power
     area = float(_math.prod(window))
     averaged = pooling(
@@ -962,7 +961,7 @@ def _normalized_groups(op: str, tensor: Tensor, groups: int, eps: float) -> Tens
     `layer_norm`'s own kernel: the statistics and the scaling in one pass over
     each row, and a backward of its own. Composed from `mean`, `var`, a
     subtraction and a division it was five passes over the data, 489us for a
-    (16, 32, 16, 16) float32 input where NumPy's formula takes 262.
+    (16, 32, 16, 16) float32 input.
     """
 
     sizes = [int(size) for size in tensor.shape]
@@ -1028,8 +1027,8 @@ def instance_norm(
     is how an evaluation pass reproduces training-time behaviour.
 
     The buffers are updated with the *unbiased* variance while the
-    normalization uses the biased one, which is what `batch_norm` does here and
-    in torch: the divisor that makes a good estimate of the population variance
+    normalization uses the biased one, which is what `batch_norm` does here:
+    the divisor that makes a good estimate of the population variance
     is not the one that makes this batch have unit variance.
     """
 
@@ -1127,8 +1126,8 @@ def local_response_norm(
     # `(batch, 1, channels, positions, 1)`: the channel axis in the depth slot
     # of a 3-D pooling, and one on either side of it so the window is 1-D.
     stacked = (tensor * tensor).reshape(sizes[0], 1, sizes[1], positions, 1)
-    # An even window has no centre, so it takes one more from below than above
-    # -- the same side `torch` takes it from.
+    # An even window has no centre, so it takes one more from below than
+    # above.
     padded = _F.pad(stacked, [0, 0, 0, 0, window // 2, (window - 1) // 2])
     energy = avg_pool3d(padded, (window, 1, 1), (1, 1, 1))
     divisor = (energy.reshape(sizes) * float(alpha) + float(k)) ** float(beta)
@@ -1217,7 +1216,7 @@ def _pooling_geometry(
     margin = _sliding_argument(padding, "padding", 3, 0, op)
     if any(pad * 2 > size for pad, size in zip(margin, kernel)):
         # Otherwise a window can be all padding, and there is no sensible
-        # maximum or mean of nothing. `torch` refuses the same case.
+        # maximum or mean of nothing.
         raise ValueError(
             f"{op} takes padding of at most half the window, got {margin} "
             f"for a window of {kernel}"
@@ -1404,8 +1403,7 @@ def _sliding_rank(*candidates: object) -> int:
     `fold` has no input shape to read the rank off -- its input arrives already
     flattened -- so it comes from whichever argument was given as a sequence,
     and from the two-dimensional case when every one of them is a bare integer.
-    Two is the only case `torch.nn.functional.fold` supports at all, so it is
-    also the one an unannotated call means.
+    Two is the common case, so it is also the one an unannotated call means.
     """
 
     for candidate in candidates:
@@ -1489,9 +1487,8 @@ def unfold(
 
     `kernel_size`, `dilation`, `padding` and `stride` are each one integer for
     every spatial axis, or a single integer meaning the same for all of them.
-    Any number of spatial axes is allowed rather than only the two
-    `torch.nn.functional.unfold` accepts, so a 3-D convolution is this same
-    matrix product with a rank-three kernel.
+    Any number of spatial axes is allowed, not only two, so a 3-D convolution
+    is this same matrix product with a rank-three kernel.
     """
 
     tensor = _atleast_tensor(input)

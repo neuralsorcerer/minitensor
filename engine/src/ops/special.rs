@@ -112,11 +112,12 @@ unit_grad_kernel!(
 /// 6e-8 a float32 can see.
 ///
 /// Float64 has no wider type to borrow that trick from, and above a few
-/// hundred elements goes to NumPy's `cbrt` through `ops::provider`, which
-/// measured 3-12x faster than the scalar `f64::cbrt` kept for the rest.
+/// hundred elements goes to the installed provider through `ops::provider`,
+/// whose vectorized `cbrt` measured 3-12x faster than the scalar `f64::cbrt`
+/// kept for the rest.
 pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return cbrt(&widened);
     }
@@ -172,13 +173,13 @@ unit_grad_kernel!(
 /// above the tie and rounds up to `2^-149` instead. Both are the same distance
 /// from an answer that underflowed either way.
 ///
-/// It is also about 3x faster: 0.48x of NumPy in float32 to 1.47x.
+/// It is also about 3x faster.
 ///
 /// Float64 keeps the hardware base-2 exponential, which has no such kernel to
 /// borrow and is already correctly rounded.
 pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return exp2(&widened);
     }
@@ -249,7 +250,7 @@ unit_grad_kernel!(
 /// those give infinities, and anything outside `[0, 1]` gives NaN.
 pub fn logit(tensor: &Tensor, eps: Option<f64>) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return logit(&widened, eps);
     }
@@ -310,7 +311,7 @@ unit_grad_kernel!(
 /// `sin(pi * input) / (pi * input)`, taken as `1` at zero.
 pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sinc(&widened);
     }
@@ -644,7 +645,7 @@ fn polygamma_scalar(order: u32, x: f64) -> f64 {
 /// `log |gamma(input)|`, element-wise.
 pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return lgamma(&widened);
     }
@@ -654,7 +655,7 @@ pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
 /// `digamma(input)`, the derivative of `lgamma`.
 pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return digamma(&widened);
     }
@@ -847,7 +848,7 @@ wide_grad_kernel!(
 /// `i0(input)`, the modified Bessel function of the first kind, order zero.
 pub fn i0(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i0(&widened);
     }
@@ -857,7 +858,7 @@ pub fn i0(tensor: &Tensor) -> Result<Tensor> {
 /// `i1(input)`, the modified Bessel function of the first kind, order one.
 pub fn i1(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i1(&widened);
     }
@@ -867,7 +868,7 @@ pub fn i1(tensor: &Tensor) -> Result<Tensor> {
 /// `i0e(input)`, `exp(-|x|) i0(x)`.
 pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i0e(&widened);
     }
@@ -877,7 +878,7 @@ pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
 /// `i1e(input)`, `exp(-|x|) i1(x)`.
 pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i1e(&widened);
     }
@@ -945,7 +946,7 @@ wide_grad_kernel!(
 /// `erfcx(input)`, `exp(x**2) erfc(x)`.
 pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erfcx(&widened);
     }
@@ -984,7 +985,7 @@ wide_grad_kernel!(
 /// The inverse error function on `[-1, 1]`.
 pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erfinv(&widened);
     }

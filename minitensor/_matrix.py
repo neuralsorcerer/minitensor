@@ -9,11 +9,10 @@
 `matmul`, `solve` and `svd` are the kernels. Everything here is one of those
 pointed at a rearranged operand: `mm` and `mv` are `matmul` with the ranks
 checked, `tensordot` is `matmul` with the contracted axes moved to the end and
-flattened, and `inverse` and `pinverse` are the `torch` spellings of `inv` and
+flattened, and `inverse` and `pinverse` are second names for `inv` and
 `pinv`. None of them earns a kernel, so none gets one, and each inherits the
 accuracy and the gradient of the one underneath -- which is the point, and the
-reason the two named after another library are forwarded rather than written
-again here.
+reason the two second names are forwarded rather than written again here.
 
 `matrix_exp` is the one that looks like it should need a kernel and does not.
 Scaling and squaring with a Pade approximant is a real algorithm, but every
@@ -143,8 +142,7 @@ def _contraction_axes(
     """The two axis lists `tensordot` contracts over.
 
     An integer means "the last `n` of the left against the first `n` of the
-    right", which is the convention NumPy took and the reason `dims=2` is its
-    default rather than something more obviously symmetric.
+    right", so the default `dims=2` contracts a pair of axes from each side.
     """
 
     if isinstance(dims, int):
@@ -253,7 +251,7 @@ def baddbmm(
 def inverse(input: object) -> Tensor:
     """The inverse of each square matrix in the stack.
 
-    The spelling `torch.inverse` uses, for `inv`. It used to be a second
+    A second name for `inv`. It used to be a second
     implementation instead -- `solve` against an identity built here -- and the
     identity was built flat, so it could not be paired with a stack of matrices
     and every batched call raised a shape mismatch against a docstring that
@@ -272,8 +270,8 @@ def inverse(input: object) -> Tensor:
 def pinverse(input: object, rcond: float = 1e-15) -> Tensor:
     """The Moore-Penrose pseudo-inverse.
 
-    The spelling `torch.pinverse` uses, for `pinv`, and it keeps that name's
-    threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. It was a
+    A second name for `pinv`, with a fixed threshold of `1e-15` rather than
+    `pinv`'s own `max(m, n) * eps`. It was a
     second implementation of the same `V diag(1/s) U^T` until it was not: one
     that took a single matrix where `pinv` takes a stack, and that agreed with
     it to the last bit on everything both would accept.
@@ -330,9 +328,8 @@ def vander(x: object, N: int | None = None, increasing: bool = False) -> Tensor:
     """The Vandermonde matrix of `x`: each row a geometric series in one entry.
 
     Column `j` is `x ** j` with `increasing=True`, and `x ** (N - 1 - j)`
-    without -- the descending order NumPy defaults to, because that is the one
-    that makes `vander(x) @ c` evaluate a polynomial with `c` in the order
-    people write coefficients.
+    without -- descending by default, because that makes `vander(x) @ c`
+    evaluate a polynomial with `c` in the order people write coefficients.
     """
 
     values = _atleast_tensor(x)
@@ -355,7 +352,7 @@ def real(input: object) -> Tensor:
     """The real part, which is the whole of it.
 
     Every dtype here is real, so this returns its input. The name exists
-    because code written against NumPy asks for it defensively, and an
+    because generic numeric code asks for it defensively, and an
     AttributeError is a worse answer than the correct one.
     """
 
@@ -386,7 +383,7 @@ def angle(input: object) -> Tensor:
 
     A real number sits on the real axis, so its argument is one of two values.
     The test is `signbit` rather than `x < 0` because negative zero is on the
-    negative side of it -- `angle(-0.0)` is `pi`, as NumPy has it -- and a
+    negative side of it -- `angle(-0.0)` is `pi` -- and a
     comparison cannot see that.
     """
 
@@ -426,9 +423,8 @@ def matrix_norm(input: object, ord: object = "fro", keepdim: bool = False) -> Te
     maximised, which is what `cond` is built from and is not itself a norm.
 
     The axes are the last two, as they are for `inverse`, `diagonal` and `svd`.
-    `permute` first to use others; `torch.linalg.matrix_norm` takes them as an
-    argument instead, and this does not, so that every matrix operation in this
-    module reads the same way.
+    `permute` first to use others. They are not an argument, so that every
+    matrix operation in this module reads the same way.
 
     A condition number in an order other than 2 is
     `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`. `cond` itself is the
@@ -655,8 +651,7 @@ def tensorsolve(a: object, b: object, dims: object = None) -> Tensor:
 
     `a` has the shape of `b` followed by the shape of the answer, and the
     system is the square one you get by flattening each half. `dims` names axes
-    of `a` to move to the end first, for when they are not already there --
-    NumPy calls that argument `axes`, and every op here spells it `dim`.
+    of `a` to move to the end first, for when they are not already there.
 
     This is `solve` with a reshape on each side; the reshape is the whole
     operation, and the gradient is `solve`'s.

@@ -264,8 +264,8 @@ def flatnonzero(input: object) -> Tensor:
 def argwhere(input: object) -> Tensor:
     """The indices of every non-zero element, one row each.
 
-    The same answer `nonzero` gives; the name is the one NumPy users reach for
-    when they want the rows rather than a tuple of coordinate arrays.
+    The same answer `nonzero` gives, under the name for wanting the rows
+    rather than a tuple of coordinate arrays.
     """
 
     return _F.nonzero(_atleast_tensor(input))
@@ -409,8 +409,8 @@ def block_diag(*tensors: object) -> Tensor:
     """Arrange the inputs down the diagonal of one larger matrix, zero
     elsewhere.
 
-    A 1-D input is taken as a single row, and a scalar as a one-by-one block,
-    matching NumPy's and PyTorch's reading. Built by padding each block out to
+    A 1-D input is taken as a single row, and a scalar as a one-by-one block.
+    Built by padding each block out to
     the full width and joining the rows, so the zeros are never materialised
     twice.
     """
@@ -446,7 +446,7 @@ def cartesian_prod(*tensors: object) -> Tensor:
     """Every combination of one element from each input, one row each.
 
     With a single input the result is that input, which is what
-    `itertools.product` of one sequence gives and what PyTorch returns.
+    `itertools.product` of one sequence gives.
     """
 
     if not tensors:
@@ -577,8 +577,8 @@ def _axis_positions(
     `ix_` opens the per-axis ranges into a mesh and `ravel_multi_index` folds
     the mesh into offsets, so only the selected region is ever materialised --
     where slicing a full index template would allocate one integer per element
-    of the whole tensor. Both are arithmetic on shapes, which is why NumPy does
-    it; see "Where an operation belongs" in `docs/development.md`.
+    of the whole tensor. Both are arithmetic on shapes, which is why NumPy
+    computes them; see "Where an operation belongs" in `docs/development.md`.
     """
 
     ranges = [_np.arange(size) for size in shape]
@@ -777,9 +777,9 @@ def _bounds(tensor: Tensor) -> tuple[int, int]:
 def unravel_index(indices: object, shape: object) -> tuple[Tensor, ...]:
     """The coordinates of flat positions `indices` in a tensor of `shape`.
 
-    One tensor per axis, each shaped like `indices` -- the form NumPy and
-    PyTorch both return, so `input[unravel_index(k, input.shape)]` reads the
-    way it does there. `stack` them on a new leading axis to get the `[ndim, n]`
+    One tensor per axis, each shaped like `indices`, so
+    `input[unravel_index(k, input.shape)]` indexes the elements `k` names.
+    `stack` them on a new leading axis to get the `[ndim, n]`
     layout `tril_indices` and `diag_indices` use.
 
     The strides come from `shape` alone, so they are computed once in Python
@@ -878,7 +878,7 @@ def ravel_multi_index(multi_index: object, dims: object) -> Tensor:
 
 
 def take_along_axis(input: object, indices: object, axis: int | None = -1) -> Tensor:
-    """`take_along_dim` under NumPy's name for the same operation.
+    """Another name for `take_along_dim`.
 
     One element per position, its `axis` coordinate coming from `indices`, with
     the index broadcast against the input's other axes. `axis=None` flattens
@@ -895,8 +895,7 @@ def put_along_axis(
     at the positions `indices` names along `axis`.
 
     Returns a new tensor rather than writing into `input`, which is how every
-    write in this library is spelled -- NumPy's version of this mutates and
-    returns nothing, so a caller porting code has to keep the result.
+    write in this library is spelled, so the caller keeps the result.
 
     A position named twice keeps whichever write landed last, as `scatter`
     does.
@@ -929,8 +928,8 @@ def compress(condition: object, input: object, dim: int | None = None) -> Tensor
     """The slices along `dim` that `condition` keeps.
 
     `condition` is one flag per position along the axis and may be shorter than
-    it, in which case the positions it does not reach are dropped -- NumPy's
-    rule, and the reason this is not simply a boolean mask.
+    it, in which case the positions it does not reach are dropped -- the
+    reason this is not simply a boolean mask.
     """
 
     tensor = _atleast_tensor(input)
@@ -1019,8 +1018,8 @@ def unique(
     """The distinct values of `input`, ascending, with NaN last and collapsed.
 
     Returns the values alone, or a tuple with whichever extras were asked for
-    -- always in NumPy's order: where each first occurred, the inverse map,
-    the counts.
+    -- always in one order: where each first occurred, the inverse map, the
+    counts.
 
     Float values, with or without their counts, are NumPy's `unique` on a view
     of the tensor's buffer: 1.4-2.5x faster than the engine's sort at every
@@ -1214,7 +1213,7 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
         # Both sides distinct, so a value is in exactly one of them precisely
         # when it differs from both its neighbours once the two are merged --
         # one sort, where probing each side into the other was two binary
-        # searches per value and five times NumPy's time. A pair that is
+        # searches per value. A pair that is
         # equal across the sides leaves together, so the one member an
         # unstable sort could place either way is NaN, which equals nothing:
         # it collapses to the first NaN of the two sides.
@@ -1268,8 +1267,7 @@ def trim_zeros(input: object, trim: str = "fb", dim: object = None) -> Tensor:
     rather than flattening it. An all-zero tensor has no box to crop to, so
     every cropped axis comes back empty whichever ends `trim` asked for.
 
-    NumPy spells this argument `axis`; every op here that takes one spells it
-    `dim`, and a single exception would be worse than the difference.
+    The axis is `dim`, as it is for every op here that takes one.
     """
 
     tensor = _atleast_tensor(input)
@@ -1331,9 +1329,8 @@ def unique_values(input: object) -> Tensor:
     thing at a time, with each answer named rather than positional. They are
     the same computation underneath.
 
-    The standard leaves the order unspecified and NumPy returns them unsorted
-    here; these come back ascending, which is the stronger promise and the one
-    `unique` itself already makes.
+    The standard leaves the order unspecified; these come back ascending,
+    which is the stronger promise and the one `unique` itself already makes.
     """
 
     return unique(_atleast_tensor(input))

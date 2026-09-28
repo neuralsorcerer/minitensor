@@ -332,14 +332,13 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
 ///
 /// Together with [`lse_run`] this replaced a loop calling scalar `exp` per
 /// element that, for a last-axis reduction, walked the whole axis on one
-/// thread. float32 on four cores, before -> after, against NumPy's
-/// `log(exp(x - max).sum()) + max`:
+/// thread. float32 on four cores, before -> after:
 ///
 /// ```text
-///   (4194304,)        13.6ms -> 1.42     NumPy 7.6
-///   (1024, 4096) d1    4.30  -> 1.27           6.4
-///   (4096, 1024) d0    4.38  -> 2.50           6.2
-///   (16, 100000, 2) d1 3.64  -> 1.70          65.6
+///   (4194304,)        13.6ms -> 1.42
+///   (1024, 4096) d1    4.30  -> 1.27
+///   (4096, 1024) d0    4.38  -> 2.50
+///   (16, 100000, 2) d1 3.64  -> 1.70
 /// ```
 ///
 /// `spread` runs the bands on the pool; it does not change how they are cut

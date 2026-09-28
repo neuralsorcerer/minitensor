@@ -55,9 +55,9 @@ pub enum QrMode {
     /// afterwards, and that is a second pass over the whole matrix. A caller
     /// solving a least-squares problem, testing rank, or taking a determinant
     /// through the factorisation never looks at `Q`, and this is roughly twice
-    /// as fast for them. NumPy spells it `mode="r"` and returns `R` on its own;
-    /// this returns the pair either way, with an `[m, 0]` `Q`, so that the
-    /// shape of the answer does not depend on the value of an argument.
+    /// as fast for them. The pair comes back either way, with an `[m, 0]` `Q`,
+    /// so that the shape of the answer does not depend on the value of an
+    /// argument.
     R,
 }
 

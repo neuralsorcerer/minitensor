@@ -530,9 +530,8 @@ fn infer_dtype_at(value: &Bound<PyAny>, depth: usize) -> Option<DataType> {
 ///
 /// Returns `None` for anything NumPy cannot type (ragged, object, strings) so
 /// the caller falls back to the element-wise walk. The mapping is this
-/// library's, not NumPy's: any float width becomes the configured default
-/// float dtype, so `[1.0, 2.0]` infers `float32` here where NumPy would say
-/// `float64`.
+/// library's own: any float width becomes the configured default float dtype,
+/// so `[1.0, 2.0]` infers `float32` whatever width `asarray` read it at.
 fn sequence_dtype_via_numpy(value: &Bound<PyAny>) -> Option<DataType> {
     sequence_kind(&numpy_asarray(value)?)
 }
@@ -1163,9 +1162,9 @@ fn subscript_items<'py>(key: &Bound<'py, PyAny>) -> Vec<Bound<'py, PyAny>> {
 /// Find the subscript's one advanced index and resolve it against `dims`.
 ///
 /// `None` when every entry is basic, so the caller can take the ordinary path.
-/// Two advanced indices are refused: NumPy pairs those up elementwise, which is
-/// a different operation, and answering with the outer product instead would be
-/// wrong quietly.
+/// Two advanced indices are refused: they could mean pairing up elementwise or
+/// an outer product, two different operations, and guessing would be wrong
+/// quietly for whoever meant the other.
 fn locate_advanced_index(
     items: &[Bound<PyAny>],
     dims: &[usize],
@@ -1284,9 +1283,8 @@ fn basic_part<'py>(
 /// does exactly this and was one call away.
 ///
 /// With exactly one index array the answer does not depend on the order the two
-/// kinds are applied in, and the array's axes stay where the array was --
-/// NumPy's rule about advanced indices moving to the front needs two of them,
-/// separated. So this applies the basic subscript with a full slice in the
+/// kinds are applied in, and the array's axes stay where the array was. So
+/// this applies the basic subscript with a full slice in the
 /// array's place and selects along the axis that leaves.
 pub(crate) fn try_single_array_index(
     reference: &Tensor,
@@ -1421,7 +1419,7 @@ pub(crate) fn plan_single_array_assign(
 /// Each position is an ordinary basic assignment, so the write goes through the
 /// same shared storage the rest of `__setitem__` uses -- assigning to a
 /// parameter still reaches the layer -- and a position named twice keeps the
-/// last write, as it does in NumPy.
+/// last write.
 pub(crate) fn apply_single_array_assign(
     target: &mut Tensor,
     plan: &AxisAssign,

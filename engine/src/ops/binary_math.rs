@@ -123,16 +123,12 @@ float_kernel!(
     /// part: a mask the branch predictor cannot guess costs six times one it
     /// can.
     ///
-    /// The last arm is the tie, and it is there because the obvious reference
-    /// has no answer. `-0.0` and `+0.0` compare equal, so either is "the
-    /// larger", and NumPy picks *neither consistently*: `np.fmax` over an
-    /// array of `(-0.0, +0.0)` pairs returns `+0.0` for the elements its
-    /// vectorized body handles and `-0.0` for the ones left to the scalar
-    /// tail, so the same two operands give different signs at different array
-    /// lengths and, at some lengths, within one array. There is nothing there
-    /// to match.
+    /// The last arm is the tie. `-0.0` and `+0.0` compare equal, so either is
+    /// "the larger", and a kernel that leaves the choice to whichever of its
+    /// vectorized body or scalar tail met the pair gives the same two operands
+    /// different signs at different array lengths.
     ///
-    /// So the rule is IEEE 754-2019's `maximumNumber` instead: `-0.0` is below
+    /// So the rule is IEEE 754-2019's `maximumNumber`: `-0.0` is below
     /// `+0.0`, which is the order every other part of this crate already sorts
     /// them in, and the answer does not depend on where in a buffer the
     /// operands sat.
@@ -660,9 +656,9 @@ macro_rules! float_binary_op {
 /// `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses.
 ///
 /// Float32 goes through `ops::simd::transcendental`, which computes it as
-/// `atan(y / x)` in float64 and narrows once. `atan2f` was the last name in
-/// this file behind NumPy, at 5.5ms over a million elements where the `atan`
-/// kernel it is one division away from costs 0.32.
+/// `atan(y / x)` in float64 and narrows once. `atan2f` took 5.5ms over a
+/// million elements where the `atan` kernel it is one division away from costs
+/// 0.32.
 pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let kernel = crate::ops::simd::F32Kernel::select();
     // SAFETY: the block closure is one `F32Kernel` method call.

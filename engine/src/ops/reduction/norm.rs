@@ -338,17 +338,17 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// `sqrt(sum(x^2))` straight, for the `p == 2` orders whose data does not need
 /// the scaling.
 ///
-/// The scaled route below is what makes this library's `norm` right where
-/// NumPy's is not -- `norm` of a float32 vector of `1e20`s is `1.73e20` here
-/// and `inf` there, and of `1e-25`s it is `1.41e-25` here and `0` there,
-/// because squaring leaves the exponent range in both directions. Dividing by
+/// The scaled route below is what keeps `norm` right where squaring leaves
+/// the exponent range in either direction: `norm` of a float32 vector of
+/// `1e20`s is `1.73e20` rather than `inf`, and of `1e-25`s it is `1.41e-25`
+/// rather than `0`. Dividing by
 /// the largest magnitude first moves the whole vector back into range.
 ///
 /// It is also three passes and a full-size temporary where the direct form
 /// needs neither: a max over the input, then `(|x| / s)^2` materialized, then
 /// the sum. On a 2048x1024 float32 tensor `norm()` measured 1.155ms against
 /// 0.271ms for `(x * x).sum()` spelled out with this library's own operators --
-/// its own `mul` and `sum` beat its `norm` by 4.3x, and NumPy's `norm` by 4x.
+/// its own `mul` and `sum` beat its `norm` by 4.3x.
 ///
 /// So try the direct form first and keep the scaled one for the inputs that
 /// actually need it. Overflow and underflow are both detectable *after* the
@@ -391,10 +391,8 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 ///
 /// The last row of each is the allocation. Below a few megabytes the temporary
 /// stays in cache and the second pass is cheap; at 64MB it does not, and the
-/// sum reads all of it back from main memory. That is also where this stops
-/// being a tuning question -- against NumPy's `linalg.norm` the whole-tensor
-/// float32 norm went from 0.33x to 3.3x, and the row norms of a 4000x4000 from
-/// 0.55x to 12x.
+/// sum reads all of it back from main memory, and the fused walk is ten times
+/// faster there rather than twice.
 ///
 /// `None` when the reduced axes are not a trailing block, because then a
 /// reduced slice is not a contiguous run and the walk is a gather rather than a

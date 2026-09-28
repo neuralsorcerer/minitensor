@@ -55,9 +55,8 @@ impl PadMode {
 
 /// How much is added before and after each axis, innermost axis first.
 ///
-/// This is the order the flat `padding` argument arrives in, and it is the one
-/// PyTorch uses: `(left, right)` for the last axis, then the one before it, and
-/// so on. It reads backwards compared to a shape, which is exactly why the
+/// This is the order the flat `padding` argument arrives in: `(left, right)`
+/// for the last axis, then the one before it, and so on. It reads backwards compared to a shape, which is exactly why the
 /// conversion happens once here rather than at every use.
 pub(crate) fn resolve_padding(ndim: usize, padding: &[usize]) -> Result<Vec<(usize, usize)>> {
     if !padding.len().is_multiple_of(2) {
@@ -143,8 +142,7 @@ fn pad_layout(tensor: &Tensor, pads: &[(usize, usize)], mode: PadMode) -> Result
 /// It used to be written down: a `Vec<Option<usize>>` with one entry per output
 /// element, built in one serial pass and then kept alive in the graph for the
 /// backward to read. On four million float32 that was 64MB of `Option<usize>`
-/// -- sixteen times the tensor -- and 68ms against NumPy's 3.8 for a job that
-/// is mostly a copy.
+/// -- sixteen times the tensor -- and 68ms for a job that is mostly a copy.
 ///
 /// The walk is over *rows* instead: everything but the last axis is decomposed
 /// once per row, and the last axis is three runs -- the margin before, the

@@ -318,8 +318,7 @@ const FOLD_ROWS: usize = RUN_SUM_CHUNK / NARROW_ROW;
 /// Before this, a rank-3 or higher input walked each output's `len` terms one
 /// at a time `inner` apart: a single rounding chain as long as the axis, and a
 /// strided read. Summing a `(4, 1000000, 1)` float32 tensor over its middle
-/// axis landed 188 ulps from the correctly rounded answer where NumPy, which
-/// sees a contiguous run there, lands one; this lands one too.
+/// axis landed 188 ulps from the correctly rounded answer; this lands one.
 ///
 /// Which route a slab takes follows from the shape alone -- with at least
 /// `DIM0_MIN_BANDS` slabs each is folded whole on one thread, otherwise each
@@ -653,8 +652,7 @@ impl ProdFloat for f64 {
 /// factors within 5e-4 of one. That is a drift, not a random walk, so it grows
 /// with the length: four million such factors came out 15000 ulps low. No
 /// grouping helps (a pairwise product was 30 times worse); a wider accumulator
-/// does, rounding once at the end. NumPy multiplies in float32 and drifts the
-/// same way. A float64 input gains nothing from it but the same deterministic
+/// does, rounding once at the end. A float64 input gains nothing from it but the same deterministic
 /// split. An answer that is not a normal `f64` is recomputed by [`exact_prod`].
 pub(crate) fn prod_run<I: ProdFloat>(run: &[I]) -> f64 {
     fn chunk_prod<I: ProdFloat>(chunk: &[I]) -> f64 {

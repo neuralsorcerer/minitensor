@@ -664,7 +664,7 @@ pub fn max_pool2d(
 /// it costs is one copy of a vector that already exists, and only when asked.
 ///
 /// Each index is a flat offset into the *unpadded* input plane, which is the
-/// convention `torch` uses and the one `max_unpool2d` scatters back into. Every
+/// convention `max_unpool2d` scatters back into. Every
 /// index names a real element: a window with none would report `-1`, and the
 /// padding rule this checks -- no more than half the window -- is what makes
 /// such a window impossible.

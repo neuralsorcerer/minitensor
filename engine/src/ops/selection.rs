@@ -203,9 +203,9 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     // first and copied second, both in parallel, and nothing in between is
     // materialised. Collecting the selected positions into a vector instead
     // made the whole operation serial and cost more than the copy it was
-    // describing -- `x[mask]` over a million elements took 9.6 ms where NumPy
-    // takes 1.0, almost all of it the `Vec<usize>` and a one-element
-    // `copy_from_slice` per selected value.
+    // describing -- `x[mask]` over a million elements took 9.6 ms, almost all
+    // of it the `Vec<usize>` and a one-element `copy_from_slice` per selected
+    // value.
     let len = mask_slice.len();
     let (band, starts) = compaction_bands(len, &|first, last| {
         mask_slice[first..last].iter().filter(|&&m| m).count()

@@ -94,7 +94,7 @@ pub fn sign(tensor: &Tensor) -> Result<Tensor> {
 /// through [`SqrtBackward`].
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sqrt(&widened);
     }
@@ -134,7 +134,7 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
 /// Gradients flow through [`RsqrtBackward`].
 pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return rsqrt(&widened);
     }
@@ -170,9 +170,9 @@ pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
 /// Element-wise reciprocal (1/x) with gradient support
 pub fn reciprocal(tensor: &Tensor) -> Result<Tensor> {
     // `1/2` is a half, so an integer argument widens rather than being
-    // refused. NumPy reads it as integer division instead and answers 0 for
-    // every magnitude above 1, which is a footgun its own documentation warns
-    // about; PyTorch widens, and so does the rest of this family.
+    // refused. Reading it as integer division instead would answer 0 for every
+    // magnitude above 1, a result nobody asking for a reciprocal wants; the
+    // rest of this family widens too.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return reciprocal(&widened);
     }
@@ -286,7 +286,7 @@ fn round_integer_to_step(value: i128, step: i128) -> i128 {
 /// `10^power`, or `None` once it leaves `i128`.
 ///
 /// A step that large is bigger than twice any value being rounded, so every
-/// one of them rounds to zero -- which is what NumPy answers too.
+/// one of them rounds to zero.
 fn power_of_ten(power: u32) -> Option<i128> {
     (0..power).try_fold(1i128, |acc, _| acc.checked_mul(10))
 }
@@ -295,7 +295,7 @@ fn power_of_ten(power: u32) -> Option<i128> {
 ///
 /// An integer is already whole, so a non-negative `decimals` leaves it alone;
 /// a negative one rounds it to a multiple of a power of ten, in the dtype it
-/// came in, the way NumPy does.
+/// came in.
 pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
     if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
         if decimals >= 0 {
@@ -315,8 +315,7 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
                     // The cast back wraps, which is the rule integer `pow`
                     // follows too: the exact answer modulo the dtype's width.
                     // Only reachable by rounding a value within a step of the
-                    // dtype's limit, where NumPy overflows a float cast and
-                    // warns about it.
+                    // dtype's limit.
                     Some(step) => crate::ops::map::unary_map(input, move |x: $ty| {
                         round_integer_to_step(x as i128, step) as $ty
                     }),
@@ -350,8 +349,8 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
 /// separately because it takes `decimals`.
 ///
 /// An integer is already rounded, so these are the identity on one and return
-/// it unchanged rather than refusing it -- which is what NumPy does, and what
-/// `relu`, `abs` and `sign` already did here. Unlike the real-valued ops there
+/// it unchanged rather than refusing it -- which is what `relu`, `abs` and
+/// `sign` already did here. Unlike the real-valued ops there
 /// is nothing to widen to: the answer is an integer and the dtype stays.
 macro_rules! float_rounding_op {
     ($name:ident, $f32_kernel:ident, $f64_kernel:ident, $label:literal, $doc:literal) => {

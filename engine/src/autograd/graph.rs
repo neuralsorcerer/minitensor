@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, Weak};
 /// before it, and so a tensor that can still be backpropagated keeps exactly
 /// its own history alive. Once the last such tensor is gone, so is the history
 /// and every activation it saved -- which is how a forward pass that is never
-/// backpropagated costs nothing once its result is dropped, as in PyTorch,
-/// rather than holding its activations until someone clears the graph.
+/// backpropagated costs nothing once its result is dropped, rather than
+/// holding its activations until someone clears the graph.
 ///
 /// Held links cannot form a cycle: a node only links to nodes that existed
 /// before it.

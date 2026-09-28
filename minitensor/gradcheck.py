@@ -79,7 +79,8 @@ def gradcheck(
     eps:
         Half-width of the central difference.
     atol, rtol:
-        Tolerances, as `numpy.allclose` uses them.
+        Tolerances: a gradient passes where
+        `|analytic - numeric| <= atol + rtol * |numeric|`.
     raise_exception:
         Raise with a description of the worst mismatch (the default) rather
         than returning `False`.

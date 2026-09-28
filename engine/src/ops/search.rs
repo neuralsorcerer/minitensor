@@ -8,8 +8,8 @@
 //!
 //! Everything here is one binary search wearing four hats. `searchsorted` is the
 //! search itself; `bucketize` is the same call with the arguments the other way
-//! round, which is the spelling PyTorch uses and the one that reads correctly
-//! when the sequence is a fixed set of boundaries; `histogram` is the search
+//! round, the spelling that reads correctly when the sequence is a fixed set
+//! of boundaries; `histogram` is the search
 //! followed by a count; and `histc` is `histogram` with the edges chosen for you.
 //!
 //! `bincount` is the degenerate case of the same thing -- the value *is* the
@@ -122,8 +122,7 @@ fn dtype_mismatch() -> MinitensorError {
 /// stack of sequences is matched row for row against a stack of values. The
 /// sequence is *assumed* sorted and never checked, because checking would cost
 /// the linear scan the binary search exists to avoid -- an unsorted sequence
-/// gives a meaningless answer rather than an error, which is also what NumPy and
-/// PyTorch do.
+/// gives a meaningless answer rather than an error.
 ///
 /// The result is `int64` positions in `0..=width`, so a value past the end of
 /// the sequence answers with the length rather than being clamped into it.
@@ -173,8 +172,7 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
         // Every value's search is independent of every other's, which is what
         // makes this parallel at all -- and it was not, which cost more than
         // the search: a million values against a million-element sequence took
-        // 400 ms on one core while NumPy's `isin`, which is this search plus a
-        // sort, took 102 ms for the whole thing.
+        // 400 ms on one core.
         //
         // One search is about `log2(width)` probes and, past the cache, each is
         // a miss. A task wants a few thousand probes in it before the split
@@ -210,8 +208,7 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
 ///
 /// [`searchsorted`] with the arguments the other way round. Both spellings exist
 /// because both readings are natural -- one asks where a value goes in a
-/// sequence, the other asks which bucket a value is in -- and PyTorch ships
-/// both for the same reason.
+/// sequence, the other asks which bucket a value is in.
 pub fn bucketize(input: &Tensor, boundaries: &Tensor, right: bool) -> Result<Tensor> {
     if boundaries.ndim() != 1 {
         return Err(MinitensorError::invalid_operation(
@@ -314,7 +311,7 @@ const TALLY_PRIVATE_BINS: usize = 1 << 16;
 ///
 /// 131,072 values, from 16,384: a band that short is tens of microseconds,
 /// less than the pool costs to wake from Python, and `bincount` of 65,536
-/// labels took 170-220us split four ways against NumPy's 80-100.
+/// labels took 170-220us split four ways.
 const TALLY_MIN_BAND: usize = 1 << 17;
 const TALLY_BANDS: usize = 64;
 
@@ -374,7 +371,7 @@ where
 ///
 /// With few bins the same counter comes round again before its last
 /// increment has landed, and each increment waits for the one before it:
-/// sixteen thousand labels over seven bins took 37us, twice NumPy. So a
+/// sixteen thousand labels over seven bins took 37us. So a
 /// short tally is kept four times over, label `i` going to copy `i % 4`, and
 /// the copies added at the end -- exact, since the counts are integers.
 fn count_labels<L: Copy>(labels: &[L], slots: &mut [i64], slot: impl Fn(L) -> usize) {
@@ -726,9 +723,8 @@ exact_extremes!(i64, i64::MIN, i64::MAX, 4, false);
 ///
 /// Non-finite values are skipped rather than propagated: the edges have to be
 /// finite and increasing, and a NaN in the data is not a reason to refuse to
-/// bin the rest of it. This is a deliberate divergence -- NumPy takes a plain
-/// min and max, so one NaN makes its range `[nan, nan]` and it raises
-/// "autodetected range is not finite" rather than binning anything. A tensor
+/// bin the rest of it: a plain min and max would make one NaN the whole
+/// range's end, and nothing could be binned. A tensor
 /// with no finite value at all comes back as an empty range for the caller to
 /// substitute, which is the one case where there is nothing better to do.
 ///
@@ -928,8 +924,8 @@ fn bin_edges(input: &Tensor, bins: Bins<'_>, range: Option<(f64, f64)>) -> Resul
                 }
             };
             // A range of no width still has to produce bins, so it is opened
-            // by half a unit either side -- NumPy's rule, and the only one that
-            // puts a constant sample somewhere sensible.
+            // by half a unit either side, which puts a constant sample in the
+            // middle bin.
             let (low, high) = if low == high {
                 (low - 0.5, high + 0.5)
             } else {
@@ -1010,7 +1006,7 @@ pub fn histogram(
 
 /// Counts over `bins` equal-width bins spanning `[min, max]`.
 ///
-/// PyTorch's spelling of [`histogram`], with two differences it is worth being
+/// A second spelling of [`histogram`], with two differences it is worth being
 /// exact about: the edges are not returned, and `min == max` means "span the
 /// data" rather than "an empty range".
 pub fn histc(input: &Tensor, bins: usize, min: f64, max: f64) -> Result<Tensor> {

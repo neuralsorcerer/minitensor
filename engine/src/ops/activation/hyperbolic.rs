@@ -441,8 +441,8 @@ vector_f32!(
 
 vector_f32!(
     /// Vectorized, through the same `log` kernel scaled by `1/ln(base)` before its
-    /// single rounding. `log2f` and `log10f` are scalar, which left them at 0.48x
-    /// and 0.23x of NumPy in float32 while the natural `log` beside them ran 1.14x.
+    /// single rounding. `log2f` and `log10f` are scalar, which left them 2-5x
+    /// slower in float32 than the natural `log` beside them.
     log2_f32,
     log_scaled,
     std::f64::consts::LOG2_E
@@ -529,8 +529,7 @@ float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos, offe
 
 vector_f32!(
     /// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
-    /// was the one arc function left running a lane at a time: `atan` measured
-    /// 2.75x NumPy's while `tan` -- the harder direction -- measured 0.85x.
+    /// was the one arc function left running a lane at a time.
     atan_f32,
     atan
 );

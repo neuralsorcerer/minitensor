@@ -282,7 +282,7 @@ where
 ///
 /// A slice with fewer non-NaN entries than the correction demands has no
 /// variance to report, and the division says so: `0 / 0` is NaN and `x / 0` is
-/// infinity, which is what NumPy gives for the same slices.
+/// infinity.
 pub fn nanvar(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -331,7 +331,7 @@ pub fn nanvar(
         // for a slice that is all NaN, and `0 / -1` is a clean -0.0 -- an
         // answer claiming the data does not vary, from data that is not
         // there. At zero the division is `0 / 0`, which is NaN: what `var`
-        // answers for an empty slice, and what NumPy answers for this one.
+        // answers for an empty slice.
         let corrected = sub(
             &count,
             &create_scalar_tensor(1.0, tensor.dtype(), tensor.device())?,
@@ -413,8 +413,8 @@ fn reject_all_nan_slices(values: &Tensor, name: &str) -> Result<()> {
 /// where the reduction itself is one pass. It also answered differently. The
 /// substitution cannot tell a NaN that became `-inf` from an `-inf` that was
 /// always there, so `nanargmax([nan, -inf])` named index 0 -- a NaN, from the
-/// reduction whose whole job is to skip them. NumPy does the same thing for
-/// the same reason. Skipping instead of substituting answers 1, and is the
+/// reduction whose whole job is to skip them. Skipping instead of
+/// substituting answers 1, and is the
 /// only one of the two that honours the name.
 pub fn nanargmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
@@ -525,8 +525,8 @@ mod tests {
     #[test]
     fn a_slice_with_too_few_finite_entries_reports_no_variance() {
         // One finite value and an unbiased correction leaves `0 / 0`; none at
-        // all leaves it whatever the numerator is over zero. Both are the
-        // answers NumPy gives, and neither is a number.
+        // all leaves it whatever the numerator is over zero. Neither is a
+        // number.
         let one = tensor(vec![NAN, 4.0, NAN], vec![3]);
         assert!(wide(&nanvar(&one, None, false, true).unwrap())[0].is_nan());
         assert_eq!(wide(&nanvar(&one, None, false, false).unwrap())[0], 0.0);
@@ -585,8 +585,8 @@ mod tests {
     fn a_nan_is_never_the_index_reported() {
         // The substitution this used to do pushed NaN to -inf, which made it
         // indistinguishable from an -inf that was there: `nanargmax` then
-        // named index 0, a NaN. NumPy still does. Skipping answers 1, the
-        // first index that holds a number.
+        // named index 0, a NaN. Skipping answers 1, the first index that
+        // holds a number.
         let t = tensor(
             vec![NAN, f64::NEG_INFINITY, NAN, f64::NEG_INFINITY],
             vec![4],

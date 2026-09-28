@@ -163,14 +163,13 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// The axes in reverse order, which is NumPy's `.T`. A matrix is
-    /// transposed and anything of lower rank comes back unchanged.
+    /// The axes in reverse order. A matrix is transposed and anything of lower
+    /// rank comes back unchanged.
     ///
     /// The three spellings of a transpose mean three different things and none
-    /// of them is the others: `t()` is PyTorch's, which transposes a matrix and
-    /// refuses a higher rank rather than guessing; `mT` is the array API's,
-    /// which swaps the last two axes and leaves batch axes alone; this one
-    /// reverses every axis, which is what a NumPy caller writing `a.T` means.
+    /// of them is the others: `t()` transposes a matrix and refuses a higher
+    /// rank rather than guessing; `mT` swaps the last two axes and leaves batch
+    /// axes alone; this one reverses every axis.
     #[getter]
     #[pyo3(name = "T")]
     pub fn transposed(&self) -> PyResult<Self> {

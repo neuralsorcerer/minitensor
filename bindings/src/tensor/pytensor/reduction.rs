@@ -10,8 +10,8 @@ impl PyTensor {
     /// The tensor a scan runs over and the axis it runs along.
     ///
     /// A scan needs one axis, so an omitted `dim` means the tensor is
-    /// flattened to the single axis it then has -- NumPy's rule, and the one
-    /// `nancumsum` was already following on its own.
+    /// flattened to the single axis it then has -- the rule `nancumsum` was
+    /// already following on its own.
     fn scan_input(&self, dim: Option<isize>) -> PyResult<(engine::Tensor, isize)> {
         match dim {
             Some(axis) => Ok((self.inner.clone(), axis)),
@@ -176,8 +176,8 @@ impl PyTensor {
     }
 
     /// Running sum along `dim`, keeping the input's shape. With no `dim` the
-    /// tensor is flattened first and the result is a line, as NumPy does and
-    /// as `nancumsum` already did.
+    /// tensor is flattened first and the result is a line, as `nancumsum`
+    /// already did.
     #[pyo3(signature = (dim=None))]
     pub fn cumsum(&self, dim: Option<isize>) -> PyResult<Self> {
         let (scanned, axis) = self.scan_input(dim)?;
@@ -203,8 +203,6 @@ impl PyTensor {
     /// comparison compiles to. On a 2048x1024 float32 matrix the values-only
     /// reduction takes 0.121ms against 0.895ms for the pair, so a caller who
     /// discards the indices pays 7.4x for them.
-    ///
-    /// Named for NumPy and PyTorch, which both spell this `amax`.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn amax(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         self.max_values(normalize_optional_axes(dim)?, keepdim.unwrap_or(false))

@@ -36,8 +36,7 @@
 //! `A`, whatever the shift did -- the shift buys convergence speed, not
 //! accuracy, which is why an approximate one is not a compromise.
 //!
-//! Singular values come back in descending order, as LAPACK's `gesdd` and
-//! NumPy's `svd` give them. `U` and `V` are determined up to the sign of each
+//! Singular values come back in descending order. `U` and `V` are determined up to the sign of each
 //! column -- and up to a rotation within any repeated singular value's subspace
 //! -- so nothing here imposes a convention and nothing should rely on one.
 
@@ -750,7 +749,7 @@ fn decompose(
     if batch > 0 && (m == 0 || n == 0) {
         // Nothing to factor -- but `U` and `V^T` are still orthogonal matrices
         // of the size that was asked for, and a caller is entitled to use them
-        // as such. Zero is not one of those. NumPy answers the same way.
+        // as such. Zero is not one of those.
         fill_identity(&mut u_data, tensor.dtype(), batch, m, u_cols)?;
         fill_identity(&mut vt_data, tensor.dtype(), batch, vt_rows, n)?;
     } else if batch > 0 {

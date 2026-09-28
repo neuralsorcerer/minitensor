@@ -348,7 +348,7 @@ pub fn diag_embed(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> R
     Ok(output)
 }
 
-/// NumPy's `diag`: build a matrix from a vector, or read a matrix's diagonal.
+/// `diag`: build a matrix from a vector, or read a matrix's diagonal.
 ///
 /// One name for the two directions because that is the name everyone reaches
 /// for, and the rank of the argument says unambiguously which was meant.

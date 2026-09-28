@@ -210,8 +210,7 @@ pub fn transpose(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyT
 /// Alias of `transpose`, under its array-library spelling.
 ///
 /// The one place an argument here is called `axis` rather than `dim`: the
-/// function's own name says which word it wants, and PyTorch spells this pair
-/// `axis0, axis1` for exactly that reason. `swapdims` below is the same
+/// function's own name says which word it wants. `swapdims` below is the same
 /// operation under the other name, and takes `dim0, dim1`.
 #[pyfunction]
 #[pyo3(signature = (input, axis0, axis1))]
@@ -376,7 +375,7 @@ macro_rules! binary_forwarders {
     };
     // The second operand is `other` unless the entry names it. `pow` does,
     // because a power's second operand is its exponent -- which is what its
-    // own docstring, the method and PyTorch all call it.
+    // own docstring and the method call it.
     (@one $name:ident, ($operand:ident $($ignored:ident)*), $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
@@ -813,7 +812,7 @@ pub fn masked_select(input: &Bound<PyAny>, mask: &Bound<PyAny>) -> PyResult<PyTe
 /// Largest element over `dim`, values only.
 ///
 /// `max(dim=...)` reports the index alongside, and finding it is most of the
-/// cost; see `Tensor.amax`. NumPy and PyTorch both spell this `amax`.
+/// cost; see `Tensor.amax`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn amax(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
@@ -927,7 +926,7 @@ pub fn argmin(
     tensor.argmin(dim, Some(keepdim))
 }
 
-/// Running sum along `dim`, keeping the input's shape. With no `dim` the tensor is flattened first and the result is a line, as in NumPy.
+/// Running sum along `dim`, keeping the input's shape. With no `dim` the tensor is flattened first and the result is a line.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
 pub fn cumsum(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
@@ -1432,7 +1431,7 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
-/// The distinct values of `input`, ascending, with NaN last and collapsed. Returns the values alone, or a tuple with whichever extras were asked for -- always in NumPy's order: where each first occurred, the inverse map, the counts.
+/// The distinct values of `input`, ascending, with NaN last and collapsed. Returns the values alone, or a tuple with whichever extras were asked for -- always in one order: where each first occurred, the inverse map, the counts.
 #[pyfunction]
 #[pyo3(signature = (input, return_inverse=false, return_counts=false, return_index=false))]
 pub fn unique(
@@ -1452,7 +1451,7 @@ pub fn unique(
     unique_result(py, found)
 }
 
-/// The distinct values of *adjacent* runs, in the order they appear. Nothing is sorted, so a value that recurs after something else appears again. Extras come back in NumPy's order: where each first occurred, the inverse map, the counts.
+/// The distinct values of *adjacent* runs, in the order they appear. Nothing is sorted, so a value that recurs after something else appears again. Extras come back in one fixed order: where each first occurred, the inverse map, the counts.
 #[pyfunction]
 #[pyo3(signature = (input, return_inverse=false, return_counts=false, return_index=false))]
 pub fn unique_consecutive(
@@ -1474,13 +1473,13 @@ pub fn unique_consecutive(
 
 /// Hand back the values alone, or a tuple of whatever was asked for.
 ///
-/// NumPy and PyTorch both vary their arity with the flags, so this does too:
-/// asking for nothing extra should not force a caller to unpack a one-tuple.
+/// The arity varies with the flags: asking for nothing extra should not force
+/// a caller to unpack a one-tuple.
 fn unique_result(py: Python<'_>, found: engine::ops::UniqueParts) -> PyResult<Py<PyAny>> {
     let (values, index, inverse, counts) = found;
     let mut parts: Vec<Py<PyAny>> = vec![Py::new(py, PyTensor::from_tensor(values))?.into()];
     // Values, then where each first occurred, then the inverse map, then the
-    // counts -- NumPy's order, so a caller asking for two of them can unpack
+    // counts -- one fixed order, so a caller asking for two of them can unpack
     // them positionally.
     for extra in [index, inverse, counts].into_iter().flatten() {
         parts.push(Py::new(py, PyTensor::from_tensor(extra))?.into());
@@ -1547,7 +1546,7 @@ pub fn bucketize(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Ten bins is NumPy's default, and `bins` may equally be the edges
+/// Ten bins by default, and `bins` may equally be the edges
 /// themselves -- an integer means "this many", anything else is a sequence.
 /// `None` back from this says the argument was a count, which `bin_count`
 /// then reads.
@@ -1565,7 +1564,7 @@ fn bin_count(value: &Bound<PyAny>) -> PyResult<usize> {
     Ok(value.extract::<i64>()? as usize)
 }
 
-/// The edges `histogram` would use, without counting anything into them. For choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored, as it is in NumPy: no edge rule here depends on them.
+/// The edges `histogram` would use, without counting anything into them. For choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored: no edge rule here depends on them, and taking it lets a caller pass `histogram`'s arguments through unchanged.
 #[pyfunction]
 #[pyo3(signature = (input, bins=None, range=None, weights=None))]
 pub fn histogram_bin_edges(
@@ -1574,7 +1573,7 @@ pub fn histogram_bin_edges(
     range: Option<(f64, f64)>,
     weights: Option<&Bound<PyAny>>,
 ) -> PyResult<PyTensor> {
-    // Accepted and ignored, as in NumPy: no edge rule here depends on them.
+    // Accepted and ignored: no edge rule here depends on them.
     let _ = weights;
     let values = PyTensor::from_python_value(input)?;
     let edges;
@@ -1633,7 +1632,7 @@ pub fn histogram(
     ))
 }
 
-/// Counts over `bins` equal-width bins spanning `[min, max]`, or the data's own range when they are equal. PyTorch's spelling of `histogram`.
+/// Counts over `bins` equal-width bins spanning `[min, max]`, or the data's own range when they are equal. A second spelling of `histogram`.
 #[pyfunction]
 #[pyo3(signature = (input, bins=100, min=0.0, max=0.0))]
 pub fn histc(input: &Bound<PyAny>, bins: usize, min: f64, max: f64) -> PyResult<PyTensor> {

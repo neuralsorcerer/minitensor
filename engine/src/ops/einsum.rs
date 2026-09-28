@@ -220,8 +220,8 @@ fn parse(equation: &str, operands: &[Tensor]) -> Result<Plan> {
         }
         None => {
             // Everything the ellipsis covers, then the subscripts used exactly
-            // once, in the order their letters sort. That is NumPy's rule and
-            // there is no better one to invent.
+            // once, in the order their letters sort, so the output order is
+            // fixed by the subscripts alone.
             let mut labels: Vec<usize> =
                 (0..covered).rev().map(|offset| ELLIPSIS + offset).collect();
             let mut once: Vec<usize> = occurrences
@@ -268,8 +268,7 @@ fn collapse_repeats(tensor: &mut Tensor, labels: &mut Vec<usize>) -> Result<()> 
 /// The size each label stands for, and a complaint if two operands disagree.
 ///
 /// A label of size one against a label of size `n` is the one disagreement that
-/// is allowed: it broadcasts, as it does everywhere else in the library and as
-/// it does in NumPy's `einsum`.
+/// is allowed: it broadcasts, as it does everywhere else in the library.
 fn label_sizes(terms: &[Vec<usize>], operands: &[Tensor]) -> Result<FxHashMap<usize, usize>> {
     let mut sizes: FxHashMap<usize, usize> = FxHashMap::default();
     for (labels, operand) in terms.iter().zip(operands) {

@@ -223,6 +223,14 @@ have -- so it is not what any published number was taken on.
 - Link from [the documentation index](index.md) when adding a new guide.
 - Keep README examples concise; move lengthy explanations into `docs/`.
 
+## Comments and docstrings
+
+- State this library's rule and the reason for it. Do not justify a choice by
+  what another library does ("as NumPy does", "PyTorch's convention"), and do
+  not quote timings relative to one; give the measured figures of this code.
+- Name NumPy only where the code actually calls it: the provider seam, the
+  Python layer's delegated operations, and the import and export paths.
+
 ## Pull request checklist
 
 Before submitting changes:

@@ -11,8 +11,7 @@ impl PyTensor {
     ///
     /// `dim`, not `axis`, and defaulted the way `stack` below defaults it:
     /// these two are the same pair of static constructors, and one of them
-    /// wanting NumPy's keyword made the choice depend on which you reached
-    /// for. The free spellings -- `cat`, `concat` -- have always said `dim`.
+    /// wanting `axis` made the choice depend on which you reached for. The free spellings -- `cat`, `concat` -- have always said `dim`.
     /// `numpy_compat.concatenate` keeps `axis`, as everything in that module
     /// does.
     #[staticmethod]

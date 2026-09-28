@@ -244,8 +244,8 @@ binary_elementwise!(
 /// The NaN-propagating pairwise maximum, written as two selects.
 ///
 /// `maximum` is not `a.max(b)`: the standard library's returns the operand
-/// that is *not* NaN, and a tensor `maximum` has to carry the NaN through, the
-/// way NumPy's does. Spelled the obvious way that is
+/// that is *not* NaN, and a tensor `maximum` has to carry the NaN through.
+/// Spelled the obvious way that is
 /// `if a.is_nan() || b.is_nan() { .. } else if a >= b { .. }`, and the `||`
 /// short-circuits, which is a branch in the middle of an elementwise loop.
 ///
@@ -427,15 +427,15 @@ rounding_kernel!(
 /// this stopped: eight lanes over 8192 elements is still a run of 1024
 /// additions per lane, and the error of a run that deep grows with its length
 /// where a pairwise fold's grows like `log n`. Averaged over 40 draws it was
-/// 2.96 times NumPy's error at 8192 elements and 1.83 times at 1024, with a
-/// worst case of 3.7e-7 against NumPy's 1.1e-7. Those are single-ulp figures --
+/// 2.96 times a pairwise sum's error at 8192 elements and 1.83 times at 1024,
+/// with a worst case of 3.7e-7 against 1.1e-7. Those are single-ulp figures --
 /// a float32 sum is never far wrong -- but they were the shape that gets worse
 /// with size rather than staying put, and this is the kernel every other
 /// reduction is built on.
 ///
-/// Folding 128-element leaves pairwise makes the depth logarithmic, which is
-/// NumPy's algorithm and its leaf size; the mean error is now within noise of
-/// NumPy's at every length. Two things about the shape of it, both measured:
+/// Folding 128-element leaves pairwise makes the depth logarithmic; the mean
+/// error is now that of a pairwise sum at every length. Two things about the
+/// shape of it, both measured:
 ///
 /// * The obvious recursion -- `f(left) + f(right)` down to the leaf -- cost
 ///   2.4x. A call returning one float cannot keep its accumulators in registers
@@ -470,7 +470,7 @@ macro_rules! float_sum_kernel {
         /// worse than the `mean` it subtracts.
         pub fn $by(data: &[$ty], keep: impl Fn($ty) -> $ty) -> $ty {
             const LANES: usize = $lanes;
-            /// NumPy's. Long enough that the merge below is noise against the
+            /// Long enough that the merge below is noise against the
             /// adds, short enough that a lane's run through one leaf stays a
             /// handful of roundings.
             const LEAF: usize = 128;
@@ -580,8 +580,7 @@ float_sum_kernel!(
 /// `dot` spelled this as `a.iter().zip(b).map(|(x, y)| x * y).sum()`, which is
 /// a single dependent chain of multiply-adds: no vectorization, because
 /// floating point addition cannot be reassociated without being told to, and
-/// one rounding per element. It measured 7.5 times slower than NumPy's `sdot`
-/// on 65536 elements and 36 times less accurate.
+/// one rounding per element.
 ///
 /// Only the common prefix is read, so a caller with mismatched lengths gets the
 /// shorter one rather than a panic; `dot` checks the lengths itself.
@@ -592,7 +591,7 @@ float_sum_kernel!(
 /// reasons: four float64 accumulators left the loop waiting on one add's
 /// latency per vector, at about an element a cycle, and a pairwise finish puts
 /// fewer roundings on each partial. At 16,384 float64 elements the four-lane
-/// loop took 5.5us against NumPy's 2.9; this takes 3.0.
+/// loop took 5.5us; this takes 3.0.
 pub fn simd_dot_f32(a: &[f32], b: &[f32]) -> f32 {
     dot_dispatch::<f32, DOT_LANES>(a, b)
 }
@@ -851,8 +850,8 @@ pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
 
 /// Sum an i32 slice into an i64 accumulator.
 ///
-/// `sum` and `prod` report a wider integer than they read, matching NumPy and
-/// PyTorch: a 32-bit total overflows after a few million counts and there is no
+/// `sum` and `prod` report a wider integer than they read: a 32-bit total
+/// overflows after a few million counts and there is no
 /// good answer to give once it has. Accumulating in i64 while *reading* i32 is
 /// what keeps that from costing anything -- promoting the input first would
 /// mean materializing a second, twice-as-large copy of it before the reduction
@@ -867,8 +866,7 @@ pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
 /// every 256-bit load of eight i32 becomes two sign-extends and two 64-bit adds
 /// where the same-width kernel did one. Summing 2M elements on four cores,
 /// best-of-200 over four separate runs, went from ~0.055ms to ~0.122ms -- 2.2x
-/// for the right answer. It is still around six times quicker than NumPy's
-/// `int32` sum (~0.73ms), which widens the same way for the same reason.
+/// for the right answer.
 ///
 /// Eight accumulators, not four or sixteen: those were tried and neither beat
 /// this, sixteen clearly worse.

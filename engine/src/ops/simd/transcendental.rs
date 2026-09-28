@@ -236,8 +236,7 @@
 //!
 //! `atanh` is bit-identical too. It replaced a promoted scalar, so that keeps
 //! what it returned, at vector speed: it had been the one float32 function
-//! left on a scalar loop, 7x slower than NumPy, whose float32 `arctanh`
-//! misses the correctly rounded answer on 4.7% of inputs.
+//! left on a scalar loop.
 //!
 //! `erf` and `erfc` are within one ulp of the correctly rounded result
 //! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
@@ -315,10 +314,10 @@
 //!
 //! # Not covered
 //!
-//! The float64 kernels all still call `libm`, and `tanh` is the one that costs
-//! something for it: 0.15x to 0.51x of NumPy depending on size, and the only
-//! kernel anywhere in the library that NumPy still beats at 16M elements. It
-//! is not covered here, and the reason is not the one it looks like.
+//! The float64 kernels here all still call `libm`; above a few hundred
+//! elements the float64 transcendentals go to the installed provider instead
+//! (see `ops::provider`). `tanh` is the one that costs something for it, and it
+//! is not covered here for a reason that is not the one it looks like.
 //!
 //! It is not the polynomial. Extending `expm1_poly` from `r^12` to `r^14`
 //! takes the worst case from 6 ulp to 4 and stops. Give the same
@@ -337,11 +336,10 @@
 //! the float64 arithmetic underneath is three ulp out. That headroom is what
 //! these kernels spend, and a float64 output has none to spend.
 //!
-//! The bar there is not libm either: against a 200-bit reference NumPy's
-//! `tanh` is faithful to 1 ulp where the glibc call this module leaves in
-//! place reaches 2, so NumPy is currently both faster and more accurate for
-//! float64 `tanh`. Matching it wants a segmented table with a polynomial per
-//! segment, which is a different piece of work from anything in this file.
+//! The bar there is not libm either: against a 200-bit reference the glibc
+//! call this module leaves in place reaches 2 ulp. A float64 `tanh` faithful
+//! to 1 ulp wants a segmented table with a polynomial per segment, which is a
+//! different piece of work from anything in this file.
 //!
 //! `erfc` is untouched: it needs relative accuracy out where `erf` has
 //! saturated, so it wants the high branch extended rather than reused.
@@ -1015,9 +1013,8 @@ fn asinh_one<const FMA: bool>(x: f32) -> f32 {
 /// `atanh(x)`, as `sign(x) * log1p(2|x| / (1 - |x|)) / 2`.
 ///
 /// `atanh` was the one float32 function left on a scalar loop -- `atanh_stable`
-/// in float64 per element, correctly rounded and 7x slower than NumPy, whose
-/// own float32 `arctanh` misses the correctly rounded answer on 4.7% of inputs.
-/// This is that same formula on the vector path, and it keeps the rounding.
+/// in float64 per element, correctly rounded and one element at a time. This
+/// is that same formula on the vector path, and it keeps the rounding.
 ///
 /// For a float32 magnitude `m` both `1 - m` and `2m` are exact in float64, so
 /// the only roundings ahead of the logarithm are the division and the `1 + w`
@@ -1041,8 +1038,8 @@ fn atanh_one<const FMA: bool>(x: f32) -> f32 {
 /// `log(x) / ln(base)`, for the fixed-base logarithms.
 ///
 /// `log2` and `log10` are this curve times a constant, and were reaching
-/// scalar `log2f`/`log10f` while `log` ran through the kernel above -- 0.48x
-/// and 0.23x of NumPy in float32 where `log` is 1.14x.
+/// scalar `log2f`/`log10f` while `log` ran through the kernel above, at 2-5x
+/// its time in float32.
 ///
 /// The scale is applied in float64, before the single rounding to float32.
 /// That is the whole reason this is a kernel rather than a `log` followed by a

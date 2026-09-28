@@ -306,7 +306,7 @@ fn column_band(inner: usize) -> usize {
 ///
 /// "Counts as true" is the same predicate `any` and `all` use -- nonzero for
 /// the numeric dtypes, the value itself for `Bool` -- because it comes from the
-/// same macro. NaN is nonzero, so it counts; that is NumPy's answer too.
+/// same macro. NaN is nonzero, so it counts.
 ///
 /// The output length is not known until the input has been scanned, so the scan
 /// happens twice: once to count what each band finds and once to write it. That
@@ -460,7 +460,7 @@ fn bool_fold(
 /// Largest element over any set of dimensions, values only -- `max` without
 /// the index, which is what lets it reduce more than one axis: an index names
 /// a position along a single axis, so `max(dim)` cannot take a list and
-/// `amax` can. NumPy and PyTorch draw the same line at the same two names.
+/// `amax` can.
 pub fn amax(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     reduce_over_dims(tensor, dim, keepdim, max)
 }
@@ -936,8 +936,8 @@ fn sift_down<T: Copy>(
 /// `select_nth_unstable_by` over the lot. That is the right algorithm when `k`
 /// is a decent fraction of the slice, and badly wrong when it is not: taking
 /// the top 100 of two million float32 meant allocating and writing 32MB of
-/// pairs -- four times the tensor -- to look at 100 of them. It measured 36.7ms
-/// against NumPy's 6.9ms for the same work.
+/// pairs -- four times the tensor -- to look at 100 of them, 36.7ms of
+/// work.
 ///
 /// A bounded heap of `k` reads the input once and touches nothing else. After
 /// the first few thousand elements the root is already better than almost every
@@ -951,26 +951,24 @@ fn sift_down<T: Copy>(
 /// Measured on two million float32, taking values and indices both:
 ///
 /// ```text
-///        k     before      after      numpy
-///        1    10.05ms     4.93ms     5.10ms
-///      100    33.69ms     5.56ms     4.19ms
-///     1000    36.94ms     6.47ms     4.35ms
-///    16384    36.60ms    20.62ms     5.47ms
-///    50000    41.35ms    43.15ms     5.88ms
+///        k     before      after
+///        1    10.05ms     4.93ms
+///      100    33.69ms     5.56ms
+///     1000    36.94ms     6.47ms
+///    16384    36.60ms    20.62ms
+///    50000    41.35ms    43.15ms
 /// ```
 ///
-/// The last row is the select path, untouched, and it is the one thing here
-/// still well behind NumPy: `argpartition` works through an index array rather
-/// than a copy of the data, so it moves a third of the bytes. That is a real
-/// gap for anyone asking for tens of thousands out of millions, which is a rare
-/// enough shape -- past a few percent of the slice you almost always want a
-/// sort or a threshold instead -- that it is left as it stands rather than
+/// The last row is the select path, untouched. A selection through an index
+/// array rather than a copy of the data would move a third of the bytes; that
+/// matters only to someone asking for tens of thousands out of millions, a
+/// rare enough shape -- past a few percent of the slice you almost always want
+/// a sort or a threshold instead -- that it is left as it stands rather than
 /// adding a third implementation of one operation to this file.
 ///
-/// Batching is where the shape most people actually run wins outright: the top
+/// Batching is where the shape most people actually run gains most: the top
 /// 50 of each row of a (256, 50000) tensor, the vocabulary-sampling shape, went
-/// 52.3ms to 11.0ms against NumPy's 42.5ms, because the rows go out to every
-/// core.
+/// 52.3ms to 11.0ms, because the rows go out to every core.
 fn bounded_topk<T: Copy>(
     dim_size: usize,
     at: impl Fn(usize) -> T,

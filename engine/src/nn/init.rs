@@ -369,7 +369,7 @@ pub fn truncated_normal_init(
 
 /// `sqrt(numerator / fan)`, and zero for a fan of zero.
 ///
-/// PyTorch's rule. A layer with no inputs has a weight with no elements, but
+/// A layer with no inputs has a weight with no elements, but
 /// its bias still has some, and `1 / sqrt(0)` is not a bound: it made
 /// `DenseLayer(0, 5)` panic inside the sampler.
 fn fan_scale(numerator: f64, fan: usize) -> f64 {

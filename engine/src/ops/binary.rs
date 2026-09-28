@@ -99,7 +99,7 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
         }
         Div => Ok(promote_division_dtype(lhs, rhs)),
         // A bit pattern is what these operate on, so a float operand has
-        // nothing to offer them; that is where NumPy and PyTorch stop too.
+        // nothing to offer them.
         Bitwise => {
             reject_float_operand(lhs, rhs, "Bitwise AND, OR and XOR")?;
             Ok(promote_arithmetic_dtype(lhs, rhs))

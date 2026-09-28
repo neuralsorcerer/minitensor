@@ -220,7 +220,7 @@ impl GradientFunction for LayerNormBackward {
 /// goes there and nowhere else: the value, the index and the gradient then all
 /// name the same element. `amax`/`amin` report no index and have no such
 /// element to name, so their gradient is split equally among everything equal
-/// to the extremum -- the mean subgradient, and what PyTorch's `amax` does.
+/// to the extremum -- the mean subgradient.
 ///
 /// Both are valid subgradients of a function that has no derivative at a tie.
 /// What is not valid is the pair disagreeing, which is what happened while

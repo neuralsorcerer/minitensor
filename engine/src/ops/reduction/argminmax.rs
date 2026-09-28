@@ -57,7 +57,7 @@ pub(crate) fn scan_along_dim<I, A, W, F>(
             // total. Carrying it in a register is the difference between a
             // scan and what the general form below degenerates to here: a
             // `split_at_mut` and a one-iteration loop *per element*, which on
-            // four million float32 cost 22ms against NumPy's 11.
+            // four million float32 cost 22ms.
             //
             // Same order of operations, so the same answer to the bit.
             if reverse {

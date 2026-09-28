@@ -60,8 +60,7 @@ impl QuantileInterpolation {
 /// within each axis and then again between the partial winners, so
 /// `[[3, 3], [3, 1]]` reduced over both axes sends a quarter, a quarter and a
 /// half to three elements that are equally the maximum. Gathering them first
-/// gives each a third, which is what an even split over the ties means and
-/// what PyTorch's `amax` gives for the same tensor.
+/// gives each a third, which is what an even split over the ties means.
 ///
 /// Nothing is copied when the axes are already at the end in order, which is
 /// the common case (`dim=(-2, -1)`): the permutation is then the identity and
@@ -457,7 +456,7 @@ fn attach_median_grad(
 ///
 /// Several axes are gathered into one and reduced together, which is the only
 /// reading a quantile has over more than one axis -- the q-th value of the
-/// group, not a quantile of quantiles. NumPy's `axis` tuple means the same.
+/// group, not a quantile of quantiles.
 pub fn quantile(
     tensor: &Tensor,
     q: f64,
@@ -467,7 +466,7 @@ pub fn quantile(
 ) -> Result<Tensor> {
     // An integer argument widens rather than being refused, the rule `mean`
     // already follows: a quantile of integers is an interpolated real number,
-    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return quantile(&widened, q, dim, keepdim, interpolation);
     }
@@ -486,7 +485,7 @@ pub fn quantiles(
 ) -> Result<Tensor> {
     // An integer argument widens rather than being refused, the rule `mean`
     // already follows: a quantile of integers is an interpolated real number,
-    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return quantiles(&widened, qs, dim, keepdim, interpolation);
     }
@@ -550,7 +549,7 @@ pub fn nanquantile(
 ) -> Result<Tensor> {
     // An integer argument widens rather than being refused, the rule `mean`
     // already follows: a quantile of integers is an interpolated real number,
-    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return nanquantile(&widened, q, dim, keepdim, interpolation);
     }
@@ -569,7 +568,7 @@ pub fn nanquantiles(
 ) -> Result<Tensor> {
     // An integer argument widens rather than being refused, the rule `mean`
     // already follows: a quantile of integers is an interpolated real number,
-    // and NumPy answers one. See `ops::util::widen_integer_input`.
+    // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return nanquantiles(&widened, qs, dim, keepdim, interpolation);
     }
@@ -1181,8 +1180,8 @@ const QUANTILE_SELECT_LIMIT: usize = 64;
 /// of `positions`, by whichever of selection and sorting is cheaper.
 ///
 /// A full sort is the obvious way and usually the wrong one: `percentile` with
-/// two quantiles read 0.12x of NumPy because it sorted a million elements to
-/// answer two questions, where NumPy selects.
+/// two quantiles sorted a million elements to answer two questions, where a
+/// selection per quantile does.
 ///
 /// `parallel` says whether a sort here may use the thread pool. It is false
 /// when the caller is already inside it with one row per worker, where a

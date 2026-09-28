@@ -666,7 +666,7 @@ fn l1_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Kullback-Leibler divergence from `target` to `input`, both given as probabilities -- *not* as log-probabilities, which is what PyTorch's `kl_div` takes. A zero in `target` contributes nothing, as the definition requires.
+/// Kullback-Leibler divergence from `target` to `input`, both given as probabilities -- *not* as log-probabilities. A zero in `target` contributes nothing, as the definition requires.
 #[pyfunction(name = "kl_div")]
 #[pyo3(signature = (input, target, reduction="mean"))]
 fn kl_div_functional(

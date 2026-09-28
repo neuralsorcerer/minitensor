@@ -326,25 +326,23 @@ binary_kernel_simd!(
 // divisors for integer dtypes before dispatching here.
 //
 // `(a / b).floor()` is the whole answer only while both sides are finite.
-// Python's `//` and NumPy's `floor_divide` agree on the two cases where it
-// is not, and this used to agree with neither:
+// Python's `//` settles the two cases where it is not, and this used to get
+// both wrong:
 //
 //   * An infinite numerator over a finite, non-zero divisor is NaN. There is
-//     no integer quotient to round to, and both references say so;
-//     `(inf / 3).floor()` said `inf`.
+//     no integer quotient to round to; `(inf / 3).floor()` said `inf`.
 //   * A finite numerator over an infinite divisor of the opposite sign is
 //     -1. The true quotient is a negative number smaller than any float, so
 //     its floor is -1, where `(3 / -inf).floor()` rounds -0.0 to -0.0.
 //
 // Division by zero keeps its infinity (`inf // 0` is `inf`), which is what
-// both references give and what the float path is for.
+// the float path is for.
 //
-// And for finite operands it was wrong one time in some, where both
-// references are right: `1.0 // 0.1` is 9 and this said 10. The exact
+// And for finite operands it was wrong one time in some: `1.0 // 0.1` is 9 and this said 10. The exact
 // quotient is 9.99999999999999944..., which *rounds* to 10.0 before the
 // floor ever sees it -- so `floor_div(a, b) * b + remainder(a, b) == a`,
 // the identity the remainder kernels below are built to, failed. The fix
-// costs a product and a fused multiply-add per element rather than NumPy's
+// costs a product and a fused multiply-add per element rather than an
 // `fmod`, because the error has one shape only:
 //
 //   * `a / b` rounds to the float nearest the exact quotient `Q`, and every
@@ -444,7 +442,7 @@ binary_kernel!(
 // are rejected by the op layer.
 //
 // A zero remainder takes the divisor's sign too: `-4.0 % 2.0` is `0.0` and
-// `4.0 % -2.0` is `-0.0`, in Python and in NumPy. `fmod` gives its zero the
+// `4.0 % -2.0` is `-0.0`, as in Python. `fmod` gives its zero the
 // dividend's sign, and passing that through gave both the wrong one.
 binary_kernel!(
     rem_f32_direct,
@@ -1322,8 +1320,8 @@ mod integer_wraparound_tests {
         // Reductions are the exception, and deliberately so: they report a
         // wider integer than they read (see `accumulating_dtype`), so the
         // totals that used to wrap now come back exact in `Int64`. The
-        // elementwise operations above still wrap, which is also what NumPy
-        // does -- `int32 + int32` is `int32` there too.
+        // elementwise operations above still wrap: `int32 + int32` is
+        // `int32`.
         {
             use crate::ops::reduction::{cumprod, cumsum, prod, sum};
             let wide = |t: &Tensor| t.data().as_i64_slice().unwrap().to_vec();

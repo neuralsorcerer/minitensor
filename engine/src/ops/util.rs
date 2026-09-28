@@ -196,17 +196,16 @@ where
 /// `sum`, `nansum`, `prod`, `cumsum` and `cumprod` build a running total, so
 /// the output can leave the range of the input long before the input itself is
 /// remarkable: summing three billion-ish `int32` values overflows, and the
-/// answer that came back was `1705032704` rather than `6000000000`. NumPy and
-/// PyTorch both widen narrow integers to 64 bits for exactly these operations,
-/// and this matches them.
+/// answer that came back was `1705032704` rather than `6000000000`. Narrow
+/// integers therefore widen to 64 bits for exactly these operations.
 ///
 /// It is only the accumulating reductions. `max`, `min`, `argmax` and the
 /// quantiles report a value that was already in the input, so widening them
-/// would be noise -- NumPy keeps the input dtype there too.
+/// would be noise.
 ///
 /// Floats are unchanged. Promoting `f32` to `f64` would silently alter every
 /// existing result and double the memory of the most common reduction in the
-/// library; NumPy does not do it either.
+/// library.
 ///
 /// `Bool` was already handled this way for `sum` and `cumsum` before this
 /// existed, by casting to `Int64` up front -- counting a mask is the usual
@@ -295,8 +294,7 @@ impl_accumulate_int!(i64);
 /// once had.
 /// Eight times shorter blocks means eight times shorter runs inside a lane, and
 /// that is the whole remaining error -- it took `softmax` over a million-class
-/// axis from 6.9e-7 to 2.5e-8, which is NumPy's own figure to the digit, and
-/// measured no slower on any shape.
+/// axis from 6.9e-7 to 2.5e-8, and measured no slower on any shape.
 #[inline]
 pub(crate) fn accurate_indexed_sum<U>(count: usize, zero: U, mut term: impl FnMut(usize) -> U) -> U
 where
@@ -597,8 +595,8 @@ pub(crate) fn broadcast_mask_index(
 /// float (or a boolean, which has no width to take).
 ///
 /// `sqrt(4)` is 2 and `sin(1)` is 0.841…; neither has an integer answer, so an
-/// op whose value is a real number takes an integer argument by widening it,
-/// which is what NumPy and PyTorch both do. The width follows the rule `mean`
+/// op whose value is a real number takes an integer argument by widening it.
+/// The width follows the rule `mean`
 /// already documents -- `int32` to `float32`, `int64` to `float64` -- so a
 /// tensor widened by one of these ops lands where the same tensor averaged
 /// would.

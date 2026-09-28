@@ -419,8 +419,8 @@ impl TensorData {
     /// to split a call across threads, so an operand NumPy is reading can
     /// overlap a shared write from another Python thread -- an optimizer step
     /// running beside a forward pass, as Hogwild-style training does. NumPy
-    /// then reads a mix of old and new element values, as PyTorch would in
-    /// that race. It never reads freed memory: its own handle keeps the buffer
+    /// then reads a mix of old and new element values. It never reads freed
+    /// memory: its own handle keeps the buffer
     /// alive, and a shared write never reallocates it. No engine kernel is in
     /// that window; they all run with the GIL held.
     #[inline(always)]
@@ -582,7 +582,7 @@ impl TensorData {
     /// each a zeroed allocation followed by a serial loop, written out once per
     /// dtype: fifteen copies of the same shape, all of them writing a fresh
     /// mapping on one core. `arange` of sixteen million int64 took 114ms that
-    /// way against NumPy's 33. Here the dtype conversion is written once and
+    /// way. Here the dtype conversion is written once and
     /// the fill is the same parallel one the rest of the module uses.
     ///
     /// `value` is called exactly once per element, with the element's index, so

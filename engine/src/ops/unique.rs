@@ -25,7 +25,7 @@
 //! `==` would emit every `NaN` in the input as its own distinct value. Both are
 //! fixed by one comparison that puts `NaN` after every number and calls it equal
 //! to itself -- which is what makes `unique([nan, 1.0, nan])` answer
-//! `[1.0, nan]`, matching NumPy, rather than `[1.0, nan, nan]`.
+//! `[1.0, nan]` rather than `[1.0, nan, nan]`.
 //!
 //! None of these is differentiable. `unique` returns a subset of its input, and
 //! which subset changes discontinuously as values collide; `mode` returns a
@@ -113,8 +113,7 @@ fn walk_runs<T: Orderable, F: FnMut(usize, usize)>(values: &[T], mut visit: F) {
 /// from anywhere in the tensor, per comparison -- where sorting the values
 /// themselves reads what it compares. And when nobody wants the positions,
 /// building them is work for no reader: `unique` over two million floats spent
-/// 397ms sorting a permutation it then discarded, against NumPy's 15 for the
-/// same question. It is 37ms now.
+/// 397ms sorting a permutation it then discarded. It is 37ms now.
 ///
 /// Ties need no rule here: equal values are equal by the comparison this module
 /// uses -- `NaN` included -- so which of them comes out first cannot change an
@@ -151,7 +150,7 @@ fn indices_tensor(values: Vec<i64>, shape: Shape, device: crate::device::Device)
 
 /// The distinct values, and whichever of the three extras was asked for: where
 /// each first occurred, which distinct value each input element was, and how
-/// many times each occurred -- in that order, which is NumPy's.
+/// many times each occurred -- in that order.
 pub type UniqueParts = (Tensor, Option<Tensor>, Option<Tensor>, Option<Tensor>);
 
 /// What a caller asked to be told, beyond the values themselves.

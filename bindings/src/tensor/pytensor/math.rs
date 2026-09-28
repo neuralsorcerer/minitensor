@@ -262,9 +262,8 @@ impl PyTensor {
     /// Element-wise larger of two tensors, ignoring a NaN in either operand. NaN only where both are.
     ///
     /// Promoted as `maximum` rather than as the rest of `binary_math`: an
-    /// exact dtype has no NaN to skip, so two integers answer an integer the
-    /// way NumPy's `fmax` does, where `/`-style promotion would make it a
-    /// float.
+    /// exact dtype has no NaN to skip, so two integers answer an integer,
+    /// where `/`-style promotion would make it a float.
     pub fn fmax(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Maximum)?;

@@ -340,8 +340,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// The cross product along `dim`. NumPy calls this argument `axis`; every
-    /// op here spells it `dim`, and PyTorch spells this one `dim` too.
+    /// The cross product along `dim`, the name every op here gives an axis.
     #[pyo3(signature = (other, dim=None))]
     pub fn cross(&self, other: &Bound<PyAny>, dim: Option<i32>) -> PyResult<Self> {
         let py = other.py();

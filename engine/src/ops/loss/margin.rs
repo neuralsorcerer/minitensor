@@ -63,8 +63,7 @@ fn align(lhs: &Tensor, rhs: &Tensor) -> Result<(Tensor, Tensor, Shape)> {
 ///
 /// Each norm is floored at `eps` on its own rather than their product being
 /// floored once: that is what keeps a zero vector paired with a long one from
-/// reporting a similarity far outside `[-1, 1]`, and it is PyTorch's
-/// definition.
+/// reporting a similarity far outside `[-1, 1]`.
 pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Result<Tensor> {
     check_operands("cosine_similarity", &[x1, x2])?;
     // Spelled out rather than as `!(eps > 0.0)`: NaN compares false either way
@@ -90,8 +89,7 @@ pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Resu
 /// `||x1 - x2||_p` along the last dimension, the distance the triplet loss
 /// measures with.
 ///
-/// `eps` is added before the norm, as PyTorch's `PairwiseDistance` does: at
-/// two identical points the p-norm's derivative is undefined, and the shift
+/// `eps` is added before the norm: at two identical points the p-norm's derivative is undefined, and the shift
 /// moves the evaluation off that point instead of returning NaN for a
 /// perfectly good pair.
 fn pairwise_distance(x1: &Tensor, x2: &Tensor, p: f64, eps: f64) -> Result<Tensor> {

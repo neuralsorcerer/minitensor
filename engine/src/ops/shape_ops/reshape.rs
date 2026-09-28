@@ -212,11 +212,10 @@ pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {
 /// so gradients flow (see [`squeeze`]).
 pub fn flatten(tensor: &Tensor, start_dim: isize, end_dim: isize) -> Result<Tensor> {
     // A scalar has no axes to name, but flattening one still means something:
-    // the single value as a length-one vector, which is what NumPy's `ravel`
-    // and `torch.flatten` both give. Refusing it made `flatten`, `ravel` and
-    // everything built on them -- `repeat_interleave` of a scalar among them --
-    // the only shape moves that would not take a 0-d tensor, while `reshape`,
-    // `tile`, `unsqueeze` and `atleast_1d` all did.
+    // the single value as a length-one vector. Refusing it made `flatten`,
+    // `ravel` and everything built on them -- `repeat_interleave` of a scalar
+    // among them -- the only shape moves that would not take a 0-d tensor,
+    // while `reshape`, `tile`, `unsqueeze` and `atleast_1d` all did.
     //
     // The two dims are still checked: `0` and `-1` are the only positions a
     // 0-d tensor has, and anything else is the mistake the error is for.
@@ -358,8 +357,8 @@ pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Resu
 /// task per position along the axes outside `dim`. That is plenty of tasks
 /// when `dim` is an inner axis and exactly one when it is axis 0, which is the
 /// common call: `cat` of two 16MB float32 matrices along dimension 0 ran on a
-/// single core at 17.9ms against NumPy's 5.5ms, while the same tensors along
-/// dimension 1 took 6.9ms because that shape happened to split.
+/// single core at 17.9ms, while the same tensors along dimension 1 took 6.9ms
+/// because that shape happened to split.
 ///
 /// Sizing the task by the output instead makes the split independent of which
 /// axis is being joined. Four tasks per thread rather than one, so a late or
@@ -762,8 +761,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
     // One output row is one selected index's `inner` elements, and rows are
     // independent of each other. Cutting by outer position instead meant a
     // selection along the first axis -- which has one -- copied its whole
-    // output on a single core: 100000 rows of 512 floats took 167ms against
-    // NumPy's 71 for the same 204MB.
+    // output on a single core: 100000 rows of 512 floats took 167ms.
     let rows_per_task = outputs_per_task(inner);
     let selected = indices.len();
 

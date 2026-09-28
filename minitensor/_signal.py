@@ -9,10 +9,9 @@
 A window is a shape, not an algorithm: five lines of arithmetic over the sample
 positions. They are here rather than left to the caller because the *ends* are
 where they differ from each other and from a naive transcription -- a window
-meant for a spectrum repeats seamlessly (`periodic=True`, which is what
-`torch` defaults to and what an FFT wants) while one meant for filter design is
-symmetric about its middle (`periodic=False`, which is what NumPy's `hanning`
-and friends give).
+meant for a spectrum repeats seamlessly (`periodic=True`, the default and
+what an FFT wants) while one meant for filter design is symmetric about its
+middle (`periodic=False`).
 
 `correlate` and `convolve` are the same sliding product read two ways: the
 first slides one signal along the other as it is, the second reverses it first.
@@ -64,8 +63,8 @@ def _degenerate(length: int) -> Tensor | None:
     """A window of one sample or none, which has no shape to speak of.
 
     One sample is the whole window, so it is 1 rather than whatever the cosine
-    happens to give at position zero -- which is what NumPy answers and what
-    keeps a windowed single sample equal to itself.
+    happens to give at position zero -- which keeps a windowed single sample
+    equal to itself.
     """
 
     if length == 0:
@@ -150,8 +149,9 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
     modes are a window onto it. Where that window starts is the only place the
     two operations differ once the reversal is done, and it is not symmetric:
     with a kernel longer than the signal, `'same'` starts one sample later for
-    a correlation than for a convolution. That is NumPy's behaviour and it is
-    easier to state as an offset than to arrive at by padding.
+    a correlation than for a convolution. The untracked path's NumPy product
+    answers that way and the tracked one has to agree, and it is easier to
+    state as an offset than to arrive at by padding.
     """
 
     signal = _flat(_atleast_tensor(first))
@@ -214,7 +214,7 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         # which padding by `taps - shortest` on each side yields exactly.
         # Computing them all and keeping these did `length + taps - 1` dot
         # products for as few as one: `correlate` of two 1,024-sample
-        # signals took 1.9ms where NumPy takes 1us.
+        # signals took 1.9ms.
         return overlaps(taps - shortest)
     full = overlaps(taps - 1)
     if mode == "full":

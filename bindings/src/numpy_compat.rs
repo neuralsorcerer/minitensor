@@ -66,7 +66,7 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Python layer, which already implements them correctly. The versions
     // that used to live here were `concatenate` and `chunk` on a fixed
     // axis, with none of the rank promotion those four are *for*: they
-    // joined two vectors into one long one where NumPy makes two rows.
+    // joined two vectors into one long one where `vstack` makes two rows.
     m.add_function(wrap_pyfunction!(split, m)?)?;
 
     // Mathematical functions
@@ -389,9 +389,7 @@ pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyRes
 
 /// Cross product of two tensors along `dim`.
 ///
-/// NumPy calls this argument `axis`, but every op here spells it `dim` and so
-/// does PyTorch's `cross`; one name for one thing beats matching each function
-/// to whichever library contributed it.
+/// The axis is `dim`, as it is for every op here: one name for one thing.
 #[pyfunction]
 #[pyo3(signature = (a, b, dim=None))]
 fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, dim: Option<i32>) -> PyResult<PyTensor> {

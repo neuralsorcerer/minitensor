@@ -214,7 +214,7 @@ eye = Tensor.eye
 
 
 def identity(n, dtype=None, device=None, requires_grad=False):
-    """The `n` by `n` identity matrix -- NumPy's name for a square `eye`."""
+    """The `n` by `n` identity matrix, a square `eye`."""
 
     return Tensor.eye(n, n, dtype=dtype, device=device, requires_grad=requires_grad)
 
@@ -315,8 +315,8 @@ if numpy_compat is not None:
     # is two rows, `hstack` of two vectors is one longer one, and `hsplit` cuts
     # a vector along the only axis it has. The compiled module used to carry
     # its own `concatenate`-on-a-fixed-axis versions with none of that, so
-    # `numpy_compat.vstack([v, v])` gave one long vector where NumPy gives two
-    # rows, and `hstack` and `hsplit` raised `IndexError` outright. Installing
+    # `numpy_compat.vstack([v, v])` gave one long vector where it should give
+    # two rows, and `hstack` and `hsplit` raised `IndexError` outright. Installing
     # the real ones keeps one implementation rather than a second, worse one.
     for _name in ("vstack", "hstack", "hsplit", "vsplit"):
         setattr(numpy_compat, _name, globals()[_name])

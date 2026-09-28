@@ -31,12 +31,12 @@ const TRANSPOSE_TILE: usize = 16;
 /// - `inner > 1`: the trailing axes move together, so each output run of
 ///   `inner` elements is one contiguous run of the input and is copied whole.
 ///   Walking them element by element took 80us to swap the leading axes of an
-///   (8, 64, 64) float32 tensor, where this takes 4.4 and NumPy 5.9.
+///   (8, 64, 64) float32 tensor, where this takes 4.4.
 /// - `inner == 1`: the swapped axes are the two sides of a matrix, one for
 ///   each position of `outer` and `between`, and are transposed in tiles; see
 ///   [`TRANSPOSE_TILE`]. `between` is 1 for `.T` of a matrix and `.mT` of a
 ///   batch; above it, a (32, 32, 32) `transpose(0, 2)` took 72us element by
-///   element and takes 20 in tiles, NumPy 25.
+///   element and takes 20 in tiles.
 pub(crate) fn transpose_map<T: Copy + Send + Sync>(
     input_data: &[T],
     input_shape: &Shape,

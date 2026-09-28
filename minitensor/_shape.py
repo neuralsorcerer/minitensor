@@ -463,8 +463,8 @@ def tile(input: object, reps: object) -> Tensor:
     """Repeat the tensor `reps` times along each axis.
 
     Unlike `repeat`, `reps` may be shorter than the tensor's rank; the missing
-    leading entries are taken as 1, which is NumPy's rule and the reason both
-    spellings exist.
+    leading entries are taken as 1, which is the reason both spellings
+    exist.
     """
 
     tensor = _atleast_tensor(input)
@@ -525,7 +525,7 @@ def tensor_split(
                 f"tensor_split requires a positive number of sections, got {sections}"
             )
         base, extra = divmod(length, sections)
-        # Built by list repetition, as NumPy builds its split points: a count
+        # Built by list repetition: a count
         # no list can hold raises MemoryError at once, where appending one
         # edge at a time ground on until the machine ran out of memory.
         sizes = [base + 1] * extra + [base] * (sections - extra)
@@ -709,7 +709,7 @@ def msort(input: object) -> Tensor:
     """Sort along the first dimension, values only.
 
     `sort` returns the indices as well and defaults to the last dimension;
-    this is the shorthand NumPy and PyTorch both spell this way.
+    this is the shorthand for the values along the first.
     """
 
     return _C.functional.sort(_atleast_tensor(input), 0)[0]
@@ -983,9 +983,9 @@ def _selection_operands(
 def lexsort(keys: object, dim: int = -1) -> Tensor:
     """The order that sorts by several keys at once, last key first.
 
-    The last key is the primary one and earlier keys break its ties, which is
-    NumPy's convention and the one that reads correctly when the keys are
-    written in the order a table's columns are.
+    The last key is the primary one and earlier keys break its ties, the
+    order that reads correctly when the keys are written in the order a
+    table's columns are.
 
     Done as one stable sort per key, least significant first: a stable sort
     leaves the order the previous keys established wherever the current one
@@ -1085,7 +1085,7 @@ def unstack(input: object, dim: int = 0) -> tuple[Tensor, ...]:
 def array_split(
     input: object, indices_or_sections: object, dim: int = 0
 ) -> tuple[Tensor, ...]:
-    """NumPy's name for `tensor_split`: split into pieces that need not divide
+    """Another name for `tensor_split`: split into pieces that need not divide
     the axis evenly."""
 
     return tensor_split(input, indices_or_sections, dim)
@@ -1203,8 +1203,8 @@ def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
     if runs is not None:
         # What is left is a handful of runs, so it is copied as runs: two
         # slices for one deleted position, where the mask below reads and
-        # tests every element to find them -- 445us against NumPy's 73 to
-        # take one element out of 262,144.
+        # tests every element to find them -- 445us to take one element out
+        # of 262,144.
         runs = [(first, last) for first, last in runs if last > first]
         if tensor.requires_grad:
             # Through the engine, which records how to route the gradient.
@@ -1345,9 +1345,8 @@ def insert(
 def resize(input: object, shape: object) -> Tensor:
     """`input`'s elements laid out in `shape`, repeating them to fill it.
 
-    NumPy's `resize` rather than PyTorch's: the free function that returns a
-    new tensor and *repeats* rather than zero-filling when the new shape is
-    larger. An empty input has nothing to repeat, so it fills with zeros.
+    A new tensor that *repeats* the input rather than zero-filling when the
+    new shape is larger. An empty input has nothing to repeat, so it fills with zeros.
     """
 
     tensor = _atleast_tensor(input)
@@ -1440,7 +1439,7 @@ def cumulative_sum(
 
 
 def broadcast_arrays(*inputs: object) -> tuple[Tensor, ...]:
-    """NumPy's name for `broadcast_tensors`: every input at their common shape."""
+    """Another name for `broadcast_tensors`: every input at their common shape."""
 
     return broadcast_tensors(*inputs)
 
@@ -1553,7 +1552,7 @@ def ix_(*sequences: object) -> tuple[Tensor, ...]:
     Each sequence gets its own axis and length one everywhere else, so
     `x[ix_(rows, cols)]` is the sub-matrix of those rows and columns rather
     than the elements they pair up into. Boolean sequences are turned into the
-    positions they select, as NumPy does.
+    positions they select.
     """
 
     grids = []
@@ -1605,10 +1604,9 @@ def _bit_axis(rank: int, dim: object, name: str) -> int:
 def packbits(input: object, dim: object = None, bitorder: str = "big") -> Tensor:
     """Pack groups of eight truth values along `dim` into one integer each.
 
-    NumPy answers in `uint8`; this library has no unsigned byte, so the values
-    come back as `int32` -- the same numbers in a wider box. `.numpy()` then
-    `.astype(numpy.uint8)` recovers NumPy's array exactly, and that cast is the
-    only place the difference shows.
+    This library has no unsigned byte, so the values come back as `int32` --
+    byte values in a wider box. `.numpy()` then `.astype(numpy.uint8)` gives
+    the packed bytes themselves.
 
     The axis is zero-padded up to a multiple of eight at its *end*, which is
     what makes `unpackbits` the inverse only when it is told the original
@@ -1648,7 +1646,7 @@ def unpackbits(
     """Expand each element along `dim` into its eight bits.
 
     The inverse of `packbits`, and its input is what `packbits` produced: an
-    `int32` tensor of byte values rather than NumPy's `uint8`. A value outside
+    `int32` tensor of byte values. A value outside
     `0..255` is refused rather than truncated -- there is no eight-bit answer
     for it, and quietly giving the low byte would make the round trip lie.
 

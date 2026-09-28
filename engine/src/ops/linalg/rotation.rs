@@ -314,8 +314,7 @@ pub(crate) fn negate_column<T: Float>(matrix: &mut [T], rows: usize, stride: usi
 ///
 /// Both factorisations produce their values in whatever order the iteration
 /// converged, and both have a conventional order callers rely on -- ascending
-/// for eigenvalues, matching LAPACK's `syev` and NumPy's `eigh`; descending for
-/// singular values, matching `gesdd` and NumPy's `svd`. The permutation is
+/// for eigenvalues, descending for singular values. The permutation is
 /// orthogonal, so applying it to the values and to the matching columns of the
 /// vectors leaves the factorisation exactly intact.
 ///

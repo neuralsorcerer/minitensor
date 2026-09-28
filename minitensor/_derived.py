@@ -171,15 +171,13 @@ def pairwise_distance(
 
     `eps` is added to the difference before the norm, which biases every
     distance upward: two identical rows are `eps * d ** (1 / p)` apart rather
-    than zero. It is here because `torch.nn.functional.pairwise_distance` has
-    it and defaults it to the same value, so ported code gets the same numbers.
+    than zero.
 
-    The reason it exists there does not apply here. A `p`-norm has no
-    derivative at the origin, and PyTorch needs the shift to keep a loss that
-    pulls two rows together from producing NaN at the moment it succeeds --
-    but this library's `norm` already answers zero for that gradient rather
-    than NaN. So `eps=0.0` is safe, gives the true distance, and is the better
-    choice for anything not being compared against torch.
+    It is not needed for the gradient. A `p`-norm has no derivative at the
+    origin, and a shift is the usual way to keep a loss that pulls two rows
+    together from producing NaN at the moment it succeeds -- but this library's
+    `norm` already answers zero for that gradient rather than NaN. So
+    `eps=0.0` is safe and gives the true distance.
     """
 
     a = _require_float(_atleast_tensor(input), "pairwise_distance")
@@ -232,9 +230,9 @@ def _is_tensor(value: object) -> bool:
 def _histogram_bounds(bounds: object, dims: int) -> list:
     """`range` as one `(low, high)` pair per dimension, or `None` for each.
 
-    Both spellings are taken: a flat sequence of `2 * dims` numbers, which is
-    what `torch.histogramdd` uses, and a sequence of pairs, which is what this
-    library's own one-dimensional `histogram` generalises to. They cannot be
+    Both spellings are taken: a flat sequence of `2 * dims` numbers, and a
+    sequence of pairs, which is what the one-dimensional `histogram`
+    generalises to. They cannot be
     confused, because one has sequences in it and the other does not.
     """
 
@@ -275,8 +273,8 @@ def _histogram_edges(column: Tensor, specification: object, bounds: object) -> T
     else:
         low, high = bounds
     if low == high:
-        # A column that never varies would otherwise have no width to divide;
-        # widening by half on each side is what `numpy` does for it too.
+        # A column that never varies would otherwise have no width to divide,
+        # so it is widened by half on each side.
         low, high = low - 0.5, high + 0.5
     if not low < high:
         raise ValueError(f"histogramdd needs an increasing range, got ({low}, {high})")
@@ -384,9 +382,8 @@ def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
     if order and not tensor.requires_grad and str(tensor.dtype) != "bool":
         # Nothing to record, so each pass is the engine's first difference:
         # one parallel subtraction of the shifted rows from the unshifted
-        # ones, with neither copied out first -- the same subtraction NumPy
-        # makes, on every core rather than one. Over a million float64 it
-        # took 288us where `np.diff` takes 738; below, each pass copies both
+        # ones, with neither copied out first, on every core. Over a million
+        # float64 it takes 288us; below, each pass copies both
         # halves out before subtracting them. The engine path stays for a
         # gradient to be recorded, and for `bool`, which it refuses.
         for _ in range(order):
@@ -429,7 +426,7 @@ def trapezoid(
         # each end by one, so the integral is the whole sum less half of each
         # end. One reduction, where averaging neighbours first copied the
         # tensor twice and passed over it three more times: 8.5ms for a
-        # million float64 samples against NumPy's 2.0.
+        # million float64 samples.
         ends = _F.narrow(values, axis, 0, 1) + _F.narrow(values, axis, length - 1, 1)
         return (_F.sum(values, [axis]) - _F.sum(ends, [axis]) * 0.5) * float(dx)
 
@@ -448,7 +445,7 @@ def trapezoid(
     return _F.sum(heights * widths, [axis])
 
 
-# `numpy` spells it `trapz` as well, and enough code says that for the alias to
+# `trapz` is the other common name, and enough code says it for the alias to
 # be worth the line.
 trapz = trapezoid
 
@@ -461,8 +458,8 @@ def cov(
 ) -> Tensor:
     """The covariance matrix of the *rows* of `input`.
 
-    Each row is a variable and each column an observation, which is NumPy's and
-    PyTorch's convention and the opposite of a design matrix's. A 1-D input is
+    Each row is a variable and each column an observation, the opposite of a
+    design matrix's layout. A 1-D input is
     one variable, so the result is its scalar variance.
 
     `fweights` counts repeats of each observation and `aweights` weights their
@@ -579,11 +576,10 @@ def average(
     do not sum to one still give an average rather than a scaled one.
 
     `weights` may have the tensor's shape, or be one-dimensional and as long as
-    the reduced axis -- NumPy's rule, and the one that makes
+    the reduced axis, which is what makes
     `average(x, dim=0, weights=[1, 2, 3])` mean what it looks like. The
     one-dimensional form needs a single axis to line up with, so weighting an
-    average over several axes takes weights shaped like the input; that is
-    NumPy's rule for the same reason.
+    average over several axes takes weights shaped like the input.
 
     With `returned=True` the weight total comes back alongside, which is what a
     caller combining averages needs and cannot recover afterwards.
@@ -900,7 +896,7 @@ def nancumsum(input: object, dim: int | None = None) -> Tensor:
     """The running sum along `dim`, treating NaN as zero.
 
     A NaN contributes nothing and, unlike in `cumsum`, does not poison every
-    total after it. With no `dim` the tensor is flattened first, as NumPy does.
+    total after it. With no `dim` the tensor is flattened first.
     """
 
     tensor = _atleast_tensor(input)
@@ -945,8 +941,8 @@ def ediff1d(
         return diff(flat) if flat.shape[0] > 1 else _F.narrow(flat, 0, 0, 0)
     # The joined-on values promote with the differences rather than being cast
     # onto their dtype: `to_begin=2.5` against an integer input used to arrive
-    # as 2. NumPy refuses the pair outright; promoting keeps the value, which
-    # is what `append` does with the same argument.
+    # as 2. Promoting keeps the value, which is what `append` does with the
+    # same argument.
     for end in (to_begin, to_end):
         if end is not None:
             flat, _ = _promote_pair(flat, _atleast_tensor(end).reshape(-1))

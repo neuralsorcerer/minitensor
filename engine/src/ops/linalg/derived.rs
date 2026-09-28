@@ -68,8 +68,8 @@ fn scalar(value: f64, like: &Tensor) -> Result<Tensor> {
 
 /// How small a singular value has to be before it counts as zero.
 ///
-/// `max(m, n) * eps`, relative to the largest singular value, which is LAPACK's
-/// convention and PyTorch's default. It is not arbitrary: the factorisation
+/// `max(m, n) * eps`, relative to the largest singular value. It is not
+/// arbitrary: the factorisation
 /// guarantees each value to within roughly `eps` times the largest, and a
 /// perturbation of the matrix by a single rounding can move a value by that
 /// much times the dimension. A value below it is a value the input did not

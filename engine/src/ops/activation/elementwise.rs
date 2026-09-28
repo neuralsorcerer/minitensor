@@ -32,7 +32,7 @@ pub(crate) use crate::ops::map::{
 /// Exponential function with gradient support
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return exp(&widened);
     }
@@ -75,7 +75,7 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
 /// Natural logarithm function with gradient support
 pub fn log(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return log(&widened);
     }
@@ -118,7 +118,7 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
 /// log1p (log(1 + x)) function with gradient support
 pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return log1p(&widened);
     }
@@ -155,7 +155,7 @@ pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
 /// Base-2 logarithm with gradient support
 pub fn log2(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return log2(&widened);
     }
@@ -165,7 +165,7 @@ pub fn log2(tensor: &Tensor) -> Result<Tensor> {
 /// Base-10 logarithm with gradient support
 pub fn log10(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return log10(&widened);
     }
@@ -221,7 +221,7 @@ fn log_base(
 /// Gauss error function with gradient support
 pub fn erf(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erf(&widened);
     }
@@ -235,7 +235,7 @@ pub fn erf(tensor: &Tensor) -> Result<Tensor> {
 /// of the tail is lost, which is precisely the regime `erfc` exists to serve.
 pub fn erfc(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erfc(&widened);
     }
@@ -280,7 +280,7 @@ fn erf_family(tensor: &Tensor, complementary: bool) -> Result<Tensor> {
 /// expm1 (exp(x) - 1) with gradient support
 pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return expm1(&widened);
     }
@@ -317,7 +317,7 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
 /// Sine function with gradient support
 pub fn sin(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sin(&widened);
     }
@@ -360,7 +360,7 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
 /// Cosine function with gradient support
 pub fn cos(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return cos(&widened);
     }
@@ -403,7 +403,7 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
 /// Tangent function with gradient support
 pub fn tan(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return tan(&widened);
     }
@@ -446,7 +446,7 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse sine function with gradient support
 pub fn asin(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return asin(&widened);
     }
@@ -483,7 +483,7 @@ pub fn asin(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse cosine function with gradient support
 pub fn acos(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return acos(&widened);
     }
@@ -520,7 +520,7 @@ pub fn acos(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse tangent function with gradient support
 pub fn atan(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return atan(&widened);
     }
@@ -557,7 +557,7 @@ pub fn atan(tensor: &Tensor) -> Result<Tensor> {
 /// Hyperbolic sine with gradient support
 pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sinh(&widened);
     }
@@ -594,7 +594,7 @@ pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
 /// Hyperbolic cosine with gradient support
 pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return cosh(&widened);
     }
@@ -631,7 +631,7 @@ pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse hyperbolic sine with gradient support
 pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return asinh(&widened);
     }
@@ -668,7 +668,7 @@ pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse hyperbolic cosine with gradient support
 pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return acosh(&widened);
     }
@@ -705,7 +705,7 @@ pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
 /// Inverse hyperbolic tangent with gradient support
 pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return atanh(&widened);
     }
@@ -742,7 +742,7 @@ pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
 /// Hyperbolic tangent function with gradient support
 pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return tanh(&widened);
     }
@@ -785,7 +785,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
 /// Sigmoid activation function with gradient support
 pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
-    // an integer answer, and both NumPy and PyTorch promote here.
+    // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sigmoid(&widened);
     }
