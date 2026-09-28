@@ -2936,7 +2936,16 @@ True
 - `GRU(input_size, hidden_size, num_layers=1, bias=True, batch_first=False, bidirectional=False, device=None, dtype=None)`
 - `MultiheadAttention(embed_dim, num_heads, bias=True, is_causal=False, device=None, dtype=None)`
 - `Dropout`, `Dropout2d`
-- `Sequential` (container of modules)
+- `Sequential` (container of modules). It holds the modules it is given, not
+  copies: a change made through the container or through one of its modules
+  -- training, `requires_grad_`, `train()`/`eval()`, `load_state_dict`, the
+  running statistics a forward pass updates -- is made to both, because there
+  is only one. `model = nn.Sequential([backbone, head])` followed by
+  `backbone.requires_grad_(False)` freezes the backbone inside `model`.
+  A module belongs to at most one `Sequential`, and to it once; a `Sequential`
+  cannot hold itself or one it is inside. Each is refused with a `ValueError`.
+  Use `copy.deepcopy(module)` for a second, independent module. A module is
+  free again once the `Sequential` holding it is gone.
 
 #### Pooling layers
 
@@ -3209,10 +3218,10 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
   optimizer holding them steps past them -- weight decay included, so an
   optimizer built over the whole model can be kept while part of it is
   frozen, and it trains that part again once unfrozen, even if a checkpoint
-  was loaded into it in between. Gradients still flow through a frozen module to its input, and its
-  buffers still update in training mode; `eval()` is what stops those.
-  Freeze a layer of a `Sequential` before adding it: the `Sequential` takes
-  its own copy of each layer's flags.
+  was loaded into it in between. Gradients still flow through a frozen module
+  to its input, and its buffers still update in training mode; `eval()` is
+  what stops those. A part of a `Sequential` is frozen the same way, before or
+  after it was added.
 - `layer.zero_grad(set_to_none=False)` clears the gradient of every trainable
   tensor the module owns -- `optimizer.zero_grad()` without an optimizer, for
   zeroing one branch of a model or for a loop that does its own stepping. Both
@@ -3897,14 +3906,12 @@ print(total.tolist(), product.tolist())
 
 #### What does not compose
 
-Three limits are worth knowing before designing around containers:
+Two limits are worth knowing before designing around containers:
 
 - `CustomLayer` is **not** an `nn.Module`, so it cannot be placed inside
   `nn.Sequential`. Chain it in a plain Python function instead, as above —
   gradients flow across the boundary either way, and an optimizer just needs
   the parameters passed to it explicitly.
-- `nn.Sequential` cannot contain another `nn.Sequential`; both the constructor
-  and `add_module` reject it. Build one flat container, or compose in Python.
 - `nn.Module` cannot be subclassed from Python. Custom behaviour goes through
   `CustomLayer` or a compiled plugin.
 

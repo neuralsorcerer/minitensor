@@ -64,6 +64,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module, PyTuple};
+use std::sync::Arc;
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
@@ -953,9 +954,311 @@ fn binary_cross_entropy_with_logits_functional(
 /// Base class for neural network modules
 #[pyclass(name = "Module", subclass)]
 pub struct PyModule {
-    // This will be a trait object in practice
-    // For now, we'll use an enum to handle different layer types
-    inner: ModuleType,
+    inner: SharedModule,
+}
+
+/// A module's layer, held by its Python object and by the `Sequential` it
+/// was added to, if any.
+///
+/// A `Sequential` used to hold a clone of each layer it was given. The clone
+/// shared the parameters' storage but had flags and buffers of its own, so
+/// the object the caller kept was half of the same layer:
+/// `model = Sequential([backbone, head]); backbone.requires_grad_(False)`
+/// left `model` training the backbone, `backbone.eval()` left its dropout
+/// running inside `model`, and the backbone's running statistics stopped at
+/// the values they had when it was added. Now both hold this, one layer.
+///
+/// Holding one layer from two places means `&mut` access that the borrow
+/// checker cannot see, and [`ModuleCell`] is where that is made sound: see
+/// its documentation for the argument.
+struct SharedModule(Arc<ModuleCell>);
+
+/// The layer and the bookkeeping that makes sharing it sound.
+///
+/// Every access happens with the GIL held, and with it held nothing else
+/// touches a module: none of the methods that read or write a layer run
+/// Python code, so they cannot be re-entered either. The exception is a
+/// forward pass, which may release the GIL inside an operation, letting
+/// another thread in while it still holds the layer mutably.
+///
+/// So a forward pass takes `tree`, the lock shared by every module in one
+/// model -- a top-level module and everything added to it, at any depth --
+/// and holds it throughout. Any other access first checks that it is not
+/// held. A forward pass can only start with the GIL held (from Python) or
+/// under a lock its model's forward already holds (a `Sequential` running
+/// its children), so an access that found the lock free keeps the model
+/// to itself until it returns.
+///
+/// The model is a tree: a module is added to at most one `Sequential`, and
+/// never to one inside itself, so no two paths from a model reach one
+/// layer and collecting `&mut` references across it cannot alias.
+struct ModuleCell {
+    layer: std::cell::UnsafeCell<ModuleType>,
+    tree: std::sync::Mutex<Arc<std::sync::atomic::AtomicBool>>,
+    /// The `Sequential` this was added to, while it exists.
+    parent: std::sync::Mutex<std::sync::Weak<ModuleCell>>,
+    /// The cells added to this one, for moving them onto the lock of
+    /// whatever this one is added to.
+    children: std::sync::Mutex<Vec<Arc<ModuleCell>>>,
+}
+
+// SAFETY: see `ModuleCell`: concurrent access is excluded by the GIL, and a
+// forward pass that releases it holds the model's `tree` lock, which every
+// other access checks first.
+unsafe impl Sync for ModuleCell {}
+
+impl ModuleCell {
+    fn new(layer: ModuleType) -> Arc<Self> {
+        Arc::new(Self {
+            layer: std::cell::UnsafeCell::new(layer),
+            tree: std::sync::Mutex::new(Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            parent: std::sync::Mutex::new(std::sync::Weak::new()),
+            children: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn tree(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.tree.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn in_forward(&self) -> bool {
+        self.tree().load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether `cell` is this one or anywhere inside it.
+    fn contains(self: &Arc<Self>, cell: &Arc<ModuleCell>) -> bool {
+        Arc::ptr_eq(self, cell)
+            || self
+                .children
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|child| child.contains(cell))
+    }
+
+    fn join_tree(&self, tree: &Arc<std::sync::atomic::AtomicBool>) {
+        *self.tree.lock().unwrap_or_else(|e| e.into_inner()) = tree.clone();
+        for child in self
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            child.join_tree(tree);
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller holds the GIL and has checked the model is not in a
+    /// forward pass, or is the forward pass holding its lock.
+    unsafe fn layer(&self) -> &ModuleType {
+        unsafe { &*self.layer.get() }
+    }
+
+    /// # Safety
+    ///
+    /// As [`Self::layer`], and no other reference into this layer is live.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn layer_mut(&self) -> &mut ModuleType {
+        unsafe { &mut *self.layer.get() }
+    }
+}
+
+/// When a `Sequential` is dropped its children stand alone again: each takes
+/// a lock of its own and can be added to another.
+impl Drop for ModuleCell {
+    fn drop(&mut self) {
+        let children = self.children.get_mut().unwrap_or_else(|e| e.into_inner());
+        for child in children.drain(..) {
+            child.join_tree(&Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        }
+    }
+}
+
+impl SharedModule {
+    fn new(layer: ModuleType) -> Self {
+        Self(ModuleCell::new(layer))
+    }
+
+    fn check_idle(&self) -> PyResult<()> {
+        if self.0.in_forward() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "this module is in a forward pass on another thread; use a \
+                 model from one thread at a time",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The layer, for a Python method to read.
+    fn get(&self) -> PyResult<&ModuleType> {
+        self.check_idle()?;
+        // SAFETY: GIL held (every caller is a Python method) and the model is
+        // not in a forward pass.
+        Ok(unsafe { self.0.layer() })
+    }
+
+    /// The layer, for a Python method to change.
+    fn get_mut(&mut self) -> PyResult<&mut ModuleType> {
+        self.check_idle()?;
+        // SAFETY: as `get`, and `&mut self` excludes this object's other
+        // methods; the other holder, a `Sequential`, only reaches the layer
+        // from its own methods, which cannot be running (GIL held, not in a
+        // forward pass).
+        Ok(unsafe { self.0.layer_mut() })
+    }
+
+    /// Run `f` as this module's forward pass, holding its model's lock.
+    fn forward<T>(&mut self, f: impl FnOnce(&mut ModuleType) -> T) -> PyResult<T> {
+        let tree = self.0.tree();
+        if tree
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "this module is already in a forward pass, on another thread or \
+                 as part of the model it belongs to",
+            ));
+        }
+        struct Release(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _release = Release(tree);
+        // SAFETY: the model's lock is held, and `&mut self` excludes this
+        // object's other methods.
+        Ok(f(unsafe { self.0.layer_mut() }))
+    }
+
+    /// The layer, to be held by a `Sequential` as its child.
+    ///
+    /// Refused for a module that already belongs to one, and for one that
+    /// `parent` is inside: either would give the model two paths to one
+    /// layer.
+    fn adopt_into(&self, parent: &SharedModule) -> PyResult<Box<dyn Layer>> {
+        if self.0.in_forward() || parent.0.in_forward() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "a module cannot be added to a Sequential while either is in a \
+                 forward pass",
+            ));
+        }
+        if self.0.contains(&parent.0) {
+            return Err(PyValueError::new_err(
+                "a Sequential cannot hold itself, or a module it is inside",
+            ));
+        }
+        let mut own_parent = self.0.parent.lock().unwrap_or_else(|e| e.into_inner());
+        if own_parent.strong_count() > 0 {
+            return Err(PyValueError::new_err(
+                "this module already belongs to a Sequential, and a module can \
+                 belong to only one; use copy.deepcopy(module) for a second, \
+                 independent one",
+            ));
+        }
+        *own_parent = Arc::downgrade(&parent.0);
+        drop(own_parent);
+        self.0.join_tree(&parent.0.tree());
+        parent
+            .0
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(self.0.clone());
+        Ok(Box::new(SharedChild(self.0.clone())))
+    }
+}
+
+/// A module as a `Sequential`'s child: the same layer its Python object
+/// holds.
+///
+/// Reached only from the `Sequential`'s own methods, so the access checks
+/// `SharedModule` makes on the way in cover these too.
+struct SharedChild(Arc<ModuleCell>);
+
+impl SharedChild {
+    fn layer(&self) -> &dyn Layer {
+        // SAFETY: see the type's documentation.
+        unsafe { self.0.layer() }.as_layer()
+    }
+
+    fn layer_mut(&mut self) -> &mut dyn Layer {
+        // SAFETY: see the type's documentation; the model is a tree, so this
+        // is the only path to the layer from the `Sequential` being walked.
+        unsafe { self.0.layer_mut() }.as_layer_mut()
+    }
+}
+
+impl Layer for SharedChild {
+    fn forward(
+        &mut self,
+        input: &engine::tensor::Tensor,
+    ) -> engine::error::Result<engine::tensor::Tensor> {
+        self.layer_mut().forward(input)
+    }
+
+    fn parameters(&self) -> Vec<&engine::tensor::Tensor> {
+        self.layer().parameters()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut engine::tensor::Tensor> {
+        self.layer_mut().parameters_mut()
+    }
+
+    fn buffers(&self) -> Vec<&engine::tensor::Tensor> {
+        self.layer().buffers()
+    }
+
+    fn buffers_mut(&mut self) -> Vec<&mut engine::tensor::Tensor> {
+        self.layer_mut().buffers_mut()
+    }
+
+    /// A copy with a layer of its own, as every other layer's is: this is
+    /// what copying a `Sequential` copies its children with.
+    fn clone_layer(&self) -> Option<Box<dyn Layer>> {
+        // SAFETY: see the type's documentation.
+        let copy = unsafe { self.0.layer() }.try_clone()?;
+        Some(Box::new(SharedChild(ModuleCell::new(copy))))
+    }
+
+    fn train(&mut self) {
+        self.layer_mut().train()
+    }
+
+    fn eval(&mut self) {
+        self.layer_mut().eval()
+    }
+
+    fn num_parameters(&self) -> usize {
+        self.layer().num_parameters()
+    }
+
+    fn named_parameters(&self) -> std::collections::HashMap<String, &engine::tensor::Tensor> {
+        self.layer().named_parameters()
+    }
+
+    fn named_parameters_mut(
+        &mut self,
+    ) -> std::collections::HashMap<String, &mut engine::tensor::Tensor> {
+        self.layer_mut().named_parameters_mut()
+    }
+
+    fn named_buffers(&self) -> std::collections::HashMap<String, &engine::tensor::Tensor> {
+        self.layer().named_buffers()
+    }
+
+    fn named_buffers_mut(
+        &mut self,
+    ) -> std::collections::HashMap<String, &mut engine::tensor::Tensor> {
+        self.layer_mut().named_buffers_mut()
+    }
 }
 
 /// Declare the module variants once and derive the uniform dispatch from that
@@ -1045,8 +1348,7 @@ impl PyModule {
         let input_tensor = borrow_tensor(input)?;
         let result = self
             .inner
-            .as_module_mut()
-            .forward(input_tensor.tensor())
+            .forward(|layer| layer.as_module_mut().forward(input_tensor.tensor()))?
             .map_err(_convert_error)?;
 
         Ok(PyTensor::from_tensor(result))
@@ -1064,13 +1366,15 @@ impl PyModule {
     /// `requires_grad` flag is the handle's own, though: setting it changes
     /// what that handle does, not whether the module trains. Freeze or
     /// unfreeze the module itself with `requires_grad_`.
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
+    fn parameters(&self) -> PyResult<Vec<PyTensor>> {
+        Ok(self
+            .inner
+            .get()?
             .as_layer()
             .parameters()
             .into_iter()
             .map(|tensor| PyTensor::from_tensor(tensor.clone()))
-            .collect()
+            .collect())
     }
 
     /// Clear the gradient of every trainable tensor this module owns.
@@ -1081,11 +1385,12 @@ impl PyModule {
     /// optimizer, for zeroing one branch of a model or for a loop that does
     /// its own stepping.
     #[pyo3(signature = (set_to_none=false))]
-    fn zero_grad(&self, set_to_none: bool) {
-        for parameter in self.inner.as_layer().parameters() {
+    fn zero_grad(&self, set_to_none: bool) -> PyResult<()> {
+        for parameter in self.inner.get()?.as_layer().parameters() {
             let mut owned = parameter.clone();
             owned.zero_grad(set_to_none);
         }
+        Ok(())
     }
 
     /// Set whether every parameter of this module takes a gradient, and
@@ -1101,31 +1406,42 @@ impl PyModule {
     /// flags of their own, and setting one does not reach the module. Buffers
     /// never take a gradient and are left alone.
     #[pyo3(signature = (requires_grad=true))]
-    fn requires_grad_<'py>(slf: Bound<'py, Self>, requires_grad: bool) -> Bound<'py, Self> {
-        for parameter in slf.borrow_mut().inner.as_layer_mut().parameters_mut() {
+    fn requires_grad_<'py>(
+        slf: Bound<'py, Self>,
+        requires_grad: bool,
+    ) -> PyResult<Bound<'py, Self>> {
+        for parameter in slf
+            .borrow_mut()
+            .inner
+            .get_mut()?
+            .as_layer_mut()
+            .parameters_mut()
+        {
             *parameter = parameter.clone().requires_grad_(requires_grad);
         }
-        slf
+        Ok(slf)
     }
 
     /// Set module to training mode
-    fn train(&mut self) {
-        self.inner.as_module_mut().train()
+    fn train(&mut self) -> PyResult<()> {
+        self.inner.get_mut()?.as_module_mut().train();
+        Ok(())
     }
 
     /// Set module to evaluation mode
-    fn eval(&mut self) {
-        self.inner.as_module_mut().eval()
+    fn eval(&mut self) -> PyResult<()> {
+        self.inner.get_mut()?.as_module_mut().eval();
+        Ok(())
     }
 
     /// Get number of parameters
-    fn num_parameters(&self) -> usize {
-        self.inner.as_layer().num_parameters()
+    fn num_parameters(&self) -> PyResult<usize> {
+        Ok(self.inner.get()?.as_layer().num_parameters())
     }
 
     /// Get detailed parameter statistics
     fn parameter_stats(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let layer: &dyn Layer = self.inner.as_layer();
+        let layer: &dyn Layer = self.inner.get()?.as_layer();
         let stats = LayerUtils::parameter_stats(layer);
         let dict = PyDict::new(py);
         dict.set_item("total_parameters", stats.total_parameters)?;
@@ -1137,7 +1453,7 @@ impl PyModule {
 
     /// Get memory usage information
     fn memory_usage(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let layer: &dyn Layer = self.inner.as_layer();
+        let layer: &dyn Layer = self.inner.get()?.as_layer();
         let usage = LayerUtils::memory_usage(layer);
         let dict = PyDict::new(py);
         dict.set_item("total_bytes", usage.total_bytes)?;
@@ -1152,15 +1468,15 @@ impl PyModule {
     /// Generate summary
     #[pyo3(signature = (name=None))]
     fn summary(&self, name: Option<&str>) -> PyResult<String> {
-        match &self.inner {
+        match self.inner.get()? {
             ModuleType::Sequential(model) => Ok(SequentialUtils::model_summary(model, name)),
             _ => {
-                let layer: &dyn Layer = self.inner.as_layer();
+                let layer: &dyn Layer = self.inner.get()?.as_layer();
                 let owned;
                 let layer_name = match name {
                     Some(n) => n,
                     None => {
-                        owned = self.__repr__();
+                        owned = self.__repr__()?;
                         &owned
                     }
                 };
@@ -1183,7 +1499,7 @@ impl PyModule {
         batch_size: usize,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
-        if let ModuleType::Sequential(model) = &self.inner {
+        if let ModuleType::Sequential(model) = self.inner.get()? {
             let est = SequentialUtils::estimate_forward_memory(model, &input_shape, batch_size);
             let dict = PyDict::new(py);
             dict.set_item("parameter_memory", est.parameter_memory)?;
@@ -1202,14 +1518,14 @@ impl PyModule {
     }
 
     /// String representation
-    fn __repr__(&self) -> String {
+    fn __repr__(&self) -> PyResult<String> {
         // Python spells its booleans `True`/`False`; Rust's `Display` gives
         // `true`/`false`, which is not valid Python in a `__repr__`.
         fn py_bool(value: bool) -> &'static str {
             if value { "True" } else { "False" }
         }
 
-        match &self.inner {
+        Ok(match self.inner.get()? {
             ModuleType::DenseLayer(layer) => format!(
                 "DenseLayer(in_features={}, out_features={})",
                 layer.in_features(),
@@ -1348,14 +1664,14 @@ impl PyModule {
                 py_bool(layer.batch_first()),
                 py_bool(layer.bidirectional())
             ),
-        }
+        })
     }
 
     /// Save module state to a file (basic implementation)
     #[pyo3(signature = (path, format=None))]
     fn save(&self, path: &str, format: Option<&str>) -> PyResult<()> {
         // Build a SerializedModel with metadata and engine state_dict
-        let state = self.inner.as_module().state_dict();
+        let state = self.inner.get()?.as_module().state_dict();
 
         let metadata = ModelMetadata::new("module".to_string(), "Module".to_string());
         let model = SerializedModel::new(metadata, state);
@@ -1407,9 +1723,9 @@ impl PyModule {
     }
 
     /// Return a StateDict snapshot of this module
-    fn state_dict(&self) -> PyStateDict {
-        let state = self.inner.as_module().state_dict();
-        crate::serialization::PyStateDict::from_engine(state)
+    fn state_dict(&self) -> PyResult<PyStateDict> {
+        let state = self.inner.get()?.as_module().state_dict();
+        Ok(crate::serialization::PyStateDict::from_engine(state))
     }
 
     /// Load a provided StateDict into this module
@@ -1420,17 +1736,18 @@ impl PyModule {
             .transpose()?;
         let sd_ref = crate::serialization::PyStateDict::inner_ref(state);
         self.inner
+            .get_mut()?
             .as_module_mut()
             .load_state_dict(sd_ref, dev)
             .map_err(_convert_error)
     }
 }
 
-impl PyModule {
-    /// A copy of the wrapped layer that shares its tensors, or `None` for a
+impl ModuleType {
+    /// A copy of the layer that shares its tensors, or `None` for a
     /// `Sequential` holding a child that cannot be copied.
-    fn try_clone_inner(&self) -> Option<ModuleType> {
-        Some(match &self.inner {
+    fn try_clone(&self) -> Option<ModuleType> {
+        Some(match self {
             ModuleType::Sequential(model) => ModuleType::Sequential(Box::new(model.try_clone()?)),
             ModuleType::DenseLayer(layer) => ModuleType::DenseLayer(layer.clone()),
             ModuleType::ReLU(layer) => ModuleType::ReLU(layer.clone()),
@@ -1464,7 +1781,9 @@ impl PyModule {
             ModuleType::Upsample(layer) => ModuleType::Upsample(layer.clone()),
         })
     }
+}
 
+impl PyModule {
     /// This module with every parameter and buffer copied into storage of its
     /// own, under a fresh identity.
     ///
@@ -1486,7 +1805,7 @@ impl PyModule {
             // where a snapshot usually is -- keeps its parameters trainable.
             .requires_grad_(tensor.requires_grad())
         }
-        let mut inner = self.try_clone_inner().ok_or_else(|| {
+        let mut inner = self.inner.get()?.try_clone().ok_or_else(|| {
             PyTypeError::new_err("this Sequential holds a layer that cannot be copied")
         })?;
         for tensor in inner.as_layer_mut().parameters_mut() {
@@ -1495,237 +1814,215 @@ impl PyModule {
         for tensor in inner.as_layer_mut().buffers_mut() {
             *tensor = independent(tensor);
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner: SharedModule::new(inner),
+        })
     }
 
     pub fn from_dense_layer(dense_layer: DenseLayer) -> Self {
         Self {
-            inner: ModuleType::DenseLayer(Box::new(dense_layer)),
+            inner: SharedModule::new(ModuleType::DenseLayer(Box::new(dense_layer))),
         }
     }
 
     pub fn from_relu(relu: ReLU) -> Self {
         Self {
-            inner: ModuleType::ReLU(Box::new(relu)),
+            inner: SharedModule::new(ModuleType::ReLU(Box::new(relu))),
         }
     }
 
     pub fn from_sigmoid(sigmoid: Sigmoid) -> Self {
         Self {
-            inner: ModuleType::Sigmoid(Box::new(sigmoid)),
+            inner: SharedModule::new(ModuleType::Sigmoid(Box::new(sigmoid))),
         }
     }
 
     pub fn from_tanh(tanh: Tanh) -> Self {
         Self {
-            inner: ModuleType::Tanh(Box::new(tanh)),
+            inner: SharedModule::new(ModuleType::Tanh(Box::new(tanh))),
         }
     }
 
     pub fn from_softmax(softmax: Softmax) -> Self {
         Self {
-            inner: ModuleType::Softmax(Box::new(softmax)),
+            inner: SharedModule::new(ModuleType::Softmax(Box::new(softmax))),
         }
     }
 
     pub fn from_leaky_relu(leaky_relu: LeakyReLU) -> Self {
         Self {
-            inner: ModuleType::LeakyReLU(Box::new(leaky_relu)),
+            inner: SharedModule::new(ModuleType::LeakyReLU(Box::new(leaky_relu))),
         }
     }
 
     pub fn from_elu(elu: ELU) -> Self {
         Self {
-            inner: ModuleType::Elu(Box::new(elu)),
+            inner: SharedModule::new(ModuleType::Elu(Box::new(elu))),
         }
     }
 
     pub fn from_gelu(gelu: GELU) -> Self {
         Self {
-            inner: ModuleType::Gelu(Box::new(gelu)),
+            inner: SharedModule::new(ModuleType::Gelu(Box::new(gelu))),
         }
     }
 
     pub fn from_sequential(sequential: Sequential) -> Self {
         Self {
-            inner: ModuleType::Sequential(Box::new(sequential)),
+            inner: SharedModule::new(ModuleType::Sequential(Box::new(sequential))),
         }
     }
 
     pub fn from_conv2d(conv2d: Conv2d) -> Self {
         Self {
-            inner: ModuleType::Conv2d(Box::new(conv2d)),
+            inner: SharedModule::new(ModuleType::Conv2d(Box::new(conv2d))),
         }
     }
 
     pub fn from_upsample(layer: Upsample) -> Self {
         Self {
-            inner: ModuleType::Upsample(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::Upsample(Box::new(layer))),
         }
     }
 
     pub fn from_adaptive_avg_pool2d(layer: AdaptiveAvgPool2d) -> Self {
         Self {
-            inner: ModuleType::AdaptiveAvgPool2d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::AdaptiveAvgPool2d(Box::new(layer))),
         }
     }
 
     pub fn from_adaptive_max_pool2d(layer: AdaptiveMaxPool2d) -> Self {
         Self {
-            inner: ModuleType::AdaptiveMaxPool2d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::AdaptiveMaxPool2d(Box::new(layer))),
         }
     }
 
     pub fn from_adaptive_avg_pool1d(layer: AdaptiveAvgPool1d) -> Self {
         Self {
-            inner: ModuleType::AdaptiveAvgPool1d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::AdaptiveAvgPool1d(Box::new(layer))),
         }
     }
 
     pub fn from_adaptive_max_pool1d(layer: AdaptiveMaxPool1d) -> Self {
         Self {
-            inner: ModuleType::AdaptiveMaxPool1d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::AdaptiveMaxPool1d(Box::new(layer))),
         }
     }
 
     pub fn from_conv_transpose2d(layer: ConvTranspose2d) -> Self {
         Self {
-            inner: ModuleType::ConvTranspose2d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::ConvTranspose2d(Box::new(layer))),
         }
     }
 
     pub fn from_conv_transpose1d(layer: ConvTranspose1d) -> Self {
         Self {
-            inner: ModuleType::ConvTranspose1d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::ConvTranspose1d(Box::new(layer))),
         }
     }
 
     pub fn from_max_pool2d(max_pool2d: MaxPool2d) -> Self {
         Self {
-            inner: ModuleType::MaxPool2d(Box::new(max_pool2d)),
+            inner: SharedModule::new(ModuleType::MaxPool2d(Box::new(max_pool2d))),
         }
     }
 
     pub fn from_avg_pool2d(avg_pool2d: AvgPool2d) -> Self {
         Self {
-            inner: ModuleType::AvgPool2d(Box::new(avg_pool2d)),
+            inner: SharedModule::new(ModuleType::AvgPool2d(Box::new(avg_pool2d))),
         }
     }
 
     pub fn from_batch_norm1d(batch_norm1d: BatchNorm1d) -> Self {
         Self {
-            inner: ModuleType::BatchNorm1d(Box::new(batch_norm1d)),
+            inner: SharedModule::new(ModuleType::BatchNorm1d(Box::new(batch_norm1d))),
         }
     }
 
     pub fn from_batch_norm2d(batch_norm2d: BatchNorm2d) -> Self {
         Self {
-            inner: ModuleType::BatchNorm2d(Box::new(batch_norm2d)),
+            inner: SharedModule::new(ModuleType::BatchNorm2d(Box::new(batch_norm2d))),
         }
     }
 
     pub fn from_dropout(dropout: Dropout) -> Self {
         Self {
-            inner: ModuleType::Dropout(Box::new(dropout)),
+            inner: SharedModule::new(ModuleType::Dropout(Box::new(dropout))),
         }
     }
 
     pub fn from_dropout2d(dropout: Dropout2d) -> Self {
         Self {
-            inner: ModuleType::Dropout2d(Box::new(dropout)),
+            inner: SharedModule::new(ModuleType::Dropout2d(Box::new(dropout))),
         }
     }
 
     pub fn from_embedding(embedding: Embedding) -> Self {
         Self {
-            inner: ModuleType::Embedding(Box::new(embedding)),
+            inner: SharedModule::new(ModuleType::Embedding(Box::new(embedding))),
         }
     }
 
     pub fn from_layer_norm(layer_norm: LayerNorm) -> Self {
         Self {
-            inner: ModuleType::LayerNorm(Box::new(layer_norm)),
+            inner: SharedModule::new(ModuleType::LayerNorm(Box::new(layer_norm))),
         }
     }
 
     pub fn from_rms_norm(rms_norm: RMSNorm) -> Self {
         Self {
-            inner: ModuleType::RMSNorm(Box::new(rms_norm)),
+            inner: SharedModule::new(ModuleType::RMSNorm(Box::new(rms_norm))),
         }
     }
 
     pub fn from_conv1d(conv1d: Conv1d) -> Self {
         Self {
-            inner: ModuleType::Conv1d(Box::new(conv1d)),
+            inner: SharedModule::new(ModuleType::Conv1d(Box::new(conv1d))),
         }
     }
 
     pub fn from_max_pool1d(layer: MaxPool1d) -> Self {
         Self {
-            inner: ModuleType::MaxPool1d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::MaxPool1d(Box::new(layer))),
         }
     }
 
     pub fn from_avg_pool1d(layer: AvgPool1d) -> Self {
         Self {
-            inner: ModuleType::AvgPool1d(Box::new(layer)),
+            inner: SharedModule::new(ModuleType::AvgPool1d(Box::new(layer))),
         }
     }
 
     pub fn from_recurrent(recurrent: Recurrent) -> Self {
         Self {
-            inner: ModuleType::Recurrent(Box::new(recurrent)),
+            inner: SharedModule::new(ModuleType::Recurrent(Box::new(recurrent))),
         }
     }
 
     pub fn from_multihead_attention(mha: MultiheadAttention) -> Self {
         Self {
-            inner: ModuleType::MultiheadAttention(Box::new(mha)),
+            inner: SharedModule::new(ModuleType::MultiheadAttention(Box::new(mha))),
         }
     }
 
-    /// Clone the inner layer into a boxed trait object, sharing its tensors as
-    /// any clone does. Written out per variant rather than derived from
-    /// `module_types!` because `Sequential` is not `Clone`: it copies itself
-    /// through its children's `clone_layer`.
-    pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
-        let layer: Box<dyn Layer> = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer.clone(),
-            ModuleType::ReLU(layer) => layer.clone(),
-            ModuleType::Sigmoid(layer) => layer.clone(),
-            ModuleType::Tanh(layer) => layer.clone(),
-            ModuleType::Softmax(layer) => layer.clone(),
-            ModuleType::LeakyReLU(layer) => layer.clone(),
-            ModuleType::Elu(layer) => layer.clone(),
-            ModuleType::Gelu(layer) => layer.clone(),
-            ModuleType::Sequential(model) => Box::new(model.try_clone().ok_or_else(|| {
-                PyTypeError::new_err("this Sequential holds a layer that cannot be copied")
-            })?),
-            ModuleType::Conv2d(layer) => layer.clone(),
-            ModuleType::BatchNorm1d(layer) => layer.clone(),
-            ModuleType::BatchNorm2d(layer) => layer.clone(),
-            ModuleType::Dropout(layer) => layer.clone(),
-            ModuleType::Dropout2d(layer) => layer.clone(),
-            ModuleType::Embedding(layer) => layer.clone(),
-            ModuleType::MultiheadAttention(layer) => layer.clone(),
-            ModuleType::LayerNorm(layer) => layer.clone(),
-            ModuleType::RMSNorm(layer) => layer.clone(),
-            ModuleType::MaxPool2d(layer) => layer.clone(),
-            ModuleType::AvgPool2d(layer) => layer.clone(),
-            ModuleType::Recurrent(layer) => layer.clone(),
-            ModuleType::Conv1d(layer) => layer.clone(),
-            ModuleType::MaxPool1d(layer) => layer.clone(),
-            ModuleType::AvgPool1d(layer) => layer.clone(),
-            ModuleType::ConvTranspose2d(layer) => layer.clone(),
-            ModuleType::ConvTranspose1d(layer) => layer.clone(),
-            ModuleType::AdaptiveAvgPool2d(layer) => layer.clone(),
-            ModuleType::AdaptiveMaxPool2d(layer) => layer.clone(),
-            ModuleType::AdaptiveAvgPool1d(layer) => layer.clone(),
-            ModuleType::AdaptiveMaxPool1d(layer) => layer.clone(),
-            ModuleType::Upsample(layer) => layer.clone(),
-        };
+    /// This module's layer, to be held by `parent`, a `Sequential`.
+    pub(crate) fn adopt_into(&self, parent: &PyModule) -> PyResult<Box<dyn Layer>> {
+        self.inner.adopt_into(&parent.inner)
+    }
 
-        Ok(layer)
+    /// Append `children`, which `adopt_into` gave for this `Sequential`.
+    pub(crate) fn push_children(&mut self, children: Vec<Box<dyn Layer>>) -> PyResult<()> {
+        if let ModuleType::Sequential(model) = self.inner.get_mut()? {
+            for child in children {
+                model.add_layer(child);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this is `other`, the same Python-visible module.
+    pub(crate) fn is_same(&self, other: &PyModule) -> bool {
+        Arc::ptr_eq(&self.inner.0, &other.inner.0)
     }
 }
 
@@ -1759,7 +2056,7 @@ impl PyDenseLayer {
     #[getter]
     fn in_features(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::DenseLayer(layer) = &module.inner {
+        if let ModuleType::DenseLayer(layer) = module.inner.get()? {
             Ok(layer.in_features())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1772,7 +2069,7 @@ impl PyDenseLayer {
     #[getter]
     fn out_features(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::DenseLayer(layer) = &module.inner {
+        if let ModuleType::DenseLayer(layer) = module.inner.get()? {
             Ok(layer.out_features())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1785,7 +2082,7 @@ impl PyDenseLayer {
     #[getter]
     fn weight(slf: PyRef<Self>) -> PyResult<PyTensor> {
         let module = slf.as_ref();
-        if let ModuleType::DenseLayer(layer) = &module.inner {
+        if let ModuleType::DenseLayer(layer) = module.inner.get()? {
             Ok(PyTensor::from_tensor(layer.weight().clone()))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1798,7 +2095,7 @@ impl PyDenseLayer {
     #[getter]
     fn bias(slf: PyRef<Self>) -> PyResult<Option<PyTensor>> {
         let module = slf.as_ref();
-        if let ModuleType::DenseLayer(layer) = &module.inner {
+        if let ModuleType::DenseLayer(layer) = module.inner.get()? {
             Ok(layer.bias().map(|b| PyTensor::from_tensor(b.clone())))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1870,4 +2167,65 @@ fn rebuild_as(class: &Bound<'_, pyo3::types::PyType>, module: PyModule) -> PyRes
          load_state_dict(model.state_dict())",
         class.name()?
     )))
+}
+
+#[cfg(test)]
+mod shared_module_tests {
+    use super::*;
+
+    fn relu() -> SharedModule {
+        SharedModule::new(ModuleType::ReLU(Box::new(ReLU::new())))
+    }
+
+    fn sequential() -> SharedModule {
+        SharedModule::new(ModuleType::Sequential(Box::new(Sequential::new())))
+    }
+
+    /// While a model is in a forward pass -- which may release the GIL --
+    /// nothing else may reach any module in it: not the modules' own Python
+    /// objects, and not a second forward pass. Threads would make this a
+    /// race to observe; the lock is what decides it, so hold it and look.
+    #[test]
+    fn a_model_in_a_forward_pass_is_closed_to_everything_else() {
+        pyo3::Python::initialize();
+        Python::attach(|_| {
+            let mut parent = sequential();
+            let mut child = relu();
+            let adopted = child.adopt_into(&parent).unwrap();
+            if let ModuleType::Sequential(model) = parent.get_mut().unwrap() {
+                model.add_layer(adopted);
+            }
+
+            let other = relu();
+            parent
+                .forward(|_| {
+                    assert!(child.get().is_err());
+                    assert!(child.get_mut().is_err());
+                    assert!(child.forward(|_| ()).is_err());
+                    assert!(other.adopt_into(&child).is_err());
+                    // A model the lock does not cover is untouched.
+                    assert!(other.get().is_ok());
+                })
+                .unwrap();
+
+            assert!(child.get().is_ok());
+            assert!(child.forward(|_| ()).is_ok());
+        });
+    }
+
+    #[test]
+    fn a_dropped_parent_gives_its_children_locks_of_their_own() {
+        pyo3::Python::initialize();
+        Python::attach(|_| {
+            let mut first = relu();
+            let second = relu();
+            {
+                let parent = sequential();
+                drop(first.adopt_into(&parent).unwrap());
+                drop(second.adopt_into(&parent).unwrap());
+            }
+            first.forward(|_| assert!(second.get().is_ok())).unwrap();
+            assert!(second.adopt_into(&relu()).is_ok());
+        });
+    }
 }

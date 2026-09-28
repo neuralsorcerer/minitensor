@@ -62,7 +62,7 @@ impl PySoftmax {
     #[getter]
     fn dim(slf: PyRef<Self>) -> PyResult<Option<isize>> {
         let module = slf.as_ref();
-        if let ModuleType::Softmax(layer) = &module.inner {
+        if let ModuleType::Softmax(layer) = module.inner.get()? {
             Ok(layer.dim())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -91,7 +91,7 @@ impl PyLeakyReLU {
     #[getter]
     fn negative_slope(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::LeakyReLU(layer) = &module.inner {
+        if let ModuleType::LeakyReLU(layer) = module.inner.get()? {
             Ok(layer.negative_slope())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -120,7 +120,7 @@ impl PyELU {
     #[getter]
     fn alpha(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::Elu(layer) = &module.inner {
+        if let ModuleType::Elu(layer) = module.inner.get()? {
             Ok(layer.alpha())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -174,7 +174,7 @@ impl PyDropout {
     #[getter]
     fn p(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::Dropout(layer) = &module.inner {
+        if let ModuleType::Dropout(layer) = module.inner.get()? {
             Ok(layer.p())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -203,7 +203,7 @@ impl PyDropout2d {
     #[getter]
     fn p(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::Dropout2d(layer) = &module.inner {
+        if let ModuleType::Dropout2d(layer) = module.inner.get()? {
             Ok(layer.p())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -255,7 +255,7 @@ impl PyConv1d {
 
     #[getter]
     fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Conv1d(layer) => Ok(layer.in_channels()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
@@ -263,7 +263,7 @@ impl PyConv1d {
 
     #[getter]
     fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Conv1d(layer) => Ok(layer.out_channels()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
@@ -271,7 +271,7 @@ impl PyConv1d {
 
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Conv1d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
@@ -279,7 +279,7 @@ impl PyConv1d {
 
     #[getter]
     fn stride(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Conv1d(layer) => Ok(layer.stride()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
@@ -287,7 +287,7 @@ impl PyConv1d {
 
     #[getter]
     fn padding(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Conv1d(layer) => Ok(layer.padding()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
@@ -314,7 +314,7 @@ impl PyMaxPool1d {
 
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool1d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
         }
@@ -322,7 +322,7 @@ impl PyMaxPool1d {
 
     #[getter]
     fn stride(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool1d(layer) => Ok(layer.stride()),
             _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
         }
@@ -330,7 +330,7 @@ impl PyMaxPool1d {
 
     #[getter]
     fn padding(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool1d(layer) => Ok(layer.padding()),
             _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
         }
@@ -357,7 +357,7 @@ impl PyAvgPool1d {
 
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool1d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
         }
@@ -365,7 +365,7 @@ impl PyAvgPool1d {
 
     #[getter]
     fn stride(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool1d(layer) => Ok(layer.stride()),
             _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
         }
@@ -373,7 +373,7 @@ impl PyAvgPool1d {
 
     #[getter]
     fn padding(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool1d(layer) => Ok(layer.padding()),
             _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
         }
@@ -381,7 +381,7 @@ impl PyAvgPool1d {
 
     #[getter]
     fn count_include_pad(slf: PyRef<Self>) -> PyResult<bool> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool1d(layer) => Ok(layer.count_include_pad()),
             _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
         }
@@ -418,7 +418,7 @@ impl PyMaxPool2d {
 
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool2d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
         }
@@ -426,7 +426,7 @@ impl PyMaxPool2d {
 
     #[getter]
     fn stride(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool2d(layer) => Ok(layer.stride()),
             _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
         }
@@ -434,7 +434,7 @@ impl PyMaxPool2d {
 
     #[getter]
     fn padding(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::MaxPool2d(layer) => Ok(layer.padding()),
             _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
         }
@@ -471,7 +471,7 @@ impl PyAvgPool2d {
 
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool2d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
         }
@@ -479,7 +479,7 @@ impl PyAvgPool2d {
 
     #[getter]
     fn stride(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool2d(layer) => Ok(layer.stride()),
             _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
         }
@@ -487,7 +487,7 @@ impl PyAvgPool2d {
 
     #[getter]
     fn count_include_pad(slf: PyRef<Self>) -> PyResult<bool> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AvgPool2d(layer) => Ok(layer.count_include_pad()),
             _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
         }
@@ -566,7 +566,7 @@ impl PyConv2d {
     #[getter]
     fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::Conv2d(layer) = &module.inner {
+        if let ModuleType::Conv2d(layer) = module.inner.get()? {
             Ok(layer.in_channels())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -579,7 +579,7 @@ impl PyConv2d {
     #[getter]
     fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::Conv2d(layer) = &module.inner {
+        if let ModuleType::Conv2d(layer) = module.inner.get()? {
             Ok(layer.out_channels())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -592,7 +592,7 @@ impl PyConv2d {
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
         let module = slf.as_ref();
-        if let ModuleType::Conv2d(layer) = &module.inner {
+        if let ModuleType::Conv2d(layer) = module.inner.get()? {
             Ok(layer.kernel_size())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -674,7 +674,7 @@ impl PyConvTranspose2d {
     /// Get input channels count
     #[getter]
     fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose2d(layer) => Ok(layer.in_channels()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -685,7 +685,7 @@ impl PyConvTranspose2d {
     /// Get output channels count
     #[getter]
     fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose2d(layer) => Ok(layer.out_channels()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -696,7 +696,7 @@ impl PyConvTranspose2d {
     /// Get kernel size
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose2d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -707,7 +707,7 @@ impl PyConvTranspose2d {
     /// Get output padding
     #[getter]
     fn output_padding(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose2d(layer) => Ok(layer.output_padding()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -771,7 +771,7 @@ impl PyConvTranspose1d {
     /// Get input channels count
     #[getter]
     fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose1d(layer) => Ok(layer.in_channels()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -782,7 +782,7 @@ impl PyConvTranspose1d {
     /// Get output channels count
     #[getter]
     fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose1d(layer) => Ok(layer.out_channels()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -793,7 +793,7 @@ impl PyConvTranspose1d {
     /// Get kernel size
     #[getter]
     fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::ConvTranspose1d(layer) => Ok(layer.kernel_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -840,7 +840,7 @@ impl PyUpsample {
     /// Whether the first and last output positions sit on the first and last inputs
     #[getter]
     fn align_corners(slf: PyRef<Self>) -> PyResult<bool> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::Upsample(layer) => Ok(layer.align_corners()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -870,7 +870,7 @@ impl PyAdaptiveAvgPool2d {
     /// The size every input is pooled down (or up) to
     #[getter]
     fn output_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AdaptiveAvgPool2d(layer) => Ok(layer.output_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -900,7 +900,7 @@ impl PyAdaptiveAvgPool1d {
     /// The size every input is pooled down (or up) to
     #[getter]
     fn output_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AdaptiveAvgPool1d(layer) => Ok(layer.output_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -930,7 +930,7 @@ impl PyAdaptiveMaxPool2d {
     /// The size every input is pooled down (or up) to
     #[getter]
     fn output_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AdaptiveMaxPool2d(layer) => Ok(layer.output_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -960,7 +960,7 @@ impl PyAdaptiveMaxPool1d {
     /// The size every input is pooled down (or up) to
     #[getter]
     fn output_size(slf: PyRef<Self>) -> PyResult<usize> {
-        match &slf.as_ref().inner {
+        match slf.as_ref().inner.get()? {
             ModuleType::AdaptiveMaxPool1d(layer) => Ok(layer.output_size()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
@@ -1002,7 +1002,7 @@ impl PyBatchNorm1d {
     #[getter]
     fn num_features(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::BatchNorm1d(layer) = &module.inner {
+        if let ModuleType::BatchNorm1d(layer) = module.inner.get()? {
             Ok(layer.num_features())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1045,7 +1045,7 @@ impl PyBatchNorm2d {
     #[getter]
     fn num_features(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::BatchNorm2d(layer) = &module.inner {
+        if let ModuleType::BatchNorm2d(layer) = module.inner.get()? {
             Ok(layer.num_features())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1084,7 +1084,7 @@ impl PyEmbedding {
     #[getter]
     fn num_embeddings(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::Embedding(layer) = &module.inner {
+        if let ModuleType::Embedding(layer) = module.inner.get()? {
             Ok(layer.num_embeddings())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1097,7 +1097,7 @@ impl PyEmbedding {
     #[getter]
     fn embedding_dim(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::Embedding(layer) = &module.inner {
+        if let ModuleType::Embedding(layer) = module.inner.get()? {
             Ok(layer.embedding_dim())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1110,7 +1110,7 @@ impl PyEmbedding {
     #[getter]
     fn padding_idx(slf: PyRef<Self>) -> PyResult<Option<usize>> {
         let module = slf.as_ref();
-        if let ModuleType::Embedding(layer) = &module.inner {
+        if let ModuleType::Embedding(layer) = module.inner.get()? {
             Ok(layer.padding_idx())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1123,7 +1123,7 @@ impl PyEmbedding {
     #[getter]
     fn weight(slf: PyRef<Self>) -> PyResult<PyTensor> {
         let module = slf.as_ref();
-        if let ModuleType::Embedding(layer) = &module.inner {
+        if let ModuleType::Embedding(layer) = module.inner.get()? {
             Ok(PyTensor::from_tensor(layer.weight().clone()))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1169,7 +1169,7 @@ impl PyLayerNorm {
     #[getter]
     fn normalized_shape(slf: PyRef<Self>) -> PyResult<Vec<usize>> {
         let module = slf.as_ref();
-        if let ModuleType::LayerNorm(layer) = &module.inner {
+        if let ModuleType::LayerNorm(layer) = module.inner.get()? {
             Ok(layer.normalized_shape().to_vec())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1182,7 +1182,7 @@ impl PyLayerNorm {
     #[getter]
     fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::LayerNorm(layer) = &module.inner {
+        if let ModuleType::LayerNorm(layer) = module.inner.get()? {
             Ok(layer.eps())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1228,7 +1228,7 @@ impl PyRMSNorm {
     #[getter]
     fn normalized_shape(slf: PyRef<Self>) -> PyResult<Vec<usize>> {
         let module = slf.as_ref();
-        if let ModuleType::RMSNorm(layer) = &module.inner {
+        if let ModuleType::RMSNorm(layer) = module.inner.get()? {
             Ok(layer.normalized_shape().to_vec())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1241,7 +1241,7 @@ impl PyRMSNorm {
     #[getter]
     fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::RMSNorm(layer) = &module.inner {
+        if let ModuleType::RMSNorm(layer) = module.inner.get()? {
             Ok(layer.eps())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1307,7 +1307,7 @@ macro_rules! recurrent_class {
                 cx: Option<&Bound<'py, PyAny>>,
             ) -> PyResult<Py<PyAny>> {
                 let module = slf.as_ref();
-                let ModuleType::Recurrent(layer) = &module.inner else {
+                let ModuleType::Recurrent(layer) = module.inner.get()? else {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         "Invalid layer type",
                     ));
@@ -1391,7 +1391,7 @@ macro_rules! recurrent_class {
         impl $ty {
             fn with_layer<T>(slf: PyRef<Self>, f: impl Fn(&Recurrent) -> T) -> PyResult<T> {
                 let module = slf.as_ref();
-                let ModuleType::Recurrent(layer) = &module.inner else {
+                let ModuleType::Recurrent(layer) = module.inner.get()? else {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         "Invalid layer type",
                     ));
@@ -1478,7 +1478,7 @@ impl PyMultiheadAttention {
         is_causal: bool,
     ) -> PyResult<PyTensor> {
         let module = slf.as_ref();
-        let ModuleType::MultiheadAttention(layer) = &module.inner else {
+        let ModuleType::MultiheadAttention(layer) = module.inner.get()? else {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
             ));
@@ -1505,7 +1505,7 @@ impl PyMultiheadAttention {
     #[getter]
     fn embed_dim(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+        if let ModuleType::MultiheadAttention(layer) = module.inner.get()? {
             Ok(layer.embed_dim())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1518,7 +1518,7 @@ impl PyMultiheadAttention {
     #[getter]
     fn num_heads(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+        if let ModuleType::MultiheadAttention(layer) = module.inner.get()? {
             Ok(layer.num_heads())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1531,7 +1531,7 @@ impl PyMultiheadAttention {
     #[getter]
     fn head_dim(slf: PyRef<Self>) -> PyResult<usize> {
         let module = slf.as_ref();
-        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+        if let ModuleType::MultiheadAttention(layer) = module.inner.get()? {
             Ok(layer.head_dim())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1544,7 +1544,7 @@ impl PyMultiheadAttention {
     #[getter]
     fn is_causal(slf: PyRef<Self>) -> PyResult<bool> {
         let module = slf.as_ref();
-        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+        if let ModuleType::MultiheadAttention(layer) = module.inner.get()? {
             Ok(layer.is_causal())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1577,33 +1577,57 @@ pub struct PySequential;
 #[pymethods]
 impl PySequential {
     /// Create a new Sequential container
+    ///
+    /// The container holds the layers themselves, not copies: training,
+    /// freezing, switching mode or loading through either the container or a
+    /// layer is the same change. A layer belongs to at most one container.
     #[new]
     #[pyo3(signature = (layers=None))]
     fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<PyClassInitializer<Self>> {
-        let sequential = if let Some(layers) = layers {
-            let mut layer_objects = Vec::with_capacity(layers.len());
-            for layer in layers {
-                layer_objects.push(layer.to_layer()?);
+        let mut module = PyModule::from_sequential(Sequential::new());
+        let layers = layers.unwrap_or_default();
+        for (index, layer) in layers.iter().enumerate() {
+            if layers[..index].iter().any(|earlier| earlier.is_same(layer)) {
+                return Err(PyValueError::new_err(format!(
+                    "layer {index} is also an earlier layer, and a module can \
+                     belong to a Sequential only once; use copy.deepcopy(module) \
+                     for a second, independent one"
+                )));
             }
-            Sequential::from_layers(layer_objects)
-        } else {
-            Sequential::new()
-        };
+        }
+        let mut children = Vec::with_capacity(layers.len());
+        for layer in &layers {
+            children.push(layer.adopt_into(&module)?);
+        }
+        module.push_children(children)?;
 
-        Ok(PyClassInitializer::from(PyModule::from_sequential(sequential)).add_subclass(Self))
+        Ok(PyClassInitializer::from(module).add_subclass(Self))
     }
 
     /// Add a layer to the sequential container
-    fn add_module(mut slf: PyRefMut<Self>, _name: &str, module: PyRef<PyModule>) -> PyResult<()> {
-        if !matches!(slf.as_ref().inner, ModuleType::Sequential(_)) {
+    fn add_module(
+        slf: &Bound<'_, Self>,
+        _name: &str,
+        module: &Bound<'_, PyModule>,
+    ) -> PyResult<()> {
+        // Answered before either is borrowed: as one object, borrowing both
+        // would fail on the borrow rather than say what is wrong.
+        if module.is(slf) {
+            return Err(PyValueError::new_err(
+                "a Sequential cannot hold itself, or a module it is inside",
+            ));
+        }
+        let module = module.borrow();
+        let mut slf = slf.borrow_mut();
+        if !matches!(slf.as_ref().inner.get()?, ModuleType::Sequential(_)) {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
             ));
         }
 
-        let layer = module.to_layer()?;
+        let layer = module.adopt_into(slf.as_ref())?;
 
-        if let ModuleType::Sequential(seq) = &mut slf.as_mut().inner {
+        if let ModuleType::Sequential(seq) = slf.as_mut().inner.get_mut()? {
             seq.add_layer(layer);
             Ok(())
         } else {
