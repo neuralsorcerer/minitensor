@@ -193,6 +193,8 @@ impl Dropout {
 }
 
 impl Layer for Dropout {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         if !self.training || self.p == 0.0 {
             // During evaluation or when p=0, return input unchanged
@@ -287,6 +289,8 @@ impl Dropout2d {
 }
 
 impl Layer for Dropout2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions - expect 4D tensor [N, C, H, W]
         if input.ndim() != 4 {

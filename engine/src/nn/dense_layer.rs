@@ -117,6 +117,8 @@ impl DenseLayer {
 }
 
 impl Layer for DenseLayer {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions
         if input.ndim() < 2 {

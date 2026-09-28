@@ -132,6 +132,17 @@ macro_rules! weight_and_optional_bias_parameters {
     };
 }
 
+/// [`Layer::clone_layer`] for a layer that is `Clone`, which every built-in
+/// layer is.
+macro_rules! cloneable_layer {
+    () => {
+        fn clone_layer(&self) -> Option<Box<dyn $crate::nn::layer::Layer>> {
+            Some(Box::new(self.clone()))
+        }
+    };
+}
+pub(crate) use cloneable_layer;
+
 pub trait Layer: Send + Sync {
     /// Forward pass through the layer
     fn forward(&mut self, input: &Tensor) -> Result<Tensor>;
@@ -152,6 +163,19 @@ pub trait Layer: Send + Sync {
     /// Get mutable persistent buffers (for loading a state dict). Default: none.
     fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
         Vec::new()
+    }
+
+    /// A boxed copy of this layer, or `None` for one that cannot be copied.
+    ///
+    /// A container holds its children as `Box<dyn Layer>`, which cannot be
+    /// cloned by type, so it copies itself by asking each child for this. The
+    /// built-in layers all answer; the default is `None` so that a layer
+    /// written outside the crate does not have to be `Clone`.
+    ///
+    /// The copy shares its tensors with the original, as `Clone` does: a
+    /// caller that needs independent parameters replaces them afterwards.
+    fn clone_layer(&self) -> Option<Box<dyn Layer>> {
+        None
     }
 
     /// Set the layer to training mode

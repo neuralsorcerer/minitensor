@@ -86,6 +86,8 @@ impl Default for ReLU {
 }
 
 impl Layer for ReLU {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         relu(input)
     }
@@ -120,6 +122,8 @@ impl Default for Sigmoid {
 }
 
 impl Layer for Sigmoid {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         sigmoid(input)
     }
@@ -154,6 +158,8 @@ impl Default for Tanh {
 }
 
 impl Layer for Tanh {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         tanh(input)
     }
@@ -205,6 +211,8 @@ impl Default for Softmax {
 }
 
 impl Layer for Softmax {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         let dim = match self.dim {
             Some(dim) => crate::ops::util::normalize_dim(dim, input.ndim())?,
@@ -255,6 +263,8 @@ impl Default for LeakyReLU {
 }
 
 impl Layer for LeakyReLU {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         leaky_relu(input, self.negative_slope)
     }
@@ -303,6 +313,8 @@ impl Default for ELU {
 }
 
 impl Layer for ELU {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Positive part: max(0, x)
         let positive = relu(input)?;
@@ -379,6 +391,8 @@ impl Default for GELU {
 }
 
 impl Layer for GELU {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // `x * Phi(x)` through the vectorised kernel, from the tanh
         // approximation by default and from the error function when asked.

@@ -50,6 +50,8 @@ impl MaxPool2d {
 }
 
 impl Layer for MaxPool2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::max_pool2d(input, self.kernel_size, self.stride, self.padding)
     }
@@ -109,6 +111,8 @@ impl AvgPool2d {
 }
 
 impl Layer for AvgPool2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::avg_pool2d(
             input,
@@ -161,6 +165,8 @@ impl MaxPool1d {
 }
 
 impl Layer for MaxPool1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::max_pool1d(input, self.kernel_size, self.stride, self.padding)
     }
@@ -216,6 +222,8 @@ impl AvgPool1d {
 }
 
 impl Layer for AvgPool1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::avg_pool1d(
             input,
@@ -262,6 +270,8 @@ impl AdaptiveAvgPool2d {
 }
 
 impl Layer for AdaptiveAvgPool2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::adaptive_avg_pool2d(input, self.output_size)
     }
@@ -299,6 +309,8 @@ impl AdaptiveAvgPool1d {
 }
 
 impl Layer for AdaptiveAvgPool1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::adaptive_avg_pool1d(input, self.output_size)
     }
@@ -336,6 +348,8 @@ impl AdaptiveMaxPool2d {
 }
 
 impl Layer for AdaptiveMaxPool2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::adaptive_max_pool2d(input, self.output_size)
     }
@@ -373,6 +387,8 @@ impl AdaptiveMaxPool1d {
 }
 
 impl Layer for AdaptiveMaxPool1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::pooling::adaptive_max_pool1d(input, self.output_size)
     }
@@ -435,6 +451,8 @@ impl Upsample {
 }
 
 impl Layer for Upsample {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // A scalar given once has to become one entry per spatial axis, and the
         // rank is only known here.

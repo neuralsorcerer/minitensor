@@ -226,6 +226,8 @@ impl Conv2d {
 }
 
 impl Layer for Conv2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Delegate actual computation to ops::conv::conv2d
         crate::ops::conv2d(
@@ -351,6 +353,8 @@ impl Conv1d {
 }
 
 impl Layer for Conv1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::conv1d(
             input,
@@ -487,6 +491,8 @@ impl ConvTranspose2d {
 }
 
 impl Layer for ConvTranspose2d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::conv_transpose2d(
             input,
@@ -610,6 +616,8 @@ impl ConvTranspose1d {
 }
 
 impl Layer for ConvTranspose1d {
+    crate::nn::layer::cloneable_layer!();
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::conv_transpose1d(
             input,

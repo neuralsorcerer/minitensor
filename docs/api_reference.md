@@ -1028,9 +1028,16 @@ print(weight.numpy().tolist(), twin.numpy().tolist())
 [1.0, 2.0] [9.0, 2.0]
 ```
 
-Layers do not pickle. To copy a model, build a second one of the same
-architecture and load the first one's weights into it:
-`twin.load_state_dict(model.state_dict())`.
+`copy.deepcopy(layer)` gives an independent layer of the same class: every
+parameter and buffer in storage of its own, so training either one, or
+running a training-mode forward through a BatchNorm in either, leaves the
+other alone. That is what a frozen target network or a running weight average
+kept beside a model needs. A copy made inside `no_grad()` keeps its parameters
+trainable.
+
+Layers do not pickle, because rebuilding one in another process needs its
+constructor arguments. To move a model between processes, save its weights
+with `module.save(path)` and load them into a model built on the other side.
 
 ## 4) Tensor instance methods
 

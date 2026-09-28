@@ -130,6 +130,8 @@ impl BatchNorm1d {
 }
 
 impl Layer for BatchNorm1d {
+    crate::nn::layer::cloneable_layer!();
+
     /// Get named parameters for this layer
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::with_capacity(2);
@@ -302,6 +304,8 @@ impl BatchNorm2d {
 }
 
 impl Layer for BatchNorm2d {
+    crate::nn::layer::cloneable_layer!();
+
     /// Get named buffers (non-trainable parameters) for this layer
     fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut buffers = HashMap::with_capacity(2);
@@ -481,6 +485,8 @@ impl LayerNorm {
 }
 
 impl Layer for LayerNorm {
+    crate::nn::layer::cloneable_layer!();
+
     /// Named parameters for serialization.
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();
@@ -607,6 +613,8 @@ impl RMSNorm {
 }
 
 impl Layer for RMSNorm {
+    crate::nn::layer::cloneable_layer!();
+
     /// Named parameters for serialization.
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();

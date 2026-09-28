@@ -65,6 +65,23 @@ impl Sequential {
     }
 }
 
+impl Sequential {
+    /// A copy of this container, or `None` if one of its children cannot be
+    /// copied (see [`Layer::clone_layer`]). The copy shares its tensors with
+    /// the original, as a clone of any layer does.
+    pub fn try_clone(&self) -> Option<Self> {
+        let layers = self
+            .layers
+            .iter()
+            .map(|layer| layer.clone_layer())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            layers,
+            training: self.training,
+        })
+    }
+}
+
 impl Default for Sequential {
     fn default() -> Self {
         Self::new()
@@ -72,6 +89,10 @@ impl Default for Sequential {
 }
 
 impl Layer for Sequential {
+    fn clone_layer(&self) -> Option<Box<dyn Layer>> {
+        Some(Box::new(self.try_clone()?))
+    }
+
     /// Prefix each child's names with its index, recursing so a nested layer's
     /// own naming survives: `1.weight`, not `layer_1.param_0`. A child that
     /// does not name its parameters keeps positional keys under its prefix, so

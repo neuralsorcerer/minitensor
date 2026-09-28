@@ -604,6 +604,8 @@ impl Recurrent {
 }
 
 impl Layer for Recurrent {
+    crate::nn::layer::cloneable_layer!();
+
     /// Names are `weight_ih_l{k}`, `weight_hh_l{k}`, `bias_ih_l{k}`,
     /// `bias_hh_l{k}`, with `_reverse` appended for the backward direction.
     ///

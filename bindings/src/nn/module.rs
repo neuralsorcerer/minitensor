@@ -994,6 +994,12 @@ macro_rules! module_types {
                 }
             }
 
+            fn as_layer_mut(&mut self) -> &mut dyn Layer {
+                match self {
+                    $(ModuleType::$variant(layer) => &mut **layer,)+
+                }
+            }
+
         }
     };
 }
@@ -1362,6 +1368,18 @@ impl PyModule {
         ))
     }
 
+    /// An independent copy of this layer: the same class and configuration,
+    /// with every parameter and buffer in storage of its own.
+    ///
+    /// Training either one leaves the other alone, and an optimizer built over
+    /// one never touches the other's parameters. Only the built-in layers can
+    /// be copied this way; for any other model, build a second one and load
+    /// the first one's weights with `load_state_dict(model.state_dict())`.
+    fn __deepcopy__(slf: &Bound<'_, Self>, _memo: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let copy = slf.borrow().independent_copy()?;
+        rebuild_as(&slf.get_type(), copy)
+    }
+
     /// Return a StateDict snapshot of this module
     fn state_dict(&self) -> PyStateDict {
         let state = self.inner.as_module().state_dict();
@@ -1383,6 +1401,77 @@ impl PyModule {
 }
 
 impl PyModule {
+    /// A copy of the wrapped layer that shares its tensors, or `None` for a
+    /// `Sequential` holding a child that cannot be copied.
+    fn try_clone_inner(&self) -> Option<ModuleType> {
+        Some(match &self.inner {
+            ModuleType::Sequential(model) => ModuleType::Sequential(Box::new(model.try_clone()?)),
+            ModuleType::DenseLayer(layer) => ModuleType::DenseLayer(layer.clone()),
+            ModuleType::ReLU(layer) => ModuleType::ReLU(layer.clone()),
+            ModuleType::Sigmoid(layer) => ModuleType::Sigmoid(layer.clone()),
+            ModuleType::Tanh(layer) => ModuleType::Tanh(layer.clone()),
+            ModuleType::Softmax(layer) => ModuleType::Softmax(layer.clone()),
+            ModuleType::LeakyReLU(layer) => ModuleType::LeakyReLU(layer.clone()),
+            ModuleType::Elu(layer) => ModuleType::Elu(layer.clone()),
+            ModuleType::Gelu(layer) => ModuleType::Gelu(layer.clone()),
+            ModuleType::Conv2d(layer) => ModuleType::Conv2d(layer.clone()),
+            ModuleType::BatchNorm1d(layer) => ModuleType::BatchNorm1d(layer.clone()),
+            ModuleType::BatchNorm2d(layer) => ModuleType::BatchNorm2d(layer.clone()),
+            ModuleType::Dropout(layer) => ModuleType::Dropout(layer.clone()),
+            ModuleType::Dropout2d(layer) => ModuleType::Dropout2d(layer.clone()),
+            ModuleType::Embedding(layer) => ModuleType::Embedding(layer.clone()),
+            ModuleType::MultiheadAttention(layer) => ModuleType::MultiheadAttention(layer.clone()),
+            ModuleType::LayerNorm(layer) => ModuleType::LayerNorm(layer.clone()),
+            ModuleType::RMSNorm(layer) => ModuleType::RMSNorm(layer.clone()),
+            ModuleType::MaxPool2d(layer) => ModuleType::MaxPool2d(layer.clone()),
+            ModuleType::AvgPool2d(layer) => ModuleType::AvgPool2d(layer.clone()),
+            ModuleType::Recurrent(layer) => ModuleType::Recurrent(layer.clone()),
+            ModuleType::Conv1d(layer) => ModuleType::Conv1d(layer.clone()),
+            ModuleType::MaxPool1d(layer) => ModuleType::MaxPool1d(layer.clone()),
+            ModuleType::AvgPool1d(layer) => ModuleType::AvgPool1d(layer.clone()),
+            ModuleType::ConvTranspose2d(layer) => ModuleType::ConvTranspose2d(layer.clone()),
+            ModuleType::ConvTranspose1d(layer) => ModuleType::ConvTranspose1d(layer.clone()),
+            ModuleType::AdaptiveAvgPool2d(layer) => ModuleType::AdaptiveAvgPool2d(layer.clone()),
+            ModuleType::AdaptiveMaxPool2d(layer) => ModuleType::AdaptiveMaxPool2d(layer.clone()),
+            ModuleType::AdaptiveAvgPool1d(layer) => ModuleType::AdaptiveAvgPool1d(layer.clone()),
+            ModuleType::AdaptiveMaxPool1d(layer) => ModuleType::AdaptiveMaxPool1d(layer.clone()),
+            ModuleType::Upsample(layer) => ModuleType::Upsample(layer.clone()),
+        })
+    }
+
+    /// This module with every parameter and buffer copied into storage of its
+    /// own, under a fresh identity.
+    ///
+    /// Cloning the layer alone shares every tensor's storage and id with the
+    /// original, and a parameter is updated in place: an optimizer stepping
+    /// the copy would move the original's weights too, and its state, keyed
+    /// by tensor id, would treat the two as one parameter. The other tensors a
+    /// layer holds are only ever read, so sharing them is safe.
+    fn independent_copy(&self) -> PyResult<Self> {
+        fn independent(tensor: &engine::tensor::Tensor) -> engine::tensor::Tensor {
+            engine::tensor::Tensor::new(
+                std::sync::Arc::new(tensor.data().clone_data()),
+                tensor.shape().clone(),
+                tensor.dtype(),
+                tensor.device(),
+                false,
+            )
+            // Set after the tensor exists, so a copy made inside `no_grad` --
+            // where a snapshot usually is -- keeps its parameters trainable.
+            .requires_grad_(tensor.requires_grad())
+        }
+        let mut inner = self.try_clone_inner().ok_or_else(|| {
+            PyTypeError::new_err("this Sequential holds a layer that cannot be copied")
+        })?;
+        for tensor in inner.as_layer_mut().parameters_mut() {
+            *tensor = independent(tensor);
+        }
+        for tensor in inner.as_layer_mut().buffers_mut() {
+            *tensor = independent(tensor);
+        }
+        Ok(Self { inner })
+    }
+
     pub fn from_dense_layer(dense_layer: DenseLayer) -> Self {
         Self {
             inner: ModuleType::DenseLayer(Box::new(dense_layer)),
@@ -1695,3 +1784,63 @@ impl PyDenseLayer {
 /// ReLU activation layer
 #[pyclass(name = "ReLU", extends = PyModule)]
 pub struct PyReLU;
+
+/// `module` as an instance of `class`, which must be `Module` or one of the
+/// built-in layers: those are marker types over `Module`, so knowing the class
+/// is all it takes to build one around an existing layer.
+fn rebuild_as(class: &Bound<'_, pyo3::types::PyType>, module: PyModule) -> PyResult<Py<PyAny>> {
+    let py = class.py();
+    if class.is(py.get_type::<PyModule>()) {
+        return Ok(Py::new(py, module)?.into_any());
+    }
+    macro_rules! built_in {
+        ($($ty:ident),+ $(,)?) => {
+            $(
+                if class.is(py.get_type::<$ty>()) {
+                    let init = PyClassInitializer::from(module).add_subclass($ty);
+                    return Ok(Py::new(py, init)?.into_any());
+                }
+            )+
+        };
+    }
+    built_in!(
+        PyDenseLayer,
+        PyReLU,
+        PySigmoid,
+        PyTanh,
+        PySoftmax,
+        PyLeakyReLU,
+        PyELU,
+        PyGELU,
+        PyDropout,
+        PyDropout2d,
+        PyConv1d,
+        PyConv2d,
+        PyConvTranspose1d,
+        PyConvTranspose2d,
+        PyMaxPool1d,
+        PyAvgPool1d,
+        PyMaxPool2d,
+        PyAvgPool2d,
+        PyUpsample,
+        PyAdaptiveAvgPool1d,
+        PyAdaptiveAvgPool2d,
+        PyAdaptiveMaxPool1d,
+        PyAdaptiveMaxPool2d,
+        PyBatchNorm1d,
+        PyBatchNorm2d,
+        PyEmbedding,
+        PyLayerNorm,
+        PyRMSNorm,
+        PyMultiheadAttention,
+        PySequential,
+        PyLSTM,
+        PyGRU,
+    );
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "copy.deepcopy copies the built-in layers, and {} is not one; build a \
+         second instance and load this one's weights into it with \
+         load_state_dict(model.state_dict())",
+        class.name()?
+    )))
+}

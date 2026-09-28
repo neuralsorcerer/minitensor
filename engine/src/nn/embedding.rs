@@ -144,6 +144,8 @@ impl Embedding {
 }
 
 impl Layer for Embedding {
+    crate::nn::layer::cloneable_layer!();
+
     /// Named parameters for serialization.
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::with_capacity(1);

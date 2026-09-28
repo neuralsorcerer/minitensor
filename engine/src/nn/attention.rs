@@ -226,6 +226,8 @@ impl MultiheadAttention {
 }
 
 impl Layer for MultiheadAttention {
+    crate::nn::layer::cloneable_layer!();
+
     /// Named parameters for serialization.
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();
