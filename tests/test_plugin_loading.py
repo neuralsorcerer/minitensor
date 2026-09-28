@@ -85,6 +85,21 @@ def test_loading_registers_the_plugin_and_its_operations(plugin):
     assert str(info.version) == "1.0.0"
 
 
+def test_a_library_without_a_build_fingerprint_is_refused_unread():
+    """The loader reads a library's build fingerprint, through a plain C
+    function, before it takes any Rust value from it. A library built another
+    way used to load, and corrupted memory at the first call through its
+    vtable. One that does not export a fingerprint at all is refused the same
+    way -- here, an ordinary extension module that is no plugin."""
+    import _ctypes
+
+    if not _ctypes.__file__.endswith(".so"):
+        pytest.skip("needs a .so that is not a plugin")
+    with pytest.raises(Exception, match="export_plugin"):
+        mt.plugins.load_plugin(_ctypes.__file__)
+    assert "rust_example_plugin" not in [i.name for i in mt.plugins.list_plugins()]
+
+
 def test_unloading_removes_the_plugin_and_its_operations():
     mt.plugins.load_plugin(_PLUGIN)
     assert mt.is_custom_op_registered_py("rust_gelu")

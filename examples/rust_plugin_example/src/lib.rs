@@ -203,28 +203,14 @@ fn create_gelu_operation() -> Arc<dyn CustomOp> {
         .unwrap()
 }
 
-// `create_plugin` is the whole ABI the host looks for, and it passes a
-// Rust-native type across the `extern "C"` boundary: a `*mut dyn Plugin` is a fat
-// pointer carrying a vtable address, which has no stable layout, so clippy's
-// `improper_ctypes_definitions` fires — correctly.
-//
-// This is inherent to the host's plugin ABI, not a mistake here: the loader in
-// `engine::plugins` resolves `create_plugin` as
-// `unsafe extern "C" fn() -> *mut dyn Plugin`, the identical signature. Host and
-// plugin therefore agree, but only as long as both are built by the same rustc
-// against the same `engine` version and with the same global allocator — the
-// host reclaims this `Box`, and frees the `Arc<dyn CustomOp>` values handed to
-// it. A plugin compiled against a different engine build, or by a different
-// compiler, will produce a mismatched vtable and corrupt at the first call.
-// Anyone adapting this example must ship plugins alongside the exact host build;
-// a `repr(C)` shim ABI would be needed to relax that, and it would be a redesign
-// of the plugin system rather than a change here.
-#[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
-pub extern "C" fn create_plugin() -> *mut dyn Plugin {
-    let plugin = RustExamplePlugin::new();
-    Box::into_raw(Box::new(plugin))
-}
+// The plugin and the host exchange Rust values -- the boxed plugin, the
+// `Arc<dyn CustomOp>`s it hands over -- whose layout and vtables match only when
+// both were built by the same compiler against the same engine. `export_plugin!`
+// exports this plugin together with the fingerprint of that build, and the
+// loader refuses a library whose fingerprint differs from its own before it
+// takes anything from it. It cannot see the global allocator: a plugin must
+// allocate through the system allocator, which is the default.
+engine::export_plugin!(RustExamplePlugin::new());
 
 #[cfg(test)]
 mod tests {

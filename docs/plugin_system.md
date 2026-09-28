@@ -207,11 +207,18 @@ impl Plugin for ExamplePlugin {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn create_plugin() -> *mut dyn Plugin {
-    Box::into_raw(Box::new(ExamplePlugin::new()))
-}
+engine::export_plugin!(ExamplePlugin::new());
 ```
+
+`export_plugin!` exports the plugin together with the fingerprint of the build
+it was compiled in: the engine version, the exact compiler and the target. A
+plugin and its host exchange Rust values whose layout only matches when all
+three agree, so the loader reads the fingerprint first, through a plain C
+function, and refuses a library whose fingerprint differs from its own before
+it takes anything else from it. A library that does not export one is refused
+too. The fingerprint cannot see the global allocator, and the two sides free
+each other's allocations, so a plugin must use the system allocator, which is
+the default.
 
 A typical Cargo manifest uses a `cdylib` crate type and depends on the engine
 crate from an appropriate path or published package:

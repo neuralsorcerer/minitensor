@@ -17,6 +17,52 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+/// What a plugin and its host must share for Rust values to pass between them:
+/// the engine version, the exact compiler, and the target.
+///
+/// A plugin library exports it (through [`export_plugin!`]) as its own copy of
+/// this constant, compiled into it, and the loader compares the two before it
+/// calls anything that returns a Rust value. A plugin built by another compiler
+/// or against another engine used to load anyway, and its vtables corrupted
+/// the first call through them.
+pub const PLUGIN_ABI: &str = env!("MINITENSOR_PLUGIN_ABI");
+
+/// [`PLUGIN_ABI`] as a C string, for the symbol [`export_plugin!`] exports.
+#[doc(hidden)]
+pub const PLUGIN_ABI_C: &str = concat!(env!("MINITENSOR_PLUGIN_ABI"), "\0");
+
+/// Export `$plugin` -- an expression building a [`Plugin`] -- from a plugin
+/// library, with the build fingerprint the loader checks first.
+///
+/// ```ignore
+/// engine::export_plugin!(MyPlugin::new());
+/// ```
+///
+/// It defines two symbols: `minitensor_plugin_abi`, a plain C function
+/// returning [`PLUGIN_ABI`] as the plugin was built, which any host can call
+/// safely whatever built it; and `create_plugin`, which hands over the plugin
+/// itself and is only called once the fingerprints match.
+#[macro_export]
+macro_rules! export_plugin {
+    ($plugin:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn minitensor_plugin_abi() -> *const ::std::ffi::c_char {
+            $crate::plugins::PLUGIN_ABI_C.as_ptr().cast()
+        }
+
+        // A `*mut dyn Plugin` is a fat pointer with no stable layout, which is
+        // what the lint says; it only crosses once `minitensor_plugin_abi` has
+        // shown both sides were built alike.
+        #[allow(improper_ctypes_definitions)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn create_plugin() -> *mut dyn $crate::plugins::Plugin {
+            let plugin: ::std::boxed::Box<dyn $crate::plugins::Plugin> =
+                ::std::boxed::Box::new($plugin);
+            ::std::boxed::Box::into_raw(plugin)
+        }
+    };
+}
+
 /// Version compatibility information for plugins
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VersionInfo {
@@ -279,16 +325,19 @@ impl PluginManager {
     /// unmapped by [`unload_plugin`](Self::unload_plugin), so the plugin's code,
     /// vtables and custom operations remain valid for its whole lifetime.
     ///
+    /// The library must export itself with [`export_plugin!`]. Its build
+    /// fingerprint is read first, through a plain C function, and a library
+    /// built by another compiler, for another target, or against another engine
+    /// version is refused before any Rust value is taken from it.
+    ///
     /// # Safety
     ///
-    /// Loading a library runs its initialisers, and its `create_plugin` symbol
-    /// is trusted to be `extern "C" fn() -> *mut dyn Plugin` returning a
-    /// `Box::into_raw`. The plugin must be built by the same Rust toolchain
-    /// against the same version and features of this crate, and must use the
-    /// same global allocator, because the plugin and the host exchange Rust
-    /// values (`dyn Plugin` fat pointers, `Arc<dyn CustomOp>`) that are
-    /// allocated on one side and freed on the other. Nothing here can check
-    /// any of that; a library built differently is undefined behaviour.
+    /// Loading a library runs its initialisers, and its two symbols are trusted
+    /// to be the ones [`export_plugin!`] defines. The fingerprint cannot see
+    /// the global allocator: the plugin and the host exchange values allocated
+    /// on one side and freed on the other, so the plugin must allocate through
+    /// the system allocator, which is the default and what the host's own
+    /// allocator hands everything to.
     #[cfg(feature = "dynamic-loading")]
     pub unsafe fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         use libloading::{Library, Symbol};
@@ -311,6 +360,38 @@ impl PluginManager {
                 MinitensorError::plugin_error(format!("Failed to load plugin library: {}", e))
             })?
         };
+
+        // The fingerprint first: a C function returning a C string, which is
+        // safe to call whatever built the library.
+        let abi: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = unsafe {
+            lib.get(b"minitensor_plugin_abi").map_err(|_| {
+                MinitensorError::plugin_error(format!(
+                    "{} does not say which build of minitensor it was compiled against; \
+                     export it with `engine::export_plugin!`",
+                    path.display()
+                ))
+            })?
+        };
+        // SAFETY: the symbol is a C function returning a NUL-terminated string
+        // that lives as long as the library, which is still loaded here.
+        let theirs = unsafe {
+            let pointer = abi();
+            if pointer.is_null() {
+                return Err(MinitensorError::plugin_error(
+                    "the plugin's build fingerprint is null",
+                ));
+            }
+            std::ffi::CStr::from_ptr(pointer)
+                .to_string_lossy()
+                .into_owned()
+        };
+        if theirs != PLUGIN_ABI {
+            return Err(MinitensorError::plugin_error(format!(
+                "{} was built for a different minitensor: it has `{theirs}`, and this is \
+                 `{PLUGIN_ABI}`. Rebuild the plugin with the same compiler and engine version",
+                path.display()
+            )));
+        }
 
         // Get the plugin creation function
         let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
