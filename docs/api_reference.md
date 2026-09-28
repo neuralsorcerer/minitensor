@@ -66,6 +66,7 @@ of convenience aliases.
 | `set_default_dtype(dtype)` | Set the global default dtype. |
 | `default_dtype(dtype)` | Context manager for temporary dtype overrides. |
 | `manual_seed(seed)` | Seed the RNG used by random ops. |
+| `empty_cache()` | Return the large freed blocks the allocator keeps for reuse (at most 256 MiB) to the system. |
 | `get_gradient(tensor)` | Access a tensor’s gradient in the global graph. |
 | `clear_autograd_graph()` | Clear the global autograd graph, releasing every stored gradient — leaves included, so not for use between the backward passes of one accumulation. Training and backpropagating loops stay bounded without it; see below. |
 | `is_autograd_graph_consumed()` | Inspect whether a graph has been consumed. |

@@ -248,6 +248,7 @@ as_tensor = Tensor.as_tensor
 get_default_dtype = _C.get_default_dtype
 set_default_dtype = _C.set_default_dtype
 manual_seed = _C.manual_seed
+empty_cache = _C.empty_cache
 get_gradient = _C.get_gradient
 clear_autograd_graph = _C.clear_autograd_graph
 autograd_graph_size = _C.autograd_graph_size
@@ -439,6 +440,7 @@ _TENSOR_EXPORTS = (
     "get_default_dtype",
     "set_default_dtype",
     "manual_seed",
+    "empty_cache",
     "default_dtype",
 )
 _ensure_unique_names(_TENSOR_EXPORTS, "tensor exports")

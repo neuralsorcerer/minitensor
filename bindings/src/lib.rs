@@ -128,6 +128,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_default_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(set_default_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(manual_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(empty_cache, m)?)?;
 
     Ok(())
 }
@@ -202,6 +203,19 @@ fn get_gradient(tensor: &PyTensor) -> PyResult<Option<PyTensor>> {
 #[pyfunction]
 fn clear_autograd_graph() -> PyResult<()> {
     engine::autograd::clear_graph().map_err(_convert_error)
+}
+
+/// Give the large freed blocks the allocator keeps for reuse back to the system.
+///
+/// Blocks of a megabyte or more that a tensor frees are kept, up to 256 MiB,
+/// for the next tensor of the same size -- which is every iteration of a loop
+/// over same-shaped batches, and saves the page faults of fresh memory. Kept
+/// blocks still count toward the process's resident memory, so a process
+/// done with large tensors can call this to return that memory rather than
+/// hold it for work that is not coming.
+#[pyfunction]
+fn empty_cache() {
+    engine::memory::block_cache::release_cached_blocks();
 }
 
 /// `(nodes, gradients)` currently held by the autograd graph.
@@ -285,6 +299,7 @@ mod tests {
                 "get_default_dtype",
                 "set_default_dtype",
                 "manual_seed",
+                "empty_cache",
             ] {
                 assert!(module.getattr(function).is_ok(), "missing {function}");
             }

@@ -245,6 +245,7 @@ def _load_stubbed_module(monkeypatch: pytest.MonkeyPatch):
     core.get_default_dtype = lambda: "float32"
     core.set_default_dtype = lambda _dtype: None
     core.manual_seed = lambda _seed: None
+    core.empty_cache = lambda: None
     core.get_gradient = lambda: None
     core.clear_autograd_graph = lambda: None
     core.autograd_graph_size = lambda: (0, 0)
@@ -306,6 +307,7 @@ def test_top_level_public_api_matches_exported_globals():
             *mt._FUNCTIONAL_FORWARDERS,
             "Tensor",
             "manual_seed",
+            "empty_cache",
             "default_dtype",
             "available_submodules",
             "list_public_api",
