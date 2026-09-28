@@ -648,6 +648,11 @@ impl ComputationGraph {
         self.nodes.contains_key(&tensor_id)
     }
 
+    /// Whether `tensor_id` has a node here that has not been released.
+    pub fn contains_live(&self, tensor_id: TensorId) -> bool {
+        self.live_node(&tensor_id).is_some()
+    }
+
     /// Compute a reverse-topological order (outputs before inputs) of the
     /// whole graph. Diagnostic API: the backward pass itself only orders the
     /// reachable subgraph via [`Self::plan_backward`]. Returns an empty vector

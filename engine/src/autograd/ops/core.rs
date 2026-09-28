@@ -212,6 +212,19 @@ pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<()> {
                 None,
             ));
         }
+        // A tensor that was recorded but has no live node here has a history
+        // this pass cannot walk. Walking nothing used to succeed, leaving every
+        // `.grad` at `None` -- which an optimizer reads as "not used by this
+        // loss" and skips in silence.
+        if tensor.grad_fn().is_some() && !graph.contains_live(tensor.id()) {
+            return Err(MinitensorError::gradient_error_with_suggestion(
+                "This tensor's autograd graph is not on this thread: an earlier backward \
+                 released it, clear_autograd_graph() cleared it, or another thread recorded \
+                 it (each thread records its own graph)",
+                "Run the forward pass again, on the thread that calls backward()",
+                None,
+            ));
+        }
         graph.plan_backward(tensor.id())
     })?;
 

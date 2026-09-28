@@ -4,22 +4,22 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The autograd graph is per-thread, and its absence is not reported.
+"""The autograd graph is per-thread, and a backward pass that cannot reach one
+says so.
 
 Nothing stated that the graph is thread-local. It matters in two opposite
 directions. The good direction is isolation: `clear_autograd_graph()` is a
 module-level function, so if the graph were shared, one thread calling it would
 wipe a graph another thread was still building. It does not.
 
-The bad direction is that crossing threads fails silently. A loss built in a
-worker thread and backpropagated on the main thread produces no gradient and no
-exception, and the tensor still reports `requires_grad=True`, so nothing marks
-the mistake. That is reachable from ordinary code -- a data pipeline or a
-`concurrent.futures` worker that builds the loss where it loaded the batch.
-
-These tests pin the behaviour rather than change it: the same silence applies
-within one thread after `clear_autograd_graph()`, so making the cross-thread
-case raise would have to redefine what `backward()` on a released graph means.
+The other direction is that a loss built in one thread cannot be
+backpropagated from another -- a data pipeline or a `concurrent.futures`
+worker that builds the loss where it loaded the batch. That used to fail in
+silence: no gradient, no exception, and a tensor still reporting
+`requires_grad=True`, so an optimizer skipped the parameter as if the loss had
+not used it. The same silence followed `clear_autograd_graph()` between a
+forward and its backward. Both now raise, since a result owns its history and
+can tell "recorded, but not here" from "never recorded".
 """
 
 import threading
@@ -93,7 +93,7 @@ def test_a_foreign_clear_does_not_disturb_a_live_graph():
     np.testing.assert_allclose(result["grad"], np.full(4, 3.0))
 
 
-def test_backward_on_another_threads_graph_is_a_silent_no_op():
+def test_backward_on_another_threads_graph_raises():
     state = {}
 
     def build():
@@ -106,24 +106,33 @@ def test_backward_on_another_threads_graph_is_a_silent_no_op():
     # The forward value survives the hop; only the graph is out of reach.
     assert state["loss"].item() == pytest.approx(15.0)
 
-    state["loss"].backward()  # must not raise
-
+    with pytest.raises(RuntimeError, match="not on this thread"):
+        state["loss"].backward()
     assert state["weight"].grad is None
-    assert mt.get_gradient(state["weight"]) is None
-    # Nothing about the tensor advertises the problem.
-    assert state["weight"].requires_grad is True
 
 
-def test_the_same_silence_applies_after_clearing_in_one_thread():
-    # Why the cross-thread case is documented rather than made to raise: an
-    # absent graph behaves identically without any threads involved.
+def test_backward_after_clearing_the_graph_raises():
     weight = mt.Tensor(np.ones(3), dtype="float64", requires_grad=True)
     loss = (weight * mt.Tensor(np.full(3, 5.0), dtype="float64")).sum()
     mt.clear_autograd_graph()
 
-    loss.backward()
-
+    with pytest.raises(RuntimeError, match="clear_autograd_graph"):
+        loss.backward()
     assert weight.grad is None
+
+
+def test_backward_through_a_released_graph_raises_after_other_recording():
+    # The consumed flag caught a second backward only while nothing had been
+    # recorded since; any later operation reset it and the second pass walked
+    # nothing in silence.
+    weight = mt.Tensor(np.ones(3), dtype="float64", requires_grad=True)
+    loss = (weight * 2.0).sum()
+    loss.backward()
+    (weight * 3.0).sum()  # records, and resets the consumed flag
+
+    with pytest.raises(RuntimeError, match="earlier backward"):
+        loss.backward()
+    np.testing.assert_allclose(weight.grad.numpy(), np.full(3, 2.0))
 
 
 def test_grad_mode_and_the_consumed_flag_are_thread_local_too():

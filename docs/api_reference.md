@@ -4063,7 +4063,7 @@ True
 A training loop needs neither guard: `backward()` releases the subgraph it
 walked, so forward-then-backward stays flat on its own.
 
-### The graph is thread-local, and a missing graph is silent
+### The graph is thread-local, and a missing graph raises
 
 Each thread records into its own autograd graph, so concurrent threads do not
 interfere: one thread's `clear_autograd_graph()` cannot disturb a graph another
@@ -4073,8 +4073,8 @@ graph-consumed flag are thread-local for the same reason.
 
 The consequence is that **a graph has to be backpropagated on the thread that
 built it**. Building a loss in a worker thread and calling `backward()` on it
-from the main thread does not raise — it quietly does nothing, leaving `.grad`
-as `None`:
+from the main thread raises, rather than leaving `.grad` as `None` for an
+optimizer to skip:
 
 ```python
 import threading
@@ -4094,9 +4094,11 @@ worker = threading.Thread(target=build)
 worker.start()
 worker.join()
 
-state["loss"].backward()          # different thread: no error, no gradient
+try:
+    state["loss"].backward()      # a different thread from the one that built it
+except RuntimeError as error:
+    print("not on this thread" in str(error))
 print(state["w"].grad is None)
-print(state["loss"].requires_grad)
 ```
 
 ```text
@@ -4104,11 +4106,9 @@ True
 True
 ```
 
-Note the tensor still reports `requires_grad=True`, so nothing about it
-signals the problem. The same silence applies within a single thread after
-`clear_autograd_graph()` — `backward()` on a released graph is a no-op rather
-than an error. If gradients come back `None` when you expect values, check
-which thread built the graph and whether it was cleared in between.
+The same error follows a `backward()` whose graph was cleared by
+`clear_autograd_graph()` after the forward pass, or released by an earlier
+`backward()` without `retain_graph=True`.
 
 ### Updating parameters while another thread reads them
 
