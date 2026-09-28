@@ -251,7 +251,12 @@ impl Optimizer for NAdam {
     /// `momentum_decay`, which a resumed optimizer may have been constructed
     /// with differently -- so it is saved rather than recomputed.
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("NAdam", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "NAdam",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "exp_avg", &self.m, parameters)?;
         save_param_buffers(&mut state, "exp_avg_sq", &self.v, parameters)?;
         state
@@ -266,6 +271,9 @@ impl Optimizer for NAdam {
         load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
         self.mu_product = state.scalars.get("mu_product").copied().unwrap_or(1.0);
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

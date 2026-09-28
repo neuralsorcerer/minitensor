@@ -158,7 +158,12 @@ impl Adadelta {
 
 impl Optimizer for Adadelta {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("Adadelta", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "Adadelta",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "square_avg", &self.square_avg, parameters)?;
         save_param_buffers(&mut state, "acc_delta", &self.acc_delta, parameters)?;
         Ok(state)
@@ -169,6 +174,9 @@ impl Optimizer for Adadelta {
         load_param_buffers(state, "square_avg", &mut self.square_avg, parameters)?;
         load_param_buffers(state, "acc_delta", &mut self.acc_delta, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

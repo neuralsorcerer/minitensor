@@ -165,7 +165,12 @@ impl Adamax {
 
 impl Optimizer for Adamax {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("Adamax", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "Adamax",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "exp_avg", &self.exp_avg, parameters)?;
         save_param_buffers(&mut state, "exp_inf", &self.exp_inf, parameters)?;
         Ok(state)
@@ -176,6 +181,9 @@ impl Optimizer for Adamax {
         load_param_buffers(state, "exp_avg", &mut self.exp_avg, parameters)?;
         load_param_buffers(state, "exp_inf", &mut self.exp_inf, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

@@ -281,7 +281,12 @@ impl SGD {
 
 impl Optimizer for SGD {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("SGD", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "SGD",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "momentum_buffer", &self.velocity, parameters)?;
         Ok(state)
     }
@@ -290,6 +295,9 @@ impl Optimizer for SGD {
         state.check_compatible("SGD", parameters)?;
         load_param_buffers(state, "momentum_buffer", &mut self.velocity, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

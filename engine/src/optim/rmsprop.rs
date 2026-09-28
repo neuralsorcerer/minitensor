@@ -295,7 +295,12 @@ impl RMSprop {
 
 impl Optimizer for RMSprop {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("RMSprop", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "RMSprop",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "square_avg", &self.square_avg, parameters)?;
         save_param_buffers(
             &mut state,
@@ -318,6 +323,9 @@ impl Optimizer for RMSprop {
         )?;
         load_param_buffers(state, "grad_avg", &mut self.grad_avg, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

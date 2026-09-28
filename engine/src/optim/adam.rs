@@ -483,8 +483,12 @@ impl Optimizer for Adam {
     /// `max_exp_avg_sq`) so a checkpoint is readable by anyone who has seen
     /// one before.
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state =
-            OptimizerState::new(self.algorithm_name(), self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            self.algorithm_name(),
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "exp_avg", &self.m, parameters)?;
         save_param_buffers(&mut state, "exp_avg_sq", &self.v, parameters)?;
         save_param_buffers(&mut state, "max_exp_avg_sq", &self.v_hat, parameters)?;
@@ -497,6 +501,9 @@ impl Optimizer for Adam {
         load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
         load_param_buffers(state, "max_exp_avg_sq", &mut self.v_hat, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

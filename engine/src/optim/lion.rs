@@ -212,7 +212,12 @@ impl Lion {
 
 impl Optimizer for Lion {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("Lion", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "Lion",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "exp_avg", &self.m, parameters)?;
         Ok(state)
     }
@@ -221,6 +226,9 @@ impl Optimizer for Lion {
         state.check_compatible("Lion", parameters)?;
         load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

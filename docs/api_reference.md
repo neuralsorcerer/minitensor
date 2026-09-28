@@ -3419,7 +3419,9 @@ All optimizer classes share a common interface:
 - `lr` property -- read/write learning rate.
 - `step_count` property -- how many steps have been applied.
 - `state_dict()` / `load_state_dict(state)` -- snapshot and restore the
-  optimizer's own state.
+  optimizer's own state, its learning rate included: a rate changed by hand
+  as training went is where the run is. To resume at a different rate, set
+  `lr` after loading.
 - `save(path)` / `load(path)` -- the same, through a file.
 
 ### Checkpointing a training run

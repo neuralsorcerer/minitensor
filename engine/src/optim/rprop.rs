@@ -193,7 +193,12 @@ impl Rprop {
 
 impl Optimizer for Rprop {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("Rprop", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "Rprop",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "prev", &self.prev_grad, parameters)?;
         save_param_buffers(&mut state, "step_size", &self.step_size, parameters)?;
         Ok(state)
@@ -204,6 +209,9 @@ impl Optimizer for Rprop {
         load_param_buffers(state, "prev", &mut self.prev_grad, parameters)?;
         load_param_buffers(state, "step_size", &mut self.step_size, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 

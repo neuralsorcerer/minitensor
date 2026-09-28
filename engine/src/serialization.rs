@@ -534,21 +534,44 @@ pub struct OptimizerState {
     pub step_count: usize,
     /// Number of parameters the optimizer was tracking, checked on load.
     pub num_parameters: usize,
-    /// Non-tensor state, e.g. NAdam's running `mu_product`.
+    /// Non-tensor state, e.g. NAdam's running `mu_product`, and the learning
+    /// rate under [`Self::LEARNING_RATE`].
     pub scalars: BTreeMap<String, f64>,
     /// Per-parameter buffers keyed `"{slot}.{name}"`, e.g. `"0.exp_avg"`.
     pub buffers: BTreeMap<String, SerializedTensor>,
 }
 
 impl OptimizerState {
-    pub fn new(algorithm: impl Into<String>, step_count: usize, num_parameters: usize) -> Self {
+    /// Where the learning rate is kept among [`Self::scalars`].
+    ///
+    /// A rate changed by hand as training went -- rather than by a
+    /// scheduler, whose own state restores it -- is part of where the run
+    /// is, and was not saved: a resumed run went back to the rate the
+    /// optimizer was constructed with. It is a scalar rather than a field of
+    /// its own so that checkpoints written before it existed still decode,
+    /// and they load keeping the optimizer's current rate.
+    pub const LEARNING_RATE: &'static str = "lr";
+
+    pub fn new(
+        algorithm: impl Into<String>,
+        step_count: usize,
+        num_parameters: usize,
+        learning_rate: f64,
+    ) -> Self {
+        let mut scalars = BTreeMap::new();
+        scalars.insert(Self::LEARNING_RATE.to_string(), learning_rate);
         Self {
             algorithm: algorithm.into(),
             step_count,
             num_parameters,
-            scalars: BTreeMap::new(),
+            scalars,
             buffers: BTreeMap::new(),
         }
+    }
+
+    /// The learning rate saved with this state, if it was.
+    pub fn learning_rate(&self) -> Option<f64> {
+        self.scalars.get(Self::LEARNING_RATE).copied()
     }
 
     /// Record one parameter's buffer. Absent buffers stay absent: an optimizer

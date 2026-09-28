@@ -360,3 +360,57 @@ def test_nadam_restores_its_momentum_product(tmp_path):
     assert restored.step_count == 7
     for left, right in zip(original.parameters(), twin.parameters()):
         np.testing.assert_array_equal(left.numpy(), right.numpy())
+
+
+# --- the learning rate is part of where the run is --------------------------
+
+
+@pytest.mark.parametrize("name", list(OPTIMIZERS))
+def test_a_rate_changed_by_hand_is_restored(name, tmp_path):
+    """A rate lowered as training went -- by hand rather than by a
+    scheduler, whose own state restores it -- was not saved, and a resumed
+    run went back to the rate the optimizer was constructed with."""
+    optimizer = OPTIMIZERS[name](_model().parameters())
+    optimizer.lr = 1.25e-4
+    path = str(tmp_path / "optimizer.bin")
+    optimizer.save(path)
+
+    resumed = OPTIMIZERS[name](_model().parameters())
+    assert resumed.lr != pytest.approx(1.25e-4)
+    resumed.load(path)
+    assert resumed.lr == pytest.approx(1.25e-4)
+
+    in_memory = OPTIMIZERS[name](_model().parameters())
+    in_memory.load_state_dict(optimizer.state_dict())
+    assert in_memory.lr == pytest.approx(1.25e-4)
+
+
+def test_a_resume_after_a_hand_changed_rate_is_an_exact_continuation(tmp_path):
+    def run(interrupt):
+        mt.manual_seed(7)
+        np.random.seed(7)
+        features = mt.Tensor(np.random.randn(64, 16).astype(np.float32))
+        targets = mt.Tensor(np.random.randn(64, 4).astype(np.float32))
+        model = _model()
+        optimizer = optim.Adam(model.parameters(), lr=1e-2)
+        losses = []
+        for step in range(30):
+            if step == 10:
+                optimizer.lr = 1e-3
+            if interrupt and step == 20:
+                model.save(str(tmp_path / "model.bin"))
+                optimizer.save(str(tmp_path / "optimizer.bin"))
+                model = _model()
+                model.load_state_dict(
+                    type(model).load_state_from(str(tmp_path / "model.bin"))
+                )
+                optimizer = optim.Adam(model.parameters(), lr=1e-2)
+                optimizer.load(str(tmp_path / "optimizer.bin"))
+            optimizer.zero_grad()
+            loss = nn.mse_loss(model(features), targets)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.numpy()))
+        return losses
+
+    assert run(interrupt=True) == run(interrupt=False)

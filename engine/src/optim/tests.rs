@@ -17,6 +17,32 @@ mod tests {
         tensor::{DataType, Shape, Tensor},
     };
 
+    /// The learning rate travels with the optimizer's state, and a state
+    /// written before it did -- no `lr` among its scalars -- still loads,
+    /// keeping the rate the optimizer has.
+    #[test]
+    fn the_learning_rate_is_saved_and_an_older_state_still_loads() {
+        let weight = Tensor::zeros(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        let parameters = [&weight];
+
+        let mut trained = SGD::new(0.1, Some(0.9), None);
+        trained.set_learning_rate(0.0125);
+        let state = trained.state_dict(&parameters).unwrap();
+        assert_eq!(state.learning_rate(), Some(0.0125));
+
+        let mut resumed = SGD::new(0.1, Some(0.9), None);
+        resumed.load_state_dict(&parameters, &state).unwrap();
+        assert_eq!(resumed.learning_rate(), 0.0125);
+
+        let mut older = state.clone();
+        older
+            .scalars
+            .remove(crate::serialization::OptimizerState::LEARNING_RATE);
+        let mut kept = SGD::new(0.5, Some(0.9), None);
+        kept.load_state_dict(&parameters, &older).unwrap();
+        assert_eq!(kept.learning_rate(), 0.5);
+    }
+
     #[test]
     fn test_sgd_creation() {
         let sgd = SGD::new(0.01, Some(0.9), Some(1e-4));

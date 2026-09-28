@@ -237,7 +237,12 @@ fn fill_with(mut tensor: Tensor, value: f64) -> Tensor {
 
 impl Optimizer for Adagrad {
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
-        let mut state = OptimizerState::new("Adagrad", self.step_count, parameters.len());
+        let mut state = OptimizerState::new(
+            "Adagrad",
+            self.step_count,
+            parameters.len(),
+            self.learning_rate(),
+        );
         save_param_buffers(&mut state, "sum", &self.state_sum, parameters)?;
         Ok(state)
     }
@@ -246,6 +251,9 @@ impl Optimizer for Adagrad {
         state.check_compatible("Adagrad", parameters)?;
         load_param_buffers(state, "sum", &mut self.state_sum, parameters)?;
         self.step_count = state.step_count;
+        if let Some(lr) = state.learning_rate() {
+            self.set_learning_rate(lr);
+        }
         Ok(())
     }
 
