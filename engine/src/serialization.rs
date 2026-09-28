@@ -370,29 +370,42 @@ impl SerializedTensor {
         })
     }
 
+    /// The element count, once the bytes are known to be exactly that many
+    /// elements of the dtype.
+    ///
+    /// Shape, dtype and bytes all come from the file, so they are checked
+    /// against each other rather than trusted: a shape whose element count
+    /// overflows `usize`, or whose byte count does, is a corrupt file to
+    /// report, never a product that wraps to something small enough to pass.
+    fn check_length(&self) -> Result<usize> {
+        let numel = self.shape.try_numel()?;
+        let needed = numel.checked_mul(self.dtype.size_bytes());
+        if needed != Some(self.data.len()) {
+            return Err(MinitensorError::SerializationError {
+                message: format!(
+                    "{} bytes of data for a {:?} tensor of shape {:?}, which needs {}",
+                    self.data.len(),
+                    self.dtype,
+                    self.shape.dims(),
+                    needed.map_or_else(|| "more than fit in memory".to_string(), |n| n.to_string()),
+                ),
+                suggestion: Some(CORRUPT_FILE.to_string()),
+                context: None,
+            });
+        }
+        Ok(numel)
+    }
+
     /// Deserialize to tensor
     pub fn to_tensor(&self, target_device: Option<Device>) -> Result<Tensor> {
         let device = target_device.unwrap_or(self.device);
-        // The shape comes from the file, so an element count past `usize` is a
-        // corrupt or hostile file to report, not a panic.
-        let numel = self.shape.try_numel()?;
+        let numel = self.check_length()?;
 
-        /// One numeric dtype's worth of little-endian decoding.
-        ///
-        /// `checked_mul` guards the untrusted `numel` (it comes from the
-        /// deserialized shape): a product that overflows `usize` is treated as
-        /// a length mismatch rather than wrapping to a small value that could
-        /// spuriously pass the check.
+        /// One numeric dtype's worth of little-endian decoding, of bytes
+        /// `check_length` has already matched to the shape.
         macro_rules! numeric_values {
             ($ty:ty, $ctor:ident, $label:literal) => {{
                 const WIDTH: usize = std::mem::size_of::<$ty>();
-                if numel.checked_mul(WIDTH) != Some(self.data.len()) {
-                    return Err(MinitensorError::serialization_error(concat!(
-                        "Invalid ",
-                        $label,
-                        " data length"
-                    )));
-                }
                 let mut values = Vec::with_capacity(numel);
                 for chunk in self.data.chunks_exact(WIDTH) {
                     let bytes: [u8; WIDTH] = chunk.try_into().map_err(|_| {
@@ -410,11 +423,6 @@ impl SerializedTensor {
             DataType::Int32 => numeric_values!(i32, from_vec_i32, "i32"),
             DataType::Int64 => numeric_values!(i64, from_vec_i64, "i64"),
             DataType::Bool => {
-                if self.data.len() != numel {
-                    return Err(MinitensorError::serialization_error(
-                        "Invalid bool data length",
-                    ));
-                }
                 let values: Vec<bool> = self.data.iter().map(|&x| x != 0).collect();
                 crate::tensor::TensorData::from_vec_bool(values, device)
             }
@@ -442,6 +450,11 @@ pub struct StateDict {
 }
 
 impl StateDict {
+    fn check(&self) -> Result<()> {
+        check_tensors("parameter", &self.parameters)?;
+        check_tensors("buffer", &self.buffers)
+    }
+
     /// Create empty state dict
     pub fn new() -> Self {
         Self {
@@ -878,26 +891,69 @@ impl DeploymentModel {
 
     /// Load deployment model
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path).map_err(|e| {
-            MinitensorError::serialization_error(format!("Failed to open file: {}", e))
-        })?;
-        let mut reader = BufReader::new(file);
+        read_file(path.as_ref(), SerializationFormat::Binary)
+    }
+}
 
-        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-            |e| {
-                MinitensorError::serialization_error(format!(
-                    "Deployment model deserialization failed: {}",
-                    e
-                ))
+/// What the file suggests when its contents, rather than the disk, are wrong.
+const CORRUPT_FILE: &str = "The file is corrupt or truncated: check that it was written by \
+                            this library and copied whole";
+
+/// Every tensor's bytes match its shape and dtype, so a corrupt file fails as
+/// it is read, naming the tensor, rather than when that tensor is first used.
+fn check_tensors(kind: &str, tensors: &BTreeMap<String, SerializedTensor>) -> Result<()> {
+    for (name, tensor) in tensors {
+        tensor.check_length().map_err(|error| match error {
+            MinitensorError::SerializationError {
+                message,
+                suggestion,
+                context,
+            } => MinitensorError::SerializationError {
+                message: format!("{kind} `{name}`: {message}"),
+                suggestion,
+                context,
             },
-        )
+            other => other,
+        })?;
+    }
+    Ok(())
+}
+
+/// A type read from a file, checked once it is decoded for what decoding
+/// alone cannot see.
+trait Loaded: serde::de::DeserializeOwned {
+    fn check(&self) -> Result<()>;
+}
+
+impl Loaded for StateDict {
+    fn check(&self) -> Result<()> {
+        StateDict::check(self)
+    }
+}
+
+impl Loaded for SerializedModel {
+    fn check(&self) -> Result<()> {
+        self.state_dict.check()
+    }
+}
+
+impl Loaded for OptimizerState {
+    fn check(&self) -> Result<()> {
+        check_tensors("optimizer buffer", &self.buffers)
+    }
+}
+
+impl Loaded for DeploymentModel {
+    fn check(&self) -> Result<()> {
+        self.state_dict.check()
     }
 }
 
 /// Decode a value of any serializable type from the file at `path`.
 ///
 /// One reader for every format and every type saved here, so the defences
-/// below apply to all of them.
+/// below apply to all of them, and every tensor in what it read is checked
+/// against its shape before the value is handed back.
 ///
 /// `bincode` trusts the length prefix of a string or byte buffer and allocates
 /// that much before reading any of it, and its only guard is a compile-time
@@ -912,7 +968,13 @@ impl DeploymentModel {
 /// factor of 64 apart, because each is another compilation of the decoder for
 /// every type read: seven measured 100KB of extension for a tighter bound that
 /// buys nothing an allocator's overcommit does not already absorb.
-fn read_file<T: serde::de::DeserializeOwned>(
+fn read_file<T: Loaded>(path: &Path, format: SerializationFormat) -> Result<T> {
+    let value: T = decode_file(path, format)?;
+    value.check()?;
+    Ok(value)
+}
+
+fn decode_file<T: serde::de::DeserializeOwned>(
     path: &Path,
     format: SerializationFormat,
 ) -> Result<T> {
