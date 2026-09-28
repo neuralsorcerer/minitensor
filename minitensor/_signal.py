@@ -37,8 +37,10 @@ _F = _C.functional
 # splits one that long over threads that wake in microseconds, where ours stays
 # on one thread because a round trip through the pool costs tens: 13us against
 # its 9 at 65,536 samples, even at 32,768, and 3.5 against 5.3 at 16,384 in
-# ours' favour. A float32 BLAS dot stays on one thread and is the slower at
-# every length, 60us against 14 at 262,144.
+# ours' favour. A float32 BLAS dot stays on one thread: a few microseconds
+# ahead up to 131,072 samples (10-18us against 17-24 there), level at 262,144
+# (about 45 each), and half as fast from 524,288 on (130-185 against 70-97), so
+# a float32 dot stays ours at every length.
 _NUMPY_DOT_FROM = 1 << 15
 
 
