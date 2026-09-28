@@ -6,25 +6,24 @@ as the source of truth. It is intentionally exhaustive and meant to complement
 existing guides such as `custom_operations.md`, `plugin_system.md`, and
 `performance.md`.
 
-## 0) Where this differs from PyTorch and NumPy
+## 0) Behaviour worth knowing first
 
-Most of this surface follows PyTorch's naming and semantics, so the places it
-does not are the ones worth knowing before you port code. Each is explained in
+A few rules here are easy to assume the other way round. Each is explained in
 full where the function is documented; this table is the index, because meeting
 them one at a time at runtime is how they cost you an afternoon. The ones that
 fail loudly are the cheap ones — it is the two silent rows that matter.
 
-| | MiniTensor | What you may expect | Detail |
-| --- | --- | --- | --- |
-| `zeros_like` and the other `*_like` forms | Inherit the source's `requires_grad`, so `zeros_like(parameter)` is trainable | `torch.*_like` defaults the flag to `False` | [§2](#2-tensor-creation-api) — **silent**; pass `requires_grad=False` to opt out |
-| A tie in `amax` / `amin` / `nanmedian` | The gradient is divided evenly among the tied elements | `torch.amax` does the same; `torch.max(dim)` instead sends it all to one index, and so does this library's `max(dim)` | [§4](#4-tensor-instance-methods) — **silent** |
-| `kl_div(input, target)` | Both arguments are probabilities | `torch.nn.functional.kl_div` takes log-probabilities as `input` | [§5](#5-functional-api-minitensorfunctional) — a log-probability input gives `inf`, so this one announces itself |
-| `median` with an even count | The lower of the two middle values, with an index naming it | `numpy.median` averages them; `torch.median` also takes the lower | [§4](#4-tensor-instance-methods) — use `quantile(0.5)` for the interpolated value |
-| `chunk` with an uneven split | Refused | `torch.chunk` shortens the last piece | [§4](#4-tensor-instance-methods) |
-| `resize(input, shape)` | Free function; *repeats* the elements to fill | `torch.Tensor.resize_` is in-place and zero-fills; this follows `numpy.resize` | [§1](#1-top-level-module-minitensor) |
-| `xavier_uniform_like` and the other initialisers | Factories returning a new tensor | `torch.nn.init.xavier_uniform_` mutates in place | [§6](#6-neural-network-module-minitensornn) |
-| `.grad` on an interior tensor | Populated after `backward()` | PyTorch gives `None` unless you call `retain_grad()` | [What `backward()` retains](#what-backward-retains) |
-| Negative padding in `functional.pad` | Refused; pad amounts must be non-negative | — | Crop with slicing instead |
+| | Behaviour | Detail |
+| --- | --- | --- |
+| `zeros_like` and the other `*_like` forms | Inherit the source's `requires_grad`, so `zeros_like(parameter)` is trainable | [§2](#2-tensor-creation-api) — **silent**; pass `requires_grad=False` to opt out |
+| A tie in `amax` / `amin` / `nanmedian` | The gradient is divided evenly among the tied elements; `max(dim)`, which reports an index, sends it all to that index | [§4](#4-tensor-instance-methods) — **silent** |
+| `kl_div(input, target)` | Both arguments are probabilities, not log-probabilities | [§5](#5-functional-api-minitensorfunctional) — a log-probability input gives `inf`, so this one announces itself |
+| `median` with an even count | The lower of the two middle values, with an index naming it | [§4](#4-tensor-instance-methods) — use `quantile(0.5)` for the interpolated value |
+| `chunk` with an uneven split | Refused | [§4](#4-tensor-instance-methods) — use `split` |
+| `resize(input, shape)` | A free function returning a new tensor; *repeats* the elements to fill | [§1](#1-top-level-module-minitensor) |
+| `xavier_uniform_like` and the other initialisers | Factories returning a new tensor, never in place | [§6](#6-neural-network-module-minitensornn) |
+| `.grad` on an interior tensor | Populated after `backward()` | [What `backward()` retains](#what-backward-retains) |
+| Negative padding in `functional.pad` | Refused; pad amounts must be non-negative | Crop with slicing instead |
 
 Every row here was checked against a running build rather than read off the
 source, and the two marked **silent** are the ones that change results without
@@ -82,7 +81,7 @@ of convenience aliases.
 | `describe_api(symbol)` | Return a one-line description for a symbol. |
 | `help()` | Render a formatted MiniTensor API reference. |
 | `broadcast_to(input, shape)` | Broadcast one tensor-like input to an explicit target shape. |
-| `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
+| `broadcast_shapes(*shapes)` | Compute the broadcast result for shape-like inputs without constructing tensors. |
 | `broadcast_tensors(*inputs)` | Convert tensor-like inputs and broadcast them to a shared shape, returning materialized contiguous tensors. |
 | `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
 | `atleast_1d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least one dimension. |
@@ -104,9 +103,9 @@ of convenience aliases.
 | `kron(input, other)` | The Kronecker product: each element of `input` scaling a copy of `other`. Ranks need not match; the shorter is padded with leading 1s. |
 | `dist(input, other, p=2.0)` | The `p`-norm of the difference. |
 | `cdist(input, other, p=2.0)` | Every pairwise `p`-distance between the rows of two batches: `(..., n, d)` and `(..., m, d)` give `(..., n, m)`. Forms the difference in full, so it costs `n * m * d` elements. |
-| `histogramdd(input, bins=10, range=None, weight=None, density=False)` | The joint histogram of a `(points, dimensions)` sample, as `(counts, edges)`. `histogram` counts along a line; this counts in a box. `bins` is one count for every dimension, one count each, or the edges themselves; `range` bounds each dimension, as a sequence of pairs or the flat `2 * dimensions` form `torch.histogramdd` takes. The axes are bucketed separately and folded into one flat position, so nothing iterates over cells -- the cost is the samples, not the grid, which is the part that grows exponentially. A point outside any dimension is dropped and each last bin holds its own right edge, as in `histogram`. |
+| `histogramdd(input, bins=10, range=None, weight=None, density=False)` | The joint histogram of a `(points, dimensions)` sample, as `(counts, edges)`. `histogram` counts along a line; this counts in a box. `bins` is one count for every dimension, one count each, or the edges themselves; `range` bounds each dimension, as a sequence of pairs or the flat `2 * dimensions` form. The axes are bucketed separately and folded into one flat position, so nothing iterates over cells -- the cost is the samples, not the grid, which is the part that grows exponentially. A point outside any dimension is dropped and each last bin holds its own right edge, as in `histogram`. |
 | `histogram2d(x, y, bins=10, range=None, weights=None, density=False)` | The joint histogram of two sequences, as `(counts, x_edges, y_edges)`. `histogramdd` over the pair, with the edges handed back separately rather than as a list. |
-| `histogram_bin_edges(input, bins=10, range=None, weights=None)` | The edges `histogram` would use, without counting anything -- for choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored, as in NumPy: no edge rule depends on them. |
+| `histogram_bin_edges(input, bins=10, range=None, weights=None)` | The edges `histogram` would use, without counting anything -- for choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored: no edge rule depends on them. |
 | `average(input, dim=None, weights=None, keepdim=False, returned=False)` | The mean, or `sum(a * w) / sum(w)` when `weights` is given -- the divisor is the weight total, so weights that do not sum to one still give an average rather than a scaled one. `weights` may have the tensor's shape or be 1-D and as long as the reduced axis. `returned=True` also gives the weight total, which a caller combining averages needs and cannot recover afterwards. |
 | `ptp(input, dim=None, keepdim=False)` | The peak-to-peak span: `amax` less `amin`. |
 | `percentile(input, q, dim=None, keepdim=False, interpolation='linear')` | `quantile` with `q` in `[0, 100]` rather than `[0, 1]` -- the same computation, so the two cannot drift apart. `q` may be a scalar or a tensor of them. |
@@ -117,7 +116,7 @@ of convenience aliases.
 | `nancumprod(input, dim=None)` | The running product along `dim` treating NaN as one. |
 | `ediff1d(input, to_end=None, to_begin=None)` | The differences between consecutive elements of the flattened tensor, with optional values joined on at either end -- which is what makes this the one to reach for when the result has to line up with something of the original length. |
 | `normalize(input, p=2.0, dim=1, eps=1e-12)` | `input` scaled so each slice along `dim` has unit `p`-norm. `eps` is a floor *under* the norm rather than a term added to it, so a zero vector comes back as zero and every other vector is exactly unit length -- adding `eps` would shrink all of them. |
-| `pairwise_distance(input, other, p=2.0, eps=1e-6, keepdim=False)` | The `p`-distance between corresponding rows: the diagonal of `cdist`, at `n` distances rather than `n * m`. Operands broadcast. `eps` is added to the difference, biasing every distance up by `eps * d ** (1 / p)`; it matches `torch.nn.functional.pairwise_distance` and is a compatibility default, not a requirement -- PyTorch needs it to avoid a NaN gradient where two rows coincide, and this library's `norm` answers zero there, so `eps=0.0` gives the true distance safely. |
+| `pairwise_distance(input, other, p=2.0, eps=1e-6, keepdim=False)` | The `p`-distance between corresponding rows: the diagonal of `cdist`, at `n` distances rather than `n * m`. Operands broadcast. `eps` is added to the difference, biasing every distance up by `eps * d ** (1 / p)`. It is a default, not a requirement: where two rows coincide this library's `norm` answers a zero gradient rather than NaN, so `eps=0.0` gives the true distance safely. |
 | `pdist(input, p=2.0)` | The `p`-distance between every pair of rows without the repeats: `n * (n - 1) / 2` values, ordered by row then column -- the strict upper triangle of `cdist(x, x)`. Built from the pairs rather than from that matrix, so it forms half as many differences as it would discard. |
 | `diff(input, n=1, dim=-1)` | The `n`-th discrete difference along `dim`. |
 | `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
@@ -126,11 +125,11 @@ of convenience aliases.
 | `append(input, values, dim=None)` | `values` joined onto the end along `dim`, or onto the flattened tensor with no `dim`. Every call copies -- there is no room at the end of a tensor to grow into, which is why this is a poor way to build one up element by element. |
 | `insert(input, obj, values, dim=None)` | `values` placed *before* the positions `obj` names, which refer to the original tensor -- so `insert(x, [1, 1], [a, b])` puts both before the element that was at 1, in that order. `obj` may be one position, several, or a slice; `-1` wraps against the axis and the position one past the end is allowed. |
 | `delete(input, obj, dim=None)` | `input` without the positions `obj` names: one, several, a slice or a boolean mask. Unlike `insert`, the position one past the end is not a place to delete. |
-| `resize(input, shape)` | The elements laid out in `shape`, *repeating* them to fill it -- NumPy's `resize`, not PyTorch's: a free function that returns a new tensor rather than an in-place one that zero-fills. An empty input has nothing to repeat and fills with zeros. |
+| `resize(input, shape)` | The elements laid out in `shape`, *repeating* them to fill it -- a free function that returns a new tensor, never an in-place one that zero-fills. An empty input has nothing to repeat and fills with zeros. |
 | `block(arrays)` | Assemble a tensor from nested lists of blocks: the innermost list joins along the last axis, the one outside it along the second-to-last, so a list of lists builds a matrix out of its blocks the way it is written on the page. Blocks are promoted to the depth of the nesting first, which lets a row vector sit next to a matrix. |
 | `expand_dims(input, dim)` | A length-1 axis at each position in `dim`, which may be several at once. The positions refer to the *result*, so `(0, 2)` puts new axes at 0 and 2 of the answer. |
 | `cumulative_sum(input, dim=None, include_initial=False)` | The array API's `cumsum`. `include_initial` prepends the empty sum, so the result is one longer than the axis and `out[i]` is the total of everything *before* `i` -- the exclusive scan `cumsum` cannot give. |
-| `permute_dims(input, axes)` / `matrix_transpose(input)` / `unstack(input, dim=0)` / `array_split(...)` / `broadcast_arrays(*inputs)` / `identity(n, ...)` | The array API's and NumPy's names for `permute`, `transpose(-2, -1)`, `unbind`, `tensor_split`, `broadcast_tensors` and a square `eye`. |
+| `permute_dims(input, axes)` / `matrix_transpose(input)` / `unstack(input, dim=0)` / `array_split(...)` / `broadcast_arrays(*inputs)` / `identity(n, ...)` | Second names for `permute`, `transpose(-2, -1)`, `unbind`, `tensor_split`, `broadcast_tensors` and a square `eye`. |
 | `geomspace(start, end, steps, ...)` | `steps` values spaced evenly on a *log* scale, from `start` to `end` inclusive. `logspace` takes the exponents; this takes the two ends themselves, which is the form a caller who knows them wants. Neither end may be zero -- a geometric sequence cannot reach it -- and both must share a sign. The ends are written back exactly rather than left to the rounding of `exp(log(...))`. |
 | `tri(n, m=None, k=0, ...)` | An `n` by `m` matrix of ones on and below the `k`-th diagonal: the mask `tril` applies, as a tensor to multiply by rather than a rule to select with. |
 | `indices(shape, sparse=False)` | The index grids of a tensor of `shape`, one per axis, each of that full shape -- or, with `sparse=True`, each shaped to broadcast into it, which costs `sum(shape)` elements instead of `ndim * prod(shape)`. |
@@ -140,15 +139,15 @@ of convenience aliases.
 | `intersect1d(input, other, assume_unique=False, return_indices=False)` | The distinct values in both, ascending -- found by a membership test against the sorted second set, so the cost is `(n + m) log m` rather than the `n * m` of comparing every pair. `return_indices` also gives where each common value first occurs in each input. `assume_unique` is accepted and changes nothing: the search does not care whether either side repeats. |
 | `setdiff1d(input, other, assume_unique=False)` | The distinct values in the first and not the second, ascending. |
 | `setxor1d(input, other, assume_unique=False)` | The distinct values in exactly one of the two, ascending -- the union less the intersection, so a value in both is in neither answer. |
-| `packbits(input, dim=None, bitorder='big')` | Pack groups of eight truth values along `dim` into one integer each. NumPy answers in `uint8`; this library has no unsigned byte, so the values come back as **int32** -- the same numbers in a wider box, and `.numpy().astype(numpy.uint8)` recovers NumPy's array exactly. The axis is zero-padded up to a multiple of eight at its end, which is why `unpackbits` is the inverse only when told the original length. `bitorder` decides whether the first element of each group is the high bit or the low one. |
-| `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. NumPy pads an *empty* input by reading uninitialised memory; this answers zeros. |
-| `trim_zeros(input, trim='fb', dim=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them -- NumPy calls that argument `axis`, but every op here spells it `dim`. |
-| `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
+| `packbits(input, dim=None, bitorder='big')` | Pack groups of eight truth values along `dim` into one integer each. This library has no unsigned byte, so the values come back as **int32** -- byte values in a wider box, and `.numpy().astype(numpy.uint8)` gives the packed bytes themselves. The axis is zero-padded up to a multiple of eight at its end, which is why `unpackbits` is the inverse only when told the original length. `bitorder` decides whether the first element of each group is the high bit or the low one. |
+| `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. An empty input gives zeros for its padding. |
+| `trim_zeros(input, trim='fb', dim=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them. |
+| `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified; these come back ascending, which is what `unique` already promised. |
 | `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 3ms partitioned against 31 sorted. The selection is NumPy's introselect, run on a zero-copy view of the tensor's buffer, which measured 1.6-5x faster than the engine's own; booleans are refused, as having no order worth selecting in. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
 | `argpartition(input, kth, dim=-1)` | Where the elements `partition` would produce came from, so `take_along_dim(x, argpartition(x, k), dim)` is a partition of the same data around the same `k`: that position holds what a sort would leave there and the two sides hold the same values. Not the same *arrangement* as `partition` when values repeat -- the order of everything but `k` is unspecified, which is what makes a selection cheaper than a sort, and the two forms take different routes to it. |
-| `lexsort(keys, dim=-1)` | The order that sorts by several keys at once, the **last** key primary and earlier keys breaking its ties -- NumPy's convention, and the one that reads correctly when the keys are a table's columns. One stable sort per key, least significant first, so `k` passes settle `k` keys. |
-| `take_along_axis(input, indices, axis=-1)` | `take_along_dim` under NumPy's name. |
-| `put_along_axis(input, indices, values, axis=-1)` | The write direction of `take_along_axis`: a new tensor with `values` at the positions `indices` names along `axis`. Returns rather than mutates, as every write here does -- NumPy's version changes its argument and returns nothing, so ported code has to keep the result. A position named twice keeps the last write. |
+| `lexsort(keys, dim=-1)` | The order that sorts by several keys at once, the **last** key primary and earlier keys breaking its ties -- the order that reads correctly when the keys are a table's columns. One stable sort per key, least significant first, so `k` passes settle `k` keys. |
+| `take_along_axis(input, indices, axis=-1)` | A second name for `take_along_dim`. |
+| `put_along_axis(input, indices, values, axis=-1)` | The write direction of `take_along_axis`: a new tensor with `values` at the positions `indices` names along `axis`. Returns rather than mutates, as every write here does, so the caller keeps the result. A position named twice keeps the last write. |
 | `compress(condition, input, dim=None)` | The slices along `dim` that `condition` keeps. `condition` is one flag per position and may be *shorter* than the axis, in which case the positions it does not reach are dropped -- which is why this is not simply a boolean mask. `dim=None` flattens first. |
 | `extract(condition, input)` | The elements where `condition` is true, flattened: `masked_select` over the whole tensor whatever its shape. |
 | `choose(input, choices)` | Pick from several tensors position by position, `input` saying which. Built as a stack and a gather, so the cost does not grow with how many choices there are. |
@@ -164,18 +163,18 @@ of convenience aliases.
 | `diagonal_scatter(input, src, offset=0)` | `input` with `src` written onto the diagonal, where `src` has the shape `diagonal(input, offset)` returns. An `offset` that runs off the matrix writes nothing rather than raising, which is what `diagonal` does for it too. |
 | `select(input, dim, index)` | One slice along `dim`, with that dimension removed. `narrow` keeps the axis at length one; this is what makes `select(t, 0, i)` the same as `t[i]`. |
 | `flatnonzero(input)` | The flat positions of every non-zero element, as a 1-D int64 tensor. |
-| `argwhere(input)` | The indices of every non-zero element, one row each -- the same answer `nonzero` gives, under the name NumPy users reach for. |
+| `argwhere(input)` | The indices of every non-zero element, one row each -- the same answer `nonzero` gives, as rows rather than a tuple of coordinate arrays. |
 | `isin(elements, test_elements, assume_unique=False, invert=False)` | Whether each element appears in `test_elements`. Integers go to NumPy, which counts them in a lookup table where the value range allows and measured 5-9x faster than a sort. Floats sort the test set once and binary-search it, so they cost `(n + m) log m` time and `n + m` memory rather than the `n * m` of comparing everything against everything -- except below 40,000 elements in all, where NumPy's version of the same was faster. |
 | `tril_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's lower triangle. `offset` moves the boundary off the main diagonal. |
 | `triu_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's upper triangle. |
 | `diag_indices(n, ndim=2)` | The `[ndim, n]` indices of the main diagonal of an `n`-sided cube -- every row the same range, since the main diagonal is where the coordinates agree. Shaped like `tril_indices` and `triu_indices`, so the three are interchangeable. |
-| `unravel_index(indices, shape)` | The coordinates of flat positions `indices` in a tensor of `shape`, one tensor per axis -- the form NumPy and PyTorch both return. `stack` them on a new leading axis for the `[ndim, n]` layout the index builders use. Positions are checked against the shape, because one out of range names the wrong element rather than failing. |
+| `unravel_index(indices, shape)` | The coordinates of flat positions `indices` in a tensor of `shape`, one tensor per axis, so indexing with the result reads the elements the positions name. `stack` them on a new leading axis for the `[ndim, n]` layout the index builders use. Positions are checked against the shape, because one out of range names the wrong element rather than failing. |
 | `ravel_multi_index(multi_index, dims)` | The flat position of each coordinate, the inverse of `unravel_index`. Takes either one tensor per axis or a single tensor whose *leading* axis is the coordinate -- which is what `tril_indices`, `triu_indices` and `diag_indices` produce, so their output can be handed straight in. |
 | `diagflat(input, offset=0)` | A square matrix with the flattened `input` on its `offset` diagonal. `diag` does this for a vector; this does it for any shape. |
 | `block_diag(*tensors)` | Arrange the inputs down the diagonal of one larger matrix, zero elsewhere. A 1-D input is a row and a scalar a one-by-one block. |
 | `cartesian_prod(*tensors)` | Every combination of one element from each 1-D input, one row each. A single input comes back unchanged. |
 | `t(input)` | The transpose of a matrix, and anything of lower rank unchanged. Declines a rank above two rather than guessing which axes were meant -- name them with `transpose`. |
-| `tensor.T` | Every axis in reverse order, which is NumPy's `.T`. A matrix is transposed and anything of lower rank comes back unchanged. |
+| `tensor.T` | Every axis in reverse order. A matrix is transposed and anything of lower rank comes back unchanged. |
 | `tensor.mT` | The last two axes swapped, leaving batch axes alone -- the array API's `.mT`, and the property spelling of `matrix_transpose`. Refuses a tensor with fewer than two axes. |
 
 The three transposes are three different operations and agree only on a
@@ -190,16 +189,16 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
 | `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
 | `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
-| `inverse(input)` | The inverse of each square matrix in the stack -- the `torch` spelling of `inv`. For `inverse(A) @ b`, ask `solve(lhs, rhs)` instead -- same answer, without forming the inverse, faster and better conditioned. |
-| `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- the `torch` spelling of `pinv`, keeping that name's threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
+| `inverse(input)` | The inverse of each square matrix in the stack -- a second name for `inv`. For `inverse(A) @ b`, ask `solve(lhs, rhs)` instead -- same answer, without forming the inverse, faster and better conditioned. |
+| `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- a second name for `pinv`, with a fixed threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
 | `matrix_norm(input, ord="fro", keepdim=False)` | A norm of each matrix over its last two axes. `"fro"` is the elementwise 2-norm and `"nuc"` the sum of the singular values; `1` and `inf` are the induced norms (largest absolute column and row sum) and `2` the largest singular value, with each negative order the same quantity minimised. The axes are the last two, as for `inverse`, `diagonal` and `svd` -- `permute` first to use others. A condition number in an order other than 2 is `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`; `cond` is the 2-norm one, which needs no inverse. |
-| `tensorsolve(a, b, dims=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `dims` names axes of `a` to move to the end first -- NumPy calls that argument `axes`. |
+| `tensorsolve(a, b, dims=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `dims` names axes of `a` to move to the end first. |
 | `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
 | `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
 | `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
-| `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because code written against NumPy asks for them defensively. |
+| `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because generic numeric code asks for them defensively. |
 | `imag(input)` | Zero everywhere, as a detached constant -- written as `input * 0` it would answer NaN for an infinite input. |
 | `angle(input)` | `0` for a positive element and `pi` for a negative one. Reads the sign *bit*, so `angle(-0.0)` is `pi`; a NaN has no argument and stays NaN. Piecewise constant, so it carries no gradient. |
 | `unflatten(input, dim, sizes)` | Split one axis into several -- the inverse of `flatten`. One entry of `sizes` may be `-1`. `reshape` can do the same thing only by restating every other dimension, which is the mistake this exists to stop. |
@@ -218,7 +217,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 ### Shape compatibility helpers
 
 `broadcast_shapes(*shapes)` computes the shape that would result from
-NumPy/PyTorch-style broadcasting without creating input tensors. Each argument
+broadcasting without creating input tensors. Each argument
 may be a non-negative integer-like scalar dimension (including objects with
 `__index__`, such as NumPy integer scalars) or an iterable shape such as a
 Python tuple/list or `tensor.shape`. Scalar tensor shapes are represented by an
@@ -246,7 +245,7 @@ Validation and edge cases:
 - Boolean dimensions are rejected even though Python `bool` is integer-like.
 - Negative dimensions raise `ValueError`; non-integer dimensions raise
   `TypeError`.
-- Zero-sized dimensions follow NumPy broadcasting rules: they can broadcast
+- Zero-sized dimensions follow the ordinary broadcasting rules: they can broadcast
   with missing dimensions or `1`, but not with another non-one positive size.
 - Incompatible shapes raise `ValueError`. Use `can_broadcast(*shapes)` when a
   boolean compatibility check is preferable to exception handling.
@@ -316,8 +315,8 @@ assert sparse_y.shape == (1, 2)
 assert singleton.shape == (1,)
 ```
 
-`atleast_1d(*inputs)`, `atleast_2d(*inputs)`, and `atleast_3d(*inputs)` mirror
-NumPy's `atleast_*` shape conventions while returning MiniTensor tensors.
+`atleast_1d(*inputs)`, `atleast_2d(*inputs)`, and `atleast_3d(*inputs)` raise
+each input to at least that rank, returning MiniTensor tensors.
 Existing `Tensor` inputs are preserved when they already satisfy the requested
 rank; lower-rank inputs use lightweight reshape/unsqueeze operations. Supplying
 one input returns a single `Tensor`, while supplying multiple inputs returns a
@@ -639,8 +638,7 @@ Every creation helper is available as either `mt.<name>(...)` or
 `Tensor.<name>(...)`.
 
 Each `*_like` form copies the source tensor's shape, dtype, device *and*
-`requires_grad` — so `zeros_like(parameter)` is itself trainable, which differs
-from `torch.zeros_like`, where the flag defaults to `False`. Pass
+`requires_grad` — so `zeros_like(parameter)` is itself trainable. Pass
 `requires_grad=` explicitly to say otherwise:
 
 ```python
@@ -701,10 +699,9 @@ The two families differ, and the difference is easy to trip over:
 
 So `Tensor(np.arange(3))` is `float32` while `from_numpy(np.arange(3))` is
 `int64`, and a float64 array loses precision through `Tensor` but not through
-`from_numpy`. `Tensor` matches `torch.Tensor`, which likewise ignores the
-source dtype and uses the default; note that `tensor` does **not** match
-`torch.tensor`, which infers. Pass `dtype=` explicitly, or use `from_numpy` /
-`as_tensor`, whenever the source dtype is the one you want.
+`from_numpy`. `Tensor` and `tensor` both ignore the source dtype and use the
+default. Pass `dtype=` explicitly, or use `from_numpy` / `as_tensor`, whenever
+the source dtype is the one you want.
 
 ```python
 import numpy as np
@@ -784,7 +781,7 @@ through a write that went nowhere. A read-only array is refused because in-place
 tensor operations write the memory it shares. A bool array is refused because
 NumPy bools may hold any byte (`np.array([2], np.uint8).view(bool)` is an
 ordinary array) and the engine's may hold only 0 and 1; `from_numpy` copies it
-and reads every non-zero byte as true, as NumPy does.
+and reads every non-zero byte as true.
 
 #### The buffer protocol
 
@@ -925,9 +922,10 @@ It is also the route mixed-dtype arithmetic takes: operands are promoted to a
 common dtype through the same conversion, so `float32_tensor * float64_tensor`
 back-propagates to both sides.
 
-Promotion follows PyTorch rather than NumPy where the two differ: an integer
-operand takes the float operand's width (`int64 + float32` is `float32`, not
-`float64`), and `/` always produces a float (`int64 / int64` is `float32`).
+An integer operand takes the float operand's width (`int64 + float32` is
+`float32`, not `float64`): widening would double the memory and halve the speed
+of any expression that mixes an index tensor into an activation. `/` always
+produces a float (`int64 / int64` is `float32`).
 A `bool` operand promotes to whatever it is paired with.
 
 The same promotion applies to the operations that *join* values rather than
@@ -935,39 +933,36 @@ combine them arithmetically -- `append`, `ediff1d`, `union1d`, `setxor1d`,
 `convolve` and `correlate` all take both operands to their common dtype. Two
 exceptions, each for its own reason:
 
-- `insert` casts the inserted values to the tensor's dtype, as NumPy does.
+- `insert` casts the inserted values to the tensor's dtype, because they
+  become part of that tensor.
 - `intersect1d` and `setdiff1d` keep the *left* operand's dtype, because every
   value they report comes from it. Promoting could lose one (an `int64`
   against a `float32` would land in `float32`), where keeping it cannot. The
-  membership test behind them still promotes, so the values agree with NumPy
-  even where the dtype does not.
+  membership test behind them still promotes, so which values are reported
+  does not depend on the dtype they are reported in.
 
-`convolve` and `correlate` answer in `float64` for an integer input, where
-NumPy stays in integers: the sliding product is `conv1d`, which is a float
-kernel. That is exact for any result below 2^53.
+`convolve` and `correlate` answer in `float64` for an integer input: the
+sliding product is `conv1d`, which is a float kernel. That is exact for any result below 2^53.
 
 Whether an operation accepts a boolean operand is decided by that promoted
 dtype, not by the operands. `-`, `//` and `%` have no boolean result to land
-in, so they are rejected when *both* sides are `bool` — as they are in NumPy —
-and accepted for every mixed pair, where the mask promotes and the operation is
+in, so they are rejected when *both* sides are `bool`, and accepted for every mixed pair, where the mask promotes and the operation is
 ordinary arithmetic (`counts - mask`). `**` is not among them: every result of
 `x ** y` on booleans is itself a boolean (`0 ** 0` is 1), so two booleans give a
-boolean where NumPy promotes to `int8`. The ordered comparisons `lt`, `le`, `gt`
+boolean. The ordered comparisons `lt`, `le`, `gt`
 and `ge` accept booleans with `False < True`, the same ordering `minimum` and
 `maximum` apply to them.
 
 `//` and `%` by zero raise for an integer pair and give `inf`/`nan` for a float
 one. An integer dtype has no infinity to land in, so there is no answer to give
-— NumPy warns and answers 0 instead, which is a value the arithmetic does not
-support. A `bool` divisor is the same rule seen through a mask: `x // mask`
+— answering 0 would be a value the arithmetic does not support. A `bool` divisor is the same rule seen through a mask: `x // mask`
 raises exactly when the mask has a `False` in it.
 
 `**` raises integers to integer powers, and the answer is the true power taken
-modulo the dtype's width — a chain of wrapping multiplications, which is what
-NumPy gives. A *negative* integer exponent has no integer answer at all and is
+modulo the dtype's width — a chain of wrapping multiplications. A *negative* integer exponent has no integer answer at all and is
 refused rather than rounded; cast the base to a float for that. `matmul` is the
 exception to the promotion rule: it requires both operands to already share a
-dtype, as it does in PyTorch, because a matrix product silently widened is a
+dtype, because a matrix product silently widened is a
 performance cliff rather than a convenience.
 
 Casting to `int32`, `int64` or `bool` returns a tensor with
@@ -1009,12 +1004,10 @@ The following instance methods are exercised by the test suite and are available
 on `Tensor` objects (many also have functional/top-level equivalents):
 
 ```{note}
-The axis argument is spelled `dim`, and keeping it is `keepdim` — PyTorch's
-names, used everywhere including on the functions NumPy contributed (`ptp`,
-`compress`, `delete`, `expand_dims`, `trim_zeros`, `array_split`, …), where
-NumPy would say `axis` and `keepdims`. One name for one thing is worth more
-than matching each function to whichever library it came from; the only
-exceptions are the names that say which word they want -- the method
+The axis argument is spelled `dim`, and keeping it is `keepdim`, everywhere --
+`ptp`, `compress`, `delete`, `expand_dims`, `trim_zeros`, `array_split` and the
+rest included. One name for one thing; the only exceptions are the names that
+say which word they want -- the method
 `swapaxes` (against `swapdims`), and the free functions `take_along_axis` and
 `put_along_axis`.
 Reductions accept a list there as well as an integer, so `dim` stays singular
@@ -1048,7 +1041,7 @@ the one axis, so squeezing it out of the first gives the second. The
 exceptions are the ops whose `dim` is not an axis of the input at all:
 `unsqueeze`, `expand_dims` and `stack` count against the output, which has one
 axis more, and `lexsort` counts against one key, which has one fewer. All four
-place a negative `dim` where NumPy places it.
+count a negative `dim` from the end of that tensor.
 
 ### Shape and layout
 
@@ -1057,8 +1050,8 @@ place a negative `dim` where NumPy places it.
 - `squeeze`, `unsqueeze`, `expand`
 - `flatten`, `ravel`
 
-`squeeze(dim)` follows PyTorch rather than NumPy for an axis that is not
-length 1: it returns the tensor unchanged instead of raising. `squeeze()` with
+`squeeze(dim)` on an axis that is not length 1 returns the tensor unchanged
+instead of raising. `squeeze()` with
 no argument drops every length-1 axis.
 
 ### Splitting an axis
@@ -1071,9 +1064,8 @@ no argument drops every length-1 axis.
   drop the rest silently.
 
 `chunk` requires the axis length to be a multiple of `sections` and raises
-otherwise. This is stricter than PyTorch's `chunk`, which shortens the last
-piece (and can return fewer pieces than asked for); use `split` when the axis
-may not divide evenly. All three round-trip through `cat` along the same
+otherwise, rather than shortening the last piece or returning fewer pieces
+than asked for; use `split` when the axis may not divide evenly. All three round-trip through `cat` along the same
 dimension, including for a zero-length axis, which yields one empty piece.
 
 ### Indexing & reordering
@@ -1096,8 +1088,8 @@ Duplicate indices are the interesting case, and the two behave differently:
   gradient accumulation. Because float addition is not associative, the
   accumulation order is fixed rather than left to thread scheduling, so repeated
   runs are bit-for-bit identical.
-- `scatter` keeps the last write. PyTorch leaves this case explicitly
-  non-deterministic; here the order is defined, and the gradient follows it —
+- `scatter` keeps the last write. The order is defined rather than left to
+  scheduling, and the gradient follows it —
   a source element whose value was overwritten receives exactly zero, as does
   an input slot that was written over.
 
@@ -1128,8 +1120,7 @@ The reductions split on whether they report an index. `max(dim)`, `min(dim)`,
 their NaN-aware forms and `median(dim)` send the whole gradient to the element
 their index names, so the value, the index and the gradient all identify the
 same element. `amax`, `amin` and `nanmedian` report no index and divide a tie's
-gradient evenly among the elements that tied — the mean subgradient, and what
-PyTorch's `amax` does. `mode` is not differentiable at all.
+gradient evenly among the elements that tied — the mean subgradient. `mode` is not differentiable at all.
 `"mean"` divides by the same count the forward divided by. `"prod"` needs the
 product of every contribution *except* each one, and computes it by counting
 zeros rather than dividing the total: `total / factor` is the obvious form and
@@ -1184,10 +1175,10 @@ same tensor sees the write follows the rule every in-place operation here uses:
   This is `index_select` along that axis and is differentiable, so a repeated
   position accumulates its gradient.
 
-  Two advanced indices in one subscript are refused by name. NumPy pairs them
-  up elementwise — `t[[0, 1], [1, 2]]` reads two elements, not a 2×2 block —
-  which is [`gather`](#indexing--reordering); index one axis at a time when the
-  outer product is what was meant.
+  Two advanced indices in one subscript are refused by name: they could mean
+  pairing up elementwise — `t[[0, 1], [1, 2]]` as two elements, which is
+  [`gather`](#indexing--reordering) — or a 2×2 block. Index one axis at a time
+  when the outer product is what was meant.
 
 `__setitem__` takes the same forms. `t[mask] = value` writes `value` -- a
 scalar or anything broadcastable to the selection shape `[n_true] + trailing`
@@ -1195,7 +1186,7 @@ scalar or anything broadcastable to the selection shape `[n_true] + trailing`
 relatives write into the positions the advanced index names. The value is
 lined up against the whole selection and each position takes its share, so a
 value that stops short of the indexed axis is repeated across it and one that
-spans it is split; a position named twice keeps the last write, as in NumPy.
+spans it is split; a position named twice keeps the last write.
 Writes go through the tensor's storage, so assigning to a parameter reaches
 the layer, and a value read from the target (`t[:, [0, 1]] = t[:, [1, 0]]`) is
 read before anything is written. Values given as Python scalars or lists are
@@ -1207,10 +1198,9 @@ value against the selection right-aligned: each of the value's dimensions must
 equal the selection's or be `1`, and extra leading dimensions of the value must
 be `1`. A value whose *shape* does not broadcast is rejected even when it holds
 the right number of elements — `t[0] = m` with `m` shaped `(4, 3)` into a
-`(3, 4)` selection raises rather than storing `m`'s elements row-major, as
-NumPy does.
+`(3, 4)` selection raises rather than storing `m`'s elements row-major.
 
-A **negative slice step** is rejected, as it is in PyTorch — `t[::-1]` raises
+A **negative slice step** is rejected — `t[::-1]` raises
 rather than reversing. Use `flip`, which reverses every requested axis in one
 pass, and follow it with a positive stride if the step was not `-1`:
 
@@ -1237,7 +1227,7 @@ substitution does not have to be worked out from the rule.
   the earliest position in its run, since the sort underneath does not keep
   equal values in their original order. With no flags the values come back on
   their own rather than in a one-tuple; with several, the extras always arrive
-  in NumPy's order (index, inverse, counts) whichever subset was asked for.
+  in one order (index, inverse, counts) whichever subset was asked for.
 - `unique_consecutive(input, return_inverse=False, return_counts=False,
   return_index=False)` — the same, but collapsing only *adjacent* runs and
   sorting nothing, so a value that recurs after something else appears again.
@@ -1249,8 +1239,8 @@ substitution does not have to be worked out from the rule.
   tie has no natural winner and a repeated value has no natural occurrence — so
   both are fixed and tested rather than left to fall out of the sort.
 
-`NaN` gets the treatment NumPy gives it, and it is worth being explicit because
-the two obvious implementations are both wrong in different ways. `NaN` is not
+`NaN` needs a rule, and it is worth being explicit because the two obvious
+implementations are both wrong in different ways. `NaN` is not
 ordered against anything, so a comparison sort over raw floating-point order has
 no defined result; and `NaN != NaN`, so a run detector over `==` emits every
 `NaN` as its own distinct value. Here one comparison puts `NaN` after every
@@ -1310,7 +1300,7 @@ the library: comparing every value against every boundary is
   `(counts, edges)`. `bins` is a count or a one-dimensional tensor of edges. The
   input is flattened; a histogram is a question about a collection of numbers,
   not about their arrangement.
-- `histc(input, bins=100, min=0.0, max=0.0)` — PyTorch's spelling: counts alone,
+- `histc(input, bins=100, min=0.0, max=0.0)` — counts alone,
   and equal bounds mean "span the data" rather than "an empty range".
 
 Two conventions worth stating because they are easy to get backwards. Values
@@ -1381,7 +1371,7 @@ over four axes with two of them batched has no other spelling here, only a chain
 of permutes and reshapes the caller has to get right.
 
 Omit `->` and the result keeps every subscript used exactly once, ordered by how
-the letters sort — NumPy's rule, so `"ij,jk"` is a matrix product and `"ii"` is a
+the letters sort, so `"ij,jk"` is a matrix product and `"ii"` is a
 trace. `...` stands for any number of leading axes and broadcasts across a rank
 mismatch, aligned from the right as broadcasting is everywhere else. A subscript
 repeated within one operand takes its diagonal; a size-1 axis broadcasts against
@@ -1406,7 +1396,7 @@ of its own.
   identity; a negative power inverts the *base* before squaring, since
   inverting the result would invert its condition number too.
 
-`diag` is NumPy's: a vector in gives a matrix with it on the diagonal, a matrix
+`diag` goes both ways: a vector in gives a matrix with it on the diagonal, a matrix
 in gives its diagonal. `diagonal` and `diag_embed` are the batched forms that
 take an axis pair and an offset, and they are each other's inverse -- and each
 other's derivative.
@@ -1448,7 +1438,7 @@ factors every matrix in it. All of them are `float32` or `float64` only.
   computed separately.
 
 The orders differ on purpose: ascending eigenvalues and descending singular
-values are what LAPACK, NumPy and PyTorch all return.
+values are the conventional orders, and the ones callers index into.
 
 The `LU` factors come back detached. A pivoted factorisation's derivative is not
 implemented here; `solve`, `det`, `slogdet` and `inv` carry theirs and run this
@@ -1597,7 +1587,7 @@ True
 ### Reductions, statistics, and equality
 
 - `sum`, `mean`, `median`, `nanmedian`, `quantile`, `nanquantile`
-  (the `nan*` reductions return NaN for all-NaN slices, matching NumPy)
+  (the `nan*` reductions return NaN for all-NaN slices)
 - `std(dim=None, unbiased=True, keepdim=False)`
 - `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`, `nanprod`
@@ -1613,7 +1603,7 @@ True
 
 `cumsum(input, dim=None)` and `cumprod(input, dim=None)` accumulate with `+`
 and `*`. With no `dim` the tensor is flattened first and the result is a line,
-which is what NumPy does and what `nancumsum` already did. Three more
+which is what `nancumsum` already did. Three more
 accumulate with something else:
 
 - `cummax(input, dim=-1)` and `cummin(input, dim=-1)` return
@@ -1660,10 +1650,9 @@ The rule turns on whether a reduction *accumulates*.
 `sum`, `nansum`, `prod`, `cumsum` and `cumprod` build a running total, so the
 result can leave the range of the input even when the input is unremarkable.
 These widen a narrow integer to `int64`: `bool` and `int32` inputs come back as
-`int64`, matching NumPy and PyTorch. Floats are unchanged — `float32` sums in
-`float32` — because promoting to `float64` would alter every existing result
-and double the memory of the most common reduction in the library, which is
-also NumPy's reasoning.
+`int64`. Floats are unchanged — `float32` sums in `float32` — because
+promoting to `float64` would alter every existing result and double the memory
+of the most common reduction in the library.
 
 Reductions that *select* keep the input dtype, because they report a value that
 was already there: `max`, `min`, `amax`, `amin`, `sort`, `topk` and the
@@ -1676,8 +1665,7 @@ branch to update an index. Reducing a 2048x1024 `float32` matrix along its last
 axis measured 0.109ms for `amax` against 0.833ms for the pair, so
 `t.max(dim=1)[0]` — the obvious way to write "row maxima" — costs about 7.6
 times what it needs to. `nanamax`/`nanamin` are the NaN-skipping forms; `amax`
-and `amin` propagate NaN, as `max` and `min` do. The names are NumPy's and
-PyTorch's.
+and `amin` propagate NaN, as `max` and `min` do.
 
 #### The NaN-skipping statistics
 
@@ -1692,12 +1680,11 @@ already exist:
 - `nanvar(input, dim=None, unbiased=True, keepdim=False)` and `nanstd(...)` —
   the mean of the squared deviations from `nanmean`, over the entries that are
   not NaN. `unbiased` divides by the non-NaN count less one, so a slice with a
-  single finite entry gives `NaN` and one with none gives `NaN` as well, which
-  is what NumPy reports for the same input.
+  single finite entry gives `NaN` and one with none gives `NaN` as well.
 - `nanargmax(input, dim=None, keepdim=False)` and `nanargmin(...)` — the index
   of the largest or smallest entry that is not NaN. A slice of nothing but NaN
   raises: every index it could name points at a NaN, so there is no answer to
-  give, and NumPy raises here too.
+  give.
 
 Writing them this way is one definition rather than two, and it is what makes
 their gradients the gradients of the operations underneath — `nanvar` is
@@ -1721,7 +1708,7 @@ answer is an integer:
   transcendentals, and `erf`, `lgamma`, `digamma`, `logit`, `sigmoid` and the
   other special functions, take an integer argument by widening it to
   `float32` for `int32` and `float64` for `int64` — the width `mean` widens
-  to, and the promotion NumPy, SciPy and PyTorch all apply here.
+  to.
 - **An integer answer keeps its dtype.** `floor`, `ceil`, `trunc` and `round`
   are the identity on an integer, `frac` is zero on one, and `relu`, `abs` and
   `sign` were already integer-valued. `round` with a negative `decimals`
@@ -1799,8 +1786,7 @@ the string `"fro"` as an alias for `p=2`. Finite negative orders raise
 Two behaviours are worth knowing:
 
 - The p-norm has a corner at the origin, so it has no derivative there. `norm`
-  reports a gradient of `0` — the subgradient of least magnitude, matching
-  PyTorch. Building the same quantity out of `(x * x).sum().sqrt()` yields
+  reports a gradient of `0` — the subgradient of least magnitude. Building the same quantity out of `(x * x).sum().sqrt()` yields
   `0 / 0 = NaN` instead, which then spreads to everything downstream.
 - The 2-norm is computed by scaling with the largest magnitude rather than
   summing squares directly, so it stays finite for inputs whose squares would
@@ -1858,7 +1844,6 @@ fold identity — which is what they used to do — gives `-inf` for floats and
 `iinfo.min` for integers, and the integer case is indistinguishable from a
 genuine maximum, since `iinfo.min` is a value a real tensor can hold. `argmax`
 returned index `0`, which is not a valid index into an axis with no elements.
-NumPy and PyTorch both raise here as well.
 
 Only the **reduced** axis has to be non-empty, so an empty batch still flows
 through a reduction over some other axis:
@@ -1883,15 +1868,15 @@ except ValueError as exc:
 Invalid argument: max() does not support empty tensors
 ```
 
-`median` and `nanmedian` follow PyTorch: with an even number of elements they
-return the **lower** of the two middle values rather than averaging them the
-way `numpy.median` does. That is also what lets `median(dim=...)` report the
+With an even number of elements, `median` and `nanmedian` return the
+**lower** of the two middle values rather than averaging them. That is what
+lets `median(dim=...)` report the
 index of the element it selected, and the index always names that element —
 `take_along_dim(x, indices, dim)` gives back the values. A `NaN` anywhere in a
 reduced slice makes that slice's median `NaN`, and the index then names the
 first `NaN` in the slice rather than a number it did not return. Use
-`quantile(0.5)` / `nanquantile(0.5)` when you want the interpolated,
-NumPy-compatible definition, or `nanmedian` to skip `NaN` entirely.
+`quantile(0.5)` / `nanquantile(0.5)` when you want the interpolated
+definition, or `nanmedian` to skip `NaN` entirely.
 
 `nanmedian(dim=None, keepdim=False)` is available as a tensor method,
 functional helper, and top-level helper. It ignores `NaN` values in floating
@@ -1947,8 +1932,8 @@ assert row_std.shape == (2, 3)
   either direction is by powers of two. Zero, infinity and NaN come back as
   themselves with an exponent of zero. C pins that only for zero -- for
   infinity and NaN the exponent is *unspecified*, and platforms disagree
-  (glibc says 0, the Microsoft runtime says -1, so `numpy.frexp` differs
-  between Linux and Windows). This answers zero on every machine.
+  (glibc says 0, the Microsoft runtime says -1). This answers zero on every
+  machine.
 - `divmod(input, other)` — the quotient and the remainder together, as Python's
   builtin gives them. Both round toward negative infinity, so
   `q * other + r == input` and the remainder takes the divisor's sign.
@@ -1963,7 +1948,7 @@ assert row_std.shape == (2, 3)
   NaN and there is genuinely nothing to compare.
 - `isposinf`, `isneginf` — the two halves of `isinf`.
 - `isreal` — true everywhere, NaN included: every dtype here is real. The name
-  exists because code written against NumPy asks, and a missing attribute is a
+  exists because generic numeric code asks, and a missing attribute is a
   worse answer than the correct one.
 - `signbit(input)` — whether the sign *bit* is set, which is not `input < 0`:
   negative zero is not less than zero but carries the bit, and telling the two
@@ -1973,15 +1958,14 @@ assert row_std.shape == (2, 3)
 - Second spellings, one object under two names: `absolute` (`abs`), `subtract`,
   `multiply`, `divide` and `true_divide` (`div`), `negative` (`neg`), `concat`
   (`cat`), `greater` (`gt`), `greater_equal` (`ge`), `less` (`lt`),
-  `less_equal` (`le`), `not_equal` (`ne`). NumPy and PyTorch each settled on a
-  different one for several of these, and code moving between them writes
-  whichever it learned.
+  `less_equal` (`le`), `not_equal` (`ne`). Several of these have two names in
+  common use, and a caller writes whichever it learned.
 - `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`,
-  `bitwise_left_shift`, `bitwise_right_shift`, and NumPy's names for the last
+  `bitwise_left_shift`, `bitwise_right_shift`, and second names for the last
   three: `invert`, `left_shift`, `right_shift`
 - `bitwise_count(input)` — the number of set bits in the *absolute value* of
   each element, as int32; `popcount` is the same object. The absolute value is
-  NumPy's choice and the right one: the popcount of a negative in two's
+  the right thing to count: the popcount of a negative in two's
   complement describes the storage rather than the number, and would answer
   differently for the same value at int32 and int64. The most negative value of
   a width is counted correctly too, where an implementation built on `abs`
@@ -1989,15 +1973,15 @@ assert row_std.shape == (2, 3)
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
-  `negative_slope`, the same side `relu` takes, matching PyTorch
+  `negative_slope`, the same side `relu` takes
 - `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
 - `round`, `floor`, `ceil`, `trunc`, `frac` — `trunc` rounds towards zero and
   `frac` is what it leaves behind, `x - trunc(x)`, carrying `x`'s sign. `frac`
   is the only differentiable one (its gradient is 1); the rest are step
   functions, so they return a constant. `round` sends halves to the even neighbour
-  (`round(0.5) == 0`, `round(2.5) == 2`), matching NumPy, PyTorch and Python's
-  built-in `round`. It takes an optional `decimals` argument.
+  (`round(0.5) == 0`, `round(2.5) == 2`), as Python's built-in `round`
+  does. It takes an optional `decimals` argument.
 - `log2`, `log10` — the natural log rescaled; they share `log`'s behaviour at
   `0`, negatives, infinities and NaN
 - `erf`, `erfc` — the Gauss error function and its complement. `erfc` uses a
@@ -2010,8 +1994,8 @@ assert row_std.shape == (2, 3)
 - `exp2(input)` — `2 ** x` from the hardware's own base-2 exponential.
   `exp(x * log(2))` rounds the exponent before using it, which costs the last
   few bits of every answer and all of them for a large `x`.
-- `sinc(input)` — `sin(pi x) / (pi x)`, taken as `1` at zero. NumPy's
-  normalized convention, so the zeros sit on the non-zero integers.
+- `sinc(input)` — `sin(pi x) / (pi x)`, taken as `1` at zero. The normalized
+  convention, so the zeros sit on the non-zero integers.
 - `lgamma(input)`, `digamma(input)` — `log |gamma(x)|` and its derivative.
   `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
   float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,
@@ -2136,7 +2120,7 @@ assert row_std.shape == (2, 3)
 - `bitwise_left_shift` / `<<`, `bitwise_right_shift` / `>>` — integers only
   (two bools have no bits to move). The right shift is arithmetic, so it
   preserves sign and floors. Counts at or past the dtype's width are undefined
-  in C, and so in NumPy; here they give the limit of the operation — `0`,
+  in C; here they give the limit of the operation — `0`,
   or `-1` for a right-shifted negative. Negative counts raise.
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not` — the same truth
   tables over *truth values* rather than bits, so they accept every dtype and
@@ -2561,9 +2545,8 @@ aligned to the bottom right when `L != S`; combining it with an explicit
 
 #### Which way round is a boolean mask?
 
-The two mask-taking families use **opposite** polarity. Both follow PyTorch,
-which is itself inconsistent here, so the convention is worth stating rather
-than guessing:
+The two mask-taking families use **opposite** polarity, so the convention is
+worth stating rather than guessing:
 
 | Function | `True` means |
 | --- | --- |
@@ -2575,9 +2558,8 @@ positions you meant to hide, so this is worth checking rather than assuming.
 
 A row that ends up with nothing to attend to has no defined softmax (`0/0`).
 `masked_softmax` and `scaled_dot_product_attention` return zeros for such a row,
-and `masked_log_softmax` returns `-inf`. Note that PyTorch returns `NaN` for a
-fully-masked attention row; zeros propagate quietly, so a fully-masked row is
-still a bug worth catching upstream.
+and `masked_log_softmax` returns `-inf`. Zeros propagate quietly, so a
+fully-masked row is still a bug worth catching upstream.
 
 ```python
 import minitensor as mt
@@ -2645,7 +2627,7 @@ when you already hold the weights and do not want a module:
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |
 | `group_norm(input, num_groups, weight=None, bias=None, eps=1e-5)` | Normalize over each group of channels and all of their positions. Between `layer_norm`, which takes every channel together, and `instance_norm`, which takes each alone -- `num_groups` says how finely to divide them and those two are the ends of the range. The statistics never cross the batch, so a sample's result does not depend on which others it was computed with, which is what makes it work at a batch size of one. `weight` and `bias` are per channel, not per group. |
 | `instance_norm(input, running_mean=None, running_var=None, weight=None, bias=None, use_input_stats=True, momentum=0.1, eps=1e-5)` | Normalize each channel of each sample over its own positions -- `group_norm` with one group per channel, and written as that rather than twice. What it adds is the running buffers: updated from the batch when `use_input_stats`, used instead of it when not. The buffers take the *unbiased* variance while the normalization takes the biased one, as `batch_norm` does. |
-| `local_response_norm(input, size, alpha=1e-4, beta=0.75, k=1.0)` | `x / (k + alpha * mean(x**2 over `size` neighbouring channels)) ** beta` -- AlexNet's normalization, where a strong response suppresses the same position in the channels beside it. An even window reaches one further below than above, as in `torch`. Built as `avg_pool3d` with the channel axis in the depth slot, so no kernel averages over channels. |
+| `local_response_norm(input, size, alpha=1e-4, beta=0.75, k=1.0)` | `x / (k + alpha * mean(x**2 over `size` neighbouring channels)) ** beta` -- AlexNet's normalization, where a strong response suppresses the same position in the channels beside it. An even window reaches one further below than above. Built as `avg_pool3d` with the channel axis in the depth slot, so no kernel averages over channels. |
 | `dropout2d(input, p)` | Channel-wise dropout. |
 | `dropout1d(input, p=0.5, training=True)` | Zero whole channels of a `(batch, channels, positions)` input -- `dropout2d` for a signal. Adjacent positions in a feature map are correlated, so zeroing scattered elements leaves each recoverable from its neighbours and regularizes little; dropping the channel does not. |
 | `dropout3d(input, p=0.5, training=True)` | The same over `(batch, channels, depth, height, width)`. |
@@ -2675,13 +2657,13 @@ when you already hold the weights and do not want a module:
 | `gumbel_softmax(logits, tau=1.0, hard=False, dim=-1, eps=1e-20)` | A differentiable sample from a categorical distribution: Gumbel noise added to the logits, then a softmax at temperature `tau`. As `tau` falls the result approaches a one-hot draw and stays differentiable at every `tau`, which sampling itself is not. With `hard=True` the value is one-hot and the gradient is still the soft one -- the straight-through estimator. |
 | `pixel_shuffle(input, upscale_factor)` | Trade `r**2` channels for that much height and width: `(n, c * r * r, h, w)` becomes `(n, c, h * r, w * r)`. The last layer of a super-resolution network -- upsampling by rearrangement costs nothing and invents nothing, where a transposed convolution does both. |
 | `pixel_unshuffle(input, downscale_factor)` | The inverse: `(n, c, h * r, w * r)` back to `(n, c * r * r, h, w)`. |
-| `embedding(input, weight, padding_idx=None)` | The rows of `weight` that `input` names, one per index, keeping the index's shape and adding the feature axis. `nn.Embedding` with the table owned by the caller -- a frozen one, or one shared between models. `padding_idx` names a row that takes no gradient; the value it holds is returned unchanged, as in torch. |
+| `embedding(input, weight, padding_idx=None)` | The rows of `weight` that `input` names, one per index, keeping the index's shape and adding the feature axis. `nn.Embedding` with the table owned by the caller -- a frozen one, or one shared between models. `padding_idx` names a row that takes no gradient; the value it holds is returned unchanged. |
 | `embedding_bag(input, weight, offsets=None, mode="mean", per_sample_weights=None, include_last_offset=False, padding_idx=None)` | One vector per bag of indices: `embedding` followed by a reduction, with the `(total, dim)` intermediate never named -- which is the whole reason the fused operation exists elsewhere. A two-dimensional `input` is one bag per row; a one-dimensional one needs `offsets` saying where each bag starts, which is what allows the bags to differ, and with `include_last_offset` the final entry is the end rather than a start. `mode` is `"sum"`, `"mean"` or `"max"`, and an empty bag reduces to zero in all three. `per_sample_weights` scales each row before it is summed and is meaningful only for `"sum"`. |
 | `channel_shuffle(input, groups)` | Read `(n, g * c, ...)` as `(n, g, c, ...)`, swap the two, flatten back. A grouped convolution never mixes its groups, so stacking two leaves two networks side by side; one shuffle between them makes it one, at the cost of a permutation and no parameters. |
-| `lp_pool1d(input, norm_type, kernel_size, stride=None)` | The `p`-norm of each window rather than its mean or its largest -- a norm type of 1 is the sum of magnitudes and a large one approaches the maximum, so this is the family `avg_pool` and `max_pool` are the ends of, with a gradient reaching every element. `abs` is taken before the power, so an odd norm type is a real norm here where `torch` would take the root of a negative number. |
+| `lp_pool1d(input, norm_type, kernel_size, stride=None)` | The `p`-norm of each window rather than its mean or its largest -- a norm type of 1 is the sum of magnitudes and a large one approaches the maximum, so this is the family `avg_pool` and `max_pool` are the ends of, with a gradient reaching every element. `abs` is taken before the power, so an odd norm type is a real norm rather than the root of a negative number. |
 | `lp_pool2d(input, norm_type, kernel_size, stride=None)` | The same over 2-D windows. |
 | `affine_grid(theta, size, align_corners=False)` | The sampling grid an affine transform describes, for `grid_sample`. `theta` is `(n, 2, 3)` over an `(n, c, h, w)` output or `(n, 3, 4)` over an `(n, c, d, h, w)` one. Feeding the result to `grid_sample` is a spatial transformer, and the gradient reaches `theta`, which is what lets the transform be learned. `align_corners` must match what `grid_sample` is then given. |
-| `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only the two `torch.nn.functional.unfold` takes, so a 3-D convolution is the same product with a rank-three kernel. |
+| `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only two, so a 3-D convolution is the same product with a rank-three kernel. |
 | `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged; fold a tensor of ones and divide to average. |
 
 ```python
@@ -3055,7 +3037,8 @@ reverse pass is realigned onto the input's timeline before being joined, so
 position `t` of the output always pairs the two directions' states *for that
 timestep*. State tensors gain a row per direction — `(num_layers * directions,
 batch, hidden_size)` — ordered layer-0-forward, layer-0-reverse, layer-1-forward
-and so on, which matches how PyTorch names `*_l{k}` and `*_l{k}_reverse`.
+and so on, the same order as the parameter names `*_l{k}` and
+`*_l{k}_reverse`.
 
 Every matmul in both layers is built from ordinary autograd-aware operations,
 so the backward pass through the unrolled sequence is derived by the existing
@@ -3119,8 +3102,7 @@ The built-in layers initialize their own weights. These are for parameters you
 create yourself -- a `plugins.CustomLayer`, or a tensor you drive through the
 functional API.
 
-They are **factories**, not PyTorch's in-place `xavier_uniform_(tensor)`: each
-takes a shape and returns a new tensor, which is also how every layer in `nn`
+They are **factories**, not in-place initialisers: each takes a shape and returns a new tensor, which is also how every layer in `nn`
 builds its parameters. To re-initialize an existing parameter, build a new
 tensor and assign it.
 
@@ -3202,8 +3184,8 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 
 `SGD`'s `dampening` scales the incoming gradient by `1 - dampening` before it
 enters the momentum buffer, so the buffer leans further on its history. The
-first step is exempt: the buffer is seeded with the gradient itself, as PyTorch
-does, rather than being damped from nothing. `nesterov=True` requires
+first step is exempt: the buffer is seeded with the gradient itself rather
+than being damped from nothing. `nesterov=True` requires
 `dampening=0` — the lookahead `grad + momentum * buf` is only the right
 extrapolation when `buf` accumulated the undamped gradient.
 
@@ -3280,12 +3262,12 @@ forgotten by the moving average.
 
 ### Gradient clipping
 
-In `minitensor.nn`, where PyTorch puts them (`torch.nn.utils.clip_grad_norm_`):
+In `minitensor.nn`:
 
 - `clip_grad_norm_(parameters, max_norm)` -- scales every gradient in place so
   their combined L2 norm is at most `max_norm`, and returns the norm *before*
   clipping so a training loop can log it. The coefficient is
-  `max_norm / (total_norm + 1e-6)`, matching PyTorch.
+  `max_norm / (total_norm + 1e-6)`.
 - `clip_grad_value_(parameters, clip_value)` -- clamps to
   `[-clip_value, clip_value]`. Pass `min_value=`/`max_value=` instead for an
   asymmetric range.
@@ -3319,7 +3301,7 @@ print(round(abs(float(parameter.numpy()[0])), 4))
 
 A scheduler wraps an optimizer, owns the step counter, and writes each step's
 rate back to `optimizer.lr`. Constructing one applies the schedule's step-0
-value immediately, as PyTorch does, so `LinearWarmupLR` starts at zero.
+value immediately, so `LinearWarmupLR` starts at zero.
 
 - `ConstantLR(optimizer)` -- holds the rate.
 - `StepLR(optimizer, step_size, gamma=0.1)` -- `base_lr * gamma ** (t // step_size)`.
@@ -3599,7 +3581,7 @@ picks the format from the file extension.
 Parameters and buffers are keyed by name: `weight` / `bias` for the dense,
 convolution and normalization layers, `running_mean` / `running_var` for
 BatchNorm's buffers, `q_proj` / `k_proj` / `v_proj` / `out_proj` (and their
-biases) for attention, and PyTorch's `weight_ih_l{k}` / `weight_hh_l{k}` /
+biases) for attention, and `weight_ih_l{k}` / `weight_hh_l{k}` /
 `bias_ih_l{k}` / `bias_hh_l{k}` for the recurrent layers, with `_reverse`
 appended for the backward direction of a bidirectional stack. `Sequential`
 prefixes each child with its index (`0.weight`, `2.bias`), recursing so a
@@ -3939,8 +3921,8 @@ correctly. An already C-contiguous array is not copied.
 
 ### What `backward()` retains
 
-Unlike PyTorch, MiniTensor exposes `.grad` on interior (non-leaf) tensors after
-a backward pass:
+MiniTensor exposes `.grad` on interior (non-leaf) tensors after a backward
+pass:
 
 ```python
 import minitensor as mt
@@ -3949,7 +3931,7 @@ x = mt.ones((4, 4))
 w = mt.ones((4, 4), requires_grad=True)
 h = mt.matmul(x, w)              # interior tensor
 mt.sum(mt.tanh(h)).backward()
-print(h.grad is not None)        # PyTorch would give None here
+print(h.grad is not None)        # an interior tensor keeps its gradient
 ```
 
 ```text
@@ -4123,13 +4105,13 @@ operation is reading -- an optimizer `step()`, `copy_`, `fill_` or an item
 assignment on a tensor that requires a gradient, all of which write in place so
 every handle sees the update -- the operation reads values that are being
 overwritten. The result is whatever mixture of old and new values the timing
-gives, the same race PyTorch has. Keep parameter updates off threads that are
+gives. Keep parameter updates off threads that are
 running forward passes on the same model at the same time.
 
 The window is deliberate. Closing it would mean copying every operand before
 the handoff, which the zero-copy design exists to avoid, or taking a lock on
 every in-place write, which every optimizer step would pay for a pattern that
-is racy in PyTorch too.
+is racy by nature.
 
 ## 13) Notes on devices & backends
 

@@ -65,9 +65,9 @@ tensor against 15ms for `.numpy()`. The array is read-only, because several
 tensors can share one buffer and a write into it would change all of them; the
 copying spellings stay writeable. See the API reference for the full contract.
 
-Note the dtype rules for sequences remain this library's, not NumPy's: a list
-of Python floats infers `float32`, the configured default, where NumPy infers
-`float64`.
+Note the dtype rules for sequences remain this library's own, even though
+`numpy.asarray` does the reading: a list of Python floats infers `float32`, the
+configured default.
 
 ## Where the time goes
 
