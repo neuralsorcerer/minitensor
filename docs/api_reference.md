@@ -810,7 +810,9 @@ Frequently used tensor properties (accessed without parentheses):
 - `tensor.dtype` -- dtype name, e.g. `"float32"`
 - `tensor.device` -- device name, e.g. `"cpu"`
 - `tensor.requires_grad` -- whether autograd tracks this tensor
-- `tensor.grad` -- accumulated gradient, or `None`
+- `tensor.grad` -- accumulated gradient, or `None`. Assignable: `None` clears
+  it, and a tensor of the same shape and dtype replaces it, so a backward pass
+  accumulates onto it and an optimizer steps with it
 - `tensor.size` -- total number of elements
 - `tensor.strides`, `tensor.itemsize`, `tensor.nbytes` -- layout and storage size
 

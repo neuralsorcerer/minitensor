@@ -99,6 +99,47 @@ impl PyTensor {
         Ok(None)
     }
 
+    /// Replace this tensor's gradient, or clear it with `None`.
+    ///
+    /// `p.grad = None` clears it the way `zero_grad(set_to_none=True)` does,
+    /// and `p.grad = g` puts `g` where a backward pass would have, so an
+    /// optimizer steps with it. The attribute was read-only, so both spellings
+    /// of the most common gradient edit in a training loop raised. A
+    /// replacement must match the tensor's shape and dtype -- anything else
+    /// is a gradient for some other tensor -- and only a tensor that requires
+    /// a gradient can be given one.
+    #[setter]
+    fn set_grad(&mut self, value: &Bound<PyAny>) -> PyResult<()> {
+        if value.is_none() {
+            self.inner.zero_grad(true);
+            return Ok(());
+        }
+        let given = PyTensor::from_python_value(value)?;
+        let grad = given.tensor();
+        if !self.inner.requires_grad() {
+            return Err(PyValueError::new_err(
+                "only a tensor that requires a gradient can be given one",
+            ));
+        }
+        if grad.shape() != self.inner.shape() {
+            return Err(PyValueError::new_err(format!(
+                "a gradient must have its tensor's shape {:?}, got {:?}",
+                self.inner.shape().dims(),
+                grad.shape().dims()
+            )));
+        }
+        if grad.dtype() != self.inner.dtype() {
+            return Err(PyTypeError::new_err(format!(
+                "a gradient must have its tensor's dtype {}, got {}",
+                self.inner.dtype(),
+                grad.dtype()
+            )));
+        }
+        self.inner.zero_grad(true);
+        engine::autograd::set_gradient(&self.inner, grad.detach());
+        Ok(())
+    }
+
     #[getter]
     fn size(&self) -> usize {
         self.inner.numel()
