@@ -182,6 +182,21 @@ fn arange_exact_int(
         ))
     })?;
     reject_unallocatable(count, dtype, "arange")?;
+    // The values run monotonically from the first to the last, so those two
+    // decide whether an int32 range holds them all; one that cannot is
+    // refused rather than wrapped.
+    if dtype == DataType::Int32 && count > 0 {
+        let last = start as i128 + (count as i128 - 1) * step_wide;
+        for value in [start as i128, last] {
+            if i32::try_from(value).is_err() {
+                return Err(pyo3::exceptions::PyOverflowError::new_err(format!(
+                    "{value} does not fit in int32 (range {} to {})",
+                    i32::MIN,
+                    i32::MAX
+                )));
+            }
+        }
+    }
     let data = TensorData::from_index_i64(count, dtype, device, |index| {
         start.wrapping_add((index as i64).wrapping_mul(step))
     });

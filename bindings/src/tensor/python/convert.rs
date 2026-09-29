@@ -126,14 +126,8 @@ fn build_tensor_from_python(
         }
 
         let (shape, flat_data) = flatten_python_data(list)?;
-        let (base_tensor, base_dtype) =
-            tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
-
-        if base_dtype == dtype {
-            return Ok(base_tensor);
-        }
-
-        return base_tensor.astype(dtype).map_err(_convert_error);
+        let (base_tensor, _) = tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
+        return python_ints_as(base_tensor, dtype);
     }
 
     if let Ok(tuple) = data.cast::<PyTuple>() {
@@ -184,11 +178,8 @@ fn build_tensor_from_python(
     if is_int && let Ok(value_int) = data.extract::<i64>() {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_i64(vec![value_int], device));
-        let mut tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
-        if dtype != DataType::Int64 {
-            tensor = tensor.astype(dtype).map_err(_convert_error)?;
-        }
-        return Ok(tensor);
+        let tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
+        return python_ints_as(tensor, dtype);
     }
 
     if is_float && let Ok(value_float) = data.extract::<f64>() {
@@ -628,14 +619,34 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
     let mut shape = vec![list.len()];
     let mut flat_data = vec![];
 
+    fn ragged() -> PyErr {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("Inconsistent nested sequence lengths")
+    }
+
+    // `shape` holds one entry per level that has held a sequence, so a scalar
+    // belongs exactly one level past its end, and a sequence belongs above the
+    // level the first scalar was found at. A scalar beside a sequence broke
+    // neither length check: `[[1, 2], 3]` read as shape [2, 2] over three
+    // values.
     fn process_nested(
         item: &Bound<PyAny>,
         depth: usize,
         shape: &mut Vec<usize>,
         flat_data: &mut Vec<ScalarValue>,
+        leaf_depth: &mut Option<usize>,
     ) -> PyResult<()> {
         if depth > MAX_NESTING {
             return Err(too_deeply_nested());
+        }
+        let is_sequence = item.cast::<PyList>().is_ok() || item.cast::<PyTuple>().is_ok();
+        if is_sequence {
+            if leaf_depth.is_some_and(|leaf| depth >= leaf) {
+                return Err(ragged());
+            }
+        } else if shape.len() != depth {
+            return Err(ragged());
+        } else {
+            *leaf_depth = Some(depth);
         }
         if let Ok(nested_list) = item.cast::<PyList>() {
             let length = nested_list.len();
@@ -647,7 +658,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
                 ));
             }
             for nested_item in nested_list.iter() {
-                process_nested(&nested_item, depth + 1, shape, flat_data)?;
+                process_nested(&nested_item, depth + 1, shape, flat_data, leaf_depth)?;
             }
             return Ok(());
         }
@@ -663,7 +674,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
                 ));
             }
             for nested_item in list.iter() {
-                process_nested(&nested_item, depth + 1, shape, flat_data)?;
+                process_nested(&nested_item, depth + 1, shape, flat_data, leaf_depth)?;
             }
             return Ok(());
         }
@@ -712,8 +723,9 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
         ))
     }
 
+    let mut leaf_depth = None;
     for item in list.iter() {
-        process_nested(&item, 1, &mut shape, &mut flat_data)?;
+        process_nested(&item, 1, &mut shape, &mut flat_data, &mut leaf_depth)?;
     }
 
     Ok((shape, flat_data))
@@ -1709,10 +1721,32 @@ fn sequence_via_numpy(
     .ok()?
     .ok()?;
 
+    // A value that does not fit is left to the walk below, which reports it.
+    python_ints_as(tensor, dtype).ok()
+}
+
+/// `tensor`, holding values read from Python, at `dtype`.
+///
+/// A Python int has no width of its own: it takes the dtype it is given, and
+/// one that dtype cannot hold is refused rather than wrapped. Narrowed to
+/// int32, 2**40 keeps its low 32 bits and becomes 0 -- a wrong value with
+/// nothing to say so.
+fn python_ints_as(tensor: Tensor, dtype: DataType) -> PyResult<Tensor> {
     if tensor.dtype() == dtype {
-        return Some(tensor);
+        return Ok(tensor);
     }
-    tensor.astype(dtype).ok()
+    if tensor.dtype() == DataType::Int64
+        && dtype == DataType::Int32
+        && let Some(values) = tensor.data().as_i64_slice()
+        && let Some(value) = values.iter().find(|&&v| i32::try_from(v).is_err())
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+            "{value} does not fit in int32 (range {} to {})",
+            i32::MIN,
+            i32::MAX
+        )));
+    }
+    tensor.astype(dtype).map_err(_convert_error)
 }
 
 /// The supported dtype a NumPy dtype widens to, if any.
