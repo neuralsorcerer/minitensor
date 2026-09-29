@@ -40,6 +40,12 @@ def bernoulli(input: object) -> Tensor:
             f"bernoulli requires a floating point tensor of probabilities, "
             f"got {probabilities.dtype}"
         )
+    # A probability outside [0, 1] -- or NaN, which no comparison admits -- is
+    # a mistake upstream, and the draw used to read it as whichever bound it
+    # passed: 1.5 always fired and NaN never did. `multinomial` and `normal`
+    # refuse their invalid parameters the same way.
+    if not bool(_F.all((probabilities >= 0.0) & (probabilities <= 1.0)).item()):
+        raise ValueError("bernoulli requires every probability to lie in [0, 1]")
     draw = _C.Tensor.rand_like(probabilities)
     return (draw < probabilities).astype(str(probabilities.dtype))
 
@@ -73,11 +79,13 @@ def normal(mean: object = 0.0, std: object = 1.0, size: object = None) -> Tensor
         if isinstance(operand, Tensor) and "float64" in str(operand.dtype):
             dtype = "float64"
 
+    # Asked as "is every spread at least zero" rather than "is any below
+    # zero", so that a NaN spread -- which is neither -- is refused too.
     if std_is_tensor:
-        negative = _F.amin(std).item() < 0.0
+        valid = bool(_F.all(std >= 0.0).item())
     else:
-        negative = float(std) < 0.0
-    if negative:
+        valid = float(std) >= 0.0
+    if not valid:
         raise ValueError("normal requires a non-negative standard deviation")
 
     draw = _C.Tensor.randn(*shape, dtype=dtype)

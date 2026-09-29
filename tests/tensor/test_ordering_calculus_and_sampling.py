@@ -481,3 +481,20 @@ def test_multinomial_never_draws_a_category_of_weight_zero():
         [mt.multinomial(_t([0.0, 1.0, 0.0, 2.0]), 50, True).numpy() for _ in range(200)]
     )
     assert set(drawn.tolist()) == {1, 3}
+
+
+@pytest.mark.parametrize("probability", [1.5, -0.5, float("nan")])
+def test_bernoulli_refuses_a_probability_outside_the_unit_interval(probability):
+    """1.5 used to fire every time and -0.5 and NaN never, each read as the
+    bound it passed, where `multinomial` and `normal` refuse their invalid
+    parameters."""
+    with pytest.raises(ValueError, match=r"lie in \[0, 1\]"):
+        mt.bernoulli(_t([0.5, probability]))
+
+
+@pytest.mark.parametrize("spread", [float("nan"), -1.0])
+def test_normal_refuses_a_spread_that_is_not_at_least_zero(spread):
+    with pytest.raises(ValueError, match="non-negative standard deviation"):
+        mt.normal(0.0, spread, (3,))
+    with pytest.raises(ValueError, match="non-negative standard deviation"):
+        mt.normal(_t([0.0, 0.0]), _t([1.0, spread]))
