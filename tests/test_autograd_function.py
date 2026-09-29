@@ -505,3 +505,38 @@ def test_no_grad_leaves_the_graph_empty_for_a_function():
     with mt.no_grad():
         Triple.apply(x)
     assert mt.autograd_graph_size() == (0, 0)
+
+
+class _TwoGradients(Function):
+    @staticmethod
+    def forward(ctx, a):
+        return a * 2.0
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, grad
+
+
+class _ThreeGradients(Function):
+    @staticmethod
+    def forward(ctx, a, k):
+        return a * k
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, grad, grad
+
+
+def test_a_wrong_gradient_count_names_the_counts_that_would_do():
+    """With only tensor arguments the two accepted counts are one count; it
+    was offered as a choice between itself and itself."""
+    x = mt.Tensor([1.0, 2.0], dtype="float64", requires_grad=True)
+    with pytest.raises(
+        ValueError, match="returned 2 gradient\\(s\\); expected 1, one per argument"
+    ):
+        _TwoGradients.apply(x).sum().backward()
+    with pytest.raises(
+        ValueError,
+        match=r"returned 3 gradient\(s\); expected 1 \(one per tensor argument\) or 2 \(one per argument\)",
+    ):
+        _ThreeGradients.apply(x, 2.0).sum().backward()

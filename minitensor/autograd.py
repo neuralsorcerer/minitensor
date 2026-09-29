@@ -191,10 +191,17 @@ class Function:
                 return tuple(gradients[slot] for slot in positions)
             if len(gradients) == len(positions):
                 return gradients
+            # With only tensor arguments the two counts are one count, and
+            # offering it twice as alternatives reads as a contradiction.
+            expected = (
+                f"{len(args)}, one per argument"
+                if len(args) == len(positions)
+                else f"{len(positions)} (one per tensor argument) or "
+                f"{len(args)} (one per argument)"
+            )
             raise ValueError(
                 f"{cls.__name__}.backward returned {len(gradients)} gradient(s); "
-                f"expected {len(positions)} (one per tensor argument) or "
-                f"{len(args)} (one per argument)"
+                f"expected {expected}"
             )
 
         handle = _C.build_custom_op(
