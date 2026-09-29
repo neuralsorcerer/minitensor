@@ -421,6 +421,37 @@ pub fn cross_entropy(
     }
 }
 
+/// Refuse a value outside `[0, 1]` where binary cross entropy reads a
+/// probability. A NaN is let through: it makes the loss NaN, which is how a
+/// diverged model shows up in every loss here.
+///
+/// Out of range, the loss has no meaning and does not say so: a prediction of
+/// 1.5 for a target of 1 scored -0.405, a loss below zero, so an output layer
+/// missing its sigmoid trained against an objective that rewarded leaving the
+/// unit interval.
+fn ensure_probabilities(tensor: &Tensor, what: &str) -> Result<()> {
+    let tensor = tensor.contiguous()?;
+    let inside = match tensor.dtype() {
+        DataType::Float32 => tensor
+            .data()
+            .as_f32_slice()
+            .is_none_or(|values| !values.iter().any(|&v| v < 0.0 || v > 1.0)),
+        DataType::Float64 => tensor
+            .data()
+            .as_f64_slice()
+            .is_none_or(|values| !values.iter().any(|&v| v < 0.0 || v > 1.0)),
+        _ => true,
+    };
+    if inside {
+        Ok(())
+    } else {
+        Err(MinitensorError::invalid_argument(format!(
+            "binary_cross_entropy requires every {what} to lie in [0, 1]; for \
+             unbounded scores use binary_cross_entropy_with_logits"
+        )))
+    }
+}
+
 /// Binary Cross Entropy loss function
 ///
 /// Computes the binary cross entropy loss between predictions and targets:
@@ -440,6 +471,8 @@ pub fn binary_cross_entropy_loss(
 ) -> Result<Tensor> {
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
+    ensure_probabilities(predictions, "prediction")?;
+    ensure_probabilities(targets, "target")?;
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
 

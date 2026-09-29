@@ -1602,3 +1602,20 @@ def test_focal_loss_per_sample_values_match_their_definition(dtype, gamma, soft)
     np.testing.assert_allclose(
         got, np.where(targets > 0, want, 0.0).sum(axis=1), rtol=1e-5, atol=1e-7
     )
+
+
+@pytest.mark.parametrize(
+    "prediction,target,which",
+    [(1.5, 1.0, "prediction"), (-0.5, 0.0, "prediction"), (0.5, 2.0, "target")],
+)
+def test_binary_cross_entropy_refuses_values_outside_the_unit_interval(
+    prediction, target, which
+):
+    """Both operands are probabilities. Outside [0, 1] the loss meant nothing
+    and did not say so: 1.5 against a target of 1 scored -0.405, below zero,
+    so a model missing its sigmoid trained toward leaving the interval."""
+    with pytest.raises(ValueError, match=f"every {which} to lie in"):
+        F.binary_cross_entropy(
+            mt.Tensor([[prediction]], dtype="float64"),
+            mt.Tensor([[target]], dtype="float64"),
+        )
