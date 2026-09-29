@@ -121,7 +121,12 @@ def test_entropy_written_with_xlogy_survives_a_zero_probability():
 @pytest.mark.parametrize("name", ["atan2", "hypot", "copysign", "xlogy"])
 def test_integer_operands_promote_the_way_division_does(name):
     ints = mt.from_numpy(np.array([3, 4], dtype=np.int64))
-    assert "float32" in str(getattr(mt, name)(ints, ints).dtype)
+    # Two int64 operands widen to float64, as `/` and `mean` widen them.
+    assert getattr(mt, name)(ints, ints).dtype == (ints / ints).dtype == "float64"
+    narrow = mt.from_numpy(np.array([3, 4], dtype=np.int32))
+    assert (
+        getattr(mt, name)(narrow, narrow).dtype == (narrow / narrow).dtype == "float32"
+    )
 
     wide = mt.from_numpy(np.array([3.0, 4.0], dtype=np.float64))
     assert "float64" in str(getattr(mt, name)(ints, wide).dtype)
@@ -322,3 +327,13 @@ def test_atan2_reads_a_transposed_operand_in_its_own_order():
         "float32"
     )
     np.testing.assert_array_equal(got, want)
+
+
+def test_a_mean_written_as_a_division_matches_mean():
+    """`x.sum() / n` and `x.mean()` are the same quantity. Two int64 operands
+    used to divide into float32 while `mean` widened to float64, so the
+    division lost every integer above 2^24 that `mean` kept."""
+    x = mt.from_numpy(np.array([2**40 + 1, 2**40 + 1], dtype=np.int64))
+    by_division = x.sum() / 2
+    assert by_division.dtype == x.mean().dtype == "float64"
+    assert int(by_division.item()) == int(x.mean().item()) == 2**40 + 1

@@ -158,11 +158,21 @@ fn promote_arithmetic_dtype(lhs: DataType, rhs: DataType) -> DataType {
     }
 }
 
+/// The dtype of `lhs / rhs`, which is always a float.
+///
+/// A float operand decides it, as it does for the other arithmetic: an integer
+/// takes the float's width. Two integers widen the way every other op with a
+/// real answer widens them -- `int32` to `float32`, `int64` to `float64`, the
+/// width `mean` gives -- so `x.sum() / n` and `x.mean()` land in the same dtype.
+/// Dividing two `int64` tensors into `float32` lost every integer above 2^24
+/// that `mean` of the same values kept.
 fn promote_division_dtype(lhs: DataType, rhs: DataType) -> DataType {
-    if lhs == DataType::Float64 || rhs == DataType::Float64 {
-        DataType::Float64
-    } else {
-        DataType::Float32
+    use DataType::*;
+    match (lhs, rhs) {
+        (Float64, _) | (_, Float64) => Float64,
+        (Float32, _) | (_, Float32) => Float32,
+        (Int64, _) | (_, Int64) => Float64,
+        _ => Float32,
     }
 }
 
@@ -199,6 +209,23 @@ mod tests {
         assert_eq!(
             promote_division_dtype(DataType::Float64, DataType::Int64),
             DataType::Float64
+        );
+        // Two integers widen by width, as `mean` does; a float operand wins.
+        assert_eq!(
+            promote_division_dtype(DataType::Int64, DataType::Int64),
+            DataType::Float64
+        );
+        assert_eq!(
+            promote_division_dtype(DataType::Int32, DataType::Int64),
+            DataType::Float64
+        );
+        assert_eq!(
+            promote_division_dtype(DataType::Int64, DataType::Float32),
+            DataType::Float32
+        );
+        assert_eq!(
+            promote_division_dtype(DataType::Bool, DataType::Bool),
+            DataType::Float32
         );
     }
 

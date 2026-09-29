@@ -899,9 +899,10 @@ mod tests {
             false,
         );
         let got = hypot(&y, &x).unwrap();
-        // `/` promotes two integers to float32, and so do these.
-        assert_eq!(got.dtype(), DataType::Float32);
-        assert_eq!(got.data().as_f32_slice().unwrap(), &[5.0, 5.656854]);
+        // `/` widens two integers by width -- `int64` to `float64` -- and so do
+        // these.
+        assert_eq!(got.dtype(), DataType::Float64);
+        assert_eq!(got.data().as_f64_slice().unwrap(), &[5.0, 32f64.sqrt()]);
 
         // A float64 operand pulls the result up, as it does for `/`.
         let got = hypot(&y, &f64_tensor(vec![4.0])).unwrap();

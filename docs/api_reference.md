@@ -925,7 +925,10 @@ back-propagates to both sides.
 An integer operand takes the float operand's width (`int64 + float32` is
 `float32`, not `float64`): widening would double the memory and halve the speed
 of any expression that mixes an index tensor into an activation. `/` always
-produces a float (`int64 / int64` is `float32`).
+produces a float. Between two integers it widens the way every operation with a
+real answer does -- `int32 / int32` is `float32` and `int64 / int64` is
+`float64`, the width `mean` gives -- so `x.sum() / len(x)` and `x.mean()` agree.
+`hypot`, `atan2` and the other binary maths that answer in reals follow `/`.
 A `bool` operand promotes to whatever it is paired with.
 
 The same promotion applies to the operations that *join* values rather than

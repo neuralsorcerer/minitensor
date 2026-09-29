@@ -224,10 +224,12 @@ def test_a_float_valued_binary_takes_an_integer_pair(name, reference, dtype):
     result = getattr(mt, name)(
         mt.Tensor(values, dtype=dtype), mt.Tensor(other, dtype=dtype)
     )
-    # Two integers promote to float32, as they do for `/`. The reference is
-    # taken in float64 -- NumPy computes a bool pair in float16, which is
-    # coarser than the answer being checked.
-    assert result.dtype == "float32"
+    # Two integers widen by width, as they do for `/`: int64 to float64, int32
+    # and bool to float32. The reference is taken in float64 -- NumPy computes
+    # a bool pair in float16, which is coarser than the answer being checked.
+    assert result.dtype == ("float64" if dtype == "int64" else "float32")
+    left, right = mt.Tensor(values, dtype=dtype), mt.Tensor(other, dtype=dtype)
+    assert result.dtype == (left / right).dtype
     np.testing.assert_allclose(
         result.numpy(),
         reference(values.astype(np.float64), other.astype(np.float64)),
