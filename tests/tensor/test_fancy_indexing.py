@@ -198,11 +198,19 @@ def test_setitem_self_referential():
     np.testing.assert_allclose(t.numpy(), np.array([2.0, 2.0, 3.0], dtype=np.float32))
 
 
-def test_bool_mask_setitem_casts_value_dtype():
+def test_bool_mask_setitem_refuses_a_value_of_another_dtype():
+    """A mask assignment follows the rule every write follows: a value with a
+    dtype of its own that disagrees with the destination is refused, not cast.
+    It used to cast, while an integer or slice key refused the same value."""
     it = mt.from_numpy(np.arange(4, dtype=np.int64))
-    it[mt.from_numpy(np.array([True, False, True, False]))] = mt.from_numpy(
-        np.array([9.7, 8.2], dtype=np.float32)
-    )
+    mask = mt.from_numpy(np.array([True, False, True, False]))
+    values = mt.from_numpy(np.array([9.7, 8.2], dtype=np.float32))
+
+    with pytest.raises(TypeError, match="expected Int64, got Float32"):
+        it[mask] = values
+    np.testing.assert_array_equal(it.numpy(), np.arange(4))
+
+    it[mask] = values.astype("int64")
     np.testing.assert_array_equal(it.numpy(), np.array([9, 1, 8, 3]))
 
 

@@ -20,6 +20,39 @@ mod tests {
         crate::autograd::ops::core::graph_gradient_count()
     }
 
+    /// `copy_` of a source that requires a gradient into a tensor computed from
+    /// others is recorded as the source: the source gets the gradient, and the
+    /// tensor's old inputs get none. Written unrecorded, the copy cut the
+    /// source out of the graph.
+    #[test]
+    fn a_recorded_copy_sends_the_gradient_to_its_source() {
+        clear_graph().unwrap();
+        let tracked = |values: Vec<f64>| {
+            Tensor::new(
+                Arc::new(TensorData::from_vec(
+                    values,
+                    DataType::Float64,
+                    Device::cpu(),
+                )),
+                Shape::new(vec![3]),
+                DataType::Float64,
+                Device::cpu(),
+                true,
+            )
+        };
+        let x = tracked(vec![1.0, 2.0, 3.0]);
+        let source = tracked(vec![4.0, 5.0, 6.0]);
+        let mut y = arithmetic::mul(&x, &x).unwrap();
+        y.copy_(&source).unwrap();
+
+        let loss = reduction::sum(&arithmetic::mul(&y, &y).unwrap(), None, false).unwrap();
+        backward(&loss, None).unwrap();
+        let grad = get_gradient(&source).unwrap();
+        assert_eq!(grad.data().as_f64_slice().unwrap(), &[8.0, 10.0, 12.0]);
+        assert!(get_gradient(&x).is_none());
+        clear_graph().unwrap();
+    }
+
     /// Repeated forward/backward without an optimizer step used to grow the
     /// stored gradient map forever. Interior tensors get a fresh id on every
     /// forward pass, so an entry was added per interior tensor per backward and

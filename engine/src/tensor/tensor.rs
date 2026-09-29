@@ -3130,7 +3130,6 @@ impl Tensor {
 }
 
 impl Tensor {
-    /// Copy data from ``source`` into this tensor in-place, preserving dtype and device.
     /// Refuse an in-place write that a live backward pass would read.
     ///
     /// `data_mut` copies on write for every tensor except a leaf that requires
@@ -3158,8 +3157,31 @@ impl Tensor {
         Ok(())
     }
 
+    /// Copy `source`'s values into this tensor, keeping its dtype and device.
+    ///
+    /// A source that requires a gradient is recorded when the copy is (see
+    /// [`autograd::records_assignment`]): this tensor becomes the source cast to
+    /// its dtype, so the gradient reaches the source. Written unrecorded, the
+    /// copy cut the source out of the graph, and a backward pass through this
+    /// tensor gave the source no gradient at all.
     pub fn copy_(&mut self, source: &Tensor) -> Result<()> {
         self.ensure_not_consumed_by_graph("copy_")?;
+        if source.requires_grad() && autograd::records_assignment(self, true) {
+            if self.shape != *source.shape() {
+                return Err(MinitensorError::invalid_argument(format!(
+                    "copy_ expected source with shape {:?}, but received {:?}",
+                    self.shape.dims(),
+                    source.shape().dims()
+                )));
+            }
+            if !self.device.is_cpu() || source.device() != self.device {
+                return Err(MinitensorError::invalid_operation(
+                    "copy_ currently supports only CPU tensors".to_string(),
+                ));
+            }
+            *self = source.deep_clone()?.astype(self.dtype)?;
+            return Ok(());
+        }
         self.write_values_from(source, false)?;
         self.refresh_autograd_metadata();
         if self.requires_grad {

@@ -1196,6 +1196,33 @@ same tensor sees the write follows the rule every in-place operation here uses:
 
 `load_state_dict` remains the tidier way to set a whole module's parameters.
 
+An assignment is recorded for autograd when a gradient has to pass through it.
+Into a tensor computed from others, or with a value that requires a gradient,
+`t[key] = value` makes `t` a new tensor holding the written values. The
+gradient reaching it goes to the value where the value was written -- summed
+where one element was broadcast to several positions, and to the last write
+where a position was named twice -- and to the old `t` everywhere else, so the
+positions the write replaced pass nothing back to what computed them. Anything
+computed from `t` before the assignment keeps the old values. `copy_` of a
+value that requires a gradient is recorded the same way. A leaf that requires
+a gradient is written in place and not recorded, which is how a parameter is
+set, and so is any assignment made inside `no_grad()`.
+
+```python
+import minitensor as mt
+
+x = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
+v = mt.Tensor([10.0], requires_grad=True)
+y = x * 2
+y[1:] = v  # broadcast to both positions, and recorded
+(y * y).sum().backward()
+print(y.tolist(), x.grad.tolist(), v.grad.tolist())
+```
+
+```text
+[2.0, 10.0, 10.0] [8.0, 0.0, 0.0] [40.0]
+```
+
 `__getitem__` supports basic indexing (ints, slices with positive steps,
 `None`/`np.newaxis`, and `...`/Ellipsis) plus NumPy-style fancy forms:
 
@@ -1232,7 +1259,8 @@ Writes go through the tensor's storage, so assigning to a parameter reaches
 the layer, and a value read from the target (`t[:, [0, 1]] = t[:, [1, 0]]`) is
 read before anything is written. Values given as Python scalars or lists are
 cast to the tensor's dtype; a tensor of another dtype is refused rather than
-promoted, and the error says which conversion to make.
+promoted, whichever form the subscript takes, and the error says which
+conversion to make.
 
 Assignment through a basic subscript broadcasts the same way, matching the
 value against the selection right-aligned: each of the value's dimensions must

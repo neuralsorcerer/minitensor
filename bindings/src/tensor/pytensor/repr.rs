@@ -120,6 +120,14 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Assign `value` to the positions `key` selects.
+    ///
+    /// Into a tensor that is part of a recorded computation, or with a value
+    /// that is, the assignment is recorded: this tensor becomes a new one
+    /// holding the assigned values, and the gradient reaching it goes to the
+    /// value where the value was written and to the old tensor everywhere else.
+    /// See [`engine::autograd::records_assignment`] for what is written in
+    /// place instead.
     fn __setitem__(
         slf: &Bound<'_, Self>,
         key: &Bound<PyAny>,
@@ -137,54 +145,89 @@ impl PyTensor {
                 this.inner.shape().dims().to_vec(),
             )
         };
-
-        // Boolean-mask assignment (`t[mask] = value`): the mask must match
-        // the leading dimensions; `value` may be a scalar or anything that
-        // broadcasts to the selection shape.
-        if let Some(mask) = try_bool_mask_key(key)? {
-            let m_dims = mask.shape().dims();
-            if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {
-                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                    "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
-                    m_dims, in_dims
-                )));
-            }
-            let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
-                t.inner
-            } else {
-                convert_python_data_to_tensor(value, dtype, device, false)?
-            };
-            let mut this = slf.borrow_mut();
-            engine::ops::selection::masked_index_assign(&mut this.inner, &mask, &val_tensor)
-                .map_err(_convert_error)?;
-            return Ok(());
-        }
-
-        // An index array or a mask somewhere in the subscript
-        // (`t[:, idx] = v`): each position it names is an ordinary basic
-        // assignment, so the value is lined up with the whole selection first
-        // and each position takes its share.
-        if let Some(plan) = plan_single_array_assign(key, &in_dims)? {
-            let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
-                t.inner
-            } else {
-                convert_python_data_to_tensor(value, dtype, device, false)?
-            };
-            let mut this = slf.borrow_mut();
-            return apply_single_array_assign(&mut this.inner, &plan, &val_tensor);
-        }
-
-        let indices = parse_indices(key, &in_dims)?;
-        let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
+        let assignment = Assignment::resolve(key, &in_dims)?;
+        let value = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner
         } else {
             convert_python_data_to_tensor(value, dtype, device, false)?
         };
+
         let mut this = slf.borrow_mut();
-        this.inner
-            .index_assign(&indices, &val_tensor)
+        // The write itself never follows the value's graph: either the
+        // assignment is recorded as a whole below, or it is not recorded.
+        let detached;
+        let written = if value.requires_grad() {
+            detached = value.detach();
+            &detached
+        } else {
+            &value
+        };
+        if !engine::autograd::records_assignment(&this.inner, value.requires_grad()) {
+            return assignment.apply(&mut this.inner, written);
+        }
+        let (mut probe, elements) = engine::autograd::assignment_probe(&this.inner, &value);
+        assignment.apply(&mut probe, &elements)?;
+        let mut result = this.inner.detach();
+        assignment.apply(&mut result, written)?;
+        this.inner = engine::autograd::record_assignment(&this.inner, &value, &probe, result)
             .map_err(_convert_error)?;
         Ok(())
+    }
+}
+
+/// Where `t[key] = value` writes, resolved from the key and the target's shape
+/// alone, so that it can be applied to more than one tensor.
+enum Assignment {
+    /// A boolean mask over the leading dimensions; `value` may be a scalar or
+    /// anything that broadcasts to the selection shape.
+    Mask(Tensor),
+    /// An index array or a mask somewhere in the subscript (`t[:, idx] = v`):
+    /// each position it names is an ordinary basic assignment, so the value is
+    /// lined up with the whole selection first and each position takes its
+    /// share.
+    Axis(AxisAssign),
+    /// Integers, slices and `...`.
+    Basic(Vec<TensorIndex>),
+}
+
+impl Assignment {
+    fn resolve(key: &Bound<PyAny>, dims: &[usize]) -> PyResult<Self> {
+        if let Some(mask) = try_bool_mask_key(key)? {
+            let m_dims = mask.shape().dims();
+            if m_dims.len() > dims.len() || dims[..m_dims.len()] != *m_dims {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
+                    m_dims, dims
+                )));
+            }
+            return Ok(Self::Mask(mask));
+        }
+        if let Some(plan) = plan_single_array_assign(key, dims)? {
+            return Ok(Self::Axis(plan));
+        }
+        Ok(Self::Basic(parse_indices(key, dims)?))
+    }
+
+    /// Write `value` into `target`, refusing a value of another dtype.
+    ///
+    /// A value with a dtype of its own keeps it, and a disagreement with the
+    /// destination is refused rather than resolved; a Python value carries no
+    /// dtype and was already converted to the destination's. An integer or
+    /// slice key refused, but a mask cast the value instead, so one assignment
+    /// followed two rules depending on how its positions were named.
+    fn apply(&self, target: &mut Tensor, value: &Tensor) -> PyResult<()> {
+        if value.dtype() != target.dtype() {
+            return Err(_convert_error(engine::MinitensorError::type_mismatch(
+                format!("{:?}", target.dtype()),
+                format!("{:?}", value.dtype()),
+            )));
+        }
+        match self {
+            Self::Mask(mask) => engine::ops::selection::masked_index_assign(target, mask, value)
+                .map_err(_convert_error),
+            Self::Axis(plan) => apply_single_array_assign(target, plan, value),
+            Self::Basic(indices) => target.index_assign(indices, value).map_err(_convert_error),
+        }
     }
 }
 

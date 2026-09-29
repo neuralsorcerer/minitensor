@@ -362,6 +362,162 @@ impl GradientFunction for RepeatBackward {
     }
 }
 
+/// Whether assigning a value into `target` has to be recorded as a new tensor
+/// rather than written into it unrecorded.
+///
+/// Written in place, an assignment into a tensor computed from others left that
+/// tensor's node as it was: the gradient still reached the old values where the
+/// assignment had replaced them, and none reached the value. A leaf that
+/// requires a gradient is still written in place and not recorded -- that is
+/// how a parameter is initialised or loaded, and why every handle to it sees
+/// the write -- as is anything written while gradients are off, and an integer
+/// target, which can carry no gradient to split.
+pub fn records_assignment(target: &Tensor, value_requires_grad: bool) -> bool {
+    is_grad_enabled()
+        && target.dtype().is_float()
+        && !(target.requires_grad() && target.is_leaf())
+        && (value_requires_grad || target.requires_grad())
+}
+
+/// The tensors an assignment is replayed on to learn where it writes: a probe
+/// shaped like `target` holding -1, and the flat position of every element of
+/// `value`, shaped like `value`.
+///
+/// Assigning the second into the first with the same key leaves each position
+/// of the probe holding the element of the value it received, with whatever
+/// broadcasting and repetition the real assignment applies -- a position named
+/// twice holds the later write -- and -1 where nothing was written.
+pub fn assignment_probe(target: &Tensor, value: &Tensor) -> (Tensor, Tensor) {
+    let probe = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            vec![-1i64; target.numel()],
+            DataType::Int64,
+            target.device(),
+        )),
+        target.shape().clone(),
+        DataType::Int64,
+        target.device(),
+        false,
+    );
+    let elements = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            (0..value.numel() as i64).collect::<Vec<i64>>(),
+            DataType::Int64,
+            value.device(),
+        )),
+        value.shape().clone(),
+        DataType::Int64,
+        value.device(),
+        false,
+    );
+    (probe, elements)
+}
+
+/// Record `result` as the assignment of `value` into `target`.
+///
+/// `result` is the assignment carried out on a detached copy of `target`, so it
+/// has an identity of its own and `target` keeps its node: whatever was computed
+/// from the old values still has them. `probe` is the first of
+/// [`assignment_probe`]'s tensors after the same assignment was replayed on it.
+pub fn record_assignment(
+    target: &Tensor,
+    value: &Tensor,
+    probe: &Tensor,
+    result: Tensor,
+) -> Result<Tensor> {
+    let slots = probe.data().as_i64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("an assignment probe must be an int64 tensor")
+    })?;
+    let written = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &element)| (element >= 0).then_some((position, element as usize)))
+        .collect();
+    let target_id = target.requires_grad().then(|| target.id());
+    let value_part = value
+        .requires_grad()
+        .then(|| (value.id(), value.shape().clone(), value.dtype()));
+    let input_ids = target_id
+        .into_iter()
+        .chain(value_part.as_ref().map(|(id, _, _)| *id))
+        .collect();
+    let grad_fn = Arc::new(AssignBackward {
+        input_ids,
+        target: target_id,
+        value: value_part,
+        shape: result.shape().clone(),
+        written,
+    });
+    with_grad_fn(result.requires_grad_(true), grad_fn)
+}
+
+/// Gradient function for an assignment into a tensor; see [`record_assignment`].
+///
+/// The result's gradient splits between the two inputs by position. Where the
+/// assignment wrote, it goes to the element of the value that position holds --
+/// summed where one element was broadcast to several positions -- and none goes
+/// to the target, whose old value there no longer reaches the result. Everywhere
+/// else it goes to the target unchanged.
+pub struct AssignBackward {
+    input_ids: SmallVec<[TensorId; 2]>,
+    target: Option<TensorId>,
+    value: Option<(TensorId, Shape, DataType)>,
+    shape: Shape,
+    /// `(position in the result, element of the value it holds)` for every
+    /// position the assignment wrote.
+    written: Vec<(usize, usize)>,
+}
+
+impl GradientFunction for AssignBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let grad = grad_output.contiguous()?;
+        let (dtype, device) = (grad.dtype(), grad.device());
+        let tensor = |data: TensorData, shape: &Shape| {
+            Tensor::new(Arc::new(data), shape.clone(), dtype, device, false)
+        };
+        let mut gradients = FxHashMap::default();
+
+        macro_rules! split {
+            ($ty:ty, $slice:ident) => {{
+                let flowing = grad.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to read grad_output for assignment")
+                })?;
+                if let Some(target) = self.target {
+                    let mut kept = flowing.to_vec();
+                    for &(position, _) in &self.written {
+                        kept[position] = 0.0;
+                    }
+                    let kept = tensor(TensorData::from_vec(kept, dtype, device), &self.shape);
+                    accumulate_grad(&mut gradients, target, kept)?;
+                }
+                if let Some((value, shape, value_dtype)) = &self.value {
+                    let mut received = vec![0.0 as $ty; shape.numel()];
+                    for &(position, element) in &self.written {
+                        received[element] += flowing[position];
+                    }
+                    let received = tensor(TensorData::from_vec(received, dtype, device), shape);
+                    accumulate_grad(&mut gradients, *value, received.astype(*value_dtype)?)?;
+                }
+            }};
+        }
+
+        match dtype {
+            DataType::Float32 => split!(f32, as_f32_slice),
+            DataType::Float64 => split!(f64, as_f64_slice),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "assignment backward only supported for floating point tensors",
+                ));
+            }
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient function for basic indexing (`tensor[...]` via [`Tensor::index`]).
 ///
 /// The backward writes the gradient back through the forward's own copy plan,
