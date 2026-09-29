@@ -36,7 +36,7 @@ impl PyTensor {
         }
 
         let tensor = create_arange_tensor(start, end, step, dtype, device, requires_grad)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// `steps` values evenly spaced over `[start, end]`, inclusive of both.
@@ -60,7 +60,7 @@ impl PyTensor {
 
         reject_unallocatable(steps, dtype, "linspace")?;
         let tensor = create_linspace_tensor(start, end, steps, dtype, device, requires_grad)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// `steps` values evenly spaced on a log scale between `base ** start` and `base ** end`.
@@ -86,7 +86,7 @@ impl PyTensor {
 
         reject_unallocatable(steps, dtype, "logspace")?;
         let tensor = create_logspace_tensor(start, end, steps, base, dtype, device, requires_grad)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// A tensor holding a copy of a NumPy array's data.
@@ -94,7 +94,7 @@ impl PyTensor {
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
         let tensor = convert_numpy_to_tensor(array, requires_grad)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// A tensor over a NumPy array's own memory, with no copy.
@@ -112,6 +112,11 @@ impl PyTensor {
     #[staticmethod]
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
-        crate::share::shared_pytensor(array, requires_grad)
+        Self::created(
+            crate::share::shared_pytensor(array, requires_grad)?
+                .tensor()
+                .clone(),
+            requires_grad,
+        )
     }
 }

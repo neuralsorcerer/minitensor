@@ -77,13 +77,7 @@ impl PyTensor {
         mut slf: PyRefMut<'py, Self>,
         requires_grad: bool,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let dtype = slf.inner.dtype();
-        if requires_grad && !dtype.is_float() {
-            return Err(PyValueError::new_err(format!(
-                "only floating point tensors can require gradients, and this one is {dtype}; \
-                 cast it with .astype('float32') first"
-            )));
-        }
+        refuse_untrackable(slf.inner.dtype(), requires_grad)?;
         slf.inner = slf.inner.clone().requires_grad_(requires_grad);
         Ok(slf)
     }
@@ -128,5 +122,32 @@ impl PyTensor {
     #[pyo3(signature = (set_to_none=false))]
     fn zero_grad(&mut self, set_to_none: bool) {
         self.inner.zero_grad(set_to_none);
+    }
+}
+
+/// Refuse a request for an integer or bool tensor to require a gradient.
+///
+/// Only a float tensor can have one. `requires_grad_` refused the request,
+/// but every constructor that takes `requires_grad=True` dropped it instead,
+/// so `mt.as_tensor(labels, requires_grad=True)` made a tensor that looked
+/// asked-for and was never tracked -- the one request answered two ways.
+pub(crate) fn refuse_untrackable(dtype: DataType, requires_grad: bool) -> PyResult<()> {
+    if requires_grad && !dtype.is_float() {
+        return Err(PyValueError::new_err(format!(
+            "only floating point tensors can require gradients, and this one is {dtype}; \
+             cast it with .astype('float32') first"
+        )));
+    }
+    Ok(())
+}
+
+impl PyTensor {
+    /// A newly made `tensor`, which the caller explicitly asked to require a
+    /// gradient if `requires_grad`; see [`refuse_untrackable`]. A flag a
+    /// `*_like` constructor inherits from its reference is not a request:
+    /// `zeros_like(weight, dtype="int64")` asks for integers, not a gradient.
+    pub(crate) fn created(tensor: Tensor, requires_grad: bool) -> PyResult<Self> {
+        refuse_untrackable(tensor.dtype(), requires_grad)?;
+        Ok(Self::from_tensor(tensor))
     }
 }

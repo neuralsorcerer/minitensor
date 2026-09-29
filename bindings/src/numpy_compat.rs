@@ -109,7 +109,7 @@ fn asarray(data: &Bound<PyAny>, dtype: Option<&str>, requires_grad: bool) -> PyR
 
     if tensor.requires_grad() != requires_grad {
         let inner = tensor.tensor().clone().requires_grad_(requires_grad);
-        tensor = PyTensor::from_tensor(inner);
+        tensor = PyTensor::created(inner, requires_grad)?;
     }
 
     Ok(tensor)

@@ -25,7 +25,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = Tensor::empty(shape, dtype, device, requires_grad);
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// A tensor of zeros.
@@ -45,7 +45,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = Tensor::zeros(shape, dtype, device, requires_grad);
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// A tensor of ones.
@@ -65,7 +65,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = Tensor::ones(shape, dtype, device, requires_grad);
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// Uniform samples over `[a, b)`.
@@ -87,7 +87,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// Uniform samples from `[0, 1)`.
@@ -107,7 +107,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, false)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// Samples from the standard normal distribution.
@@ -127,7 +127,7 @@ impl PyTensor {
 
         let shape = Shape::new(dims);
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, true)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// Normal samples confined to `[lower, upper]`.
@@ -162,7 +162,7 @@ impl PyTensor {
             upper,
             "truncated_normal",
         )?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, requires_grad)
     }
 
     /// Uniform samples shaped like `input`.
@@ -191,10 +191,11 @@ impl PyTensor {
         };
 
         let device = resolve_device_or(device, reference_tensor.device())?;
+        let asked = requires_grad.unwrap_or(false);
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
-        Ok(Self::from_tensor(tensor))
+        Self::created(tensor, asked)
     }
 }
 
@@ -232,7 +233,7 @@ macro_rules! fan_init_constructors {
                         FanInitKind::$kind,
                         stringify!($name),
                     )?;
-                    Ok(Self::from_tensor(tensor))
+                    Self::created(tensor, requires_grad.unwrap_or(false))
                 }
 
                 #[doc = $doc]
@@ -263,6 +264,7 @@ macro_rules! fan_init_constructors {
                         },
                     };
                     let device = resolve_device_or(device, reference_tensor.device())?;
+                    let asked = requires_grad.unwrap_or(false);
                     let requires_grad =
                         requires_grad.unwrap_or(reference_tensor.requires_grad());
                     let tensor = create_fan_init_tensor(
@@ -273,7 +275,7 @@ macro_rules! fan_init_constructors {
                         FanInitKind::$kind,
                         stringify!($like),
                     )?;
-                    Ok(Self::from_tensor(tensor))
+                    Self::created(tensor, asked)
                 }
             )*
         }

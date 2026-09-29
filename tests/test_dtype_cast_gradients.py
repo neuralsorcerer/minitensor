@@ -282,6 +282,47 @@ def test_asking_an_integer_or_bool_tensor_to_require_a_gradient_raises(dtype):
     assert tensor.requires_grad_(False).requires_grad is False
 
 
+# Every constructor that takes `requires_grad` used to drop the request for an
+# integer or bool tensor, where `requires_grad_` refused it: the same request
+# answered two ways, and the silent one handed back a tensor that looked
+# asked-for and was never tracked.
+FACTORIES = {
+    "Tensor": lambda dtype: mt.Tensor([1, 0], dtype=dtype, requires_grad=True),
+    "tensor": lambda dtype: mt.tensor([1, 0], dtype=dtype, requires_grad=True),
+    "zeros": lambda dtype: mt.zeros((2,), dtype=dtype, requires_grad=True),
+    "ones": lambda dtype: mt.ones((2,), dtype=dtype, requires_grad=True),
+    "empty": lambda dtype: mt.empty((2,), dtype=dtype, requires_grad=True),
+    "full": lambda dtype: mt.full([2], 1, dtype=dtype, requires_grad=True),
+    "zeros_like": lambda dtype: mt.zeros_like(
+        mt.zeros((2,), dtype=dtype), requires_grad=True
+    ),
+    "as_tensor": lambda dtype: mt.as_tensor(
+        np.array([1, 0], dtype=dtype), requires_grad=True
+    ),
+    "from_numpy": lambda dtype: mt.from_numpy(
+        np.array([1, 0], dtype=dtype), requires_grad=True
+    ),
+}
+
+
 @pytest.mark.parametrize("dtype", NON_FLOAT_DTYPES)
-def test_an_integer_or_bool_tensor_is_never_built_requiring_a_gradient(dtype):
-    assert mt.zeros((2,), dtype=dtype, requires_grad=True).requires_grad is False
+@pytest.mark.parametrize("factory", list(FACTORIES))
+def test_building_an_integer_or_bool_tensor_requiring_a_gradient_raises(factory, dtype):
+    with pytest.raises(ValueError, match="only floating point tensors"):
+        FACTORIES[factory](dtype)
+
+
+@pytest.mark.parametrize("dtype", NON_FLOAT_DTYPES)
+def test_an_integer_or_bool_tensor_is_built_without_one_when_not_asked(dtype):
+    assert mt.zeros((2,), dtype=dtype).requires_grad is False
+
+
+@pytest.mark.parametrize("dtype", NON_FLOAT_DTYPES)
+def test_a_flag_inherited_from_a_reference_is_not_a_request(dtype):
+    """`zeros_like(weight, dtype="int64")` asks for integers shaped like the
+    weight, not for a gradient: the flag it inherits from a trainable
+    reference is dropped for a dtype that cannot carry one, not refused."""
+    weight = mt.zeros((2, 3), requires_grad=True)
+    assert mt.zeros_like(weight, dtype=dtype).requires_grad is False
+    assert mt.ones_like(weight, dtype=dtype).requires_grad is False
+    assert weight.new_zeros((2,), dtype=dtype).requires_grad is False

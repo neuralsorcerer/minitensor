@@ -2198,7 +2198,9 @@ Create a new tensor that inherits dtype and device from an existing one:
 - `detach()` returns a view that autograd does not track; `detach_()` detaches
   in place and returns `None`.
 - `requires_grad_(requires_grad)` sets gradient tracking and returns the tensor, so it
-  chains.
+  chains. Only a float tensor can require a gradient: asking it of an integer
+  or bool tensor raises `ValueError`, here and in every constructor that takes
+  `requires_grad=True`.
 - `grad` holds the accumulated gradient; `has_grad` is a **property** reporting
   whether one is present.
 

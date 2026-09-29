@@ -27,10 +27,10 @@ impl PyTensor {
 
         if let Some(value) = data {
             let tensor = convert_python_data_to_tensor(value, dtype, device, requires_grad)?;
-            Ok(Self::from_tensor(tensor))
+            Self::created(tensor, requires_grad)
         } else {
             let tensor = Tensor::empty(Shape::new(Vec::new()), dtype, device, requires_grad);
-            Ok(Self::from_tensor(tensor))
+            Self::created(tensor, requires_grad)
         }
     }
 
