@@ -8,7 +8,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::Tensor,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Which axis of the input a layer's width is read from.
 pub(crate) enum FeatureAxis {
@@ -242,6 +242,32 @@ pub trait Module: Layer {
         Ok(())
     }
 
+    /// The names [`Self::state_dict`] files this module's parameters under:
+    /// its own names if it gives them, positional `param_{i}` keys if not.
+    fn parameter_names(&self) -> Vec<String> {
+        let named = self.named_parameters();
+        if named.is_empty() {
+            (0..self.parameters().len())
+                .map(|i| format!("param_{i}"))
+                .collect()
+        } else {
+            named.into_keys().collect()
+        }
+    }
+
+    /// The names [`Self::state_dict`] files this module's buffers under; see
+    /// [`Self::parameter_names`].
+    fn buffer_names(&self) -> Vec<String> {
+        let named = self.named_buffers();
+        if named.is_empty() {
+            (0..self.buffers().len())
+                .map(|i| format!("buffer_{i}"))
+                .collect()
+        } else {
+            named.into_keys().collect()
+        }
+    }
+
     /// Get state dictionary for serialization
     fn state_dict(&self) -> crate::serialization::StateDict {
         let mut state_dict = crate::serialization::StateDict::new();
@@ -297,8 +323,13 @@ pub trait Module: Layer {
     /// the first forward pass then refused its float32 input. Converting on the
     /// way in would decide the precision for the caller, so it is reported too.
     ///
-    /// All three collect and report, so one message names every problem rather
-    /// than making the caller rediscover them one at a time.
+    /// An entry the layer has no slot for is reported as well. Ignoring it let
+    /// a checkpoint of a deeper model load into a shallower one: every slot the
+    /// two shared was filled, the rest of the checkpoint was dropped, and the
+    /// load reported success on weights that were never the ones trained.
+    ///
+    /// All of them collect and report, so one message names every problem
+    /// rather than making the caller rediscover them one at a time.
     ///
     /// Checking happens before anything is written, so a load that fails leaves
     /// the layer exactly as it was. A caller that catches the error and falls
@@ -324,7 +355,7 @@ pub trait Module: Layer {
         // accessors so nothing is modified. `named_*` and `named_*_mut` are
         // required to produce the same names, so what passes here is what the
         // write below will find.
-        {
+        let parameters: HashSet<String> = {
             let named = self.named_parameters();
             if named.is_empty() {
                 for (i, param) in self.parameters().iter().enumerate() {
@@ -338,8 +369,9 @@ pub trait Module: Layer {
                     problems.check(name, param, loaded, true);
                 }
             }
-        }
-        {
+            self.parameter_names().into_iter().collect()
+        };
+        let buffers: HashSet<String> = {
             let named = self.named_buffers();
             if named.is_empty() {
                 for (i, buffer) in self.buffers().iter().enumerate() {
@@ -353,7 +385,9 @@ pub trait Module: Layer {
                     problems.check(name, buffer, loaded, false);
                 }
             }
-        }
+            self.buffer_names().into_iter().collect()
+        };
+        problems.unexpected_entries(state_dict, &parameters, &buffers);
         problems.into_result()?;
 
         // Pass two: write. Every lookup above succeeded at the right shape and
@@ -425,6 +459,7 @@ fn write_loaded(slot: &mut Tensor, loaded: Tensor, through: bool) -> Result<()> 
 #[derive(Default)]
 struct LoadProblems {
     missing: Vec<String>,
+    unexpected: Vec<String>,
     mismatched: Vec<String>,
     mistyped: Vec<String>,
     in_use: Vec<String>,
@@ -465,9 +500,40 @@ impl LoadProblems {
         }
     }
 
+    /// Record every entry of `state_dict` the module has no slot for. A
+    /// parameter and a buffer are separate namespaces, so an entry filed under
+    /// the wrong one is unexpected there and its slot is missing; saying which
+    /// namespace it belongs to explains both at once.
+    fn unexpected_entries(
+        &mut self,
+        state_dict: &crate::serialization::StateDict,
+        parameters: &HashSet<String>,
+        buffers: &HashSet<String>,
+    ) {
+        for name in state_dict.parameters.keys() {
+            if !parameters.contains(name) {
+                self.unexpected.push(if buffers.contains(name) {
+                    format!("{name} (given as a parameter; it is a buffer)")
+                } else {
+                    name.clone()
+                });
+            }
+        }
+        for name in state_dict.buffers.keys() {
+            if !buffers.contains(name) {
+                self.unexpected.push(if parameters.contains(name) {
+                    format!("{name} (given as a buffer; it is a parameter)")
+                } else {
+                    format!("{name} (buffer)")
+                });
+            }
+        }
+    }
+
     fn into_result(self) -> Result<()> {
         let problems: Vec<String> = [
             ("missing from the state dict", self.missing),
+            ("not in this module", self.unexpected),
             ("wrong shape", self.mismatched),
             ("wrong dtype", self.mistyped),
             (
@@ -657,5 +723,46 @@ mod parameter_view_tests {
                     .all(|&v| v == 1.0)
             );
         }
+    }
+
+    /// An entry the layer has no slot for is refused, and the layer keeps the
+    /// values it had. Ignoring it loaded the shared part of a checkpoint from
+    /// a larger model and reported success.
+    #[test]
+    fn an_entry_the_layer_has_no_slot_for_is_refused() {
+        use super::Module;
+        use crate::serialization::StateDict;
+        use crate::tensor::{Shape, Tensor};
+
+        let dev = crate::device::Device::cpu();
+        let dt = crate::tensor::DataType::Float32;
+        let ones = |dims: &[usize]| Tensor::ones(Shape::new(dims.to_vec()), dt, dev, false);
+        let mut layer = DenseLayer::new(4, 3, true, dev, dt).unwrap();
+        let before = layer.parameters()[0]
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .to_vec();
+
+        let mut state = StateDict::new();
+        state
+            .add_parameter("weight".into(), &ones(&[3, 4]))
+            .unwrap();
+        state.add_parameter("bias".into(), &ones(&[3])).unwrap();
+        state.add_parameter("scale".into(), &ones(&[3])).unwrap();
+        state.add_buffer("bias".into(), &ones(&[3])).unwrap();
+
+        let message = Module::load_state_dict(&mut layer, &state, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message
+                .contains("not in this module: bias (given as a buffer; it is a parameter), scale"),
+            "{message}"
+        );
+        assert_eq!(
+            layer.parameters()[0].data().as_f32_slice().unwrap(),
+            before.as_slice()
+        );
     }
 }

@@ -3674,17 +3674,43 @@ nested layer keeps its own names: a `Sequential` can hold another, and the
 first layer of a block at position 1 saves as `1.0.weight`.
 
 `load_state_dict` requires every one of those names to be present, shaped like
-the slot it lands in and of its dtype, and raises naming all the problems at
-once if not:
+the slot it lands in and of its dtype, and no other names, and raises naming
+all the problems at once if not:
 
 ```text
-load_state_dict: missing from the state dict: 0.bias; wrong shape: 1.weight
-(expected [5], got [3]); wrong dtype: 2.weight (expected float32, got float64)
+load_state_dict: missing from the state dict: 0.bias; not in this module:
+3.weight; wrong shape: 1.weight (expected [5], got [3]); wrong dtype: 2.weight
+(expected float32, got float64)
 ```
 
+An entry the module has no slot for is refused rather than skipped, so a
+checkpoint of a deeper model does not load into a shallower one by filling the
+layers the two share. Parameters and buffers are separate namespaces in a
+`StateDict`, and an entry filed under the wrong one says which it belongs to.
+
+`load_state_dict` takes a `StateDict` or any mapping from name to tensor, such
+as `dict(state)` or a comprehension over `state.items()`. A mapping does not
+say which entries are buffers, so each name is filed where the module keeps it.
+
 A dtype is not converted on the way in, because that would choose the
-precision for you: to load a float64 checkpoint into a float32 model, build the
-model in float64, or cast the state dict's tensors first.
+precision for you: to load a float32 checkpoint into a float64 model, build the
+model in float32, or cast the checkpoint's tensors first:
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+checkpoint = nn.DenseLayer(4, 3).state_dict()
+wide = nn.DenseLayer(4, 3, dtype="float64")
+wide.load_state_dict(
+    {name: tensor.astype("float64") for name, tensor in checkpoint.items()}
+)
+print(wide.state_dict()["weight"].dtype)
+```
+
+```text
+float64
+```
 
 Nothing is written unless every entry checks out, so a load that raises leaves
 the module exactly as it was — a caller that catches the error and falls back

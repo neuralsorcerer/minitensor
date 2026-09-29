@@ -1804,19 +1804,85 @@ impl PyModule {
         Ok(crate::serialization::PyStateDict::from_engine(state))
     }
 
-    /// Load a provided StateDict into this module
+    /// Load `state` into this module: a `StateDict`, or any mapping from name
+    /// to tensor.
+    ///
+    /// A state dict reads as a mapping, so `dict(state)` and a comprehension
+    /// over `state.items()` are the natural way to change one -- casting its
+    /// tensors, say -- and what they make has to load back. A mapping does not
+    /// say which entries are buffers, so each name is filed where this module
+    /// keeps it.
     #[pyo3(signature = (state, device=None))]
-    fn load_state_dict(&mut self, state: &PyStateDict, device: Option<&PyDevice>) -> PyResult<()> {
+    fn load_state_dict(&mut self, state: &Bound<PyAny>, device: Option<&PyDevice>) -> PyResult<()> {
         let dev = device
             .map(|d| crate::device::ensure_available(d.device()))
             .transpose()?;
-        let sd_ref = crate::serialization::PyStateDict::inner_ref(state);
+        let (given, built);
+        let state_dict = match state.cast::<PyStateDict>() {
+            Ok(state) => {
+                given = state.borrow();
+                PyStateDict::inner_ref(&given)
+            }
+            // A mapping is read before the module is borrowed for the write:
+            // iterating one runs Python code, which may reach this module.
+            Err(_) => {
+                let buffers = self.inner.get()?.as_module().buffer_names();
+                built = state_dict_from_mapping(state, &buffers)?;
+                &built
+            }
+        };
         self.inner
             .get_mut()?
             .as_module_mut()
-            .load_state_dict(sd_ref, dev)
+            .load_state_dict(state_dict, dev)
             .map_err(_convert_error)
     }
+}
+
+/// A state dict holding `mapping`'s tensors, each filed as a buffer if its name
+/// is one of `buffers` and as a parameter otherwise.
+fn state_dict_from_mapping(
+    mapping: &Bound<PyAny>,
+    buffers: &[String],
+) -> PyResult<engine::serialization::StateDict> {
+    let items = mapping.call_method0("items").map_err(|_| {
+        PyTypeError::new_err(format!(
+            "load_state_dict takes a StateDict or a mapping from name to tensor, not {}",
+            type_name(mapping)
+        ))
+    })?;
+    let mut state = engine::serialization::StateDict::new();
+    for item in items.try_iter()? {
+        let (name, value): (Bound<PyAny>, Bound<PyAny>) = item?.extract()?;
+        let name: String = name.extract().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "load_state_dict: every name must be a str, not {}",
+                type_name(&name)
+            ))
+        })?;
+        let tensor = value.cast::<PyTensor>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "load_state_dict: {name:?} holds a {}, not a Tensor",
+                type_name(&value)
+            ))
+        })?;
+        let tensor = tensor.borrow();
+        let added = if buffers.contains(&name) {
+            state.add_buffer(name, tensor.tensor())
+        } else {
+            state.add_parameter(name, tensor.tensor())
+        };
+        added.map_err(_convert_error)?;
+    }
+    Ok(state)
+}
+
+fn type_name(value: &Bound<PyAny>) -> String {
+    value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| "object".to_string())
 }
 
 impl ModuleType {

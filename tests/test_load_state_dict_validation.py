@@ -29,7 +29,12 @@ throws the error away, and each failure was silent in a different way:
   again says nothing about loading. Converting on the way in would choose the
   precision for the caller, so this is reported like the other two.
 
-All three are checked now, before anything is written, so a rejected load leaves the
+- **An entry the layer has no slot for** was ignored. A checkpoint of a
+  deeper model loaded into a shallower one: the layers the two shared were
+  filled, the rest of the checkpoint was dropped, and the load reported success
+  on weights that were never the ones trained together.
+
+All four are checked now, before anything is written, so a rejected load leaves the
 layer exactly as it was. That matters for the caller who catches the error and
 falls back: they get the model they had, not one holding half a checkpoint.
 
@@ -266,6 +271,46 @@ def test_loading_plain_tensors_keeps_the_layer_trainable():
     assert not np.array_equal(before["bias"], after["bias"])
 
 
+# --- an entry the module has no slot for -----------------------------------
+
+
+def test_an_unexpected_entry_is_reported():
+    with pytest.raises(Exception, match="not in this module: scale"):
+        _target().load_state_dict(
+            _state(weight=np.zeros((3, 4)), bias=np.zeros(3), scale=np.zeros(3))
+        )
+
+
+def test_a_deeper_checkpoint_does_not_load_into_a_shallower_model():
+    """Every layer the two share matches, so nothing else would catch it."""
+    deeper = nn.Sequential(
+        [nn.DenseLayer(4, 3), nn.DenseLayer(3, 3), nn.DenseLayer(3, 2)]
+    )
+    shallower = nn.Sequential([nn.DenseLayer(4, 3), nn.DenseLayer(3, 3)])
+    before = _snapshot(shallower)
+
+    with pytest.raises(Exception, match=r"not in this module: 2\.bias, 2\.weight"):
+        shallower.load_state_dict(deeper.state_dict())
+    for name, values in before.items():
+        np.testing.assert_array_equal(_snapshot(shallower)[name], values, err_msg=name)
+
+
+def test_an_entry_under_the_wrong_namespace_says_which_one_it_belongs_to():
+    norm = nn.BatchNorm1d(3)
+    state = norm.state_dict()
+    swapped = S.StateDict()
+    for name in state.parameter_names():
+        swapped.add_parameter(name, state.get_parameter(name))
+    swapped.add_parameter("running_mean", state.get_buffer("running_mean"))
+    swapped.add_buffer("running_var", state.get_buffer("running_var"))
+
+    with pytest.raises(Exception) as excinfo:
+        norm.load_state_dict(swapped)
+    message = str(excinfo.value)
+    assert "missing from the state dict: running_mean" in message
+    assert "running_mean (given as a parameter; it is a buffer)" in message
+
+
 # --- a load writes into the parameters the layer already has ----------------
 
 # An optimizer holds its own handles to the parameters and keys them by
@@ -361,8 +406,9 @@ def test_a_load_after_the_forward_pass_is_dropped_goes_through():
         lambda: _state(weight=np.zeros((7, 9)), bias=np.zeros(9)),
         lambda: _state(wieght=np.zeros((3, 4)), bias=np.zeros(3)),
         lambda: _state("float64", weight=np.zeros((3, 4)), bias=np.zeros(3)),
+        lambda: _state(weight=np.zeros((3, 4)), bias=np.zeros(3), scale=np.zeros(3)),
     ],
-    ids=["empty", "half", "wrong_shape", "misspelled", "wrong_dtype"],
+    ids=["empty", "half", "wrong_shape", "misspelled", "wrong_dtype", "unexpected"],
 )
 def test_a_rejected_load_leaves_the_module_alone(build):
     """`weight` sorts before `bias` in neither order reliably, so a load that
@@ -452,3 +498,90 @@ def test_every_layer_round_trips_through_a_file(name, tmp_path):
 
     for entry, values in expected.items():
         np.testing.assert_array_equal(_snapshot(target)[entry], values, err_msg=entry)
+
+
+# --- a plain mapping --------------------------------------------------------
+
+# A state dict reads as a mapping, so `dict(state)` or a comprehension over
+# `state.items()` is how one gets changed -- and what that makes has to load
+# back. A mapping does not say which entries are buffers; the module does.
+
+
+@pytest.mark.parametrize("name", list(CATALOGUE), ids=list(CATALOGUE))
+def test_every_layer_round_trips_through_a_plain_dict(name):
+    source, target = _differently_initialised(CATALOGUE[name])
+    expected = _snapshot(source)
+
+    target.load_state_dict(dict(source.state_dict()))
+
+    for entry, values in expected.items():
+        np.testing.assert_array_equal(_snapshot(target)[entry], values, err_msg=entry)
+
+
+def test_running_statistics_in_a_dict_are_loaded_as_buffers():
+    mt.manual_seed(0)
+    trained = nn.BatchNorm1d(3)
+    trained(
+        mt.from_numpy(
+            np.random.default_rng(0).standard_normal((8, 3)).astype(np.float32)
+        )
+    )
+    fresh = nn.BatchNorm1d(3)
+
+    fresh.load_state_dict(
+        {name: tensor for name, tensor in trained.state_dict().items()}
+    )
+    np.testing.assert_array_equal(
+        fresh.state_dict().get_buffer("running_mean").numpy(),
+        trained.state_dict().get_buffer("running_mean").numpy(),
+    )
+
+
+def test_a_checkpoint_cast_through_a_dict_loads_into_the_wider_model():
+    """The documented way to load a float32 checkpoint into a float64 model."""
+    mt.manual_seed(0)
+    narrow = nn.Sequential([nn.DenseLayer(4, 3), nn.BatchNorm1d(3)])
+    wide = nn.Sequential(
+        [nn.DenseLayer(4, 3, dtype="float64"), nn.BatchNorm1d(3, dtype="float64")]
+    )
+
+    wide.load_state_dict(
+        {name: tensor.astype("float64") for name, tensor in narrow.state_dict().items()}
+    )
+    for name, values in _snapshot(narrow).items():
+        assert _snapshot(wide)[name].dtype == np.float64
+        np.testing.assert_array_equal(_snapshot(wide)[name], values.astype(np.float64))
+
+
+def test_a_dict_is_checked_like_a_state_dict():
+    target = _target()
+    before = _snapshot(target)
+    checkpoint = dict(_source().state_dict())
+
+    with pytest.raises(Exception, match="missing from the state dict: bias"):
+        target.load_state_dict({"weight": checkpoint["weight"]})
+    with pytest.raises(Exception, match="not in this module: scale"):
+        target.load_state_dict({**checkpoint, "scale": mt.zeros(3)})
+    for name, values in before.items():
+        np.testing.assert_array_equal(_snapshot(target)[name], values, err_msg=name)
+
+
+@pytest.mark.parametrize(
+    "state,message",
+    [
+        (
+            [("weight", mt.zeros(3, 4))],
+            "a StateDict or a mapping from name to tensor, not list",
+        ),
+        (
+            {"weight": np.zeros((3, 4)), "bias": mt.zeros(3)},
+            '"weight" holds a ndarray, not a Tensor',
+        ),
+        ({0: mt.zeros(3)}, "every name must be a str, not int"),
+    ],
+    ids=["not_a_mapping", "not_a_tensor", "not_a_name"],
+)
+def test_what_is_not_a_mapping_of_tensors_is_refused_by_name(state, message):
+    with pytest.raises(TypeError) as excinfo:
+        _target().load_state_dict(state)
+    assert message in str(excinfo.value)
