@@ -14,9 +14,9 @@ impl PyTensor {
 
     /// Create a new tensor from Python data
     #[new]
-    #[pyo3(signature = (data=None, dtype=None, device=None, requires_grad=false))]
+    #[pyo3(signature = (data=DataArg::Missing, dtype=None, device=None, requires_grad=false))]
     fn new(
-        data: Option<&Bound<PyAny>>,
+        data: DataArg<'_>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -25,8 +25,13 @@ impl PyTensor {
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
-        if let Some(value) = data {
-            let tensor = convert_python_data_to_tensor(value, dtype, device, requires_grad)?;
+        if let DataArg::Given(value) = data {
+            if value.is_none() {
+                return Err(PyTypeError::new_err(
+                    "tensor data cannot be None; pass a number, a sequence or an array",
+                ));
+            }
+            let tensor = convert_python_data_to_tensor(&value, dtype, device, requires_grad)?;
             Self::created(tensor, requires_grad)
         } else {
             let tensor = Tensor::empty(Shape::new(Vec::new()), dtype, device, requires_grad);
@@ -466,5 +471,23 @@ impl PyTensor {
     /// A contiguous 1-D view of every element, in row-major order.
     pub fn ravel(&self) -> PyResult<Self> {
         self.flatten(0, -1)
+    }
+}
+
+/// The constructor's `data`: whatever was passed, `None` included, or nothing.
+///
+/// A plain optional argument reads an explicit `None` as absent, so
+/// `tensor(None)` -- usually a variable that was never set -- quietly built the
+/// placeholder a bare `Tensor.__new__(Tensor)` gets, and read back as 0.0.
+pub(crate) enum DataArg<'py> {
+    Missing,
+    Given(Bound<'py, PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for DataArg<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(Self::Given(obj.to_owned()))
     }
 }

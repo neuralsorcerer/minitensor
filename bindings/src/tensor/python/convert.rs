@@ -140,6 +140,12 @@ fn build_tensor_from_python(
         return build_tensor_from_python(list.as_any(), dtype, device, requires_grad);
     }
 
+    // A range is a sequence of ints; inside a list it already converted.
+    if data.is_instance_of::<pyo3::types::PyRange>() {
+        let list = PyList::new(data.py(), data.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+        return build_tensor_from_python(list.as_any(), dtype, device, requires_grad);
+    }
+
     // Handle scalars.
     //
     // Each extract is guarded by a test of the value's kind because `extract`
@@ -221,9 +227,10 @@ fn build_tensor_from_python(
         }
     }
 
-    Err(PyErr::new::<PyTypeError, _>(
-        "Unsupported data type for tensor creation",
-    ))
+    Err(PyErr::new::<PyTypeError, _>(format!(
+        "Unsupported data type for tensor creation: {}",
+        data.get_type().name()?
+    )))
 }
 
 pub(crate) fn apply_binary_ufunc<F>(

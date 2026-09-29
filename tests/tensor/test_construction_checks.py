@@ -110,3 +110,22 @@ def test_a_float_dtype_holds_a_python_int_past_int64():
     assert mt.tensor([[1], [HUGE]]).dtype == mt.tensor(HUGE).dtype
     assert mt.full((1,), HUGE, dtype="float64").tolist() == [expected]
     assert (mt.zeros(1, dtype="float64") + HUGE).tolist() == [expected]
+
+
+def test_none_is_not_data():
+    # Usually a variable that was never set; it used to read back as 0.0.
+    with pytest.raises(TypeError, match="cannot be None"):
+        mt.tensor(None)
+    with pytest.raises(TypeError, match="cannot be None"):
+        mt.Tensor(None, dtype="int64")
+
+
+def test_a_range_converts_like_the_list_it_holds():
+    assert mt.tensor(range(3)).tolist() == mt.tensor([0, 1, 2]).tolist()
+    assert mt.tensor(range(1, 7, 2), dtype="int64").tolist() == [1, 3, 5]
+    assert mt.tensor(range(0)).shape == (0,)
+
+
+def test_an_unsupported_object_is_named():
+    with pytest.raises(TypeError, match="generator"):
+        mt.tensor(x for x in [1, 2])
