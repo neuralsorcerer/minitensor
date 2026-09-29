@@ -14,6 +14,8 @@ and rescaling by hand.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -144,3 +146,38 @@ def test_clipping_bounds_a_training_step():
     optimizer.step()
 
     assert abs(float(parameter.numpy()[0])) == pytest.approx(2.0, rel=1e-5)
+
+
+def _with_gradient(values):
+    param = mt.Tensor(
+        np.asarray(values, dtype=np.float64), dtype="float64", requires_grad=True
+    )
+    (param * param / 2).sum().backward()
+    return param
+
+
+def test_a_single_tensor_is_one_parameter():
+    """Iterated like a list, a tensor gave its elements, none of which holds a
+    gradient: clipping one tensor left its gradient alone and reported 0."""
+    param = _with_gradient([3.0, 4.0])
+    assert mt.nn.grad_norm(param) == 5.0
+    assert mt.nn.count_parameters_with_gradients(param) == 1
+
+    assert mt.nn.clip_grad_norm_(param, 1.0) == 5.0
+    np.testing.assert_allclose(param.grad.numpy(), [0.6, 0.8], rtol=1e-5)
+
+    mt.nn.clip_grad_value_(param, 0.7)
+    np.testing.assert_allclose(param.grad.numpy(), [0.6, 0.7], rtol=1e-5)
+
+
+def test_nothing_to_clip_has_a_norm_of_positive_zero():
+    norm = mt.nn.clip_grad_norm_([], 1.0)
+    assert norm == 0.0 and math.copysign(1.0, norm) == 1.0
+
+
+def test_a_tensor_listed_twice_is_refused():
+    """It would count twice toward the norm and be scaled twice."""
+    param = _with_gradient([3.0, 4.0])
+    with pytest.raises(ValueError, match="more than once"):
+        mt.nn.clip_grad_norm_([param, param], 1.0)
+    np.testing.assert_array_equal(param.grad.numpy(), [3.0, 4.0])

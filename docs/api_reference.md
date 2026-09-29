@@ -3382,7 +3382,9 @@ In `minitensor.nn`:
 
 Parameters without a gradient are skipped rather than rejected, so passing
 `model.parameters()` before the first `backward()` is a no-op. Only float
-gradients participate.
+gradients participate. `parameters` is any iterable of tensors, or a single
+tensor; a tensor listed twice is refused, since its gradient would count twice
+toward the norm and be scaled twice.
 
 ```python
 import minitensor as mt

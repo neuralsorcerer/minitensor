@@ -99,7 +99,9 @@ impl GradientUtils {
                 }
                 _ => 0.0,
             })
-            .sum();
+            // Folded from +0.0: a float `sum` starts at -0.0, so with no
+            // gradient to add the norm came back as -0.0.
+            .fold(0.0, |total, part| total + part);
         total_sq_norm.sqrt()
     }
 

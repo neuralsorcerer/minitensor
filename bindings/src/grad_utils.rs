@@ -25,7 +25,16 @@ use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
 /// Collect an iterable of tensors, accepting the `_tensor`-wrapping objects the
 /// rest of the API accepts. Unlike the optimizer's version an empty sequence is
 /// fine: clipping nothing is a no-op, not a mistake.
+///
+/// A single tensor is one parameter. Iterated like a sequence, it gave its
+/// elements -- none of which holds a gradient -- so clipping one tensor's
+/// gradient left it untouched and reported a norm of zero.
 fn collect(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    if parameters.is_instance_of::<PyTensor>()
+        || parameters.hasattr(intern!(parameters.py(), "_tensor"))?
+    {
+        return Ok(vec![parameters.clone().unbind()]);
+    }
     let mut collected = Vec::new();
     for item in PyIterator::from_object(parameters)? {
         collected.push(item?.unbind());
@@ -53,8 +62,30 @@ fn with_parameters<R>(
 ) -> PyResult<R> {
     let collected = collect(parameters)?;
     let mut borrowed: Vec<PyRefMut<PyTensor>> = Vec::with_capacity(collected.len());
-    for value in &collected {
-        borrowed.push(borrow_mut(py, value)?);
+    let mut first_seen = std::collections::HashMap::new();
+    for (index, value) in collected.iter().enumerate() {
+        let tensor = borrow_mut(py, value).map_err(|error| {
+            // A tensor listed twice is already borrowed by its first entry,
+            // which the refusal below names; say so rather than calling the
+            // repeat something other than a tensor.
+            if value.bind(py).is_instance_of::<PyTensor>() {
+                PyValueError::new_err(format!(
+                    "parameter {index} is listed more than once; each tensor's \
+                     gradient is clipped once"
+                ))
+            } else {
+                error
+            }
+        })?;
+        // Listed twice, a gradient counts twice toward the norm and is scaled
+        // twice, as it would be stepped twice by an optimizer.
+        if let Some(first) = first_seen.insert(tensor.tensor().id(), index) {
+            return Err(PyValueError::new_err(format!(
+                "parameter {index} is the same tensor as parameter {first}; \
+                 each tensor's gradient is clipped once"
+            )));
+        }
+        borrowed.push(tensor);
     }
     let mut refs: Vec<&mut Tensor> = borrowed.iter_mut().map(|t| t.tensor_mut()).collect();
     body(refs.as_mut_slice())
