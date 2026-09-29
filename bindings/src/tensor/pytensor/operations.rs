@@ -150,6 +150,9 @@ impl PyTensor {
     /// Limit every element to `[min, max]`. Either bound may be omitted.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clamp(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        if let Some(result) = self.clamp_exact_int(min, max)? {
+            return Ok(Self::from_tensor(result));
+        }
         let min_val = parse_clip_bound(min, "min")?;
         let max_val = parse_clip_bound(max, "max")?;
         let result = self.inner.clamp(min_val, max_val).map_err(_convert_error)?;
@@ -222,5 +225,52 @@ impl PyTensor {
         let dtype = dtype::parse_dtype(dtype)?;
         let result = self.inner.astype(dtype).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
+    }
+}
+
+impl PyTensor {
+    /// `clamp` of an integer tensor between Python-int bounds, exactly.
+    ///
+    /// The bounds otherwise pass through an f64, which rounds an int64 bound
+    /// past 2^53; `None` when the tensor is a float one or a bound is not a
+    /// Python int, which leaves the general path to answer.
+    fn clamp_exact_int(
+        &self,
+        min: Option<&Bound<PyAny>>,
+        max: Option<&Bound<PyAny>>,
+    ) -> PyResult<Option<Tensor>> {
+        if self.inner.dtype().is_float() {
+            return Ok(None);
+        }
+        fn bound<'a, 'py>(
+            value: Option<&'a Bound<'py, PyAny>>,
+        ) -> Option<Option<(i64, &'a Bound<'py, PyAny>)>> {
+            match value {
+                Some(value) if !value.is_none() => {
+                    exact_python_int(value).map(|v| Some((v, value)))
+                }
+                _ => Some(None),
+            }
+        }
+        let (Some(low), Some(high)) = (bound(min), bound(max)) else {
+            return Ok(None);
+        };
+        if let (Some((low, _)), Some((high, _))) = (low, high)
+            && low > high
+        {
+            return Err(PyValueError::new_err(format!(
+                "Invalid argument: clip minimum {low} cannot be greater than maximum {high}"
+            )));
+        }
+        let mut result = self.inner.clone();
+        if let Some((_, value)) = low {
+            let scalar = tensor_from_py_value(&self.inner, value)?;
+            result = result.maximum(&scalar).map_err(_convert_error)?;
+        }
+        if let Some((_, value)) = high {
+            let scalar = tensor_from_py_value(&self.inner, value)?;
+            result = result.minimum(&scalar).map_err(_convert_error)?;
+        }
+        Ok(Some(result))
     }
 }

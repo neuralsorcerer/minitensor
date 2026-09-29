@@ -201,7 +201,7 @@ impl PyTensor {
     #[pyo3(signature = (input, fill_value, dtype=None, device=None, requires_grad=None))]
     fn full_like(
         input: &Bound<PyAny>,
-        fill_value: f64,
+        fill_value: &Bound<PyAny>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -218,6 +218,12 @@ impl PyTensor {
         let asked = requires_grad.unwrap_or(false);
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = reference.shape_vec();
+        if !dtype.is_float() && exact_python_int(fill_value).is_some() {
+            let mut tensor = Tensor::zeros(Shape::new(shape), dtype, device, false);
+            fill_from_python(&mut tensor, fill_value)?;
+            return Self::created(tensor, asked);
+        }
+        let fill_value = extract_real_scalar(fill_value, "fill_value")?;
         let tensor = create_full_tensor(shape, fill_value, dtype, device, requires_grad)?;
         Self::created(tensor, asked)
     }
@@ -494,7 +500,7 @@ impl PyTensor {
     #[pyo3(signature = (shape, fill_value, dtype=None, device=None, requires_grad=false))]
     pub fn full(
         shape: &Bound<PyAny>,
-        fill_value: f64,
+        fill_value: &Bound<PyAny>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -506,6 +512,12 @@ impl PyTensor {
 
         let dims = parse_shape_like(shape, "shape")?;
         reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
+        if !dtype.is_float() && exact_python_int(fill_value).is_some() {
+            let mut tensor = Tensor::zeros(Shape::new(dims), dtype, device, false);
+            fill_from_python(&mut tensor, fill_value)?;
+            return Self::created(tensor, asked);
+        }
+        let fill_value = extract_real_scalar(fill_value, "fill_value")?;
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Self::created(tensor, asked)
     }

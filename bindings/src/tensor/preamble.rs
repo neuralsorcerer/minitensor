@@ -178,6 +178,27 @@ fn with_index_vector<R>(
     }
 }
 
+/// A Python integer, exactly, or `None` for anything else.
+///
+/// The integer-dtype paths below take a Python int this way rather than as an
+/// `f64`: an f64 holds every integer only up to 2^53, so an int64 value past
+/// that came back rounded -- `full`, `fill_` and `clamp` wrote 2^60 for
+/// 2^60 + 1, and `arange` between two such bounds came back empty.
+pub(crate) fn exact_python_int(value: &Bound<PyAny>) -> Option<i64> {
+    if value.is_instance_of::<pyo3::types::PyFloat>() {
+        return None;
+    }
+    value.extract::<i64>().ok()
+}
+
+/// Set every element of `tensor` to `value`, converted to its dtype the way
+/// an assignment converts one -- exactly, for a Python int into an integer
+/// tensor.
+pub(crate) fn fill_from_python(tensor: &mut Tensor, value: &Bound<PyAny>) -> PyResult<()> {
+    let scalar = convert_python_data_to_tensor(value, tensor.dtype(), tensor.device(), false)?;
+    tensor.index_assign(&[], &scalar).map_err(_convert_error)
+}
+
 fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option<f64>> {
     match value {
         None => Ok(None),

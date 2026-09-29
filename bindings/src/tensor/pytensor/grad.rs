@@ -113,8 +113,12 @@ impl PyTensor {
         mut slf: PyRefMut<'py, Self>,
         value: &Bound<PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let fill_value = extract_real_scalar(value, "value")?;
-        slf.inner.fill_(fill_value).map_err(_convert_error)?;
+        if !slf.inner.dtype().is_float() && exact_python_int(value).is_some() {
+            fill_from_python(&mut slf.inner, value)?;
+        } else {
+            let fill_value = extract_real_scalar(value, "value")?;
+            slf.inner.fill_(fill_value).map_err(_convert_error)?;
+        }
         register_leaf_tensor(&slf.inner);
         Ok(slf)
     }

@@ -169,7 +169,11 @@ fn empty_like(tensor: &Bound<PyAny>, dtype: Option<&str>) -> PyResult<PyTensor> 
 /// Create a tensor filled with a value, same shape and dtype as input
 #[pyfunction]
 #[pyo3(signature = (tensor, fill_value, dtype=None))]
-fn full_like(tensor: &Bound<PyAny>, fill_value: f64, dtype: Option<&str>) -> PyResult<PyTensor> {
+fn full_like(
+    tensor: &Bound<PyAny>,
+    fill_value: &Bound<PyAny>,
+    dtype: Option<&str>,
+) -> PyResult<PyTensor> {
     let args = LikeArgs::from_source(tensor, dtype)?;
     let py = tensor.py();
     let shape_tuple = args.shape_tuple(py)?;

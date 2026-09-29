@@ -9,11 +9,11 @@ use super::*;
 impl PyTensor {
     /// Evenly spaced values over `[start, end)` with the given step.
     #[staticmethod]
-    #[pyo3(signature = (start, end=None, step=1.0, dtype=None, device=None, requires_grad=false))]
+    #[pyo3(signature = (start, end=None, step=None, dtype=None, device=None, requires_grad=false))]
     fn arange(
-        start: f64,
-        end: Option<f64>,
-        step: f64,
+        start: &Bound<PyAny>,
+        end: Option<&Bound<PyAny>>,
+        step: Option<&Bound<PyAny>>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -21,6 +21,19 @@ impl PyTensor {
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
+
+        if !dtype.is_float()
+            && let Some(tensor) = arange_exact_int(start, end, step, dtype, device)?
+        {
+            return Self::created(tensor, requires_grad);
+        }
+        let real = |value: &Bound<PyAny>, name: &str| extract_real_scalar(value, name);
+        let start = real(start, "start")?;
+        let end = end.map(|value| real(value, "end")).transpose()?;
+        let step = step
+            .map(|value| real(value, "step"))
+            .transpose()?
+            .unwrap_or(1.0);
 
         let (start, end) = match end {
             Some(value) => (start, value),
@@ -119,4 +132,76 @@ impl PyTensor {
             requires_grad,
         )
     }
+}
+
+/// `arange` over an integer dtype with Python-int bounds, counted exactly.
+///
+/// The bounds otherwise pass through an f64, where integers past 2^53 are
+/// spaced more than one apart: `arange(2**60 + 1, 2**60 + 3)` rounded both
+/// ends to the same value and came back empty. `None` when a bound is not a
+/// Python int, leaving the general path to answer.
+fn arange_exact_int(
+    start: &Bound<PyAny>,
+    end: Option<&Bound<PyAny>>,
+    step: Option<&Bound<PyAny>>,
+    dtype: DataType,
+    device: Device,
+) -> PyResult<Option<Tensor>> {
+    let Some(first) = exact_python_int(start) else {
+        return Ok(None);
+    };
+    let (start, end) = match end {
+        None => (0, first),
+        Some(value) => match exact_python_int(value) {
+            Some(end) => (first, end),
+            None => return Ok(None),
+        },
+    };
+    let step = match step {
+        None => 1,
+        Some(value) => match exact_python_int(value) {
+            Some(step) => step,
+            None => return Ok(None),
+        },
+    };
+    if step == 0 {
+        return Err(PyValueError::new_err("Step cannot be zero"));
+    }
+    // The count is ceil((end - start) / step), in i128 so the span of two
+    // int64 bounds cannot overflow.
+    let span = end as i128 - start as i128;
+    let step_wide = step as i128;
+    let count = if (span > 0) == (step_wide > 0) && span != 0 {
+        (span + step_wide - step_wide.signum()) / step_wide
+    } else {
+        0
+    };
+    let count = usize::try_from(count).map_err(|_| {
+        PyValueError::new_err(format!(
+            "arange from {start} to {end} by {step} is too long"
+        ))
+    })?;
+    reject_unallocatable(count, dtype, "arange")?;
+    let values: Vec<i64> = (0..count as i64)
+        .map(|i| start.wrapping_add(i.wrapping_mul(step)))
+        .collect();
+    let data = match dtype {
+        DataType::Int64 => TensorData::from_vec(values, dtype, device),
+        DataType::Int32 => {
+            let narrowed: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+            TensorData::from_vec(narrowed, dtype, device)
+        }
+        DataType::Bool => {
+            let truth: Vec<bool> = values.iter().map(|&v| v != 0).collect();
+            TensorData::from_vec(truth, dtype, device)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Tensor::new(
+        Arc::new(data),
+        Shape::new(vec![count]),
+        dtype,
+        device,
+        false,
+    )))
 }
