@@ -421,7 +421,15 @@ pub fn median(
             (values, Some(indices), Some(axis))
         }
     };
-    let values = attach_median_grad(values, tensor, norm_dim, keepdim, false, indices.as_ref())?;
+    let mut values =
+        attach_median_grad(values, tensor, norm_dim, keepdim, false, indices.as_ref())?;
+    // Over every axis the median comes back as a scalar, and `keepdim` keeps
+    // each reduced axis at extent one, as every other reduction does -- it
+    // was ignored here, so `median(keepdim=True)` could not broadcast back
+    // against its input the way `mean(keepdim=True)` can.
+    if norm_dim.is_none() && keepdim {
+        values = values.reshape(crate::tensor::Shape::new(vec![1; tensor.ndim()]))?;
+    }
     Ok((values, indices))
 }
 

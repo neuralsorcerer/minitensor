@@ -1570,3 +1570,22 @@ def test_quantiles_at_the_ends_come_from_the_extremes():
         mt.from_numpy(values), mt.from_numpy(np.array([0.0, 100.0]))
     ).numpy()
     np.testing.assert_array_equal(got, [values.min(), values.max()])
+
+
+def test_median_over_every_axis_keeps_them_with_keepdim():
+    """Every reduction keeps each reduced axis at extent one under `keepdim`,
+    so its result broadcasts back against its input. `median` over all axes
+    ignored the flag and came back 0-d."""
+    x = mt.Tensor(
+        np.arange(24.0).reshape(2, 3, 4)[::-1].copy(),
+        dtype="float64",
+        requires_grad=True,
+    )
+    middle = x.median(keepdim=True)
+    assert tuple(middle.shape) == (1, 1, 1) == tuple(x.mean(keepdim=True).shape)
+    assert middle.item() == 11.0
+
+    (x - middle).sum().backward()
+    expected = np.ones((2, 3, 4))
+    expected[1, 2, 3] -= 24.0
+    np.testing.assert_array_equal(x.grad.numpy(), expected)
