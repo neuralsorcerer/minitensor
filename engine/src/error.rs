@@ -199,15 +199,12 @@ impl MinitensorError {
     pub fn type_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!(
-            "Use .to_dtype({}) to convert the tensor to the expected type",
-            expected_str
-        );
+        let suggestion = conversion_suggestion(&expected_str, &actual_str);
 
         Self::TypeError {
             expected: expected_str,
             actual: actual_str,
-            suggestion: Some(suggestion),
+            suggestion,
             context: None,
         }
     }
@@ -220,15 +217,12 @@ impl MinitensorError {
     ) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!(
-            "Use .to_dtype({}) to convert the tensor to the expected type",
-            expected_str
-        );
+        let suggestion = conversion_suggestion(&expected_str, &actual_str);
 
         Self::TypeError {
             expected: expected_str,
             actual: actual_str,
-            suggestion: Some(suggestion),
+            suggestion,
             context: Some(context.into()),
         }
     }
@@ -713,6 +707,32 @@ impl MinitensorError {
     }
 }
 
+/// The conversion a dtype mismatch asks for, when `expected` names a dtype.
+///
+/// The suggestion used to be `.to_dtype(..)` with `expected` pasted in, which
+/// named a method that does not exist, spelled the dtype as it is printed
+/// rather than as it is passed, and read `.to_dtype(integral tensor)` for the
+/// callers whose `expected` describes a family of dtypes rather than one.
+fn conversion_suggestion(expected: &str, actual: &str) -> Option<String> {
+    let name = dtype_name(expected)?;
+    let actual = dtype_name(actual).unwrap_or(actual);
+    Some(format!(
+        "Convert the {actual} tensor with .astype('{name}')"
+    ))
+}
+
+/// A dtype as `astype` takes it, from any of the spellings error messages use.
+fn dtype_name(spelled: &str) -> Option<&'static str> {
+    Some(match spelled.to_ascii_lowercase().as_str() {
+        "float32" | "f32" => "float32",
+        "float64" | "f64" => "float64",
+        "int32" | "i32" => "int32",
+        "int64" | "i64" => "int64",
+        "bool" => "bool",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::MinitensorError;
@@ -792,7 +812,10 @@ mod tests {
     fn test_builder_specific_suggestions_and_context() {
         let dtype = MinitensorError::type_mismatch_with_context("f32", "i64", "cast input");
         assert_eq!(dtype.context(), Some("cast input"));
-        assert!(dtype.suggestion().unwrap().contains(".to_dtype(f32)"));
+        assert_eq!(
+            dtype.suggestion(),
+            Some("Convert the int64 tensor with .astype('float32')")
+        );
 
         let device = MinitensorError::device_mismatch_with_context("cpu", "cuda", "device copy");
         assert_eq!(device.context(), Some("device copy"));
@@ -1016,13 +1039,15 @@ mod tests {
 
     #[test]
     fn test_type_and_dimension_contextual_paths() {
-        let ty = MinitensorError::type_mismatch_with_context("f16", "i8", "cast kernel");
+        let ty = MinitensorError::type_mismatch_with_context("Float64", "Int32", "cast kernel");
         assert_eq!(ty.context(), Some("cast kernel"));
-        assert!(
-            ty.suggestion()
-                .unwrap()
-                .contains("Use .to_dtype(f16) to convert")
+        assert_eq!(
+            ty.suggestion(),
+            Some("Convert the int32 tensor with .astype('float64')")
         );
+        // A description of a family of dtypes names no single conversion.
+        let family = MinitensorError::type_mismatch("a floating-point dtype", "Int64");
+        assert_eq!(family.suggestion(), None);
 
         let grow_rank = MinitensorError::dimension_error("rank too small", Some(4), Some(2));
         assert!(grow_rank.suggestion().unwrap().contains(".unsqueeze()"));

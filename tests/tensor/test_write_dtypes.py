@@ -110,6 +110,9 @@ def test_the_refusal_names_the_destination_as_the_dtype_expected():
         mt.put(_dest("float64"), _index([1]), _dest("float32", (7,)))
     message = str(raised.value)
     assert "expected Float64" in message and "got Float32" in message
+    # The suggestion names the conversion that fixes it, with the method that
+    # makes it: it used to say `.to_dtype(Float64)`, which does not exist.
+    assert "Convert the float32 tensor with .astype('float64')" in message
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
