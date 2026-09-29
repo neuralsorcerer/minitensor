@@ -71,7 +71,7 @@ impl Embedding {
 
         // Token embeddings are conventionally drawn from N(0, 1); reuse the
         // shared initializer so dtype/device handling stays in one place.
-        let weight = init_parameter(
+        let mut weight = init_parameter(
             Shape::new(vec![num_embeddings, embedding_dim]),
             InitMethod::Normal {
                 mean: 0.0,
@@ -80,6 +80,21 @@ impl Embedding {
             dtype,
             device,
         )?;
+        // The padding row starts at zero, which is the embedding the layer
+        // gives that token. Drawn like the others, it held values the layer
+        // never returned: a saved table showed them, and the functional
+        // `embedding` over the same table, which returns what a padding row
+        // holds, disagreed with the layer.
+        if let Some(pad) = padding_idx {
+            let row = pad * embedding_dim..(pad + 1) * embedding_dim;
+            let data = weight.data_mut();
+            match dtype {
+                DataType::Float32 => {
+                    data.as_f32_slice_mut().expect("float32 weight")[row].fill(0.0)
+                }
+                _ => data.as_f64_slice_mut().expect("float64 weight")[row].fill(0.0),
+            }
+        }
 
         Ok(Self {
             weight,
@@ -218,6 +233,14 @@ mod tests {
             .unwrap()
             .copy_from_slice(&data);
         t
+    }
+
+    #[test]
+    fn the_padding_row_starts_at_zero_and_the_rest_do_not() {
+        let emb = Embedding::new(5, 3, Some(2), Device::cpu(), DataType::Float64).unwrap();
+        let weight = emb.weight().data().as_f64_slice().unwrap().to_vec();
+        assert!(weight[6..9].iter().all(|&v| v == 0.0));
+        assert!(weight[..6].iter().chain(&weight[9..]).any(|&v| v != 0.0));
     }
 
     #[test]

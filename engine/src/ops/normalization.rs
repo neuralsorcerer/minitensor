@@ -122,6 +122,17 @@ pub fn batch_norm(
     // Compute batch statistics only when they are actually used: during
     // training, or in eval mode when no running estimates are available.
     let use_batch_stats = training || running_mean.is_none() || running_var.is_none();
+    // One value per channel has no spread to normalize by: every output came
+    // back exactly zero, whatever the input, and the running variance was
+    // pulled toward zero, which inflates every later output in eval mode.
+    if use_batch_stats && num_features > 0 && input.numel() == num_features {
+        return Err(MinitensorError::invalid_argument(format!(
+            "batch_norm needs more than one value per channel to compute batch \
+             statistics, and this input of shape {:?} has one; use a larger \
+             batch, or evaluation mode with running statistics",
+            input.shape().dims()
+        )));
+    }
     let (mean_used, var_used, centered) = if use_batch_stats {
         let batch_mean = input.mean(Some(axes_isize.clone()), true)?; // [1, C, ...]
         let centered = crate::ops::arithmetic::sub(input, &batch_mean)?;
