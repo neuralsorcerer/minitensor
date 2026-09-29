@@ -704,45 +704,48 @@ impl GradientFunction for FocalLossBackward {
         }
         gradients.reserve(1);
 
-        // Exact gradient of FL = -alpha * (1 - p_t)^gamma * log(p_t) wrt the
-        // logits, where p_t is the true-class softmax probability:
-        //   dFL/dz_j = alpha * (p_j - onehot_j)
-        //              * (1 - p_t)^(gamma-1) * [ (1 - p_t) - gamma * p_t * ln(p_t) ]
-        // The modulating factor is a per-sample scalar (broadcast over classes).
+        // Per sample, FL = alpha * sum_j t_j f(p_j) with f(p) = -(1 - p)^gamma
+        // ln p, summed over the class axis, for targets that are one-hot or
+        // any distribution over the classes. `p` is the softmax of the logits
+        // `z`, and dp_j/dz_k = p_j (delta_jk - p_k), so
+        //
+        //   dFL/dz_k = alpha * (u_k - p_k * sum_j u_j),   u_j = t_j p_j f'(p_j).
+        //
+        // This used to be the one-hot special case, `(p - t)` times a factor
+        // of the true class's probability, which is a different function for
+        // soft targets: their gradient came back wrong while their loss was
+        // right.
         let p = self.softmax_predictions.detach();
         let t = self.targets.detach();
         let dtype = p.dtype();
         let device = p.device();
 
-        // True-class probability per sample: p_t = sum(p * onehot) over classes.
+        let u = focal_weighted_derivative(&t, &p, self.gamma)?;
         let class_dim = (p.ndim() - 1) as isize;
-        let pt = reduction::sum(&arithmetic::mul(&p, &t)?, Some(vec![class_dim]), true)?;
+        let total = reduction::sum(&u, Some(vec![class_dim]), true)?;
+        let alpha = create_scalar_tensor(self.alpha, dtype, device)?;
+        let mut base_grad =
+            arithmetic::mul(&arithmetic::sub(&u, &arithmetic::mul(&p, &total)?)?, &alpha)?;
 
-        let one = create_scalar_tensor(1.0, dtype, device)?;
-        let one_minus_pt = arithmetic::sub(&one, &pt)?;
-        let log_pt = crate::ops::activation::log(&pt)?;
-        let gamma_scalar = create_scalar_tensor(self.gamma, dtype, device)?;
-        // bracket = (1 - p_t) - gamma * p_t * ln(p_t)
-        let bracket = arithmetic::sub(
-            &one_minus_pt,
-            &arithmetic::mul(&arithmetic::mul(&gamma_scalar, &pt)?, &log_pt)?,
-        )?;
-        let modulating =
-            arithmetic::mul(&tensor_power(&one_minus_pt, self.gamma - 1.0)?, &bracket)?;
-        let alpha_tensor = create_scalar_tensor(self.alpha, dtype, device)?;
-        let weight = arithmetic::mul(&modulating, &alpha_tensor)?; // per-sample scalar
+        // The upstream gradient is a scalar after `"mean"` or `"sum"` and one
+        // value per sample after `"none"`, which spreads over that sample's
+        // classes.
+        let upstream = match self.reduction.as_str() {
+            "none" => grad_output.unsqueeze(-1)?,
+            "mean" => {
+                let num_classes = *self.predictions_shape.last().unwrap_or(&1);
+                let num_samples =
+                    (self.predictions_shape.iter().product::<usize>() / num_classes.max(1)) as f64;
+                base_grad = arithmetic::mul(
+                    &base_grad,
+                    &create_scalar_tensor(1.0 / num_samples, dtype, device)?,
+                )?;
+                grad_output.clone()
+            }
+            _ => grad_output.clone(),
+        };
 
-        let mut base_grad = arithmetic::mul(&arithmetic::sub(&p, &t)?, &weight)?;
-
-        if self.reduction == "mean" {
-            let num_classes = *self.predictions_shape.last().unwrap_or(&1);
-            let num_samples =
-                (self.predictions_shape.iter().product::<usize>() / num_classes.max(1)) as f64;
-            let scale = create_scalar_tensor(1.0 / num_samples, dtype, device)?;
-            base_grad = arithmetic::mul(&base_grad, &scale)?;
-        }
-
-        let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
+        let pred_grad = arithmetic::mul(&base_grad, &upstream)?;
         accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         Ok(gradients)
@@ -752,43 +755,54 @@ impl GradientFunction for FocalLossBackward {
         &self.input_ids
     }
 }
-/// Raise each tensor element to the given power
-fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
+/// `t * p * f'(p)` for the focal term `f(p) = -(1 - p)^gamma ln p`:
+///
+///   p f'(p) = -(1 - p)^gamma + gamma * p ln p * (1 - p)^(gamma - 1).
+///
+/// The second term tends to 0 as `p` tends to 1 (for `gamma > 0`) and to 0,
+/// and is taken as 0 at those ends rather than as the `0 * inf` a direct
+/// evaluation gives there. A class with no target mass contributes nothing.
+fn focal_weighted_derivative(targets: &Tensor, probs: &Tensor, gamma: f64) -> Result<Tensor> {
+    macro_rules! derivative_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let t = targets.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from focal targets")
             })?;
-            let output = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
+            let p = probs.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from focal probabilities")
             })?;
-            let exp = exponent as f32;
-            unary_map_into(output, input, move |v: f32| v.powf(exp));
-        }
-        DataType::Float64 => {
-            let input = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-            unary_map_into(output, input, move |v: f64| v.powf(exponent));
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Power operation only supported for floating point tensors",
-            ));
-        }
+            let gamma = gamma as $ty;
+            let values = binary_map(t, p, |t: $ty, p: $ty| {
+                if t == 0.0 {
+                    return 0.0;
+                }
+                let rest = 1.0 - p;
+                let bent = if gamma == 0.0 || p <= 0.0 || rest <= 0.0 {
+                    0.0
+                } else {
+                    gamma * p * p.ln() * rest.powf(gamma - 1.0)
+                };
+                t * (bent - rest.powf(gamma))
+            });
+            TensorData::from_vec::<$ty>(values, $dtype, probs.device())
+        }};
     }
 
+    let data = match probs.dtype() {
+        DataType::Float32 => derivative_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => derivative_for!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "focal_loss requires floating point tensors",
+            ));
+        }
+    };
     Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
+        Arc::new(data),
+        probs.shape().clone(),
+        probs.dtype(),
+        probs.device(),
         false,
     ))
 }

@@ -804,7 +804,16 @@ pub fn focal_loss(
         // samples (numel / num_classes), not the total element count.
         let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
         let n = (focal_values.numel() / num_classes) as f64;
-        let loss = reduce_detached(focal_values, reduction, n, None)?;
+        // `"none"` is one loss per sample, as for cross_entropy: the sum over
+        // classes. Returning the per-class terms instead made
+        // `focal_loss(.., "none").mean()` a `1 / num_classes` of
+        // `focal_loss(.., "mean")`.
+        let loss = if reduction == "none" {
+            let class_axis = (focal_values.ndim() - 1) as isize;
+            crate::ops::reduction::sum(&focal_values, Some(vec![class_axis]), false)?
+        } else {
+            reduce_detached(focal_values, reduction, n, None)?
+        };
         (loss, softmax_for_grad)
     };
 

@@ -1570,9 +1570,13 @@ def test_binary_cross_entropy_matches_its_definition(dtype, reduction):
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("gamma", [0.0, 0.5, 2.0])
 @pytest.mark.parametrize("soft", [False, True], ids=["indices", "soft"])
-def test_focal_loss_per_element_terms_match_their_definition(dtype, gamma, soft):
-    """alpha * (1 - p)^gamma * -(t * log p), per element, with classes that
-    carry no target mass contributing nothing."""
+def test_focal_loss_per_sample_values_match_their_definition(dtype, gamma, soft):
+    """The sum over classes of alpha * (1 - p)^gamma * -(t * log p), one value
+    per sample, with classes that carry no target mass contributing nothing.
+
+    `"none"` used to return the per-class terms themselves, so it did not have
+    the shape of the losses it reduces to: its mean was a `1 / num_classes` of
+    the `"mean"` loss."""
 
     rng = np.random.default_rng(8)
     logits = rng.standard_normal((6, 11)).astype(dtype)
@@ -1593,5 +1597,8 @@ def test_focal_loss_per_element_terms_match_their_definition(dtype, gamma, soft)
     got = F.focal_loss(
         mt.from_numpy(logits), target_arg, alpha=0.25, gamma=gamma, reduction="none"
     ).numpy()
-    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-7)
-    assert (got[targets == 0] == 0).all()
+    assert got.shape == (6,)
+    np.testing.assert_allclose(got, want.sum(axis=1), rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(
+        got, np.where(targets > 0, want, 0.0).sum(axis=1), rtol=1e-5, atol=1e-7
+    )

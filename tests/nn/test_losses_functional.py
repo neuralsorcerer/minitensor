@@ -220,3 +220,100 @@ def test_a_loss_class_and_its_function_agree(reduction):
         from_function = function(predictions, targets, reduction)
         assert tuple(from_class.shape) == tuple(from_function.shape)
         np.testing.assert_allclose(from_class.numpy(), from_function.numpy())
+
+
+# --- focal loss: one value per sample, and gradients for any targets --------
+
+_RNG = np.random.default_rng(23)
+_LOGITS = _RNG.standard_normal((3, 4))
+_LABELS = mt.from_numpy(np.array([0, 1, 2], np.int64))
+_SOFT = mt.Tensor(_RNG.dirichlet(np.ones(4), size=3), dtype="float64")
+_WEIGHTS = _RNG.standard_normal(3)
+
+
+def _central_difference(value, x, eps=1e-6):
+    grad = np.zeros_like(x)
+    for index in np.ndindex(x.shape):
+        up, down = x.copy(), x.copy()
+        up[index] += eps
+        down[index] -= eps
+        grad[index] = (value(up) - value(down)) / (2 * eps)
+    return grad
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.5, 2.0])
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+@pytest.mark.parametrize("targets", ["labels", "soft"])
+def test_focal_loss_gradient_matches_central_differences(targets, reduction, gamma):
+    """The backward was the one-hot special case -- `(p - t)` times a factor
+    of the true class's probability -- so soft targets got a gradient off by
+    8e-3 while their loss was right. And `"none"` returned per-class terms
+    whose gradient was only right when every class of a sample was weighted
+    alike; weighting samples differently put it off by 0.13."""
+    target = _LABELS if targets == "labels" else _SOFT
+
+    def loss(x, track=False):
+        logits = mt.Tensor(x, dtype="float64", requires_grad=track)
+        out = F.focal_loss(logits, target, 0.25, gamma, reduction)
+        if reduction == "none":
+            out = (out * mt.Tensor(_WEIGHTS, dtype="float64")).sum()
+        return logits, out
+
+    logits, out = loss(_LOGITS, track=True)
+    out.backward()
+    expected = _central_difference(lambda x: loss(x)[1].item(), _LOGITS)
+    np.testing.assert_allclose(logits.grad.numpy(), expected, atol=1e-8)
+
+
+# --- every loss: "none" is what "mean" and "sum" reduce ----------------------
+
+_T = lambda values: mt.Tensor(np.asarray(values), dtype="float64")  # noqa: E731
+_A, _B = _T(_RNG.standard_normal(5)), _T(_RNG.standard_normal(5))
+_P = _T(_RNG.uniform(0.05, 0.95, 5))
+_BITS = _T(_RNG.integers(0, 2, 5).astype(float))
+_SIGNS = _T(_RNG.choice([-1.0, 1.0], 5))
+_COUNTS = _T(_RNG.uniform(0.0, 3.0, 5))
+_SCORES = _T(_RNG.standard_normal((5, 4)))
+_CLASSES = mt.from_numpy(_RNG.integers(0, 4, 5).astype(np.int64))
+_DIST = _T(_RNG.dirichlet(np.ones(4), 5))
+_U, _V, _W = (_T(_RNG.standard_normal((5, 3))) for _ in range(3))
+
+REDUCIBLE = {
+    "mse_loss": lambda r: F.mse_loss(_A, _B, reduction=r),
+    "l1_loss": lambda r: F.l1_loss(_A, _B, reduction=r),
+    "huber_loss": lambda r: F.huber_loss(_A, _B, reduction=r),
+    "smooth_l1_loss": lambda r: F.smooth_l1_loss(_A, _B, reduction=r),
+    "log_cosh_loss": lambda r: F.log_cosh_loss(_A, _B, reduction=r),
+    "binary_cross_entropy": lambda r: F.binary_cross_entropy(_P, _BITS, reduction=r),
+    "cross_entropy": lambda r: F.cross_entropy(_SCORES, _CLASSES, reduction=r),
+    "cross_entropy soft": lambda r: F.cross_entropy(_SCORES, _DIST, reduction=r),
+    "nll_loss": lambda r: F.nll_loss(_SCORES, _CLASSES, reduction=r),
+    "kl_div": lambda r: F.kl_div(_SCORES, _DIST, reduction=r),
+    "focal_loss": lambda r: F.focal_loss(_SCORES, _CLASSES, reduction=r),
+    "focal_loss soft": lambda r: F.focal_loss(_SCORES, _DIST, reduction=r),
+    "soft_margin_loss": lambda r: F.soft_margin_loss(_A, _SIGNS, reduction=r),
+    "poisson_nll_loss": lambda r: F.poisson_nll_loss(_A, _COUNTS, reduction=r),
+    "hinge_embedding_loss": lambda r: F.hinge_embedding_loss(
+        _COUNTS, _SIGNS, reduction=r
+    ),
+    "margin_ranking_loss": lambda r: F.margin_ranking_loss(_A, _B, _SIGNS, reduction=r),
+    "cosine_embedding_loss": lambda r: F.cosine_embedding_loss(
+        _U, _V, _SIGNS, reduction=r
+    ),
+    "triplet_margin_loss": lambda r: F.triplet_margin_loss(_U, _V, _W, reduction=r),
+}
+
+
+@pytest.mark.parametrize("name", list(REDUCIBLE))
+def test_none_is_what_mean_and_sum_reduce(name):
+    """`focal_loss(.., "none")` returned one term per class, so its mean was
+    `1 / num_classes` of `focal_loss(.., "mean")`. Whatever `"none"` returns,
+    `"mean"` and `"sum"` have to be its mean and its sum."""
+    loss = REDUCIBLE[name]
+    per_item = loss("none")
+    assert np.isclose(per_item.mean().item(), loss("mean").item(), rtol=1e-12)
+    assert np.isclose(per_item.sum().item(), loss("sum").item(), rtol=1e-12)
+
+
+def test_focal_loss_none_has_one_value_per_sample():
+    assert tuple(F.focal_loss(_SCORES, _CLASSES, reduction="none").shape) == (5,)
