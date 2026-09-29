@@ -13,6 +13,38 @@ use crate::tensor::{DataType, Shape, Tensor, TensorData};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+/// Refuse an `eps` that is negative or not finite.
+///
+/// `eps` is added to a variance before its square root, so a negative one
+/// takes the root of a negative number wherever a feature varies less than it:
+/// `LayerNorm(eps=-1)` answered NaN for every input of small spread. NaN or
+/// infinity is never a stabilizer either. Zero is allowed; it asks for no
+/// stabilization, and a constant row then divides by zero, as asked.
+pub fn check_eps(op: &str, eps: f64) -> Result<()> {
+    if eps.is_finite() && eps >= 0.0 {
+        Ok(())
+    } else {
+        Err(MinitensorError::invalid_argument(format!(
+            "{op} requires eps to be finite and non-negative, got {eps}"
+        )))
+    }
+}
+
+/// Refuse a running-statistics `momentum` outside `[0, 1]`.
+///
+/// The running estimate is `(1 - momentum) * running + momentum * batch`, an
+/// average only while `momentum` is in `[0, 1]`: at 2 it doubles the batch's
+/// share and subtracts the history, and the estimate diverges.
+pub fn check_momentum(op: &str, momentum: f64) -> Result<()> {
+    if (0.0..=1.0).contains(&momentum) {
+        Ok(())
+    } else {
+        Err(MinitensorError::invalid_argument(format!(
+            "{op} requires momentum to lie in [0, 1], got {momentum}"
+        )))
+    }
+}
+
 fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
     let mut data = TensorData::zeros_on_device(1, dtype, device);
     match dtype {
@@ -78,6 +110,8 @@ pub fn batch_norm(
             "batch_norm expects input with at least 2 dimensions",
         ));
     }
+    check_eps("batch_norm", eps)?;
+    check_momentum("batch_norm", momentum)?;
 
     let num_features = input.size(1)?;
 
@@ -402,6 +436,7 @@ pub fn layer_norm(
             "layer_norm requires at least one normalized dimension".to_string(),
         ));
     }
+    check_eps("layer_norm", eps)?;
 
     if normalized_shape.len() > input.ndim() {
         return Err(MinitensorError::invalid_operation(
@@ -697,6 +732,7 @@ pub fn rms_norm(
             "rms_norm requires at least one normalized dimension".to_string(),
         ));
     }
+    check_eps("rms_norm", eps)?;
     if normalized_shape.len() > input.ndim() {
         return Err(MinitensorError::invalid_operation(
             "normalized_shape rank cannot exceed input rank for rms_norm".to_string(),

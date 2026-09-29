@@ -951,6 +951,21 @@ def _affine(
     return normalized
 
 
+def _check_norm_args(op: str, eps: float, momentum: float | None = None) -> None:
+    """The same checks the engine's normalizations make, under this op's name.
+
+    A negative `eps` takes the root of a negative variance wherever a group
+    varies less than it, and a `momentum` outside [0, 1] turns the running
+    average into a divergent sum.
+    """
+
+    eps = float(eps)
+    if not (_math.isfinite(eps) and eps >= 0.0):
+        raise ValueError(f"{op} requires eps to be finite and non-negative, got {eps}")
+    if momentum is not None and not (0.0 <= float(momentum) <= 1.0):
+        raise ValueError(f"{op} requires momentum to lie in [0, 1], got {momentum}")
+
+
 def _normalized_groups(op: str, tensor: Tensor, groups: int, eps: float) -> Tensor:
     """`tensor` with each group centred and scaled.
 
@@ -994,6 +1009,7 @@ def group_norm(
 
     `weight` and `bias` are one value per channel, not per group.
     """
+    _check_norm_args("group_norm", eps)
 
     tensor = _atleast_tensor(input)
     if tensor.ndim() < 2:
@@ -1031,6 +1047,7 @@ def instance_norm(
     the divisor that makes a good estimate of the population variance
     is not the one that makes this batch have unit variance.
     """
+    _check_norm_args("instance_norm", eps, momentum)
 
     tensor = _atleast_tensor(input)
     if tensor.ndim() < 3:

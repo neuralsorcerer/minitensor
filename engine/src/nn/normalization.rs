@@ -53,6 +53,8 @@ impl BatchNorm1d {
     ) -> Result<Self> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
+        crate::ops::normalization::check_eps("BatchNorm", eps)?;
+        crate::ops::normalization::check_momentum("BatchNorm", momentum)?;
 
         let param_shape = Shape::new(vec![num_features]);
 
@@ -262,6 +264,8 @@ impl BatchNorm2d {
     ) -> Result<Self> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
+        crate::ops::normalization::check_eps("BatchNorm", eps)?;
+        crate::ops::normalization::check_momentum("BatchNorm", momentum)?;
 
         let param_shape = Shape::new(vec![num_features]);
 
@@ -439,6 +443,9 @@ impl LayerNorm {
                 "LayerNorm requires normalized_shape to contain at least one dimension",
             ));
         }
+        if let Some(eps) = eps {
+            crate::ops::normalization::check_eps("LayerNorm", eps)?;
+        }
         if !dtype.is_float() {
             return Err(MinitensorError::invalid_argument(
                 "LayerNorm parameters must have a floating point dtype",
@@ -571,6 +578,9 @@ impl RMSNorm {
             return Err(MinitensorError::invalid_argument(
                 "RMSNorm requires normalized_shape to contain at least one dimension",
             ));
+        }
+        if let Some(eps) = eps {
+            crate::ops::normalization::check_eps("RMSNorm", eps)?;
         }
         if !dtype.is_float() {
             return Err(MinitensorError::invalid_argument(
