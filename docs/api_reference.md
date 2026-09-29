@@ -978,6 +978,15 @@ nothing to a backward pass.
 Python numeric protocol: tensors support `+`, `-`, `*`, `/`, `//`, `%`, `@`,
 `**`, unary `-`/`+`, `abs()`, `~` (bool/int only), the comparison operators,
 and the in-place forms (`+=`, `-=`, …), with scalars accepted on either side.
+`divmod`, `round(t)` and `round(t, n)` work elementwise.
+
+A one-element tensor also stands in for its value: `float(t)`, `int(t)` (exact
+for an integer tensor, truncating for a float one), `bool(t)`, and a format
+spec such as `f"{loss:.4f}"`. An integer or bool one is an index, so it can
+subscript a list or size a `range`. Iterating walks the first axis, each row
+keeping its place in the graph; a 0-d tensor refuses iteration as it refuses
+`len`. `t == x` with an `x` that cannot become a tensor -- `None`, a string --
+is `False` rather than an error, so a tensor can be searched for in a list.
 
 ```python
 import minitensor as mt

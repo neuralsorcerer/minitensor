@@ -8,12 +8,29 @@ use super::*;
 #[pymethods]
 impl PyTensor {
     // Comparison operators as Python dunder methods
-    fn __eq__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        self.eq_from_py(other)
+    /// Elementwise equality. A value that cannot become a tensor -- `None`,
+    /// a string, an arbitrary object -- is not a tensor's equal rather than
+    /// an error: `t == None` raised, which broke `t in [None, t]` and every
+    /// container search that compares against a sentinel.
+    fn __eq__(&self, py: Python<'_>, other: &Bound<PyAny>) -> PyResult<Py<PyAny>> {
+        match self.eq_from_py(other) {
+            Ok(result) => Ok(Py::new(py, result)?.into_any()),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+                Ok(py.NotImplemented())
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn __ne__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        self.ne_from_py(other)
+    /// Elementwise inequality; see `__eq__` for a value that is no tensor.
+    fn __ne__(&self, py: Python<'_>, other: &Bound<PyAny>) -> PyResult<Py<PyAny>> {
+        match self.ne_from_py(other) {
+            Ok(result) => Ok(Py::new(py, result)?.into_any()),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+                Ok(py.NotImplemented())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn __lt__(&self, other: &Bound<PyAny>) -> PyResult<Self> {

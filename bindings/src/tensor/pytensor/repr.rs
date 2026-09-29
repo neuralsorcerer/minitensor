@@ -14,7 +14,13 @@ impl PyTensor {
             self.inner.shape().dims(),
             self.dtype(),
             self.device(),
-            self.inner.requires_grad()
+            // Spelled the way Python spells a boolean, since this is read in
+            // Python: it used to print `false`.
+            if self.inner.requires_grad() {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 
@@ -42,7 +48,11 @@ impl PyTensor {
     fn __bool__(&self) -> PyResult<bool> {
         if self.inner.numel() != 1 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "The truth value of a tensor with more than one element is ambiguous",
+                if self.inner.numel() == 0 {
+                    "The truth value of an empty tensor is ambiguous"
+                } else {
+                    "The truth value of a tensor with more than one element is ambiguous"
+                },
             ));
         }
 
@@ -96,9 +106,92 @@ impl PyTensor {
         Ok(value)
     }
 
-    fn __int__(&self) -> PyResult<i64> {
+    /// The value as a Python int: exact for an integer tensor, truncated
+    /// toward zero for a float one, as `int()` truncates a float.
+    ///
+    /// Every dtype used to pass through an f64, so an int64 above 2^53 came
+    /// back rounded -- `int(t)` for 2^60 + 1 gave 2^60 -- and a float
+    /// outside the i64 range saturated instead of growing.
+    fn __int__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.scalar_as_i64()? {
+            return Ok(value.into_pyobject(py)?.into_any().unbind());
+        }
         let value = self.scalar_as_f64()?;
-        Ok(value as i64)
+        Ok(pyo3::types::PyFloat::new(py, value)
+            .call_method0("__int__")?
+            .unbind())
+    }
+
+    /// The value as an index: an integer or bool tensor of one element, so
+    /// it can subscript a list or size a `range`. A float tensor is refused,
+    /// as a float is.
+    fn __index__(&self) -> PyResult<i64> {
+        self.scalar_as_i64()?.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "only an integer tensor can be used as an index, not {}",
+                self.inner.dtype()
+            ))
+        })
+    }
+
+    /// Iterate over the first axis.
+    ///
+    /// Without this, iteration fell back to subscripting 0, 1, 2, ... until
+    /// an IndexError -- which a 0-d tensor raises at once, so
+    /// `for x in scalar` ran zero times rather than refusing, while `len`
+    /// refused.
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<TensorRows> {
+        let this = slf.borrow();
+        if this.inner.ndim() == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "iteration over a 0-d tensor",
+            ));
+        }
+        Ok(TensorRows {
+            tensor: slf.clone().into_any().unbind(),
+            next: 0,
+            len: this.inner.shape().dims()[0],
+        })
+    }
+
+    /// `round(t)` and `round(t, n)`: the elementwise rounding `round`
+    /// already gives, to `n` decimals.
+    #[pyo3(signature = (ndigits=None))]
+    fn __round__(&self, ndigits: Option<i32>) -> PyResult<Self> {
+        self.round(ndigits.unwrap_or(0))
+    }
+
+    /// `divmod(t, x)`: the pair `(t // x, t % x)`.
+    fn __divmod__<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(slf.py(), [slf.floor_div(other)?, slf.rem(other)?])
+    }
+
+    /// `divmod(x, t)`: the pair `(x // t, x % t)`.
+    fn __rdivmod__<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(slf.py(), [other.floor_div(slf)?, other.rem(slf)?])
+    }
+
+    /// Format a one-element tensor as its value, so `f"{loss:.4f}"` works;
+    /// any tensor formats with an empty spec, as `str` does.
+    fn __format__(slf: &Bound<'_, Self>, spec: &str) -> PyResult<String> {
+        if spec.is_empty() {
+            return Ok(slf.str()?.to_string());
+        }
+        if slf.borrow().inner.numel() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "a format spec ({spec:?}) applies to a one-element tensor, and this one has {} elements",
+                slf.borrow().inner.numel()
+            )));
+        }
+        slf.call_method0("item")?
+            .call_method1("__format__", (spec,))?
+            .extract()
     }
 
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
@@ -231,7 +324,50 @@ impl Assignment {
     }
 }
 
+/// A lazy iterator over a tensor's first axis, each row read with the same
+/// subscript `t[i]` a caller would write.
+#[pyclass(name = "TensorRows")]
+pub struct TensorRows {
+    tensor: Py<PyAny>,
+    next: usize,
+    len: usize,
+}
+
+#[pymethods]
+impl TensorRows {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        if self.next >= self.len {
+            return Ok(None);
+        }
+        let row = self.tensor.bind(py).get_item(self.next)?;
+        self.next += 1;
+        Ok(Some(row.unbind()))
+    }
+}
+
 impl PyTensor {
+    /// The value of a one-element integer or bool tensor, exactly; `None`
+    /// for a float one. Mirrors `__bool__`'s single-element requirement.
+    fn scalar_as_i64(&self) -> PyResult<Option<i64>> {
+        if self.inner.numel() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "only one element tensors can be converted to Python scalars",
+            ));
+        }
+        let err =
+            || PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to access tensor data");
+        Ok(match self.inner.dtype() {
+            DataType::Int32 => Some(self.inner.data().as_i32_slice().ok_or_else(err)?[0] as i64),
+            DataType::Int64 => Some(self.inner.data().as_i64_slice().ok_or_else(err)?[0]),
+            DataType::Bool => Some(self.inner.data().as_bool_slice().ok_or_else(err)?[0] as i64),
+            DataType::Float32 | DataType::Float64 => None,
+        })
+    }
+
     /// Extract the value of a one-element tensor as f64 for `__float__` /
     /// `__int__`. Mirrors `__bool__`'s single-element requirement.
     fn scalar_as_f64(&self) -> PyResult<f64> {
