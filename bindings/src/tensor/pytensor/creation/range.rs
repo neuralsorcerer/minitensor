@@ -147,19 +147,30 @@ fn arange_exact_int(
     dtype: DataType,
     device: Device,
 ) -> PyResult<Option<Tensor>> {
-    let Some(first) = exact_python_int(start) else {
+    // A Python int past int64 has no integer-dtype answer; through a float it
+    // saturated to the dtype's bound.
+    let exact = |value: &Bound<PyAny>| -> PyResult<Option<i64>> {
+        match exact_python_int(value) {
+            Some(value) => Ok(Some(value)),
+            None if dtype.is_int() && value.is_instance_of::<pyo3::types::PyInt>() => {
+                Err(does_not_fit(value.str()?, dtype))
+            }
+            None => Ok(None),
+        }
+    };
+    let Some(first) = exact(start)? else {
         return Ok(None);
     };
     let (start, end) = match end {
         None => (0, first),
-        Some(value) => match exact_python_int(value) {
+        Some(value) => match exact(value)? {
             Some(end) => (first, end),
             None => return Ok(None),
         },
     };
     let step = match step {
         None => 1,
-        Some(value) => match exact_python_int(value) {
+        Some(value) => match exact(value)? {
             Some(step) => step,
             None => return Ok(None),
         },
@@ -189,11 +200,7 @@ fn arange_exact_int(
         let last = start as i128 + (count as i128 - 1) * step_wide;
         for value in [start as i128, last] {
             if i32::try_from(value).is_err() {
-                return Err(pyo3::exceptions::PyOverflowError::new_err(format!(
-                    "{value} does not fit in int32 (range {} to {})",
-                    i32::MIN,
-                    i32::MAX
-                )));
+                return Err(does_not_fit(value, dtype));
             }
         }
     }

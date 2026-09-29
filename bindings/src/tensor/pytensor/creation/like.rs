@@ -218,7 +218,7 @@ impl PyTensor {
         let asked = requires_grad.unwrap_or(false);
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = reference.shape_vec();
-        if !dtype.is_float() && exact_python_int(fill_value).is_some() {
+        if !dtype.is_float() && is_integer_value(fill_value) {
             let mut tensor = Tensor::zeros(Shape::new(shape), dtype, device, false);
             fill_from_python(&mut tensor, fill_value)?;
             return Self::created(tensor, asked);
@@ -512,7 +512,7 @@ impl PyTensor {
 
         let dims = parse_shape_like(shape, "shape")?;
         reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
-        if !dtype.is_float() && exact_python_int(fill_value).is_some() {
+        if !dtype.is_float() && is_integer_value(fill_value) {
             let mut tensor = Tensor::zeros(Shape::new(dims), dtype, device, false);
             fill_from_python(&mut tensor, fill_value)?;
             return Self::created(tensor, asked);

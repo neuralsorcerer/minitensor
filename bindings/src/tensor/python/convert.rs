@@ -125,7 +125,12 @@ fn build_tensor_from_python(
             return Ok(tensor);
         }
 
-        let (shape, flat_data) = flatten_python_data(list)?;
+        let (shape, flat_data, oversized) = flatten_python_data(list)?;
+        if let Some(value) = oversized
+            && dtype.is_int()
+        {
+            return Err(does_not_fit(value, dtype));
+        }
         let (base_tensor, _) = tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
         return python_ints_as(base_tensor, dtype);
     }
@@ -180,6 +185,13 @@ fn build_tensor_from_python(
         let base_data = Arc::new(TensorData::from_vec_i64(vec![value_int], device));
         let tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
         return python_ints_as(tensor, dtype);
+    }
+
+    // An int that reached here is past int64. It can still be a float, but an
+    // integer dtype cannot hold it, and converting through a float saturated
+    // it to the dtype's bound.
+    if dtype.is_int() && data.is_instance_of::<PyInt>() {
+        return Err(does_not_fit(data.str()?, dtype));
     }
 
     if is_float && let Ok(value_float) = data.extract::<f64>() {
@@ -615,7 +627,12 @@ pub(crate) fn prepare_binary_operands_from_py(
     ))
 }
 
-fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<ScalarValue>)> {
+/// The shape and values of a nested sequence, and the first int in it too
+/// large for int64 -- read as the float it rounds to, which only a float
+/// dtype can hold.
+fn flatten_python_data(
+    list: &Bound<PyList>,
+) -> PyResult<(Vec<usize>, Vec<ScalarValue>, Option<String>)> {
     let mut shape = vec![list.len()];
     let mut flat_data = vec![];
 
@@ -634,6 +651,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
         shape: &mut Vec<usize>,
         flat_data: &mut Vec<ScalarValue>,
         leaf_depth: &mut Option<usize>,
+        oversized: &mut Option<String>,
     ) -> PyResult<()> {
         if depth > MAX_NESTING {
             return Err(too_deeply_nested());
@@ -658,7 +676,14 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
                 ));
             }
             for nested_item in nested_list.iter() {
-                process_nested(&nested_item, depth + 1, shape, flat_data, leaf_depth)?;
+                process_nested(
+                    &nested_item,
+                    depth + 1,
+                    shape,
+                    flat_data,
+                    leaf_depth,
+                    oversized,
+                )?;
             }
             return Ok(());
         }
@@ -674,7 +699,14 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
                 ));
             }
             for nested_item in list.iter() {
-                process_nested(&nested_item, depth + 1, shape, flat_data, leaf_depth)?;
+                process_nested(
+                    &nested_item,
+                    depth + 1,
+                    shape,
+                    flat_data,
+                    leaf_depth,
+                    oversized,
+                )?;
             }
             return Ok(());
         }
@@ -686,6 +718,14 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
 
         if let Ok(value_int) = item.extract::<i64>() {
             flat_data.push(ScalarValue::Int(value_int));
+            return Ok(());
+        }
+
+        if item.is_instance_of::<PyInt>() {
+            flat_data.push(ScalarValue::Float(item.extract::<f64>()?));
+            if oversized.is_none() {
+                *oversized = Some(item.str()?.to_string());
+            }
             return Ok(());
         }
 
@@ -724,11 +764,19 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
     }
 
     let mut leaf_depth = None;
+    let mut oversized = None;
     for item in list.iter() {
-        process_nested(&item, 1, &mut shape, &mut flat_data, &mut leaf_depth)?;
+        process_nested(
+            &item,
+            1,
+            &mut shape,
+            &mut flat_data,
+            &mut leaf_depth,
+            &mut oversized,
+        )?;
     }
 
-    Ok((shape, flat_data))
+    Ok((shape, flat_data, oversized))
 }
 
 #[derive(Clone, Copy)]
@@ -1740,13 +1788,21 @@ fn python_ints_as(tensor: Tensor, dtype: DataType) -> PyResult<Tensor> {
         && let Some(values) = tensor.data().as_i64_slice()
         && let Some(value) = values.iter().find(|&&v| i32::try_from(v).is_err())
     {
-        return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
-            "{value} does not fit in int32 (range {} to {})",
-            i32::MIN,
-            i32::MAX
-        )));
+        return Err(does_not_fit(value, DataType::Int32));
     }
     tensor.astype(dtype).map_err(_convert_error)
+}
+
+/// The error for a Python int outside the range of the integer `dtype` it
+/// was given.
+pub(crate) fn does_not_fit(value: impl std::fmt::Display, dtype: DataType) -> PyErr {
+    let (name, low, high) = match dtype {
+        DataType::Int32 => ("int32", i64::from(i32::MIN), i64::from(i32::MAX)),
+        _ => ("int64", i64::MIN, i64::MAX),
+    };
+    PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+        "{value} does not fit in {name} (range {low} to {high})"
+    ))
 }
 
 /// The supported dtype a NumPy dtype widens to, if any.

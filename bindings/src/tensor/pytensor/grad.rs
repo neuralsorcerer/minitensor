@@ -113,7 +113,7 @@ impl PyTensor {
         mut slf: PyRefMut<'py, Self>,
         value: &Bound<PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        if !slf.inner.dtype().is_float() && exact_python_int(value).is_some() {
+        if !slf.inner.dtype().is_float() && is_integer_value(value) {
             fill_from_python(&mut slf.inner, value)?;
         } else {
             let fill_value = extract_real_scalar(value, "value")?;

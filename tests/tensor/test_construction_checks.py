@@ -9,7 +9,8 @@
 A scalar beside a sequence at the same level broke neither length check, so
 `[[1, 2], 3]` became a shape [2, 2] tensor over three values. A Python int
 has no width of its own and takes the dtype it is given; one that does not
-fit int32 kept its low 32 bits, so 2**40 became 0.
+fit int32 kept its low 32 bits, so 2**40 became 0, and one past int64 was
+read as a float and saturated to the int64 bound. A float dtype holds either.
 """
 
 from __future__ import annotations
@@ -79,3 +80,33 @@ def test_an_int64_array_converts_as_a_cast():
     # An array carries a dtype of its own, so asking for another is a cast.
     wrapped = np.array([BIG + 5]).astype(np.int32)
     assert mt.tensor(np.array([BIG + 5]), dtype="int32").tolist() == wrapped.tolist()
+
+
+HUGE = 2**70
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: mt.tensor(HUGE, dtype="int64"),
+        lambda: mt.tensor([1, HUGE], dtype="int64"),
+        lambda: mt.full((1,), HUGE, dtype="int64"),
+        lambda: mt.full_like(mt.zeros(1, dtype="int64"), HUGE),
+        lambda: mt.zeros(1, dtype="int64").fill_(-HUGE),
+        lambda: mt.zeros(1, dtype="int64") - HUGE,
+        lambda: mt.arange(HUGE, HUGE + 3, dtype="int64"),
+    ],
+    ids=["scalar", "list", "full", "full_like", "fill_", "sub", "arange"],
+)
+def test_a_python_int_outside_int64_is_refused(build):
+    with pytest.raises(OverflowError, match="does not fit in int64"):
+        build()
+
+
+def test_a_float_dtype_holds_a_python_int_past_int64():
+    expected = float(HUGE)
+    assert mt.tensor(HUGE, dtype="float64").item() == expected
+    assert mt.tensor([1, HUGE], dtype="float64").tolist() == [1.0, expected]
+    assert mt.tensor([[1], [HUGE]]).dtype == mt.tensor(HUGE).dtype
+    assert mt.full((1,), HUGE, dtype="float64").tolist() == [expected]
+    assert (mt.zeros(1, dtype="float64") + HUGE).tolist() == [expected]

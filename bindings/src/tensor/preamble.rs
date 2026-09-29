@@ -191,6 +191,13 @@ pub(crate) fn exact_python_int(value: &Bound<PyAny>) -> Option<i64> {
     value.extract::<i64>().ok()
 }
 
+/// Whether `value` is an integer an integer-dtype path should take exactly:
+/// one [`exact_python_int`] reads, or a Python int too large for int64, which
+/// those paths refuse rather than round through a float to the dtype's bound.
+pub(crate) fn is_integer_value(value: &Bound<PyAny>) -> bool {
+    exact_python_int(value).is_some() || value.is_instance_of::<pyo3::types::PyInt>()
+}
+
 /// Set every element of `tensor` to `value`, converted to its dtype the way
 /// an assignment converts one -- exactly, for a Python int into an integer
 /// tensor.
