@@ -23,7 +23,7 @@ use crate::{
         selection::where_op,
         util::create_scalar_tensor,
     },
-    tensor::{Shape, Tensor},
+    tensor::{DataType, Shape, Tensor},
 };
 
 /// A scalar of the same dtype and device as `like`, ready to broadcast.
@@ -282,6 +282,8 @@ pub fn poisson_nll_loss(
         )));
     }
 
+    ensure_counts(target)?;
+
     let mut values = if log_input {
         // exp(input) - target * input
         sub(&crate::ops::activation::exp(input)?, &mul(target, input)?)?
@@ -299,6 +301,33 @@ pub fn poisson_nll_loss(
     }
 
     reduce_loss(values, reduction)
+}
+
+/// Refuse a negative Poisson target.
+///
+/// A count below zero has no likelihood, yet the loss is finite there -- the
+/// log-rate form is linear in `target` -- so it trained toward an optimum that
+/// means nothing. A NaN passes through, as it does in every loss.
+fn ensure_counts(target: &Tensor) -> Result<()> {
+    let target = target.contiguous()?;
+    let negative = match target.dtype() {
+        DataType::Float32 => target
+            .data()
+            .as_f32_slice()
+            .is_some_and(|values| values.iter().any(|&v| v < 0.0)),
+        DataType::Float64 => target
+            .data()
+            .as_f64_slice()
+            .is_some_and(|values| values.iter().any(|&v| v < 0.0)),
+        _ => false,
+    };
+    if negative {
+        Err(MinitensorError::invalid_argument(
+            "poisson_nll_loss requires every target to be a count, at least 0",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// `target * log(target) - target + 0.5 * log(2 pi target)`, and zero where
@@ -562,6 +591,7 @@ mod tests {
         let other = tensor(vec![0.5, 0.2, -1.1, 0.4], vec![2, 2]);
         let target = tensor(vec![1.0, -1.0], vec![2]);
         let flat_target = tensor(vec![1.0, -1.0, 1.0, -1.0], vec![2, 2]);
+        let counts = tensor(vec![0.0, 2.0, 1.0, 3.0], vec![2, 2]);
 
         /// One loss under test: its name, and the call with every operand but
         /// the one being differentiated already bound.
@@ -592,7 +622,7 @@ mod tests {
             ),
             (
                 "poisson",
-                Box::new(|t: &Tensor| poisson_nll_loss(t, &other, true, false, 0.0, "sum")),
+                Box::new(|t: &Tensor| poisson_nll_loss(t, &counts, true, false, 0.0, "sum")),
             ),
         ];
 

@@ -199,6 +199,17 @@ def test_poisson_nll_loss_matches_the_definition(log_input):
     np.testing.assert_allclose(got, expected, rtol=1e-13)
 
 
+@pytest.mark.parametrize("log_input", [True, False])
+def test_poisson_nll_loss_refuses_a_negative_count(log_input):
+    with pytest.raises(ValueError, match="count, at least 0"):
+        F.poisson_nll_loss(
+            _tensor([0.5, 1.0]), _tensor([-1.0, 2.0]), log_input=log_input
+        )
+    # A NaN target is not refused; it propagates.
+    got = F.poisson_nll_loss(_tensor([0.5]), _tensor([float("nan")]))
+    assert np.isnan(got.item())
+
+
 def test_the_poisson_stirling_term_matches_the_log_factorial():
     counts = np.array([0.0, 1.0, 2.0, 5.0])
     rate = np.zeros_like(counts)
