@@ -129,6 +129,17 @@ def multinomial(input: object, num_samples: int, replacement: bool = False) -> T
     totals = _F.sum(rows, [1], True)
     if _F.amin(totals).item() <= 0.0:
         raise ValueError("multinomial requires each row of weights to sum above zero")
+    if not replacement:
+        # A category of weight zero is never drawn, so a row has only as many
+        # distinct draws in it as it has weights above zero. Asked for more,
+        # the sort below used to hand back zero-weight categories to make up
+        # the count.
+        drawable = int(_F.amin(_F.count_nonzero(rows, 1)).item())
+        if count > drawable:
+            raise ValueError(
+                f"multinomial cannot draw {count} categories without replacement "
+                f"from a row with only {drawable} of nonzero weight"
+            )
     probabilities = rows / totals
 
     if replacement:
@@ -136,9 +147,13 @@ def multinomial(input: object, num_samples: int, replacement: bool = False) -> T
         # index it selects, which is the inverse-transform definition.
         cumulative = _F.cumsum(probabilities, 1)
         draws = _C.Tensor.rand(rows.shape[0], count, dtype=str(rows.dtype))
+        # Searching from the right takes the first category whose cumulative
+        # sum exceeds the draw, and a category of weight zero adds nothing, so
+        # it is never that one. Searching from the left, a draw of exactly 0
+        # landed on a leading category of weight zero.
         picked = _stack_rows(
             [
-                _F.searchsorted(_row(cumulative, r), _row(draws, r))
+                _F.searchsorted(_row(cumulative, r), _row(draws, r), right=True)
                 for r in range(rows.shape[0])
             ]
         )
@@ -149,9 +164,12 @@ def multinomial(input: object, num_samples: int, replacement: bool = False) -> T
         # Gumbel top-k: the largest `k` of `log(w) + Gumbel(0, 1)` are exactly
         # a weighted sample without replacement, which is why no removal loop
         # is needed.
+        # A weight of zero has a key of exactly -inf, below every drawable
+        # one: offset by a small epsilon instead, it could outrank a weight
+        # small enough, and the count check above would not be the whole guard.
         eps = 1e-20
         uniform = _C.Tensor.rand_like(probabilities)
-        keys = _F.log(probabilities + eps) - _F.log(-_F.log(uniform + eps) + eps)
+        keys = _F.log(probabilities) - _F.log(-_F.log(uniform + eps) + eps)
         picked = _F.topk(keys, count, 1, True, True)[1]
 
     return picked.reshape(-1) if flat else picked

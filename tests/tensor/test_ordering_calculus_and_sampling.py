@@ -455,3 +455,29 @@ def test_multinomial_reports_what_it_cannot_do():
         mt.multinomial(_t([0.0, 0.0]), 1, True)
     with pytest.raises(ValueError, match="1-D or 2-D"):
         mt.multinomial(_t(GRID), 1, True)
+
+
+def test_multinomial_never_draws_a_category_of_weight_zero():
+    """A zero weight has probability zero, with replacement or without.
+
+    Without replacement, asking for more categories than a row has of nonzero
+    weight used to be answered by filling up with zero-weight ones, so it is
+    refused now; up to that count, the zero weights stay out even beside a
+    weight too small to show in a sum. With replacement, a draw of exactly 0
+    landed on a leading zero weight."""
+    with pytest.raises(ValueError, match="only 2 of nonzero weight"):
+        mt.multinomial(_t([1.0, 0.0, 1.0]), 3, False)
+    with pytest.raises(ValueError, match="only 1 of nonzero weight"):
+        mt.multinomial(_t([[1.0, 1.0], [0.0, 1.0]]), 2, False)
+
+    mt.manual_seed(0)
+    for _ in range(300):
+        assert sorted(mt.multinomial(_t([1.0, 0.0, 1.0]), 2, False).tolist()) == [0, 2]
+        assert sorted(mt.multinomial(_t([1e-300, 0.0, 1.0]), 2, False).tolist()) == [
+            0,
+            2,
+        ]
+    drawn = np.concatenate(
+        [mt.multinomial(_t([0.0, 1.0, 0.0, 2.0]), 50, True).numpy() for _ in range(200)]
+    )
+    assert set(drawn.tolist()) == {1, 3}
