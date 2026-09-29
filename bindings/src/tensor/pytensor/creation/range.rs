@@ -182,21 +182,9 @@ fn arange_exact_int(
         ))
     })?;
     reject_unallocatable(count, dtype, "arange")?;
-    let values: Vec<i64> = (0..count as i64)
-        .map(|i| start.wrapping_add(i.wrapping_mul(step)))
-        .collect();
-    let data = match dtype {
-        DataType::Int64 => TensorData::from_vec(values, dtype, device),
-        DataType::Int32 => {
-            let narrowed: Vec<i32> = values.iter().map(|&v| v as i32).collect();
-            TensorData::from_vec(narrowed, dtype, device)
-        }
-        DataType::Bool => {
-            let truth: Vec<bool> = values.iter().map(|&v| v != 0).collect();
-            TensorData::from_vec(truth, dtype, device)
-        }
-        _ => return Ok(None),
-    };
+    let data = TensorData::from_index_i64(count, dtype, device, |index| {
+        start.wrapping_add((index as i64).wrapping_mul(step))
+    });
     Ok(Some(Tensor::new(
         Arc::new(data),
         Shape::new(vec![count]),

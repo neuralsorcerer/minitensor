@@ -620,6 +620,44 @@ impl TensorData {
         }
     }
 
+    /// [`Self::from_index`] for values that are integers, computed exactly.
+    ///
+    /// `from_index` produces each value as an f64, which holds every integer
+    /// only up to 2^53; an integer range past that needs its values made as
+    /// integers, and filled with the same parallel fill.
+    pub fn from_index_i64<F>(numel: usize, dtype: DataType, device: Device, value: F) -> Self
+    where
+        F: Fn(usize) -> i64 + Sync,
+    {
+        macro_rules! build {
+            ($ty:ty, $convert:expr) => {{
+                // SAFETY: the chunks tile the buffer and each writes every one
+                // of its elements, so all `numel` are initialized.
+                let data: Vec<$ty> = unsafe {
+                    crate::ops::map::build_vec::<$ty, _>(numel, |spare| {
+                        crate::ops::map::par_out_chunks(
+                            spare,
+                            crate::ops::map::PAR_CHUNK,
+                            &|first, chunk| {
+                                for (offset, slot) in chunk.iter_mut().enumerate() {
+                                    slot.write($convert(value(first + offset)));
+                                }
+                            },
+                        );
+                    })
+                };
+                Self::from_vec(data, dtype, device)
+            }};
+        }
+        match dtype {
+            DataType::Float32 => build!(f32, |v: i64| v as f32),
+            DataType::Float64 => build!(f64, |v: i64| v as f64),
+            DataType::Int32 => build!(i32, |v: i64| v as i32),
+            DataType::Int64 => build!(i64, |v: i64| v),
+            DataType::Bool => build!(bool, |v: i64| v != 0),
+        }
+    }
+
     /// Create new tensor data with ones on specified device
     #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
