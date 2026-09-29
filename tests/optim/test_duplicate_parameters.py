@@ -67,3 +67,16 @@ def test_one_step_moves_a_parameter_by_its_learning_rate_once():
     (weight * 2.0).sum().backward()
     optimizer.step()
     assert weight.numpy().tolist() == pytest.approx([0.8])
+
+
+@pytest.mark.parametrize("make", OPTIMIZERS, ids=lambda cls: cls.__name__)
+def test_a_single_tensor_is_one_parameter(make):
+    """Iterated like a list, a tensor gave its elements, each a new tensor that
+    nothing reads: the optimizer was built, stepped, and never moved it."""
+    weight = mt.Tensor([1.0, 2.0], requires_grad=True)
+    optimizer = make(weight, lr=0.1)
+    before = weight.tolist()
+
+    (weight * weight).sum().backward()
+    optimizer.step()
+    assert weight.tolist() != before

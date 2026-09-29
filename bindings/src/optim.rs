@@ -16,7 +16,7 @@ use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
+use pyo3::types::{PyAny, PyModule as Pyo3Module};
 
 /// Base class for optimizers.
 ///
@@ -346,12 +346,11 @@ fn borrow_tensor_mut<'py>(
 }
 
 fn collect_parameters(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
-    let iterator = PyIterator::from_object(parameters)?;
+    let items = crate::grad_utils::parameter_items(parameters)?;
     let mut collected: Vec<Py<PyAny>> = Vec::new();
     let mut first_seen = std::collections::HashMap::new();
 
-    for (index, item) in iterator.enumerate() {
-        let value = item?;
+    for (index, value) in items.into_iter().enumerate() {
         // Only a float tensor can have a gradient, so any other would never
         // be stepped -- refused here, by position, rather than skipped in
         // silence at every step.

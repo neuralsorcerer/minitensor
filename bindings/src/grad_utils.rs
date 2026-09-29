@@ -22,24 +22,31 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
 
-/// Collect an iterable of tensors, accepting the `_tensor`-wrapping objects the
-/// rest of the API accepts. Unlike the optimizer's version an empty sequence is
-/// fine: clipping nothing is a no-op, not a mistake.
+/// The tensors a `parameters` argument names: a single tensor is one, and
+/// anything else is iterated.
 ///
-/// A single tensor is one parameter. Iterated like a sequence, it gave its
-/// elements -- none of which holds a gradient -- so clipping one tensor's
-/// gradient left it untouched and reported a norm of zero.
-fn collect(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+/// Iterated like a sequence, a tensor gives its elements -- none of which holds
+/// a gradient or is held by anything -- so clipping one tensor's gradient left
+/// it untouched, and an optimizer given one tensor stepped nothing.
+pub(crate) fn parameter_items<'py>(
+    parameters: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
     if parameters.is_instance_of::<PyTensor>()
         || parameters.hasattr(intern!(parameters.py(), "_tensor"))?
     {
-        return Ok(vec![parameters.clone().unbind()]);
+        return Ok(vec![parameters.clone()]);
     }
-    let mut collected = Vec::new();
-    for item in PyIterator::from_object(parameters)? {
-        collected.push(item?.unbind());
-    }
-    Ok(collected)
+    PyIterator::from_object(parameters)?.collect()
+}
+
+/// Collect the parameters, accepting the `_tensor`-wrapping objects the rest
+/// of the API accepts. Unlike the optimizer's version an empty sequence is
+/// fine: clipping nothing is a no-op, not a mistake.
+fn collect(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    Ok(parameter_items(parameters)?
+        .into_iter()
+        .map(Bound::unbind)
+        .collect())
 }
 
 fn borrow_mut<'py>(py: Python<'py>, value: &'py Py<PyAny>) -> PyResult<PyRefMut<'py, PyTensor>> {
