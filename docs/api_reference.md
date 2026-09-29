@@ -70,8 +70,8 @@ of convenience aliases.
 | `clear_autograd_graph()` | Clear the global autograd graph, releasing every stored gradient — leaves included, so not for use between the backward passes of one accumulation. Training and backpropagating loops stay bounded without it; see below. |
 | `is_autograd_graph_consumed()` | Inspect whether a graph has been consumed. |
 | `mark_autograd_graph_consumed()` | Mark the current graph as consumed. |
-| `no_grad()` | Context manager: disable gradient recording (results are detached leaves; nothing is saved for backward). |
-| `enable_grad()` | Context manager: re-enable gradient recording inside a `no_grad()` block. |
+| `no_grad()` | Context manager: disable gradient recording (results are detached leaves; nothing is saved for backward). Also a decorator: `@mt.no_grad()` runs every call of the function without recording. |
+| `enable_grad()` | Context manager or decorator: re-enable gradient recording inside a `no_grad()` block. |
 | `is_grad_enabled()` | Query the thread-local gradient recording mode. |
 | `set_grad_enabled(enabled)` | Set the gradient recording mode, returning the previous mode. |
 | `available_submodules()` | Return availability of optional submodules. |

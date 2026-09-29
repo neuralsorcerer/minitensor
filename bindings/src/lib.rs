@@ -134,28 +134,81 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 }
 
 /// Context manager that sets the thread-local autograd recording mode on
-/// entry and restores the previous mode on exit. Re-entrant: each `with`
-/// block restores whatever mode was active when it was entered.
+/// entry and restores the previous mode on exit, and a decorator that runs a
+/// function in that mode: `@mt.no_grad()`.
+///
+/// The modes to restore are a stack, not one slot. One object entered twice
+/// -- `ng = mt.no_grad()` used by nested blocks, or by a function that
+/// recurses -- overwrote the mode its outer entry had saved, and the outer
+/// exit found nothing to restore: recording stayed off for the rest of the
+/// thread, with no error anywhere.
 #[pyclass(name = "GradMode")]
 struct GradMode {
     target: bool,
-    previous: Option<bool>,
+    previous: Vec<bool>,
 }
+
+/// Wraps a function so every call runs inside a fresh `GradMode`, keeping
+/// the function's name, docstring and signature and binding as a method
+/// does. Written in Python because `functools.wraps` is what does all three.
+const DECORATE: &std::ffi::CStr = c"
+import functools
+
+def decorate(mode, enabled, func):
+    @functools.wraps(func)
+    def run(*args, **kwargs):
+        with mode(enabled):
+            return func(*args, **kwargs)
+    return run
+";
 
 #[pymethods]
 impl GradMode {
+    #[new]
+    fn new(enabled: bool) -> Self {
+        Self {
+            target: enabled,
+            previous: Vec::new(),
+        }
+    }
+
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         let prev = engine::autograd::set_grad_enabled(slf.target);
-        slf.previous = Some(prev);
+        slf.previous.push(prev);
         slf
     }
 
     #[pyo3(signature = (*_args))]
     fn __exit__(&mut self, _args: &Bound<'_, pyo3::types::PyTuple>) -> bool {
-        if let Some(prev) = self.previous.take() {
+        if let Some(prev) = self.previous.pop() {
             engine::autograd::set_grad_enabled(prev);
         }
         false
+    }
+
+    /// `func`, run in this mode on every call.
+    fn __call__(slf: &Bound<'_, Self>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        if !func.is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "a grad mode decorates a function; use it in a `with` block otherwise",
+            ));
+        }
+        static DECORATOR: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+        let decorate = DECORATOR.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            let module = pyo3::types::PyModule::from_code(
+                py,
+                DECORATE,
+                c"minitensor_grad_mode.py",
+                c"minitensor_grad_mode",
+            )?;
+            Ok(module.getattr("decorate")?.unbind())
+        })?;
+        let target = slf.borrow().target;
+        Ok(decorate
+            .bind(py)
+            .call1((slf.get_type(), target, func))?
+            .unbind())
     }
 }
 
@@ -166,19 +219,13 @@ impl GradMode {
 /// still opt in explicitly via `requires_grad_(True)`.
 #[pyfunction]
 fn no_grad() -> GradMode {
-    GradMode {
-        target: false,
-        previous: None,
-    }
+    GradMode::new(false)
 }
 
 /// Return a context manager that re-enables gradient recording, e.g. inside an outer `no_grad()` block.
 #[pyfunction]
 fn enable_grad() -> GradMode {
-    GradMode {
-        target: true,
-        previous: None,
-    }
+    GradMode::new(true)
 }
 
 /// Query whether gradient recording is currently enabled on this thread.

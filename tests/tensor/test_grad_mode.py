@@ -112,3 +112,78 @@ class TestPerTensorZeroGrad:
         assert mt.get_gradient(b) is not None
 
         mt.clear_autograd_graph()
+
+
+class TestGradModeObjects:
+    """A grad mode object can be entered more than once and used as a
+    decorator."""
+
+    def test_one_object_entered_twice_restores_the_mode(self):
+        """Each object kept one saved mode, so the inner entry overwrote the
+        outer one's and the outer exit restored nothing: recording stayed off
+        for the rest of the thread."""
+        guard = mt.no_grad()
+        with guard:
+            with guard:
+                assert not mt.is_grad_enabled()
+            assert not mt.is_grad_enabled()
+        assert mt.is_grad_enabled()
+
+    def test_no_grad_decorates_a_function(self):
+        x = mt.Tensor([1.0, 2.0], requires_grad=True)
+
+        @mt.no_grad()
+        def predict(t):
+            """Scaled."""
+            return t * 2
+
+        assert not predict(x).requires_grad
+        assert mt.is_grad_enabled()
+        assert predict.__name__ == "predict"
+        assert predict.__doc__ == "Scaled."
+
+    def test_a_decorated_method_binds_self(self):
+        x = mt.Tensor([1.0], requires_grad=True)
+
+        class Model:
+            factor = 3.0
+
+            @mt.no_grad()
+            def run(self, t):
+                return t * self.factor
+
+        assert not Model().run(x).requires_grad
+
+    def test_the_mode_is_restored_after_an_exception(self):
+        @mt.no_grad()
+        def fail():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            fail()
+        assert mt.is_grad_enabled()
+
+    def test_a_decorated_function_can_recurse(self):
+        x = mt.Tensor([1.0], requires_grad=True)
+
+        @mt.no_grad()
+        def depth(n):
+            return x * 1.0 if n == 0 else depth(n - 1)
+
+        assert not depth(4).requires_grad
+        assert mt.is_grad_enabled()
+
+    def test_enable_grad_decorates_inside_no_grad(self):
+        x = mt.Tensor([1.0], requires_grad=True)
+
+        @mt.enable_grad()
+        def tracked(t):
+            return t * 2
+
+        with mt.no_grad():
+            assert tracked(x).requires_grad
+            assert not mt.is_grad_enabled()
+
+    def test_decorating_something_not_callable_is_refused(self):
+        with pytest.raises(TypeError, match="decorates a function"):
+            mt.no_grad()(5)
