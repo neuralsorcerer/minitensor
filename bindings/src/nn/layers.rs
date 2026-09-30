@@ -1002,12 +1002,19 @@ impl PyBatchNorm1d {
     ) -> PyResult<PyClassInitializer<Self>> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
-        let _affine = affine.unwrap_or(true);
+        let affine = affine.unwrap_or(true);
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
-        let batch_norm = BatchNorm1d::new(num_features, Some(eps), Some(momentum), device, dtype)
-            .map_err(_convert_error)?;
+        let batch_norm = BatchNorm1d::with_affine(
+            num_features,
+            Some(eps),
+            Some(momentum),
+            affine,
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
 
         Ok(PyClassInitializer::from(PyModule::from_batch_norm1d(batch_norm)).add_subclass(Self))
     }
@@ -1045,12 +1052,19 @@ impl PyBatchNorm2d {
     ) -> PyResult<PyClassInitializer<Self>> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
-        let _affine = affine.unwrap_or(true);
+        let affine = affine.unwrap_or(true);
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
-        let batch_norm = BatchNorm2d::new(num_features, Some(eps), Some(momentum), device, dtype)
-            .map_err(_convert_error)?;
+        let batch_norm = BatchNorm2d::with_affine(
+            num_features,
+            Some(eps),
+            Some(momentum),
+            affine,
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
 
         Ok(PyClassInitializer::from(PyModule::from_batch_norm2d(batch_norm)).add_subclass(Self))
     }

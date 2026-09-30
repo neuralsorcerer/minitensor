@@ -16,228 +16,15 @@ use crate::{
 };
 use std::collections::HashMap;
 
-/// 1D Batch normalization layer
+/// State and arithmetic shared by [`BatchNorm1d`] and [`BatchNorm2d`], which
+/// differ only in the input rank they accept.
 ///
-/// Applies Batch Normalization over a 2D or 3D input (a mini-batch of 1D inputs
-/// with optional additional channel dimension).
-///
-/// The mean and standard-deviation are calculated per-dimension over the mini-batches
-/// and γ and β are learnable parameter vectors of size C (where C is the input size).
+/// The scale and shift are optional: without them (`affine = false`) the layer
+/// only normalizes, and has no parameters for an optimizer to train.
 #[derive(Clone)]
-pub struct BatchNorm1d {
-    weight: Tensor,       // γ (gamma) - learnable scale parameter
-    bias: Tensor,         // β (beta) - learnable shift parameter
-    running_mean: Tensor, // Running mean for inference
-    running_var: Tensor,  // Running variance for inference
-    num_features: usize,
-    eps: f64,
-    momentum: f64,
-    training: bool,
-}
-
-impl BatchNorm1d {
-    /// Create a new 1D batch normalization layer
-    ///
-    /// # Arguments
-    /// * `num_features` - Number of features or channels C from an expected input of size (N, C) or (N, C, L)
-    /// * `eps` - A value added to the denominator for numerical stability. Default: 1e-5
-    /// * `momentum` - The value used for the running_mean and running_var computation. Default: 0.1
-    /// * `device` - Device to place the layer parameters on
-    /// * `dtype` - Data type for the layer parameters
-    pub fn new(
-        num_features: usize,
-        eps: Option<f64>,
-        momentum: Option<f64>,
-        device: Device,
-        dtype: DataType,
-    ) -> Result<Self> {
-        let eps = eps.unwrap_or(1e-5);
-        let momentum = momentum.unwrap_or(0.1);
-        crate::ops::normalization::check_eps("BatchNorm", eps)?;
-        crate::ops::normalization::check_momentum("BatchNorm", momentum)?;
-
-        let param_shape = Shape::new(vec![num_features]);
-
-        // Initialize weight (gamma) to ones
-        let weight = init_parameter(param_shape.clone(), InitMethod::Ones, dtype, device)?;
-
-        // Initialize bias (beta) to zeros
-        let bias = init_parameter(param_shape.clone(), InitMethod::Zeros, dtype, device)?;
-
-        // Initialize running statistics to zeros and ones respectively
-        let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false); // No gradients for running stats
-        let running_var = Tensor::ones(param_shape, dtype, device, false); // No gradients for running stats
-
-        Ok(Self {
-            weight,
-            bias,
-            running_mean,
-            running_var,
-            num_features,
-            eps,
-            momentum,
-            training: true,
-        })
-    }
-
-    /// Get number of features
-    pub fn num_features(&self) -> usize {
-        self.num_features
-    }
-
-    /// Get epsilon value
-    pub fn eps(&self) -> f64 {
-        self.eps
-    }
-
-    /// Get momentum value
-    pub fn momentum(&self) -> f64 {
-        self.momentum
-    }
-
-    /// Check if in training mode
-    pub fn is_training(&self) -> bool {
-        self.training
-    }
-
-    /// Get the weight (gamma) tensor
-    pub fn weight(&self) -> &Tensor {
-        &self.weight
-    }
-
-    /// Get the bias (beta) tensor
-    pub fn bias(&self) -> &Tensor {
-        &self.bias
-    }
-
-    /// Get the running mean tensor
-    pub fn running_mean(&self) -> &Tensor {
-        &self.running_mean
-    }
-
-    /// Get the running variance tensor
-    pub fn running_var(&self) -> &Tensor {
-        &self.running_var
-    }
-
-    /// Set training mode
-    pub fn train(&mut self) {
-        self.training = true;
-    }
-
-    /// Set evaluation mode
-    pub fn eval(&mut self) {
-        self.training = false;
-    }
-}
-
-impl Layer for BatchNorm1d {
-    crate::nn::layer::cloneable_layer!();
-
-    /// Get named parameters for this layer
-    fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::with_capacity(2);
-        params.insert("weight".to_string(), &self.weight);
-        params.insert("bias".to_string(), &self.bias);
-        params
-    }
-    /// Get named mutable parameters for this layer
-    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::with_capacity(2);
-        params.insert("weight".to_string(), &mut self.weight);
-        params.insert("bias".to_string(), &mut self.bias);
-        params
-    }
-    /// Get named buffers (non-trainable parameters) for this layer
-    fn named_buffers(&self) -> HashMap<String, &Tensor> {
-        let mut buffers = HashMap::with_capacity(2);
-        buffers.insert("running_mean".to_string(), &self.running_mean);
-        buffers.insert("running_var".to_string(), &self.running_var);
-        buffers
-    }
-
-    /// Get named mutable buffers for this layer.
-    ///
-    /// Must mirror [`Self::named_buffers`]: saving under names and loading by
-    /// position would put `running_var` wherever the buffer order happened to
-    /// place it.
-    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut buffers = HashMap::with_capacity(2);
-        buffers.insert("running_mean".to_string(), &mut self.running_mean);
-        buffers.insert("running_var".to_string(), &mut self.running_var);
-        buffers
-    }
-
-    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Validate input dimensions - expect 2D [N, C] or 3D [N, C, L]
-        if input.ndim() < 2 || input.ndim() > 3 {
-            return Err(MinitensorError::invalid_operation(
-                "BatchNorm1d expects 2D input [batch_size, features] or 3D input [batch_size, features, length]",
-            ));
-        }
-
-        // Validate number of features
-        check_feature_dim(
-            "BatchNorm1d",
-            "num_features",
-            self.num_features,
-            input,
-            FeatureAxis::At(1),
-        )?;
-
-        // Delegate to the functional kernel rather than re-deriving the
-        // statistics here. That kernel is rank-generic and — critically —
-        // stores the *unbiased* batch variance in `running_var` (Bessel's
-        // correction). The copy that used to live here
-        // stored the biased variance, so the layer and `F.batch_norm`
-        // disagreed about eval-time normalization for the same input.
-        crate::ops::normalization::batch_norm(
-            input,
-            Some(&mut self.running_mean),
-            Some(&mut self.running_var),
-            Some(&self.weight),
-            Some(&self.bias),
-            self.training,
-            self.momentum,
-            self.eps,
-        )
-    }
-
-    fn parameters(&self) -> Vec<&Tensor> {
-        vec![&self.weight, &self.bias]
-    }
-
-    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![&mut self.weight, &mut self.bias]
-    }
-
-    fn buffers(&self) -> Vec<&Tensor> {
-        // Order must stay stable: it defines the indexed buffer names used for
-        // serialization (buffer_0 = running_mean, buffer_1 = running_var).
-        vec![&self.running_mean, &self.running_var]
-    }
-
-    fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![&mut self.running_mean, &mut self.running_var]
-    }
-
-    fn train(&mut self) {
-        self.training = true;
-    }
-
-    fn eval(&mut self) {
-        self.training = false;
-    }
-}
-
-/// 2D Batch normalization layer for convolutional layers
-///
-/// Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
-/// with additional channel dimension).
-#[derive(Clone)]
-pub struct BatchNorm2d {
-    weight: Tensor,
-    bias: Tensor,
+struct BatchNormCore {
+    weight: Option<Tensor>, // γ (gamma) - learnable scale
+    bias: Option<Tensor>,   // β (beta) - learnable shift
     running_mean: Tensor,
     running_var: Tensor,
     num_features: usize,
@@ -246,19 +33,12 @@ pub struct BatchNorm2d {
     training: bool,
 }
 
-impl BatchNorm2d {
-    /// Create a new 2D batch normalization layer
-    ///
-    /// # Arguments
-    /// * `num_features` - Number of features or channels C from an expected input of size (N, C, H, W)
-    /// * `eps` - A value added to the denominator for numerical stability. Default: 1e-5
-    /// * `momentum` - The value used for the running_mean and running_var computation. Default: 0.1
-    /// * `device` - Device to place the layer parameters on
-    /// * `dtype` - Data type for the layer parameters
-    pub fn new(
+impl BatchNormCore {
+    fn new(
         num_features: usize,
         eps: Option<f64>,
         momentum: Option<f64>,
+        affine: bool,
         device: Device,
         dtype: DataType,
     ) -> Result<Self> {
@@ -268,14 +48,25 @@ impl BatchNorm2d {
         crate::ops::normalization::check_momentum("BatchNorm", momentum)?;
 
         let param_shape = Shape::new(vec![num_features]);
-
-        // Initialize weight (gamma) to ones
-        let weight = init_parameter(param_shape.clone(), InitMethod::Ones, dtype, device)?;
-
-        // Initialize bias (beta) to zeros
-        let bias = init_parameter(param_shape.clone(), InitMethod::Zeros, dtype, device)?;
-
-        // Initialize running statistics
+        let (weight, bias) = if affine {
+            (
+                Some(init_parameter(
+                    param_shape.clone(),
+                    InitMethod::Ones,
+                    dtype,
+                    device,
+                )?),
+                Some(init_parameter(
+                    param_shape.clone(),
+                    InitMethod::Zeros,
+                    dtype,
+                    device,
+                )?),
+            )
+        } else {
+            (None, None)
+        };
+        // Running statistics are state, not parameters: they take no gradient.
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false);
         let running_var = Tensor::ones(param_shape, dtype, device, false);
 
@@ -291,33 +82,60 @@ impl BatchNorm2d {
         })
     }
 
-    /// Get number of features
-    pub fn num_features(&self) -> usize {
-        self.num_features
+    /// Normalize through the functional kernel, which stores the *unbiased*
+    /// batch variance in `running_var`, so the layer and `batch_norm` agree
+    /// about eval-time normalization for the same input.
+    fn forward(&mut self, input: &Tensor, layer: &str) -> Result<Tensor> {
+        check_feature_dim(
+            layer,
+            "num_features",
+            self.num_features,
+            input,
+            FeatureAxis::At(1),
+        )?;
+        crate::ops::normalization::batch_norm(
+            input,
+            Some(&mut self.running_mean),
+            Some(&mut self.running_var),
+            self.weight.as_ref(),
+            self.bias.as_ref(),
+            self.training,
+            self.momentum,
+            self.eps,
+        )
     }
 
-    /// Set training mode
-    pub fn train(&mut self) {
-        self.training = true;
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut params = HashMap::with_capacity(2);
+        if let Some(weight) = &self.weight {
+            params.insert("weight".to_string(), weight);
+        }
+        if let Some(bias) = &self.bias {
+            params.insert("bias".to_string(), bias);
+        }
+        params
     }
 
-    /// Set evaluation mode
-    pub fn eval(&mut self) {
-        self.training = false;
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut params = HashMap::with_capacity(2);
+        if let Some(weight) = &mut self.weight {
+            params.insert("weight".to_string(), weight);
+        }
+        if let Some(bias) = &mut self.bias {
+            params.insert("bias".to_string(), bias);
+        }
+        params
     }
-}
 
-impl Layer for BatchNorm2d {
-    crate::nn::layer::cloneable_layer!();
-
-    /// Get named buffers (non-trainable parameters) for this layer
+    /// Must mirror [`Self::named_buffers_mut`]: saving under names and loading
+    /// by position would put `running_var` wherever the order placed it.
     fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &self.running_mean);
         buffers.insert("running_var".to_string(), &self.running_var);
         buffers
     }
-    /// Get named mutable buffers for this layer
+
     fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &mut self.running_mean);
@@ -325,60 +143,207 @@ impl Layer for BatchNorm2d {
         buffers
     }
 
-    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Validate input dimensions - expect 4D [N, C, H, W]
-        if input.ndim() != 4 {
-            return Err(MinitensorError::invalid_operation(
-                "BatchNorm2d expects 4D input [batch_size, channels, height, width]",
-            ));
-        }
-
-        check_feature_dim(
-            "BatchNorm2d",
-            "num_features",
-            self.num_features,
-            input,
-            FeatureAxis::At(1),
-        )?;
-
-        // See `BatchNorm1d::forward`: shared kernel, unbiased `running_var`.
-        crate::ops::normalization::batch_norm(
-            input,
-            Some(&mut self.running_mean),
-            Some(&mut self.running_var),
-            Some(&self.weight),
-            Some(&self.bias),
-            self.training,
-            self.momentum,
-            self.eps,
-        )
-    }
-
     fn parameters(&self) -> Vec<&Tensor> {
-        vec![&self.weight, &self.bias]
+        self.weight.iter().chain(self.bias.iter()).collect()
     }
 
     fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![&mut self.weight, &mut self.bias]
+        self.weight.iter_mut().chain(self.bias.iter_mut()).collect()
     }
 
+    /// Order must stay stable: it defines the indexed buffer names used for
+    /// serialization (buffer_0 = running_mean, buffer_1 = running_var).
     fn buffers(&self) -> Vec<&Tensor> {
-        // buffer_0 = running_mean, buffer_1 = running_var (stable order).
         vec![&self.running_mean, &self.running_var]
     }
 
     fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
         vec![&mut self.running_mean, &mut self.running_var]
     }
-
-    fn train(&mut self) {
-        self.training = true;
-    }
-
-    fn eval(&mut self) {
-        self.training = false;
-    }
 }
+
+/// The methods `BatchNorm1d` and `BatchNorm2d` share, forwarded to their core.
+macro_rules! batch_norm_layer {
+    ($name:ident, $doc_input:literal, $check_rank:expr, $rank_message:literal) => {
+        impl $name {
+            #[doc = concat!("Create a batch normalization layer over ", $doc_input, ", with a")]
+            /// learnable scale and shift.
+            ///
+            /// # Arguments
+            /// * `num_features` - The channel count C, the size of axis 1
+            /// * `eps` - Added to the variance for numerical stability. Default: 1e-5
+            /// * `momentum` - Weight of each batch in the running statistics. Default: 0.1
+            /// * `device` - Device to place the layer parameters on
+            /// * `dtype` - Data type for the layer parameters
+            pub fn new(
+                num_features: usize,
+                eps: Option<f64>,
+                momentum: Option<f64>,
+                device: Device,
+                dtype: DataType,
+            ) -> Result<Self> {
+                Self::with_affine(num_features, eps, momentum, true, device, dtype)
+            }
+
+            /// As [`Self::new`], with `affine` saying whether the layer has a
+            /// learnable scale and shift. Without them it only normalizes.
+            pub fn with_affine(
+                num_features: usize,
+                eps: Option<f64>,
+                momentum: Option<f64>,
+                affine: bool,
+                device: Device,
+                dtype: DataType,
+            ) -> Result<Self> {
+                Ok(Self {
+                    core: BatchNormCore::new(num_features, eps, momentum, affine, device, dtype)?,
+                })
+            }
+
+            /// Get number of features
+            pub fn num_features(&self) -> usize {
+                self.core.num_features
+            }
+
+            /// The value added to the variance for numerical stability.
+            pub fn eps(&self) -> f64 {
+                self.core.eps
+            }
+
+            /// The weight each batch gets in the running statistics.
+            pub fn momentum(&self) -> f64 {
+                self.core.momentum
+            }
+
+            /// Whether the layer has a learnable scale and shift.
+            pub fn affine(&self) -> bool {
+                self.core.weight.is_some()
+            }
+
+            /// Whether the layer normalizes with batch statistics.
+            pub fn is_training(&self) -> bool {
+                self.core.training
+            }
+
+            /// The scale (gamma), when the layer is affine.
+            pub fn weight(&self) -> Option<&Tensor> {
+                self.core.weight.as_ref()
+            }
+
+            /// The shift (beta), when the layer is affine.
+            pub fn bias(&self) -> Option<&Tensor> {
+                self.core.bias.as_ref()
+            }
+
+            /// Get the running mean tensor
+            pub fn running_mean(&self) -> &Tensor {
+                &self.core.running_mean
+            }
+
+            /// Get the running variance tensor
+            pub fn running_var(&self) -> &Tensor {
+                &self.core.running_var
+            }
+
+            /// Set training mode
+            pub fn train(&mut self) {
+                self.core.training = true;
+            }
+
+            /// Set evaluation mode
+            pub fn eval(&mut self) {
+                self.core.training = false;
+            }
+        }
+
+        impl Layer for $name {
+            crate::nn::layer::cloneable_layer!();
+
+            fn named_parameters(&self) -> HashMap<String, &Tensor> {
+                self.core.named_parameters()
+            }
+
+            fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+                self.core.named_parameters_mut()
+            }
+
+            fn named_buffers(&self) -> HashMap<String, &Tensor> {
+                self.core.named_buffers()
+            }
+
+            fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+                self.core.named_buffers_mut()
+            }
+
+            fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+                let check_rank: fn(usize) -> bool = $check_rank;
+                if !check_rank(input.ndim()) {
+                    return Err(MinitensorError::invalid_operation($rank_message));
+                }
+                self.core.forward(input, stringify!($name))
+            }
+
+            fn parameters(&self) -> Vec<&Tensor> {
+                self.core.parameters()
+            }
+
+            fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+                self.core.parameters_mut()
+            }
+
+            fn buffers(&self) -> Vec<&Tensor> {
+                self.core.buffers()
+            }
+
+            fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
+                self.core.buffers_mut()
+            }
+
+            fn train(&mut self) {
+                self.core.training = true;
+            }
+
+            fn eval(&mut self) {
+                self.core.training = false;
+            }
+        }
+    };
+}
+
+/// 1D Batch normalization layer
+///
+/// Applies Batch Normalization over a 2D or 3D input (a mini-batch of 1D inputs
+/// with optional additional channel dimension).
+///
+/// The mean and standard-deviation are calculated per-dimension over the mini-batches
+/// and γ and β are learnable parameter vectors of size C (where C is the input size).
+#[derive(Clone)]
+pub struct BatchNorm1d {
+    core: BatchNormCore,
+}
+
+batch_norm_layer!(
+    BatchNorm1d,
+    "a 2D `[N, C]` or 3D `[N, C, L]` input",
+    |ndim| (2..=3).contains(&ndim),
+    "BatchNorm1d expects 2D input [batch_size, features] or 3D input [batch_size, features, length]"
+);
+
+/// 2D Batch normalization layer for convolutional layers
+///
+/// Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
+/// with additional channel dimension).
+#[derive(Clone)]
+pub struct BatchNorm2d {
+    core: BatchNormCore,
+}
+
+batch_norm_layer!(
+    BatchNorm2d,
+    "a 4D `[N, C, H, W]` input",
+    |ndim| ndim == 4,
+    "BatchNorm2d expects 4D input [batch_size, channels, height, width]"
+);
 
 /// Shared validation for the shape-normalizing layers: `normalized_shape` must
 /// be non-empty and match the trailing dimensions of the input.
@@ -701,8 +666,8 @@ mod tests {
         assert_eq!(layer.eps(), 1e-5);
         assert_eq!(layer.momentum(), 0.1);
         assert!(layer.is_training());
-        assert_eq!(layer.weight().shape(), &Shape::new(vec![128]));
-        assert_eq!(layer.bias().shape(), &Shape::new(vec![128]));
+        assert_eq!(layer.weight().unwrap().shape(), &Shape::new(vec![128]));
+        assert_eq!(layer.bias().unwrap().shape(), &Shape::new(vec![128]));
         assert_eq!(layer.running_mean().shape(), &Shape::new(vec![128]));
         assert_eq!(layer.running_var().shape(), &Shape::new(vec![128]));
     }
@@ -1159,7 +1124,7 @@ mod tests {
 
         // n = H * W = 4, so the stored (unbiased) variance is 1.25 * 4/3.
         let running_var = 1.25f32 * 4.0 / 3.0;
-        let expected = (5.0 - 2.5) / (running_var + layer.eps as f32).sqrt();
+        let expected = (5.0 - 2.5) / (running_var + layer.eps() as f32).sqrt();
         let out_slice = output.data().as_f32_slice().unwrap();
         assert!(out_slice.iter().all(|&v| (v - expected).abs() < 1e-4));
     }

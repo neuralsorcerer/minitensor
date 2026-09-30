@@ -2971,8 +2971,8 @@ True
 - `AvgPool2d(kernel_size, stride=None, padding=None, count_include_pad=True)`
 - `MaxPool1d(kernel_size, stride=None, padding=0)`
 - `AvgPool1d(kernel_size, stride=None, padding=0, count_include_pad=True)`
-- `BatchNorm1d`
-- `BatchNorm2d`
+- `BatchNorm1d(num_features, eps=1e-5, momentum=0.1, affine=True, device=None, dtype=None)`
+- `BatchNorm2d(num_features, eps=1e-5, momentum=0.1, affine=True, device=None, dtype=None)` -- with `affine=False` the layer only normalizes: it has no `weight` or `bias`, and nothing for an optimizer to train
 - `LayerNorm(normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None)`
 - `RMSNorm(normalized_shape, eps=1e-6, elementwise_affine=True, device=None, dtype=None)`
 - `Embedding(num_embeddings, embedding_dim, padding_idx=None, device=None, dtype=None)`

@@ -1593,28 +1593,99 @@ impl PyModule {
         }
     }
 
-    /// String representation
+    /// String representation: the constructor call that builds this layer.
+    ///
+    /// Required arguments always appear; optional ones only when they differ
+    /// from their defaults, so two layers that behave differently never print
+    /// the same. Values are written as Python spells them.
     fn __repr__(&self) -> PyResult<String> {
+        /// Accumulates `, name=value` for the arguments that are not at their
+        /// defaults.
+        struct Args(String);
+        impl Args {
+            fn new(required: String) -> Self {
+                Self(required)
+            }
+            fn unless<T: PartialEq>(
+                mut self,
+                name: &str,
+                value: T,
+                default: T,
+                text: String,
+            ) -> Self {
+                if value != default {
+                    self.0.push_str(&format!(", {name}={text}"));
+                }
+                self
+            }
+            fn call(self, class: &str) -> String {
+                format!("{class}({})", self.0)
+            }
+        }
         // Python spells its booleans `True`/`False`; Rust's `Display` gives
         // `true`/`false`, which is not valid Python in a `__repr__`.
-        fn py_bool(value: bool) -> &'static str {
-            if value { "True" } else { "False" }
+        fn py_bool(value: bool) -> String {
+            if value { "True" } else { "False" }.to_string()
+        }
+        fn pair(value: (usize, usize)) -> String {
+            format!("({}, {})", value.0, value.1)
+        }
+        /// A float as a Python literal: `1e-05` style is not needed, but a
+        /// whole number must keep its point, and `{:?}` does both.
+        fn float(value: f64) -> String {
+            format!("{value:?}")
+        }
+        /// One value for every axis prints as that value; otherwise a tuple.
+        fn per_axis<T: std::fmt::Debug + PartialEq>(values: &[T]) -> String {
+            match values {
+                [single] => format!("{single:?}"),
+                _ => format!(
+                    "({})",
+                    values
+                        .iter()
+                        .map(|v| format!("{v:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        fn has_bias(layer: &dyn Layer) -> bool {
+            layer
+                .named_parameters()
+                .keys()
+                .any(|name| name.contains("bias"))
+        }
+        fn mode_name(mode: engine::ops::interpolate::InterpolateMode) -> &'static str {
+            match mode {
+                engine::ops::interpolate::InterpolateMode::Nearest => "nearest",
+                engine::ops::interpolate::InterpolateMode::Linear => "linear",
+            }
         }
 
-        Ok(match self.inner.get()? {
-            ModuleType::DenseLayer(layer) => format!(
-                "DenseLayer(in_features={}, out_features={})",
+        let inner = self.inner.get()?;
+        let bias = has_bias(inner.as_layer());
+        Ok(match inner {
+            ModuleType::DenseLayer(layer) => Args::new(format!(
+                "in_features={}, out_features={}",
                 layer.in_features(),
                 layer.out_features()
-            ),
+            ))
+            .unless("bias", bias, true, py_bool(bias))
+            .call("DenseLayer"),
             ModuleType::ReLU(_) => "ReLU()".to_string(),
             ModuleType::Sigmoid(_) => "Sigmoid()".to_string(),
             ModuleType::Tanh(_) => "Tanh()".to_string(),
-            ModuleType::Softmax(layer) => format!("Softmax(dim={:?})", layer.dim()),
+            ModuleType::Softmax(layer) => match layer.dim() {
+                Some(dim) => format!("Softmax(dim={dim})"),
+                None => "Softmax()".to_string(),
+            },
             ModuleType::LeakyReLU(layer) => {
-                format!("LeakyReLU(negative_slope={})", layer.negative_slope())
+                format!(
+                    "LeakyReLU(negative_slope={})",
+                    float(layer.negative_slope())
+                )
             }
-            ModuleType::Elu(layer) => format!("ELU(alpha={})", layer.alpha()),
+            ModuleType::Elu(layer) => format!("ELU(alpha={})", float(layer.alpha())),
             ModuleType::Gelu(layer) => {
                 if layer.is_approximate() {
                     "GELU()".to_string()
@@ -1623,36 +1694,104 @@ impl PyModule {
                 }
             }
             ModuleType::Sequential(_) => self.sequential_repr()?,
-            ModuleType::Conv2d(layer) => format!(
-                "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",
+            ModuleType::Conv2d(layer) => Args::new(format!(
+                "in_channels={}, out_channels={}, kernel_size={}",
+                layer.in_channels(),
+                layer.out_channels(),
+                pair(layer.kernel_size())
+            ))
+            .unless("stride", layer.stride(), (1, 1), pair(layer.stride()))
+            .unless("padding", layer.padding(), (0, 0), pair(layer.padding()))
+            .unless("dilation", layer.dilation(), (1, 1), pair(layer.dilation()))
+            .unless("groups", layer.groups(), 1, layer.groups().to_string())
+            .unless("bias", bias, true, py_bool(bias))
+            .call("Conv2d"),
+            ModuleType::Conv1d(layer) => Args::new(format!(
+                "in_channels={}, out_channels={}, kernel_size={}",
                 layer.in_channels(),
                 layer.out_channels(),
                 layer.kernel_size()
-            ),
-            ModuleType::ConvTranspose2d(layer) => format!(
-                "ConvTranspose2d(in_channels={}, out_channels={}, kernel_size={:?})",
+            ))
+            .unless("stride", layer.stride(), 1, layer.stride().to_string())
+            .unless("padding", layer.padding(), 0, layer.padding().to_string())
+            .unless(
+                "dilation",
+                layer.dilation(),
+                1,
+                layer.dilation().to_string(),
+            )
+            .unless("groups", layer.groups(), 1, layer.groups().to_string())
+            .unless("bias", bias, true, py_bool(bias))
+            .call("Conv1d"),
+            ModuleType::ConvTranspose2d(layer) => Args::new(format!(
+                "in_channels={}, out_channels={}, kernel_size={}",
+                layer.in_channels(),
+                layer.out_channels(),
+                pair(layer.kernel_size())
+            ))
+            .unless("stride", layer.stride(), (1, 1), pair(layer.stride()))
+            .unless("padding", layer.padding(), (0, 0), pair(layer.padding()))
+            .unless(
+                "output_padding",
+                layer.output_padding(),
+                (0, 0),
+                pair(layer.output_padding()),
+            )
+            .unless("dilation", layer.dilation(), (1, 1), pair(layer.dilation()))
+            .unless("groups", layer.groups(), 1, layer.groups().to_string())
+            .unless("bias", bias, true, py_bool(bias))
+            .call("ConvTranspose2d"),
+            ModuleType::ConvTranspose1d(layer) => Args::new(format!(
+                "in_channels={}, out_channels={}, kernel_size={}",
                 layer.in_channels(),
                 layer.out_channels(),
                 layer.kernel_size()
-            ),
-            ModuleType::ConvTranspose1d(layer) => format!(
-                "ConvTranspose1d(in_channels={}, out_channels={}, kernel_size={})",
-                layer.in_channels(),
-                layer.out_channels(),
-                layer.kernel_size()
-            ),
-            ModuleType::Upsample(layer) => match (layer.size(), layer.scale_factor()) {
-                (Some(size), _) => format!("Upsample(size={size:?}, mode={:?})", layer.mode()),
-                (None, Some(factor)) => {
-                    format!("Upsample(scale_factor={factor:?}, mode={:?})", layer.mode())
-                }
-                (None, None) => "Upsample(mode=?)".to_string(),
-            },
+            ))
+            .unless("stride", layer.stride(), 1, layer.stride().to_string())
+            .unless("padding", layer.padding(), 0, layer.padding().to_string())
+            .unless(
+                "output_padding",
+                layer.output_padding(),
+                0,
+                layer.output_padding().to_string(),
+            )
+            .unless(
+                "dilation",
+                layer.dilation(),
+                1,
+                layer.dilation().to_string(),
+            )
+            .unless("groups", layer.groups(), 1, layer.groups().to_string())
+            .unless("bias", bias, true, py_bool(bias))
+            .call("ConvTranspose1d"),
+            ModuleType::Upsample(layer) => {
+                let target = match (layer.size(), layer.scale_factor()) {
+                    (Some(size), _) => format!("size={}", per_axis(size)),
+                    (None, Some(factor)) => format!("scale_factor={}", per_axis(factor)),
+                    (None, None) => String::new(),
+                };
+                let mode = mode_name(layer.mode());
+                let args = Args(target)
+                    .unless("mode", mode, "nearest", format!("\"{mode}\""))
+                    .unless(
+                        "align_corners",
+                        layer.align_corners(),
+                        false,
+                        py_bool(layer.align_corners()),
+                    );
+                format!("Upsample({})", args.0.trim_start_matches(", "))
+            }
             ModuleType::AdaptiveAvgPool2d(layer) => {
-                format!("AdaptiveAvgPool2d(output_size={:?})", layer.output_size())
+                format!(
+                    "AdaptiveAvgPool2d(output_size={})",
+                    pair(layer.output_size())
+                )
             }
             ModuleType::AdaptiveMaxPool2d(layer) => {
-                format!("AdaptiveMaxPool2d(output_size={:?})", layer.output_size())
+                format!(
+                    "AdaptiveMaxPool2d(output_size={})",
+                    pair(layer.output_size())
+                )
             }
             ModuleType::AdaptiveAvgPool1d(layer) => {
                 format!("AdaptiveAvgPool1d(output_size={})", layer.output_size())
@@ -1661,58 +1800,80 @@ impl PyModule {
                 format!("AdaptiveMaxPool1d(output_size={})", layer.output_size())
             }
             ModuleType::BatchNorm1d(layer) => {
-                format!("BatchNorm1d(num_features={})", layer.num_features())
+                Args::new(format!("num_features={}", layer.num_features()))
+                    .unless("eps", layer.eps(), 1e-5, float(layer.eps()))
+                    .unless("momentum", layer.momentum(), 0.1, float(layer.momentum()))
+                    .unless("affine", layer.affine(), true, py_bool(layer.affine()))
+                    .call("BatchNorm1d")
             }
             ModuleType::BatchNorm2d(layer) => {
-                format!("BatchNorm2d(num_features={})", layer.num_features())
+                Args::new(format!("num_features={}", layer.num_features()))
+                    .unless("eps", layer.eps(), 1e-5, float(layer.eps()))
+                    .unless("momentum", layer.momentum(), 0.1, float(layer.momentum()))
+                    .unless("affine", layer.affine(), true, py_bool(layer.affine()))
+                    .call("BatchNorm2d")
             }
-            ModuleType::Dropout(layer) => format!("Dropout(p={})", layer.p()),
-            ModuleType::Dropout2d(layer) => format!("Dropout2d(p={})", layer.p()),
-            ModuleType::Embedding(layer) => format!(
-                "Embedding(num_embeddings={}, embedding_dim={}, padding_idx={:?})",
+            ModuleType::Dropout(layer) => format!("Dropout(p={})", float(layer.p())),
+            ModuleType::Dropout2d(layer) => format!("Dropout2d(p={})", float(layer.p())),
+            ModuleType::Embedding(layer) => Args::new(format!(
+                "num_embeddings={}, embedding_dim={}",
                 layer.num_embeddings(),
-                layer.embedding_dim(),
-                layer.padding_idx()
-            ),
-            ModuleType::LayerNorm(layer) => format!(
-                "LayerNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
-                layer.normalized_shape(),
-                layer.eps(),
-                py_bool(layer.elementwise_affine())
-            ),
-            ModuleType::RMSNorm(layer) => format!(
-                "RMSNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
-                layer.normalized_shape(),
-                layer.eps(),
-                py_bool(layer.elementwise_affine())
-            ),
-            ModuleType::MultiheadAttention(layer) => format!(
-                "MultiheadAttention(embed_dim={}, num_heads={}, head_dim={}, is_causal={})",
+                layer.embedding_dim()
+            ))
+            .unless(
+                "padding_idx",
+                layer.padding_idx(),
+                None,
+                layer.padding_idx().map_or(String::new(), |i| i.to_string()),
+            )
+            .call("Embedding"),
+            ModuleType::LayerNorm(layer) => {
+                Args::new(format!("normalized_shape={:?}", layer.normalized_shape()))
+                    .unless("eps", layer.eps(), 1e-5, float(layer.eps()))
+                    .unless(
+                        "elementwise_affine",
+                        layer.elementwise_affine(),
+                        true,
+                        py_bool(layer.elementwise_affine()),
+                    )
+                    .call("LayerNorm")
+            }
+            ModuleType::RMSNorm(layer) => {
+                Args::new(format!("normalized_shape={:?}", layer.normalized_shape()))
+                    .unless("eps", layer.eps(), 1e-6, float(layer.eps()))
+                    .unless(
+                        "elementwise_affine",
+                        layer.elementwise_affine(),
+                        true,
+                        py_bool(layer.elementwise_affine()),
+                    )
+                    .call("RMSNorm")
+            }
+            ModuleType::MultiheadAttention(layer) => Args::new(format!(
+                "embed_dim={}, num_heads={}",
                 layer.embed_dim(),
-                layer.num_heads(),
-                layer.head_dim(),
-                py_bool(layer.is_causal())
-            ),
+                layer.num_heads()
+            ))
+            .unless("bias", bias, true, py_bool(bias))
+            .unless(
+                "is_causal",
+                layer.is_causal(),
+                false,
+                py_bool(layer.is_causal()),
+            )
+            .call("MultiheadAttention"),
             ModuleType::MaxPool2d(layer) => format!(
-                "MaxPool2d(kernel_size={:?}, stride={:?}, padding={:?})",
-                layer.kernel_size(),
-                layer.stride(),
-                layer.padding()
+                "MaxPool2d(kernel_size={}, stride={}, padding={})",
+                pair(layer.kernel_size()),
+                pair(layer.stride()),
+                pair(layer.padding())
             ),
             ModuleType::AvgPool2d(layer) => format!(
-                "AvgPool2d(kernel_size={:?}, stride={:?}, padding={:?}, count_include_pad={})",
-                layer.kernel_size(),
-                layer.stride(),
-                layer.padding(),
+                "AvgPool2d(kernel_size={}, stride={}, padding={}, count_include_pad={})",
+                pair(layer.kernel_size()),
+                pair(layer.stride()),
+                pair(layer.padding()),
                 py_bool(layer.count_include_pad())
-            ),
-            ModuleType::Conv1d(layer) => format!(
-                "Conv1d(in_channels={}, out_channels={}, kernel_size={}, stride={}, padding={})",
-                layer.in_channels(),
-                layer.out_channels(),
-                layer.kernel_size(),
-                layer.stride(),
-                layer.padding()
             ),
             ModuleType::MaxPool1d(layer) => format!(
                 "MaxPool1d(kernel_size={}, stride={}, padding={})",
