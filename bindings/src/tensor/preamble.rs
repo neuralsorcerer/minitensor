@@ -475,21 +475,7 @@ impl PyTensor {
         dim: Option<isize>,
         keepdim: bool,
     ) -> PyResult<(Self, Option<Self>)> {
-        match self.inner.median(dim, keepdim) {
-            Ok((values, indices_opt)) => {
-                let values_tensor = Self::from_tensor(values);
-                let indices_tensor = indices_opt.map(Self::from_tensor);
-                Ok((values_tensor, indices_tensor))
-            }
-            // Deliberate departure from `_convert_error`, which maps
-            // `InvalidArgument` to `ValueError`: `median()` on an empty tensor
-            // raises `RuntimeError`, and
-            // `test_median_empty_tensor_raises` pins that. Everything else
-            // keeps the standard mapping.
-            Err(err @ MinitensorError::InvalidArgument { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let (values, indices) = self.inner.median(dim, keepdim).map_err(_convert_error)?;
+        Ok((Self::from_tensor(values), indices.map(Self::from_tensor)))
     }
 }

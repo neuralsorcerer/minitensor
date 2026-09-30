@@ -248,9 +248,12 @@ def test_median_keepdim_keeps_a_unit_axis():
 
 
 def test_median_empty_tensor_raises():
+    # The same error the other reductions with no identity give an empty input.
     x = mt.Tensor(np.empty((0, 3), dtype=np.float32))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="empty"):
         x.median()
+    with pytest.raises(ValueError, match="empty"):
+        x.max()
 
 
 def test_median_nan_propagates_global():
