@@ -336,3 +336,16 @@ def test_a_long_list_of_positions_is_resolved_as_a_short_one_is():
     ordered = mt.argpartition(tensor, mt.from_numpy(kth)).numpy()
     for position in kth:
         assert values[ordered[position]] == expected[position]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda x: mt.delete(x, [1.5]),
+        lambda x: mt.partition(x, 1.5),
+    ],
+    ids=["delete", "partition"],
+)
+def test_a_fractional_position_is_refused_by_name(call):
+    with pytest.raises(TypeError, match=r"takes integer positions, got float 1\.5"):
+        call(mt.arange(6))

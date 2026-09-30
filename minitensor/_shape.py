@@ -880,9 +880,15 @@ def _position_array(obj: object, name: str) -> _np.ndarray:
     flat = _np.asarray(obj).reshape(-1)
     if flat.dtype.kind in "iub":
         return flat.astype(_np.int64, copy=False)
-    return _np.array(
-        [_operator.index(value) for value in flat.tolist()], dtype=_np.int64
-    )
+    positions = []
+    for value in flat.tolist():
+        try:
+            positions.append(_operator.index(value))
+        except TypeError:
+            raise TypeError(
+                f"{name} takes integer positions, got {type(value).__name__} {value!r}"
+            ) from None
+    return _np.array(positions, dtype=_np.int64)
 
 
 def _checked_positions(
