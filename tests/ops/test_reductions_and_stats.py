@@ -1589,3 +1589,14 @@ def test_median_over_every_axis_keeps_them_with_keepdim():
     expected = np.ones((2, 3, 4))
     expected[1, 2, 3] -= 24.0
     np.testing.assert_array_equal(x.grad.numpy(), expected)
+
+
+def test_int64_mean_does_not_wrap_when_the_sum_would():
+    # The sum of these overflows int64; their mean is well inside it.
+    values = [[2**62, 2**62, -3], [2**62, 5, 2**62]]
+    t = mt.tensor(values, dtype="int64")
+    expected = np.array(values, dtype=np.float64)
+    np.testing.assert_allclose(t.mean().item(), expected.mean(), rtol=1e-15)
+    np.testing.assert_allclose(t.mean(dim=0).numpy(), expected.mean(0), rtol=1e-15)
+    np.testing.assert_allclose(t.mean(dim=1).numpy(), expected.mean(1), rtol=1e-15)
+    assert t.mean().dtype == "float64"

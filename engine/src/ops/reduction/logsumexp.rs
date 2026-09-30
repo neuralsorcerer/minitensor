@@ -632,8 +632,21 @@ pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
     // Normalise negative dimensions and deduplicate
     let normalized = normalize_reduction_dims(dim, tensor.ndim())?;
 
+    // An int64 sum wraps past 2^63 though the mean it feeds is always in
+    // range: the mean of [2^62, 2^62] came back as -2^62. The result is
+    // float64 either way, so the values are summed there. An int32 sum
+    // accumulates in int64, which holds any count of int32 values that fits
+    // in memory, so it keeps the exact integer sum.
+    let widened;
+    let summed = if tensor.dtype() == DataType::Int64 {
+        widened = tensor.astype(DataType::Float64)?;
+        &widened
+    } else {
+        tensor
+    };
+
     let sum_result = sum(
-        tensor,
+        summed,
         normalized
             .clone()
             .map(|d| d.iter().map(|&x| x as isize).collect()),
@@ -701,7 +714,7 @@ pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
             ),
         ),
         DataType::Int64 => (
-            sum_result.astype(DataType::Float64)?,
+            sum_result,
             Tensor::new(
                 Arc::new(TensorData::from_vec(
                     vec![num_elements],
