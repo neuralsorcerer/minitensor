@@ -516,10 +516,11 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
 /// Softplus activation function with gradient support
 pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
-    if beta <= 0.0 {
-        return Err(MinitensorError::invalid_argument(
-            "softplus beta must be positive",
-        ));
+    // Not `beta <= 0.0`, which a NaN beta passes.
+    if !(beta > 0.0 && beta.is_finite()) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "softplus beta must be positive and finite, got {beta}"
+        )));
     }
 
     // An integer argument widens rather than being refused, as it does for
@@ -602,6 +603,12 @@ pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
 
 /// ELU activation function with configurable alpha
 pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
+    // A NaN or infinite alpha makes every negative input NaN or infinite.
+    if !alpha.is_finite() {
+        return Err(MinitensorError::invalid_argument(format!(
+            "elu requires a finite alpha, got {alpha}"
+        )));
+    }
     // An integer argument widens rather than being refused, as it does for
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
@@ -856,6 +863,12 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
 
 /// LeakyReLU activation function with gradient support
 pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
+    // A NaN or infinite slope makes every negative input NaN or infinite.
+    if !negative_slope.is_finite() {
+        return Err(MinitensorError::invalid_argument(format!(
+            "leaky_relu requires a finite negative_slope, got {negative_slope}"
+        )));
+    }
     // An integer argument widens rather than being refused, as it does for
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.

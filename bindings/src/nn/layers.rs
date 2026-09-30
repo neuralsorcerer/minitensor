@@ -81,10 +81,18 @@ impl PyLeakyReLU {
     /// Create a new LeakyReLU layer
     #[new]
     #[pyo3(signature = (negative_slope=None))]
-    fn new(negative_slope: Option<f64>) -> PyClassInitializer<Self> {
+    fn new(negative_slope: Option<f64>) -> PyResult<PyClassInitializer<Self>> {
         let negative_slope = negative_slope.unwrap_or(0.01);
+        // Refused here rather than on the first call, as the functional form
+        // refuses it: a non-finite slope makes every negative input NaN or
+        // infinite.
+        if !negative_slope.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "LeakyReLU requires a finite negative_slope, got {negative_slope}"
+            )));
+        }
         let leaky_relu = LeakyReLU::new(Some(negative_slope));
-        PyClassInitializer::from(PyModule::from_leaky_relu(leaky_relu)).add_subclass(Self)
+        Ok(PyClassInitializer::from(PyModule::from_leaky_relu(leaky_relu)).add_subclass(Self))
     }
 
     /// Get the negative slope parameter
@@ -110,10 +118,16 @@ impl PyELU {
     /// Create a new ELU layer
     #[new]
     #[pyo3(signature = (alpha=None))]
-    fn new(alpha: Option<f64>) -> PyClassInitializer<Self> {
+    fn new(alpha: Option<f64>) -> PyResult<PyClassInitializer<Self>> {
         let alpha = alpha.unwrap_or(1.0);
+        // As for `LeakyReLU`: a non-finite alpha poisons every negative input.
+        if !alpha.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "ELU requires a finite alpha, got {alpha}"
+            )));
+        }
         let elu = ELU::new(Some(alpha));
-        PyClassInitializer::from(PyModule::from_elu(elu)).add_subclass(Self)
+        Ok(PyClassInitializer::from(PyModule::from_elu(elu)).add_subclass(Self))
     }
 
     /// Get the alpha parameter

@@ -1272,6 +1272,9 @@ def conv3d(
             f"in_channels / groups, kD, kH, kW), got {taps.ndim()} dimensions"
         )
     kernel = tuple(int(size) for size in list(taps.shape)[2:])
+    if 0 in kernel:
+        # With no depth taps the sum below has no terms at all.
+        raise ValueError(f"conv3d kernel size must be greater than zero, got {kernel}")
     step = _sliding_argument(stride, "stride", 3, 1, "conv3d")
     margin = _sliding_argument(padding, "padding", 3, 0, "conv3d")
     spaced = _sliding_argument(dilation, "dilation", 3, 1, "conv3d")

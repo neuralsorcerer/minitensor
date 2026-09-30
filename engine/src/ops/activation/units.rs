@@ -509,9 +509,11 @@ pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return celu(&widened, alpha);
     }
-    if alpha == 0.0 || alpha.is_nan() {
+    // An infinite alpha is refused too: `alpha * expm1(x / alpha)` is then
+    // `inf * 0` on every negative input.
+    if alpha == 0.0 || !alpha.is_finite() {
         return Err(MinitensorError::invalid_argument(format!(
-            "celu requires a non-zero alpha, got {alpha}"
+            "celu requires a finite, non-zero alpha, got {alpha}"
         )));
     }
     unary_unit(tensor, "celu", CELU, CELU_D, [alpha, 0.0])

@@ -143,6 +143,13 @@ pub fn conv1d(
 
     let input_dims = input.shape().dims().to_vec();
     let weight_dims = weight.shape().dims().to_vec();
+    // Checked before the 2-D call, whose message would give the kernel as
+    // `1x0`.
+    if weight_dims[2] == 0 {
+        return Err(MinitensorError::invalid_operation(
+            "conv1d kernel size must be greater than zero, got 0",
+        ));
+    }
 
     let input_2d = input.reshape(Shape::new(vec![
         input_dims[0],
@@ -209,6 +216,13 @@ pub fn conv2d(
     let kernel_h = weight.size(2)?;
     let kernel_w = weight.size(3)?;
 
+    // A kernel with no taps has no window to slide, and its span below,
+    // `dilation * (kernel - 1) + 1`, would wrap around.
+    if kernel_h == 0 || kernel_w == 0 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "kernel size must be greater than zero, got {kernel_h}x{kernel_w}"
+        )));
+    }
     if groups == 0 {
         return Err(MinitensorError::invalid_operation(
             "groups must be greater than zero",
@@ -445,6 +459,13 @@ pub fn conv_transpose2d(
     let kernel_h = weight.size(2)?;
     let kernel_w = weight.size(3)?;
 
+    // A kernel with no taps has no window to slide, and its span below,
+    // `dilation * (kernel - 1) + 1`, would wrap around.
+    if kernel_h == 0 || kernel_w == 0 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "kernel size must be greater than zero, got {kernel_h}x{kernel_w}"
+        )));
+    }
     if groups == 0 {
         return Err(MinitensorError::invalid_operation(
             "groups must be greater than zero",
@@ -637,6 +658,13 @@ pub fn conv_transpose1d(
 
     let input_dims = input.shape().dims().to_vec();
     let weight_dims = weight.shape().dims().to_vec();
+    // Checked before the 2-D call, whose message would give the kernel as
+    // `1x0`.
+    if weight_dims[2] == 0 {
+        return Err(MinitensorError::invalid_operation(
+            "conv_transpose1d kernel size must be greater than zero, got 0",
+        ));
+    }
     let input_2d = input.reshape(Shape::new(vec![
         input_dims[0],
         input_dims[1],

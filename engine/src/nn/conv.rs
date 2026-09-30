@@ -32,6 +32,25 @@ fn check_groups(in_channels: usize, out_channels: usize, groups: usize) -> Resul
     Ok(())
 }
 
+/// Refuse a window that cannot slide: a kernel with no taps, or a stride or
+/// dilation of zero. Checked when the layer is built, so a bad layer is never
+/// constructed only to fail -- or, for an empty kernel, to return a map of
+/// zeros -- on its first call.
+fn check_window(kernel: &[usize], stride: &[usize], dilation: &[usize]) -> Result<()> {
+    for (name, values) in [
+        ("kernel_size", kernel),
+        ("stride", stride),
+        ("dilation", dilation),
+    ] {
+        if values.contains(&0) {
+            return Err(MinitensorError::invalid_argument(format!(
+                "{name} must be greater than zero, got {values:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 2D Convolutional layer
 ///
 /// Applies a 2D convolution over an input signal composed of several input planes.
@@ -84,6 +103,11 @@ impl Conv2d {
         let dilation = dilation.unwrap_or((1, 1));
         let groups = groups.unwrap_or(1);
         check_groups(in_channels, out_channels, groups)?;
+        check_window(
+            &[kernel_size.0, kernel_size.1],
+            &[stride.0, stride.1],
+            &[dilation.0, dilation.1],
+        )?;
 
         // Initialize weight tensor with shape [out_channels, in_channels, kernel_height, kernel_width]
         let weight_shape = Shape::new(vec![
@@ -136,6 +160,11 @@ impl Conv2d {
         let dilation = dilation.unwrap_or((1, 1));
         let groups = groups.unwrap_or(1);
         check_groups(in_channels, out_channels, groups)?;
+        check_window(
+            &[kernel_size.0, kernel_size.1],
+            &[stride.0, stride.1],
+            &[dilation.0, dilation.1],
+        )?;
 
         // Initialize weight tensor
         let weight_shape = Shape::new(vec![
@@ -293,6 +322,11 @@ impl Conv1d {
 
         let groups = groups.unwrap_or(1);
         check_groups(in_channels, out_channels, groups)?;
+        check_window(
+            &[kernel_size],
+            &[stride.unwrap_or(1)],
+            &[dilation.unwrap_or(1)],
+        )?;
 
         let weight_shape = Shape::new(vec![out_channels, in_channels / groups, kernel_size]);
         let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
@@ -421,6 +455,11 @@ impl ConvTranspose2d {
         let dilation = dilation.unwrap_or((1, 1));
         let groups = groups.unwrap_or(1);
         check_groups(in_channels, out_channels, groups)?;
+        check_window(
+            &[kernel_size.0, kernel_size.1],
+            &[stride.0, stride.1],
+            &[dilation.0, dilation.1],
+        )?;
 
         let weight_shape = Shape::new(vec![
             in_channels,
@@ -551,6 +590,7 @@ impl ConvTranspose1d {
         let dilation = dilation.unwrap_or(1);
         let groups = groups.unwrap_or(1);
         check_groups(in_channels, out_channels, groups)?;
+        check_window(&[kernel_size], &[stride], &[dilation])?;
 
         let weight_shape = Shape::new(vec![in_channels, out_channels / groups, kernel_size]);
         let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
