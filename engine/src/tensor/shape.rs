@@ -88,7 +88,7 @@ impl Shape {
         self.dims
             .get(dim)
             .copied()
-            .ok_or_else(|| MinitensorError::index_error(dim as isize, 0, self.dims.len()))
+            .ok_or_else(|| MinitensorError::dim_out_of_range(dim as isize, self.dims.len()))
     }
 
     /// Get all dimensions as a slice

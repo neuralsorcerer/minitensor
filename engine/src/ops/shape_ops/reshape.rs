@@ -734,7 +734,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
             .find(|idx| !in_range(idx))
             .copied()
             .unwrap_or(0);
-        return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
+        return Err(MinitensorError::index_error(bad as isize, dim, dim_size));
     }
 
     if !tensor.device().is_cpu() {
@@ -914,7 +914,7 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
             .copied()
             .find(|v| !in_range(v))
             .unwrap_or(0);
-        return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
+        return Err(MinitensorError::index_error(bad as isize, dim, dim_size));
     }
 
     if !tensor.device().is_cpu() {
@@ -1199,14 +1199,13 @@ pub fn narrow(tensor: &Tensor, dim: isize, start: usize, length: usize) -> Resul
     let dim_size = tensor.shape().dims()[dim];
 
     if start > dim_size {
-        return Err(MinitensorError::index_error(start as isize, 0, dim_size));
+        return Err(MinitensorError::index_error(start as isize, dim, dim_size));
     }
     if start + length > dim_size {
-        return Err(MinitensorError::index_error(
-            (start + length) as isize,
-            0,
-            dim_size,
-        ));
+        return Err(MinitensorError::invalid_argument(format!(
+            "narrow: start {start} plus length {length} runs past the end of \
+             dimension {dim}, which has size {dim_size}"
+        )));
     }
 
     if length == 0 {

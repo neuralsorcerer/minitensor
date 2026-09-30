@@ -1775,10 +1775,11 @@ impl Tensor {
     #[inline(always)]
     pub fn squeeze_dim(&self, dim: isize) -> Result<Self> {
         let ndim = self.ndim() as isize;
+        let given = dim;
         let dim = if dim < 0 { dim + ndim } else { dim };
 
         if dim < 0 || dim >= ndim {
-            return Err(MinitensorError::index_error(dim, 0, ndim as usize));
+            return Err(MinitensorError::dim_out_of_range(given, ndim as usize));
         }
 
         let dim = dim as usize;
@@ -1797,10 +1798,14 @@ impl Tensor {
     #[inline(always)]
     pub fn unsqueeze(&self, dim: isize) -> Result<Self> {
         let ndim = self.ndim() as isize;
+        let given = dim;
         let dim = if dim < 0 { dim + ndim + 1 } else { dim };
 
         if dim < 0 || dim > ndim {
-            return Err(MinitensorError::index_error(dim, 0, (ndim + 1) as usize));
+            return Err(MinitensorError::dim_out_of_range(
+                given,
+                (ndim + 1) as usize,
+            ));
         }
 
         let dim = dim as usize;
@@ -1940,10 +1945,10 @@ impl Tensor {
         let end = if end_dim < 0 { end_dim + ndim } else { end_dim };
 
         if start < 0 || start >= ndim {
-            return Err(MinitensorError::index_error(start, 0, ndim as usize));
+            return Err(MinitensorError::dim_out_of_range(start_dim, ndim as usize));
         }
         if end < 0 || end >= ndim {
-            return Err(MinitensorError::index_error(end, 0, ndim as usize));
+            return Err(MinitensorError::dim_out_of_range(end_dim, ndim as usize));
         }
         if start > end {
             return Err(MinitensorError::invalid_argument(
@@ -2011,13 +2016,13 @@ impl Tensor {
             match idx {
                 TensorIndex::Index(pos) => {
                     if pos >= dim_size {
-                        return Err(MinitensorError::index_error(pos as isize, 0, dim_size));
+                        return Err(MinitensorError::index_error(pos as isize, i, dim_size));
                     }
                     offset += pos * strides[i];
                 }
                 TensorIndex::Slice { start, end, step } => {
                     if end > dim_size {
-                        return Err(MinitensorError::index_error(end as isize, 0, dim_size));
+                        return Err(MinitensorError::index_error(end as isize, i, dim_size));
                     }
                     // An inverted range selects nothing -- `x[2:1]` is empty,
                     // not an error. This used to reject it, reporting a
@@ -2192,13 +2197,13 @@ impl Tensor {
             match idx {
                 TensorIndex::Index(pos) => {
                     if pos >= dim_size {
-                        return Err(MinitensorError::index_error(pos as isize, 0, dim_size));
+                        return Err(MinitensorError::index_error(pos as isize, i, dim_size));
                     }
                     offset += pos * strides[i];
                 }
                 TensorIndex::Slice { start, end, step } => {
                     if end > dim_size {
-                        return Err(MinitensorError::index_error(end as isize, 0, dim_size));
+                        return Err(MinitensorError::index_error(end as isize, i, dim_size));
                     }
                     // An inverted range selects nothing -- `x[2:1]` is empty,
                     // not an error. This used to reject it, reporting a

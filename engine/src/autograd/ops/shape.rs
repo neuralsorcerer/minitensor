@@ -685,9 +685,8 @@ pub(crate) fn repeat_interleave_backward_impl(
     dim: usize,
 ) -> Result<Tensor> {
     if dim >= input_shape.len() {
-        return Err(MinitensorError::index_error(
+        return Err(MinitensorError::dim_out_of_range(
             dim as isize,
-            0,
             input_shape.len(),
         ));
     }

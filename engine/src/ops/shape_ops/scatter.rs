@@ -178,7 +178,7 @@ pub(crate) fn scatter_layout(
         .ok_or_else(|| MinitensorError::invalid_operation("scatter indices must be int64"))?;
     for &v in indices {
         if v < 0 || v as usize >= dim_size {
-            return Err(MinitensorError::index_error(v as isize, 0, dim_size));
+            return Err(MinitensorError::index_error(v as isize, dim, dim_size));
         }
     }
 

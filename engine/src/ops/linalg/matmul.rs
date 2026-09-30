@@ -51,16 +51,16 @@ pub(crate) fn compute_diagonal_spec(
 
     let dim1_size = dims
         .get(dim1)
-        .ok_or_else(|| MinitensorError::index_error(dim1 as isize, 0, dims.len()))?;
+        .ok_or_else(|| MinitensorError::dim_out_of_range(dim1 as isize, dims.len()))?;
     let dim2_size = dims
         .get(dim2)
-        .ok_or_else(|| MinitensorError::index_error(dim2 as isize, 0, dims.len()))?;
+        .ok_or_else(|| MinitensorError::dim_out_of_range(dim2 as isize, dims.len()))?;
     let stride1 = strides
         .get(dim1)
-        .ok_or_else(|| MinitensorError::index_error(dim1 as isize, 0, strides.len()))?;
+        .ok_or_else(|| MinitensorError::dim_out_of_range(dim1 as isize, strides.len()))?;
     let stride2 = strides
         .get(dim2)
-        .ok_or_else(|| MinitensorError::index_error(dim2 as isize, 0, strides.len()))?;
+        .ok_or_else(|| MinitensorError::dim_out_of_range(dim2 as isize, strides.len()))?;
 
     let diag_stride = stride1.saturating_add(*stride2);
 
