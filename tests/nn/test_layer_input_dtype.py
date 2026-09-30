@@ -41,8 +41,39 @@ def test_a_float32_input_to_a_float64_layer_is_refused_by_name(build, name):
     assert "expected float64, got float32" in message
     assert f"{name} has float64 parameters" in message
     assert ".astype('float64')" in message
+    assert "convert the model with .astype('float32')" in message
 
 
 def test_layers_without_parameters_and_embeddings_take_their_own_inputs():
     nn.ReLU()(mt.randn(2, 3, dtype="float64"))
     nn.Embedding(5, 2)(mt.tensor([1, 2], dtype="int64"))
+
+
+def test_astype_converts_a_model_in_place_and_keeps_it_trainable():
+    model = nn.Sequential([nn.DenseLayer(3, 4), nn.BatchNorm1d(4), nn.DenseLayer(4, 2)])
+    before = {
+        name: tensor.numpy().copy() for name, tensor in model.state_dict().items()
+    }
+
+    assert model.astype("float64") is model
+    assert {p.dtype for p in model.parameters()} == {"float64"}
+    assert {b.dtype for b in model.buffers()} == {"float64"}
+    assert [name for name, _ in model.named_buffers()] == [
+        "1.running_mean",
+        "1.running_var",
+    ]
+    after = model.state_dict()
+    for name, values in before.items():
+        assert (after[name].numpy() == values).all()
+
+    output = model(mt.randn(5, 3, dtype="float64"))
+    optimizer = mt.optim.SGD(model.parameters(), lr=0.1)
+    output.sum().backward()
+    optimizer.step()
+
+
+def test_astype_keeps_a_frozen_model_frozen_and_refuses_integers():
+    frozen = nn.DenseLayer(3, 2).requires_grad_(False).astype("float64")
+    assert not any(p.requires_grad for p in frozen.parameters())
+    with pytest.raises(ValueError, match="must be floating point"):
+        nn.DenseLayer(3, 2).astype("int64")

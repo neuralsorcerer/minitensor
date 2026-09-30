@@ -3266,6 +3266,14 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 - `layer.named_parameters()` returns `(name, handle)` pairs in the order
   `parameters()` gives, under the names `state_dict()` uses -- `1.0.bias` for
   the bias of the first layer of a `Sequential`'s second part.
+- `layer.buffers()` and `layer.named_buffers()` do the same for the state a
+  module keeps and saves but does not train, such as a batch norm's running
+  statistics.
+- `layer.astype(dtype)` converts every parameter and floating-point buffer to
+  `'float32'` or `'float64'` in place and returns the module; each parameter
+  keeps its `requires_grad`. The tensors are new ones, so build the optimizer
+  after converting. A layer refuses an input whose dtype differs from its
+  parameters, and names itself when it does.
 - `layer.requires_grad_(False)` freezes the module and returns it;
   `layer.requires_grad_()` unfreezes it. A frozen module records nothing for
   its parameters, a backward pass leaves them without a gradient, and an

@@ -1381,8 +1381,8 @@ impl ModuleType {
             wanted.clone(),
             given.clone(),
             format!(
-                "{} has {wanted} parameters and was given a {given} input; \
-                 build the layer with dtype='{given}' to keep the input as it is",
+                "{} has {wanted} parameters and was given a {given} input; to \
+                 keep the input as it is, convert the model with .astype('{given}')",
                 self.class_name()
             ),
         ))
@@ -1486,6 +1486,80 @@ impl PyModule {
                 (name, PyTensor::from_tensor(tensor.clone()))
             })
             .collect())
+    }
+
+    /// Handles to the module's buffers: state it keeps and saves but does not
+    /// train, such as a batch norm's running statistics.
+    fn buffers(&self) -> PyResult<Vec<PyTensor>> {
+        Ok(self
+            .inner
+            .get()?
+            .as_layer()
+            .buffers()
+            .into_iter()
+            .map(|tensor| PyTensor::from_tensor(tensor.clone()))
+            .collect())
+    }
+
+    /// `(name, buffer)` for every buffer, in the order `buffers()` gives them
+    /// and under the names `state_dict()` uses.
+    fn named_buffers(&self) -> PyResult<Vec<(String, PyTensor)>> {
+        let layer = self.inner.get()?.as_layer();
+        let names: std::collections::HashMap<_, _> = layer
+            .named_buffers()
+            .into_iter()
+            .map(|(name, tensor)| (tensor.id(), name))
+            .collect();
+        Ok(layer
+            .buffers()
+            .into_iter()
+            .enumerate()
+            .map(|(index, tensor)| {
+                let name = names
+                    .get(&tensor.id())
+                    .cloned()
+                    .unwrap_or_else(|| format!("buffer_{index}"));
+                (name, PyTensor::from_tensor(tensor.clone()))
+            })
+            .collect())
+    }
+
+    /// Convert every parameter and floating-point buffer to `dtype`, in place,
+    /// and return the module.
+    ///
+    /// Only the float dtypes are accepted: parameters are trained through
+    /// gradients, which an integer has none of. Each parameter keeps its
+    /// `requires_grad`. The converted tensors are new ones, so an optimizer
+    /// built over the module beforehand still holds the old ones -- build it
+    /// after converting.
+    fn astype<'py>(slf: Bound<'py, Self>, dtype: &str) -> PyResult<Bound<'py, Self>> {
+        let target = dtype::parse_dtype(dtype)?;
+        if !target.is_float() {
+            return Err(PyValueError::new_err(format!(
+                "a module's parameters must be floating point; astype takes \
+                 'float32' or 'float64', got '{dtype}'"
+            )));
+        }
+        {
+            let mut this = slf.borrow_mut();
+            let layer = this.inner.get_mut()?.as_layer_mut();
+            for parameter in layer.parameters_mut() {
+                if parameter.dtype() != target {
+                    let trainable = parameter.requires_grad();
+                    *parameter = parameter
+                        .detach()
+                        .astype(target)
+                        .map_err(_convert_error)?
+                        .requires_grad_(trainable);
+                }
+            }
+            for buffer in layer.buffers_mut() {
+                if buffer.dtype() != target && buffer.dtype().is_float() {
+                    *buffer = buffer.detach().astype(target).map_err(_convert_error)?;
+                }
+            }
+        }
+        Ok(slf)
     }
 
     /// Clear the gradient of every trainable tensor this module owns.
