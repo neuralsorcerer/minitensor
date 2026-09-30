@@ -1227,6 +1227,8 @@ impl Layer for SharedChild {
         &mut self,
         input: &engine::tensor::Tensor,
     ) -> engine::error::Result<engine::tensor::Tensor> {
+        // SAFETY: see the type's documentation.
+        unsafe { self.0.layer() }.check_input_dtype(input)?;
         self.layer_mut().forward(input)
     }
 
@@ -1307,6 +1309,12 @@ macro_rules! module_types {
         }
 
         impl ModuleType {
+            fn variant_name(&self) -> &'static str {
+                match self {
+                    $(ModuleType::$variant(_) => stringify!($variant),)+
+                }
+            }
+
             fn as_layer(&self) -> &dyn Layer {
                 match self {
                     $(ModuleType::$variant(layer) => &**layer,)+
@@ -1333,6 +1341,52 @@ macro_rules! module_types {
 
         }
     };
+}
+
+impl ModuleType {
+    /// The Python class this layer is.
+    fn class_name(&self) -> &'static str {
+        match self {
+            ModuleType::Elu(_) => "ELU",
+            ModuleType::Gelu(_) => "GELU",
+            ModuleType::Recurrent(layer) => match layer.kind() {
+                CellKind::Lstm => "LSTM",
+                CellKind::Gru => "GRU",
+            },
+            other => other.variant_name(),
+        }
+    }
+
+    /// Refuse an input whose dtype differs from the layer's parameters.
+    ///
+    /// Checked here, at the layer, rather than left to the first operation
+    /// inside it: that one reports its own operands, so a float64 layer given
+    /// a float32 input read "expected Float32, got Float64" -- the input's dtype
+    /// as the expectation, and no word of which layer. An `Embedding` reads
+    /// integer indices, and a `Sequential` is checked child by child.
+    fn check_input_dtype(&self, input: &engine::tensor::Tensor) -> engine::error::Result<()> {
+        if matches!(self, ModuleType::Sequential(_) | ModuleType::Embedding(_)) {
+            return Ok(());
+        }
+        let parameters = self.as_layer().parameters();
+        let Some(parameter) = parameters.first() else {
+            return Ok(());
+        };
+        if parameter.dtype() == input.dtype() {
+            return Ok(());
+        }
+        let wanted = format!("{:?}", parameter.dtype()).to_lowercase();
+        let given = format!("{:?}", input.dtype()).to_lowercase();
+        Err(engine::error::MinitensorError::type_mismatch_with_context(
+            wanted.clone(),
+            given.clone(),
+            format!(
+                "{} has {wanted} parameters and was given a {given} input; \
+                 build the layer with dtype='{given}' to keep the input as it is",
+                self.class_name()
+            ),
+        ))
+    }
 }
 
 module_types! {
@@ -1376,7 +1430,10 @@ impl PyModule {
         let input_tensor = borrow_tensor(input)?;
         let result = self
             .inner
-            .forward(|layer| layer.as_module_mut().forward(input_tensor.tensor()))?
+            .forward(|layer| {
+                layer.check_input_dtype(input_tensor.tensor())?;
+                layer.as_module_mut().forward(input_tensor.tensor())
+            })?
             .map_err(_convert_error)?;
 
         Ok(PyTensor::from_tensor(result))
