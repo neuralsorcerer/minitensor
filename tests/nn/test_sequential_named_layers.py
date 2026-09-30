@@ -68,3 +68,17 @@ def test_a_name_that_cannot_key_a_parameter_is_refused(name, problem):
     with pytest.raises(ValueError, match=problem):
         model.add_module(name, nn.ReLU())
     assert len(model) == 3
+
+
+def test_the_summary_names_each_layer_as_its_keys_do():
+    summary = _model().summary()
+    assert "Layer 0:" in summary
+    assert "Layer head: 10 parameters" in summary
+
+
+def test_memory_usage_counts_buffers_as_well_as_parameters():
+    model = nn.Sequential([nn.DenseLayer(3, 4), nn.BatchNorm1d(4, affine=False)])
+    usage = model.memory_usage()
+    assert usage["parameter_bytes"] == (3 * 4 + 4) * 4
+    assert usage["buffer_bytes"] == 2 * 4 * 4
+    assert usage["total_bytes"] == usage["parameter_bytes"] + usage["buffer_bytes"]

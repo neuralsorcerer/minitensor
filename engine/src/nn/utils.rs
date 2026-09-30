@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{Layer, Sequential};
-use crate::tensor::DataType;
+use crate::tensor::{DataType, Tensor};
 use std::collections::HashMap;
 
 /// Utility functions for layer and model inspection
@@ -52,20 +52,28 @@ impl LayerUtils {
     }
 
     /// Get memory usage statistics for a layer's parameters
+    ///
+    /// Buffers count as well as parameters: a batch norm's running statistics
+    /// occupy memory and are saved with the model, though nothing trains them.
     pub fn memory_usage(layer: &dyn Layer) -> MemoryUsage {
-        let params = layer.parameters();
-        let mut total_bytes = 0usize;
-        let mut bytes_by_dtype = HashMap::with_capacity(params.len());
-
-        for param in params {
-            let dtype = param.dtype();
-            let param_bytes = param.numel() * dtype.size_bytes();
-            total_bytes += param_bytes;
-            *bytes_by_dtype.entry(dtype).or_insert(0) += param_bytes;
-        }
+        let mut bytes_by_dtype = HashMap::new();
+        let mut tally = |tensors: Vec<&Tensor>| -> usize {
+            let mut bytes = 0;
+            for tensor in tensors {
+                let dtype = tensor.dtype();
+                let size = tensor.numel() * dtype.size_bytes();
+                bytes += size;
+                *bytes_by_dtype.entry(dtype).or_insert(0) += size;
+            }
+            bytes
+        };
+        let parameter_bytes = tally(layer.parameters());
+        let buffer_bytes = tally(layer.buffers());
 
         MemoryUsage {
-            total_bytes,
+            total_bytes: parameter_bytes + buffer_bytes,
+            parameter_bytes,
+            buffer_bytes,
             bytes_by_dtype,
         }
     }
@@ -126,10 +134,10 @@ impl SequentialUtils {
 
         let num_layers = model.len();
         let mut layer_stats = Vec::with_capacity(num_layers);
-        for i in 0..num_layers {
+        for (i, name) in model.names().iter().enumerate() {
             if let Some(layer) = model.get_layer(i) {
                 let stats = LayerUtils::parameter_stats(layer);
-                layer_stats.push((i, stats));
+                layer_stats.push((name.clone(), stats));
             }
         }
 
@@ -159,10 +167,10 @@ impl SequentialUtils {
         summary.push('\n');
 
         // Layer-by-layer breakdown
-        for (layer_idx, layer_stats) in &stats.layer_stats {
+        for (layer_name, layer_stats) in &stats.layer_stats {
             summary.push_str(&format!(
                 "Layer {}: {} parameters ({} trainable)\n",
-                layer_idx, layer_stats.total_parameters, layer_stats.trainable_parameters
+                layer_name, layer_stats.total_parameters, layer_stats.trainable_parameters
             ));
         }
 
@@ -209,7 +217,7 @@ impl SequentialUtils {
         batch_size: usize,
     ) -> ForwardMemoryEstimate {
         let input_elements = input_shape.iter().product::<usize>() * batch_size;
-        let parameter_memory = LayerUtils::memory_usage(model).total_bytes;
+        let parameter_memory = LayerUtils::memory_usage(model).parameter_bytes;
 
         let element_bytes = model
             .parameters()
@@ -241,7 +249,10 @@ pub struct ParameterStats {
 /// Memory usage information
 #[derive(Debug, Clone)]
 pub struct MemoryUsage {
+    /// Parameters and buffers together.
     pub total_bytes: usize,
+    pub parameter_bytes: usize,
+    pub buffer_bytes: usize,
     pub bytes_by_dtype: HashMap<crate::tensor::DataType, usize>,
 }
 
@@ -252,7 +263,9 @@ pub struct SequentialStats {
     pub trainable_parameters: usize,
     pub non_trainable_parameters: usize,
     pub num_layers: usize,
-    pub layer_stats: Vec<(usize, ParameterStats)>,
+    /// Each layer's name -- its position unless it was added under one -- and
+    /// its statistics.
+    pub layer_stats: Vec<(String, ParameterStats)>,
 }
 
 /// Forward pass memory estimation

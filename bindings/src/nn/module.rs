@@ -1664,6 +1664,8 @@ impl PyModule {
         let usage = LayerUtils::memory_usage(layer);
         let dict = PyDict::new(py);
         dict.set_item("total_bytes", usage.total_bytes)?;
+        dict.set_item("parameter_bytes", usage.parameter_bytes)?;
+        dict.set_item("buffer_bytes", usage.buffer_bytes)?;
         let dtype_dict = PyDict::new(py);
         for (dtype, bytes) in usage.bytes_by_dtype {
             dtype_dict.set_item(crate::dtype::dtype_to_python_string(dtype), bytes)?;
