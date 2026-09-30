@@ -2102,6 +2102,7 @@ impl PyModule {
     fn independent_copy(&self, py: Python<'_>) -> PyResult<Self> {
         if let ModuleType::Sequential(_) = self.inner.get()? {
             let mut copy = PyModule::from_sequential(Sequential::new());
+            let names = self.child_names()?;
             let mut layers = Vec::new();
             for child in self.children(py)? {
                 let child = child.bind(py);
@@ -2113,7 +2114,17 @@ impl PyModule {
                     &copy,
                 )?);
             }
-            copy.push_children(layers)?;
+            // Named as the original's layers are, so the copy's parameter
+            // keys match and a state dict moves between the two.
+            if let ModuleType::Sequential(model) = copy.inner.get_mut()? {
+                for (name, layer) in names.iter().zip(layers) {
+                    if name.parse::<u64>().is_ok() {
+                        model.add_layer(layer);
+                    } else {
+                        model.add_named_layer(name, layer).map_err(_convert_error)?;
+                    }
+                }
+            }
             copy.inner.0.set_training(self.inner.0.is_training());
             return Ok(copy);
         }
@@ -2339,10 +2350,11 @@ impl PyModule {
             if children.is_empty() {
                 return Ok("Sequential()".to_string());
             }
+            let names = self.child_names()?;
             let mut text = String::from("Sequential(\n");
-            for (index, child) in children.iter().enumerate() {
+            for (name, child) in names.iter().zip(children.iter()) {
                 let shown = child.bind(py).repr()?.to_string().replace('\n', "\n  ");
-                text.push_str(&format!("  ({index}): {shown}\n"));
+                text.push_str(&format!("  ({name}): {shown}\n"));
             }
             text.push(')');
             Ok(text)
@@ -2381,6 +2393,15 @@ impl PyModule {
             }
         }
         Ok(())
+    }
+
+    /// The names of a `Sequential`'s layers, in order; empty for any other
+    /// module.
+    pub(crate) fn child_names(&self) -> PyResult<Vec<String>> {
+        Ok(match self.inner.get()? {
+            ModuleType::Sequential(model) => model.names().to_vec(),
+            _ => Vec::new(),
+        })
     }
 }
 

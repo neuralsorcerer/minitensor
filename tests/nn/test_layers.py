@@ -124,7 +124,10 @@ def test_add_module_takes_a_sequential_too():
     outer = Sequential()
     outer.add_module("nested", Sequential([Sequential([DenseLayer(3, 4)])]))
 
-    assert sorted(outer.state_dict().keys()) == ["0.0.0.bias", "0.0.0.weight"]
+    assert sorted(outer.state_dict().keys()) == [
+        "nested.0.0.bias",
+        "nested.0.0.weight",
+    ]
     assert tuple(outer(Tensor(np.ones((2, 3), np.float32))).shape_vec()) == (2, 4)
 
 

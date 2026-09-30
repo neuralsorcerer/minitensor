@@ -4,12 +4,19 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{error::Result, nn::layer::Layer, tensor::Tensor};
+use crate::{
+    error::{MinitensorError, Result},
+    nn::layer::Layer,
+    tensor::Tensor,
+};
 use std::collections::HashMap;
 
 /// Sequential container for neural network layers
 pub struct Sequential {
     layers: Vec<Box<dyn Layer>>,
+    /// Each layer's name, the prefix of its parameters' keys: its position
+    /// unless it was added under a name of its own.
+    names: Vec<String>,
     training: bool,
 }
 
@@ -18,21 +25,66 @@ impl Sequential {
     pub fn new() -> Self {
         Self {
             layers: Vec::new(),
+            names: Vec::new(),
             training: true,
         }
     }
 
     /// Create a sequential model from a vector of layers
     pub fn from_layers(layers: Vec<Box<dyn Layer>>) -> Self {
+        let names = (0..layers.len()).map(|i| i.to_string()).collect();
         Self {
             layers,
+            names,
             training: true,
         }
     }
 
-    /// Add a layer to the sequential model
+    /// Add a layer to the sequential model, named by its position.
     pub fn add_layer(&mut self, layer: Box<dyn Layer>) {
+        self.names.push(self.layers.len().to_string());
         self.layers.push(layer);
+    }
+
+    /// Add a layer under `name`, which then prefixes its parameters' keys:
+    /// `encoder.weight` rather than `2.weight`.
+    ///
+    /// A plain integer is refused -- those name layers by position, and one
+    /// given explicitly could collide with a later layer's -- as are a name
+    /// already taken, an empty one, and one containing `.`, which separates
+    /// the parts of a key.
+    pub fn add_named_layer(&mut self, name: &str, layer: Box<dyn Layer>) -> Result<()> {
+        self.check_name(name)?;
+        self.names.push(name.to_string());
+        self.layers.push(layer);
+        Ok(())
+    }
+
+    /// Whether [`Self::add_named_layer`] would take `name`, answered without
+    /// adding anything.
+    pub fn check_name(&self, name: &str) -> Result<()> {
+        let problem = if name.is_empty() {
+            Some("cannot be empty")
+        } else if name.contains('.') {
+            Some("cannot contain '.', which separates the parts of a parameter key")
+        } else if name.parse::<u64>().is_ok() {
+            Some("cannot be an integer; those name layers by their position")
+        } else if self.names.iter().any(|existing| existing == name) {
+            Some("is already taken")
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => Err(MinitensorError::invalid_argument(format!(
+                "layer name {name:?} {problem}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Each layer's name, in order.
+    pub fn names(&self) -> &[String] {
+        &self.names
     }
 
     /// Get the number of layers in the model
@@ -77,6 +129,7 @@ impl Sequential {
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             layers,
+            names: self.names.clone(),
             training: self.training,
         })
     }
@@ -93,13 +146,14 @@ impl Layer for Sequential {
         Some(Box::new(self.try_clone()?))
     }
 
-    /// Prefix each child's names with its index, recursing so a nested layer's
+    /// Prefix each child's names with its name -- its index unless it was
+    /// added under one -- recursing so a nested layer's
     /// own naming survives: `1.weight`, not `layer_1.param_0`. A child that
     /// does not name its parameters keeps positional keys under its prefix, so
     /// the path still identifies which layer a tensor belongs to.
     fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut named = HashMap::new();
-        for (i, layer) in self.layers.iter().enumerate() {
+        for (i, layer) in self.names.iter().zip(self.layers.iter()) {
             let child = layer.named_parameters();
             if child.is_empty() {
                 for (j, param) in layer.parameters().into_iter().enumerate() {
@@ -118,7 +172,7 @@ impl Layer for Sequential {
     /// keys or a saved model would not load back into itself.
     fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut named = HashMap::new();
-        for (i, layer) in self.layers.iter_mut().enumerate() {
+        for (i, layer) in self.names.iter().zip(self.layers.iter_mut()) {
             // The immutable probe has to finish before the mutable borrow
             // starts, so ask whether the child names anything first.
             let has_names = !layer.named_parameters().is_empty();
@@ -138,7 +192,7 @@ impl Layer for Sequential {
     /// Buffers follow the same prefixing as parameters.
     fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut named = HashMap::new();
-        for (i, layer) in self.layers.iter().enumerate() {
+        for (i, layer) in self.names.iter().zip(self.layers.iter()) {
             let child = layer.named_buffers();
             if child.is_empty() {
                 for (j, buffer) in layer.buffers().into_iter().enumerate() {
@@ -156,7 +210,7 @@ impl Layer for Sequential {
     /// Mutable counterpart of [`Self::named_buffers`].
     fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut named = HashMap::new();
-        for (i, layer) in self.layers.iter_mut().enumerate() {
+        for (i, layer) in self.names.iter().zip(self.layers.iter_mut()) {
             let has_names = !layer.named_buffers().is_empty();
             if has_names {
                 for (name, buffer) in layer.named_buffers_mut() {

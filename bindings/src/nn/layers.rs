@@ -1633,11 +1633,10 @@ impl PySequential {
     }
 
     /// Add a layer to the sequential container
-    fn add_module(
-        slf: &Bound<'_, Self>,
-        _name: &str,
-        module: &Bound<'_, PyModule>,
-    ) -> PyResult<()> {
+    ///
+    /// `name` prefixes the layer's parameter keys (`encoder.weight`); layers
+    /// given to the constructor are named by position.
+    fn add_module(slf: &Bound<'_, Self>, name: &str, module: &Bound<'_, PyModule>) -> PyResult<()> {
         // Answered before either is borrowed: as one object, borrowing both
         // would fail on the borrow rather than say what is wrong.
         if module.is(slf) {
@@ -1646,10 +1645,14 @@ impl PySequential {
             ));
         }
         let mut this = slf.borrow_mut();
+        // The name is checked before the module is adopted, so a refused name
+        // leaves both untouched.
+        if let ModuleType::Sequential(seq) = this.as_ref().inner.get()? {
+            seq.check_name(name).map_err(_convert_error)?;
+        }
         let layer = PyModule::adopt_into(module, this.as_ref())?;
         if let ModuleType::Sequential(seq) = this.as_mut().inner.get_mut()? {
-            seq.add_layer(layer);
-            Ok(())
+            seq.add_named_layer(name, layer).map_err(_convert_error)
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
