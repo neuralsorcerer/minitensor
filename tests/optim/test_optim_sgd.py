@@ -113,7 +113,7 @@ def test_sgd_invalid_momentum():
     try:
         optim.SGD(model.parameters(), lr=0.1, momentum=-0.1)
     except ValueError as e:
-        assert str(e) == "Momentum must be non-negative."
+        assert str(e) == "Momentum must be non-negative and finite."
     else:
         assert False, "ValueError not raised for negative momentum."
 
@@ -124,7 +124,7 @@ def test_sgd_invalid_weight_decay():
     try:
         optim.SGD(model.parameters(), lr=0.1, weight_decay=-0.01)
     except ValueError as e:
-        assert str(e) == "Weight decay must be non-negative."
+        assert str(e) == "Weight decay must be non-negative and finite."
     else:
         assert False, "ValueError not raised for negative weight decay."
 
@@ -135,14 +135,14 @@ def test_sgd_invalid_lr():
     try:
         optim.SGD(model.parameters(), lr=0.0)
     except ValueError as e:
-        assert str(e) == "Learning rate must be positive."
+        assert str(e) == "Learning rate must be positive and finite."
     else:
         assert False, "ValueError not raised for zero learning rate."
 
     try:
         optim.SGD(model.parameters(), lr=-0.1)
     except ValueError as e:
-        assert str(e) == "Learning rate must be positive."
+        assert str(e) == "Learning rate must be positive and finite."
     else:
         assert False, "ValueError not raised for negative learning rate."
 

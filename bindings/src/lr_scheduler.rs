@@ -159,7 +159,7 @@ impl PyLRScheduler {
 
     fn apply(&mut self, py: Python<'_>) -> PyResult<f64> {
         let lr = self.inner.get_lr(self.last_epoch, self.base_lr);
-        self.optimizer.borrow_mut(py).set_lr(lr);
+        self.optimizer.borrow_mut(py).set_lr(lr)?;
         Ok(lr)
     }
 }

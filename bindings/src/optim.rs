@@ -186,9 +186,18 @@ impl PyOptimizer {
     }
 
     /// Set learning rate
+    /// Zero is allowed here, unlike at construction: a schedule may anneal
+    /// the rate all the way down. A negative or non-finite rate is refused,
+    /// since one step with it turns every parameter into garbage or NaN.
     #[setter]
-    pub(crate) fn set_lr(&mut self, lr: f64) {
-        self.inner.set_learning_rate(lr)
+    pub(crate) fn set_lr(&mut self, lr: f64) -> PyResult<()> {
+        if !(lr >= 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "Learning rate must be non-negative and finite, got {lr}."
+            )));
+        }
+        self.inner.set_learning_rate(lr);
+        Ok(())
     }
 
     /// String representation
@@ -455,18 +464,24 @@ impl PySGD {
         weight_decay: f64,
         nesterov: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
 
-        if momentum < 0.0 {
-            return Err(PyValueError::new_err("Momentum must be non-negative."));
+        if !(momentum >= 0.0 && momentum.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Momentum must be non-negative and finite.",
+            ));
         }
 
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         if nesterov && momentum <= 0.0 {
@@ -476,6 +491,14 @@ impl PySGD {
         }
         // Nesterov's lookahead is `grad + momentum * buf`, which is only the
         // correct extrapolation when `buf` accumulated the full gradient.
+        // The gradient enters the momentum buffer scaled by `1 - dampening`,
+        // so past 1 it is added with its sign flipped.
+        if !(0.0..=1.0).contains(&dampening) {
+            return Err(PyValueError::new_err(
+                "Dampening must be in the range [0, 1].",
+            ));
+        }
+
         if nesterov && dampening != 0.0 {
             return Err(PyValueError::new_err(
                 "Nesterov momentum requires zero dampening.",
@@ -546,16 +569,22 @@ impl PyAdam {
         weight_decay: f64,
         amsgrad: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
 
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
 
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -631,16 +660,22 @@ impl PyAdamW {
         eps: f64,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
 
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
 
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -706,24 +741,32 @@ impl PyRMSprop {
         momentum: f64,
         centered: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
 
         if !(0.0..=1.0).contains(&alpha) {
             return Err(PyValueError::new_err("Alpha must be in the range [0, 1]."));
         }
 
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
 
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
-        if momentum < 0.0 {
-            return Err(PyValueError::new_err("Momentum must be non-negative."));
+        if !(momentum >= 0.0 && momentum.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Momentum must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -785,23 +828,29 @@ impl PyNAdam {
         weight_decay: f64,
         momentum_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
         if !(0.0..1.0).contains(&beta1) || !(0.0..1.0).contains(&beta2) {
             return Err(PyValueError::new_err(
                 "Beta coefficients must be in the range [0, 1).",
             ));
         }
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
-        }
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
-        }
-        if momentum_decay < 0.0 {
+        if !(eps > 0.0 && eps.is_finite()) {
             return Err(PyValueError::new_err(
-                "momentum_decay must be non-negative.",
+                "Epsilon must be positive and finite.",
+            ));
+        }
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
+        }
+        if !(momentum_decay >= 0.0 && momentum_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "momentum_decay must be non-negative and finite.",
             ));
         }
 
@@ -876,22 +925,30 @@ impl PyAdagrad {
         initial_accumulator_value: f64,
         eps: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
-        }
-        if lr_decay < 0.0 {
-            return Err(PyValueError::new_err("lr_decay must be non-negative."));
-        }
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
-        }
-        if initial_accumulator_value < 0.0 {
+        if !(lr > 0.0 && lr.is_finite()) {
             return Err(PyValueError::new_err(
-                "initial_accumulator_value must be non-negative.",
+                "Learning rate must be positive and finite.",
             ));
         }
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(lr_decay >= 0.0 && lr_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "lr_decay must be non-negative and finite.",
+            ));
+        }
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
+        }
+        if !(initial_accumulator_value >= 0.0 && initial_accumulator_value.is_finite()) {
+            return Err(PyValueError::new_err(
+                "initial_accumulator_value must be non-negative and finite.",
+            ));
+        }
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -961,12 +1018,16 @@ impl PyLion {
         beta2: Option<f64>,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
 
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -1016,17 +1077,23 @@ impl PyAdadelta {
         eps: f64,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
         if !(0.0..1.0).contains(&rho) {
             return Err(PyValueError::new_err("rho must be in [0, 1)."));
         }
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -1086,14 +1153,20 @@ impl PyAdamax {
         eps: f64,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -1165,14 +1238,20 @@ impl PyRAdam {
         eps: f64,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
-        if eps <= 0.0 {
-            return Err(PyValueError::new_err("Epsilon must be positive."));
+        if !(eps > 0.0 && eps.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Epsilon must be positive and finite.",
+            ));
         }
-        if weight_decay < 0.0 {
-            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        if !(weight_decay >= 0.0 && weight_decay.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Weight decay must be non-negative and finite.",
+            ));
         }
 
         let params = collect_parameters(parameters)?;
@@ -1240,8 +1319,10 @@ impl PyRprop {
         etas: (f64, f64),
         step_sizes: (f64, f64),
     ) -> PyResult<PyClassInitializer<Self>> {
-        if lr <= 0.0 {
-            return Err(PyValueError::new_err("Learning rate must be positive."));
+        if !(lr > 0.0 && lr.is_finite()) {
+            return Err(PyValueError::new_err(
+                "Learning rate must be positive and finite.",
+            ));
         }
         let (eta_minus, eta_plus) = etas;
         if !(eta_minus > 0.0 && eta_minus < 1.0) {
