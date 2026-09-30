@@ -47,6 +47,10 @@ from ._shape import (
 
 Tensor = _C.Tensor
 _F = _C.functional
+# The engine's kernels, taken before the functions below replace them in `nn`.
+_cross_entropy_kernel = _C.nn.cross_entropy
+_bce_kernel = _C.nn.binary_cross_entropy
+_bce_logits_kernel = _C.nn.binary_cross_entropy_with_logits
 
 
 def nll_loss(
@@ -114,6 +118,114 @@ def nll_loss(
         return _F.sum(weighted) / _F.sum(scale)
     raise ValueError(
         f"nll_loss reduction must be 'none', 'mean' or 'sum', got {reduction!r}"
+    )
+
+
+def cross_entropy(
+    input: object,
+    target: object,
+    reduction: str = "mean",
+    dim: int = 1,
+    *,
+    weight: object | None = None,
+    ignore_index: int = -100,
+) -> Tensor:
+    """Softmax cross-entropy of `input` scores against `target`.
+
+    The target is either one class index per prediction, or a full score per
+    class. `dim` selects the class axis and defaults to 1.
+
+    For class-index targets, `weight` scales each class's contribution and
+    `ignore_index` drops the positions holding it, both as `nll_loss` does --
+    with `reduction="mean"` the loss is divided by the total weight of the
+    positions kept. Without either, the fused kernel computes it in one pass.
+    """
+
+    scores = _atleast_tensor(input)
+    labels = _atleast_tensor(target)
+    if labels.dtype not in ("int32", "int64"):
+        if weight is not None:
+            raise ValueError(
+                "cross_entropy weight applies to class-index targets; for "
+                "per-class scores, scale the target instead"
+            )
+        return _cross_entropy_kernel(scores, labels, reduction, dim)
+    if weight is None and not bool(_F.any(labels == ignore_index)):
+        return _cross_entropy_kernel(scores, labels, reduction, dim)
+
+    axis = dim + scores.ndim() if dim < 0 else dim
+    if not 0 <= axis < scores.ndim():
+        raise IndexError(
+            f"cross_entropy dim {dim} is out of range for a "
+            f"{scores.ndim()}-dimensional input"
+        )
+    if axis != 1:
+        scores = _F.movedim(scores, axis, 1)
+    return nll_loss(
+        _F.log_softmax(scores, dim=1), labels, weight, ignore_index, reduction
+    )
+
+
+def _weighted(losses: Tensor, weight: object, reduction: str, name: str) -> Tensor:
+    """Scale per-element `losses` by `weight`, which broadcasts against them,
+    then reduce. A weighted mean still divides by the element count: the
+    weights rescale each element's say, not the number of elements."""
+
+    if reduction not in ("none", "mean", "sum"):
+        raise ValueError(
+            f"{name} reduction must be 'none', 'mean' or 'sum', got {reduction!r}"
+        )
+    scaled = losses * _atleast_tensor(weight).astype(losses.dtype)
+    if list(scaled.shape) != list(losses.shape):
+        raise ValueError(
+            f"{name} weight of shape {list(_atleast_tensor(weight).shape)} does not "
+            f"broadcast to the loss's shape {list(losses.shape)}"
+        )
+    if reduction == "none":
+        return scaled
+    return _F.sum(scaled) if reduction == "sum" else _F.mean(scaled)
+
+
+def binary_cross_entropy(
+    input: object, target: object, reduction: str = "mean", *, weight: object = None
+) -> Tensor:
+    """Binary cross entropy over probabilities.
+
+    A prediction or target outside `[0, 1]` raises, since the loss is
+    meaningless there -- use `binary_cross_entropy_with_logits` for unbounded
+    scores; a NaN still gives a NaN loss. `weight` scales each element's loss
+    and broadcasts against it.
+    """
+
+    if weight is None:
+        return _bce_kernel(input, target, reduction)
+    return _weighted(
+        _bce_kernel(input, target, "none"), weight, reduction, "binary_cross_entropy"
+    )
+
+
+def binary_cross_entropy_with_logits(
+    input: object,
+    target: object,
+    pos_weight: object = None,
+    reduction: str = "mean",
+    *,
+    weight: object = None,
+) -> Tensor:
+    """Binary cross entropy of `sigmoid(input)` against `target`, computed from
+    the logits so large scores do not saturate.
+
+    `pos_weight` scales the positive term of each class; `weight` scales each
+    element's whole loss and broadcasts against it.
+    """
+
+    if weight is None:
+        return _bce_logits_kernel(input, target, pos_weight, reduction)
+    return _weighted(
+        _bce_logits_kernel(input, target, pos_weight, "none"),
+        weight,
+        reduction,
+        "binary_cross_entropy_with_logits",
     )
 
 
@@ -1624,8 +1736,11 @@ _NN_EXTRAS = (
     "affine_grid",
     "alpha_dropout",
     "avg_pool3d",
+    "binary_cross_entropy",
+    "binary_cross_entropy_with_logits",
     "channel_shuffle",
     "conv3d",
+    "cross_entropy",
     "dropout1d",
     "dropout3d",
     "embedding",

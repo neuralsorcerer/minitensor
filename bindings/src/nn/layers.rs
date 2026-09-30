@@ -1833,23 +1833,94 @@ impl PyLogCoshLoss {
 #[pyclass(name = "CrossEntropyLoss")]
 pub struct PyCrossEntropyLoss {
     inner: CrossEntropyLoss,
+    /// One weight per class, for class-index targets.
+    weight: Option<Py<PyAny>>,
+    /// The target value whose positions are left out of the loss.
+    ignore_index: i64,
 }
 
 #[pymethods]
 impl PyCrossEntropyLoss {
-    /// Create a new Cross Entropy loss
+    /// Create a new Cross Entropy loss. `weight` and `ignore_index` apply to
+    /// class-index targets, as they do in `functional.cross_entropy`.
     #[new]
-    #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> PyResult<Self> {
+    #[pyo3(signature = (weight=None, ignore_index=-100, reduction="mean"))]
+    fn new(weight: Option<Py<PyAny>>, ignore_index: i64, reduction: &str) -> PyResult<Self> {
         check_reduction(reduction, false).map_err(_convert_error)?;
         Ok(Self {
             inner: CrossEntropyLoss::new(reduction),
+            weight,
+            ignore_index,
         })
     }
 
+    /// Compute the loss.
+    ///
+    /// Through `functional.cross_entropy`, so the layer and the function
+    /// cannot disagree about what `weight` and `ignore_index` mean; without
+    /// either in play that takes the fused kernel.
+    fn forward(
+        &self,
+        py: Python<'_>,
+        predictions: &Bound<PyAny>,
+        targets: &Bound<PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let function = py
+            .import(pyo3::intern!(py, "minitensor._nn_extras"))?
+            .getattr(pyo3::intern!(py, "cross_entropy"))?;
+        let options = pyo3::types::PyDict::new(py);
+        options.set_item("weight", self.weight.as_ref().map(|w| w.bind(py).clone()))?;
+        options.set_item("ignore_index", self.ignore_index)?;
+        Ok(function
+            .call(
+                (predictions, targets, self.inner.reduction()),
+                Some(&options),
+            )?
+            .unbind())
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(
+        &self,
+        py: Python<'_>,
+        predictions: &Bound<PyAny>,
+        targets: &Bound<PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.forward(py, predictions, targets)
+    }
+
+    /// Get the reduction mode
+    #[getter]
+    fn reduction(&self) -> &str {
+        self.inner.reduction()
+    }
+
+    /// The per-class weights, if any.
+    #[getter]
+    fn weight(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.weight.as_ref().map(|w| w.clone_ref(py))
+    }
+
+    /// The target value left out of the loss.
+    #[getter]
+    fn ignore_index(&self) -> i64 {
+        self.ignore_index
+    }
+
     /// String representation
-    fn __repr__(&self) -> String {
-        format!("CrossEntropyLoss(reduction='{}')", self.inner.reduction())
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut text = String::from("CrossEntropyLoss(");
+        let mut parts = Vec::new();
+        if let Some(weight) = &self.weight {
+            parts.push(format!("weight={}", weight.bind(py).repr()?));
+        }
+        if self.ignore_index != -100 {
+            parts.push(format!("ignore_index={}", self.ignore_index));
+        }
+        parts.push(format!("reduction='{}'", self.inner.reduction()));
+        text.push_str(&parts.join(", "));
+        text.push(')');
+        Ok(text)
     }
 }
 
@@ -2128,7 +2199,6 @@ loss_forward_methods!(PyMAELoss, predictions);
 loss_forward_methods!(PyHuberLoss, predictions);
 loss_forward_methods!(PySmoothL1Loss, predictions);
 loss_forward_methods!(PyLogCoshLoss, predictions);
-loss_forward_methods!(PyCrossEntropyLoss, predictions);
 loss_forward_methods!(PyBCELoss, predictions);
 loss_forward_methods!(PyBCEWithLogitsLoss, logits);
 loss_forward_methods!(PyFocalLoss, predictions);

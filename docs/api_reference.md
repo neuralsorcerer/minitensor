@@ -2726,9 +2726,9 @@ when you already hold the weights and do not want a module:
 | `log_cosh_loss(input, target, ...)` | Log-cosh loss. |
 | `kl_div(input, target, reduction="mean")` | KL divergence over probabilities (not log-probabilities). `reduction="mean"` is the element-wise mean, as for every other loss here; `"batchmean"` divides by the leading dimension, which is the divisor that makes the result a true KL divergence per sample. |
 | `focal_loss(input, target, alpha=0.25, gamma=2.0, reduction="mean")` | Multi-class focal loss over logits, with class-index targets or a distribution over the classes per sample. `reduction="none"` gives one value per sample. `alpha` must lie strictly in `(0, 1)`. |
-| `binary_cross_entropy(input, target, ...)` | Binary cross entropy over probabilities. A prediction or target outside `[0, 1]` raises, since the loss is meaningless there -- use `binary_cross_entropy_with_logits` for unbounded scores; a NaN still gives a NaN loss. |
-| `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
-| `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
+| `binary_cross_entropy(input, target, reduction="mean", *, weight=None)` | Binary cross entropy over probabilities. A prediction or target outside `[0, 1]` raises, since the loss is meaningless there -- use `binary_cross_entropy_with_logits` for unbounded scores; a NaN still gives a NaN loss. `weight` scales each element's loss and broadcasts against it; the mean still divides by the element count. |
+| `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class; the keyword-only `weight` scales each element's whole loss. |
+| `cross_entropy(input, target, reduction="mean", dim=1, *, weight=None, ignore_index=-100)` | Softmax cross entropy over `dim`. The target is one class index per prediction, or a score per class. For class indices, `weight` scales each class's contribution and `ignore_index` drops the positions holding it, as in `nll_loss`: a weighted mean divides by the total weight kept. |
 | `nll_loss(input, target, weight=None, ignore_index=-100, reduction="mean")` | Negative log-likelihood over *log*-probabilities -- what `log_softmax` produces. Pairing the two gives what `cross_entropy` gives; they are separate so a model that already carries its own log-probabilities does not have them recomputed. `weight` scales each class, and with `reduction="mean"` the divisor becomes the total weight rather than the count, which is what makes a weighted mean an average and not a scaled sum. `ignore_index` drops positions from both. |
 | `ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=False)` | Connectionist temporal classification. See below -- it takes more explaining than a table row allows. |
 | `margin_ranking_loss(input1, input2, target, margin=0.0, reduction="mean")` | `max(0, -target * (input1 - input2) + margin)`. `target` is `+1` where `input1` should rank higher and `-1` where `input2` should, so the loss is zero exactly when the ranking is right by at least `margin`. |
@@ -3096,7 +3096,7 @@ hidden = hidden + attn(norm(hidden))  # pre-norm residual block
 - `HuberLoss`
 - `LogCoshLoss`
 - `SmoothL1Loss`
-- `CrossEntropyLoss`
+- `CrossEntropyLoss(weight=None, ignore_index=-100, reduction="mean")`
 - `BCELoss`
 - `BCEWithLogitsLoss(reduction="mean", pos_weight=None)`
 - `FocalLoss`
