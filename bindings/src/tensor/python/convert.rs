@@ -978,6 +978,34 @@ fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<u
     Ok(None)
 }
 
+/// A list of positions with a bool among them: `[1, True]` read the bool as
+/// position 1. Positions and flags are two different kinds of index, and a
+/// list mixing them is neither.
+fn bool_among_positions() -> PyErr {
+    PyTypeError::new_err(
+        "an index list mixes ints and bools: a list of ints names positions and a list of \
+         bools is a mask, so a bool among positions is neither",
+    )
+}
+
+/// Whether a nested list has a bool anywhere among its leaves.
+fn holds_bool(item: &Bound<PyAny>) -> PyResult<bool> {
+    if item.is_instance_of::<pyo3::types::PyBool>() {
+        return Ok(true);
+    }
+    match item.cast::<PyList>() {
+        Ok(list) => {
+            for entry in list.iter() {
+                if holds_bool(&entry)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
 /// An integer index array from one entry of a subscript: its values, flattened,
 /// and the shape they came in.
 ///
@@ -1045,9 +1073,15 @@ pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i
         // conversion already knows how to measure it.
         let mut values = Vec::with_capacity(list.len());
         for entry in list.iter() {
+            if entry.is_instance_of::<pyo3::types::PyBool>() {
+                return Err(bool_among_positions());
+            }
             match entry.extract::<i64>() {
                 Ok(v) => values.push(v),
                 Err(_) => {
+                    if holds_bool(item)? {
+                        return Err(bool_among_positions());
+                    }
                     let nested =
                         convert_python_data_to_tensor(item, DataType::Int64, Device::cpu(), false)?;
                     let shape = nested.shape().dims().to_vec();
@@ -1175,8 +1209,9 @@ pub(crate) fn try_fancy_index_tensor(
 enum AxisIndex {
     /// Positions, flattened, and the shape they came in.
     Positions(Vec<i64>, Vec<usize>),
-    /// A 1-D mask, one flag per position along the axis.
-    Mask(Vec<bool>),
+    /// A mask's flags in row-major order, and its shape: one flag per position
+    /// across the `shape.len()` axes it spans.
+    Mask(Vec<bool>, Vec<usize>),
 }
 
 /// The advanced index in one entry of a subscript, if it is one. An `int`, a
@@ -1186,18 +1221,20 @@ fn axis_index(item: &Bound<PyAny>) -> PyResult<Option<AxisIndex>> {
         return Ok(Some(AxisIndex::Positions(values, shape)));
     }
     // A 1-D mask picks positions along one axis, so it is the same job as a
-    // list of those positions. Masks of higher rank span several axes at once
-    // and are left to the whole-key path.
+    // list of those positions. A mask of higher rank does that job across the
+    // axes it spans, taken as one: `x[:, m]` with a `(3, 4)` mask over a
+    // `(2, 3, 4)` tensor is `x.reshape(2, 12)[:, m.flatten()]`.
     if let Some(mask) = try_bool_mask_key(item)?
-        && mask.ndim() == 1
+        && mask.ndim() >= 1
     {
+        let shape = mask.shape().dims().to_vec();
         let mask = mask.contiguous().map_err(_convert_error)?;
         let flags = mask
             .data()
             .as_bool_slice()
             .ok_or_else(|| PyRuntimeError::new_err("failed to read index mask"))?
             .to_vec();
-        return Ok(Some(AxisIndex::Mask(flags)));
+        return Ok(Some(AxisIndex::Mask(flags, shape)));
     }
     Ok(None)
 }
@@ -1207,8 +1244,12 @@ fn axis_index(item: &Bound<PyAny>) -> PyResult<Option<AxisIndex>> {
 struct AdvancedIndex {
     /// Which entry of the subscript it is.
     position: usize,
-    /// The input axis it indexes.
+    /// The first input axis it indexes.
     input_axis: usize,
+    /// The extents of the input axes it spans, starting at `input_axis`: one
+    /// axis for an index array, as many as it has dimensions for a mask.
+    /// `selected` counts positions across all of them in row-major order.
+    spanned: Vec<usize>,
     /// Where that axis sits in the shape the subscript selects.
     output_axis: usize,
     /// The positions along it, resolved and in the order written.
@@ -1251,6 +1292,10 @@ fn locate_advanced_index(
     let Some((position, index)) = found else {
         return Ok(None);
     };
+    let span = match &index {
+        AxisIndex::Positions(..) => 1,
+        AxisIndex::Mask(_, shape) => shape.len(),
+    };
 
     // Where the index sits among the input axes, and where that axis lands in
     // the output: an integer entry drops its axis, `None` adds one, `...`
@@ -1258,7 +1303,8 @@ fn locate_advanced_index(
     let explicit = items
         .iter()
         .filter(|it| !it.is_none() && !is_ellipsis(it))
-        .count();
+        .count()
+        + (span - 1);
     if explicit > dims.len() {
         return Err(PyIndexError::new_err(format!(
             "too many indices for tensor: it has {} dimension(s) but {explicit} were indexed",
@@ -1280,24 +1326,32 @@ fn locate_advanced_index(
             output_axis += 1;
         }
     }
-    if input_axis >= dims.len() {
+    if input_axis + span > dims.len() {
         return Err(PyIndexError::new_err(format!(
             "too many indices for tensor: it has {} dimension(s)",
             dims.len()
         )));
     }
 
-    let dim_size = dims[input_axis];
+    let spanned = dims[input_axis..input_axis + span].to_vec();
     let (selected, index_shape) = match index {
-        AxisIndex::Positions(values, shape) => {
-            (resolve_index_values(&values, input_axis, dim_size)?, shape)
-        }
-        AxisIndex::Mask(flags) => {
-            if flags.len() != dim_size {
+        AxisIndex::Positions(values, shape) => (
+            resolve_index_values(&values, input_axis, dims[input_axis])?,
+            shape,
+        ),
+        AxisIndex::Mask(flags, shape) => {
+            if span == 1 && flags.len() != dims[input_axis] {
                 return Err(PyIndexError::new_err(format!(
-                    "boolean index has {} element(s) but dimension {input_axis} has size \
-                     {dim_size}",
-                    flags.len()
+                    "boolean index has {} element(s) but dimension {input_axis} has size {}",
+                    flags.len(),
+                    dims[input_axis]
+                )));
+            }
+            if shape != spanned {
+                return Err(PyIndexError::new_err(format!(
+                    "boolean index of shape {shape:?} does not match dimensions {input_axis} \
+                     to {} of the tensor, which have shape {spanned:?}",
+                    input_axis + span - 1
                 )));
             }
             let taken: Vec<i64> = flags
@@ -1313,30 +1367,33 @@ fn locate_advanced_index(
     Ok(Some(AdvancedIndex {
         position,
         input_axis,
+        spanned,
         output_axis,
         selected,
         index_shape,
     }))
 }
 
-/// The same subscript with a full slice where the advanced index was, so the
-/// basic path can take everything else.
+/// The same subscript with full slices where the advanced index was, one for
+/// each axis it spans, so the basic path can take everything else.
 fn basic_part<'py>(
     key: &Bound<'py, PyAny>,
     items: &[Bound<'py, PyAny>],
-    position: usize,
+    found: &AdvancedIndex,
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let basic: Vec<Bound<PyAny>> = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            if i == position {
-                PySlice::full(key.py()).into_any()
-            } else {
-                item.clone()
-            }
-        })
-        .collect();
+    let mut basic: Vec<Bound<PyAny>> = Vec::with_capacity(items.len() + found.spanned.len());
+    for (i, item) in items.iter().enumerate() {
+        if i == found.position {
+            basic.extend(
+                found
+                    .spanned
+                    .iter()
+                    .map(|_| PySlice::full(key.py()).into_any()),
+            );
+        } else {
+            basic.push(item.clone());
+        }
+    }
     PyTuple::new(key.py(), basic)
 }
 
@@ -1365,7 +1422,7 @@ pub(crate) fn try_single_array_index(
         return Ok(None);
     };
 
-    let basic_key = basic_part(key, &items, found.position)?;
+    let basic_key = basic_part(key, &items, &found)?;
     let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
     // The basic part is read only by the gather below, so where it selects
     // everything it is the tensor itself, shared rather than copied: `t[:, i]`
@@ -1381,6 +1438,16 @@ pub(crate) fn try_single_array_index(
     };
     for &pos in &newaxis_positions {
         base = base.unsqueeze(pos as isize).map_err(_convert_error)?;
+    }
+    if found.spanned.len() > 1 {
+        // A mask over several axes counts its positions across all of them,
+        // so they become one axis to select along.
+        let mut merged = base.shape().dims().to_vec();
+        let span = found.output_axis..found.output_axis + found.spanned.len();
+        merged.splice(span, [found.spanned.iter().product()]);
+        base = base
+            .reshape(engine::tensor::Shape::new(merged))
+            .map_err(_convert_error)?;
     }
 
     let taken =
@@ -1407,8 +1474,11 @@ pub(crate) struct AxisAssign {
     /// The basic part of the subscript, one entry per input dimension, with the
     /// indexed axis still taken in full.
     indices: Vec<TensorIndex>,
-    /// Which of those entries the advanced index replaces.
+    /// The first of those entries the advanced index replaces.
     input_axis: usize,
+    /// The extents of the entries it replaces, from `input_axis` on: a
+    /// position in `selected` counts across all of them in row-major order.
+    spanned: Vec<usize>,
     /// The shape the subscript selects, which is what a value is lined up
     /// against.
     selection: Vec<usize>,
@@ -1438,7 +1508,7 @@ pub(crate) fn plan_single_array_assign(
         return Ok(None);
     };
 
-    let basic_key = basic_part(key, &items, found.position)?;
+    let basic_key = basic_part(key, &items, &found)?;
     let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
     let base: Vec<usize> = indices
         .iter()
@@ -1458,8 +1528,9 @@ pub(crate) fn plan_single_array_assign(
     for &position in &newaxis_positions {
         selection.insert(position.min(selection.len()), 1);
     }
+    let span = found.spanned.len();
     selection.splice(
-        found.output_axis..found.output_axis + 1,
+        found.output_axis..found.output_axis + span,
         found.index_shape.iter().copied(),
     );
     let added_before = newaxis_positions
@@ -1468,11 +1539,12 @@ pub(crate) fn plan_single_array_assign(
         .count();
     let flat_axis = found.output_axis - added_before;
     let mut flat = base;
-    flat[flat_axis] = found.selected.len();
+    flat.splice(flat_axis..flat_axis + span, [found.selected.len()]);
 
     Ok(Some(AxisAssign {
         indices,
         input_axis: found.input_axis,
+        spanned: found.spanned,
         selection_span: found.output_axis + found.index_shape.len(),
         selection,
         flat,
@@ -1513,7 +1585,7 @@ pub(crate) fn apply_single_array_assign(
         // so every position gets all of it -- `t[:, idx] = row`, and the scalar
         // case with it. Nothing has to be materialised for that.
         for &position in &plan.selected {
-            dest[plan.input_axis] = TensorIndex::Index(position as usize);
+            plan.place(&mut dest, position);
             target.index_assign(&dest, &value).map_err(_convert_error)?;
         }
         return Ok(());
@@ -1541,10 +1613,22 @@ pub(crate) fn apply_single_array_assign(
     for (step, &position) in plan.selected.iter().enumerate() {
         share[plan.flat_axis] = TensorIndex::Index(step);
         let part = broadcast.index(&share).map_err(_convert_error)?;
-        dest[plan.input_axis] = TensorIndex::Index(position as usize);
+        plan.place(&mut dest, position);
         target.index_assign(&dest, &part).map_err(_convert_error)?;
     }
     Ok(())
+}
+
+impl AxisAssign {
+    /// Point the replaced entries of `dest` at one selected position, which
+    /// for a mask over several axes means one coordinate on each.
+    fn place(&self, dest: &mut [TensorIndex], position: i64) {
+        let mut rest = position as usize;
+        for (offset, &extent) in self.spanned.iter().enumerate().rev() {
+            dest[self.input_axis + offset] = TensorIndex::Index(rest % extent);
+            rest /= extent;
+        }
+    }
 }
 
 fn full_slice(dim: usize) -> TensorIndex {
@@ -1562,6 +1646,22 @@ fn full_slice(dim: usize) -> TensorIndex {
 /// which axis was overrun nor how long it is — the two facts needed to fix the
 /// call. The engine's `IndexError` already reports all three, so match it.
 fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<TensorIndex> {
+    // A bool converts to an integer, so `x[True]` was `x[1]` and `x[:, False]`
+    // was `x[:, 0]`: a condition that happened to be a Python bool picked a
+    // row without a word. A mask is a bool tensor or list; a lone bool is
+    // neither a mask nor a position.
+    if item.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "a bool cannot index axis {axis}: it is not a position, and reading it as one \
+             would pick {} without saying so. Index with an int to pick a position, or with a \
+             bool tensor or list to select by a mask",
+            if item.is_truthy()? {
+                "position 1"
+            } else {
+                "position 0"
+            }
+        )));
+    }
     // A slice or `None` is not asked for an integer first: the refusal is
     // raised and its message formatted, which cost more than the slice.
     let basic = item.is_exact_instance_of::<PySlice>() || item.is_none();
@@ -1617,7 +1717,11 @@ fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<Te
             step: 1,
         })
     } else {
-        Err(PyTypeError::new_err("Invalid index type"))
+        Err(PyTypeError::new_err(format!(
+            "{} cannot index a tensor: an index is an int, a slice, None, ..., or an int or \
+             bool tensor, array or list",
+            item.get_type().fully_qualified_name()?
+        )))
     }
 }
 

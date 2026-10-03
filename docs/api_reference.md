@@ -1238,7 +1238,7 @@ print(y.tolist(), x.grad.tolist(), v.grad.tolist())
 ```
 
 `__getitem__` supports basic indexing (ints, slices with positive steps,
-`None`/`np.newaxis`, and `...`/Ellipsis) plus NumPy-style fancy forms:
+`None`/`np.newaxis`, and `...`/Ellipsis) plus these advanced forms:
 
 - **Boolean masks** — `t[mask]` where the mask's shape equals `t`'s leading
   `mask.ndim` dimensions selects the trailing blocks: a full-shape mask
@@ -1250,12 +1250,19 @@ print(y.tolist(), x.grad.tolist(), v.grad.tolist())
 - **One advanced index anywhere in the subscript** — `t[:, idx]`,
   `t[1:3, idx]`, `t[..., idx]`, `t[i, 1, idx]` and `t[:, mask]` select along
   the axis the index is written on, mixed freely with ints, slices, `None`
-  and `...`. The index may be a list, an int ndarray, an int tensor or a 1-D
-  bool mask; positions wrap negatively against *that* axis, and an index array
+  and `...`. The index may be a list, an int ndarray, an int tensor or a bool
+  mask; positions wrap negatively against *that* axis, and an index array
   of two dimensions or more puts both of its axes where the one axis was
   (`t[:, [[0, 2], [1, 1]]]` on a `(2, 3, 4)` tensor gives `(2, 2, 2, 4)`).
+  A mask of two dimensions or more covers as many axes, starting where it is
+  written, and must match their shape: `t[:, m]` with a `(3, 4)` mask over a
+  `(2, 3, 4, 5)` tensor gives `(2, m.sum(), 5)`, and `t[m, ...]` is `t[m]`.
   This is `index_select` along that axis and is differentiable, so a repeated
   position accumulates its gradient.
+
+  A bool is not a position. `t[True]`, `t[:, False]` and `t[[1, True]]` are
+  refused rather than read as `t[1]`, `t[:, 0]` and `t[[1, 1]]`; a mask is a
+  bool tensor, array or list.
 
   Two advanced indices in one subscript are refused by name: they could mean
   pairing up elementwise — `t[[0, 1], [1, 2]]` as two elements, which is
