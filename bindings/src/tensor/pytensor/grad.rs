@@ -117,6 +117,7 @@ impl PyTensor {
             fill_from_python(&mut slf.inner, value)?;
         } else {
             let fill_value = extract_real_scalar(value, "value")?;
+            check_float_fits(fill_value, slf.inner.dtype())?;
             slf.inner.fill_(fill_value).map_err(_convert_error)?;
         }
         register_leaf_tensor(&slf.inner);

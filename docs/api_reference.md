@@ -1281,7 +1281,11 @@ the layer, and a value read from the target (`t[:, [0, 1]] = t[:, [1, 0]]`) is
 read before anything is written. Values given as Python scalars or lists are
 cast to the tensor's dtype; a tensor of another dtype is refused rather than
 promoted, whichever form the subscript takes, and the error says which
-conversion to make.
+conversion to make. Into an integer tensor a Python number has to fit: an int
+outside the dtype's range is refused, and so is a float with no integer to
+truncate to -- NaN, an infinity, or one out of range -- with the same
+`OverflowError` here as from `fill_`, `full`, `full_like`, `new_full` and the
+constructors. Any other float truncates.
 
 Assignment through a basic subscript broadcasts the same way, matching the
 value against the selection right-aligned: each of the value's dimensions must

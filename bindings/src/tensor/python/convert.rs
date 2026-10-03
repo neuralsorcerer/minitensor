@@ -132,7 +132,7 @@ fn build_tensor_from_python(
             return Err(does_not_fit(value, dtype));
         }
         let (base_tensor, _) = tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
-        return python_ints_as(base_tensor, dtype);
+        return python_values_as(base_tensor, dtype);
     }
 
     if let Ok(tuple) = data.cast::<PyTuple>() {
@@ -190,7 +190,7 @@ fn build_tensor_from_python(
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_i64(vec![value_int], device));
         let tensor = Tensor::new(base_data, shape, DataType::Int64, device, requires_grad);
-        return python_ints_as(tensor, dtype);
+        return python_values_as(tensor, dtype);
     }
 
     // An int that reached here is past int64. It can still be a float, but an
@@ -203,11 +203,8 @@ fn build_tensor_from_python(
     if is_float && let Ok(value_float) = data.extract::<f64>() {
         let shape = Shape::new(vec![]);
         let base_data = Arc::new(TensorData::from_vec_f64(vec![value_float], device));
-        let mut tensor = Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);
-        if dtype != DataType::Float64 {
-            tensor = tensor.astype(dtype).map_err(_convert_error)?;
-        }
-        return Ok(tensor);
+        let tensor = Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);
+        return python_values_as(tensor, dtype);
     }
 
     let float_name = intern!(data.py(), "__float__");
@@ -218,12 +215,8 @@ fn build_tensor_from_python(
             let val = float_obj.extract::<f64>()?;
             let shape = Shape::new(vec![]);
             let base_data = Arc::new(TensorData::from_vec_f64(vec![val], device));
-            let mut tensor =
-                Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);
-            if dtype != DataType::Float64 {
-                tensor = tensor.astype(dtype).map_err(_convert_error)?;
-            }
-            return Ok(tensor);
+            let tensor = Tensor::new(base_data, shape, DataType::Float64, device, requires_grad);
+            return python_values_as(tensor, dtype);
         }
     }
 
@@ -1881,16 +1874,20 @@ fn sequence_via_numpy(
     .ok()?;
 
     // A value that does not fit is left to the walk below, which reports it.
-    python_ints_as(tensor, dtype).ok()
+    python_values_as(tensor, dtype).ok()
 }
 
 /// `tensor`, holding values read from Python, at `dtype`.
 ///
-/// A Python int has no width of its own: it takes the dtype it is given, and
-/// one that dtype cannot hold is refused rather than wrapped. Narrowed to
-/// int32, 2**40 keeps its low 32 bits and becomes 0 -- a wrong value with
-/// nothing to say so.
-fn python_ints_as(tensor: Tensor, dtype: DataType) -> PyResult<Tensor> {
+/// A Python number has no width of its own: it takes the dtype it is given,
+/// and one that dtype cannot hold is refused rather than wrapped or clamped.
+/// Narrowed to int32, 2**40 keeps its low 32 bits and becomes 0 -- a wrong
+/// value with nothing to say so. A float bound for an integer dtype is
+/// truncated, as any float-to-integer conversion is, but NaN, an infinity or
+/// a value whose truncation is out of range has no integer to truncate to: the
+/// cast saturated them to 0 and the dtype's bounds, so `fill_(inf)` on int32
+/// wrote 2147483647.
+fn python_values_as(tensor: Tensor, dtype: DataType) -> PyResult<Tensor> {
     if tensor.dtype() == dtype {
         return Ok(tensor);
     }
@@ -1901,7 +1898,45 @@ fn python_ints_as(tensor: Tensor, dtype: DataType) -> PyResult<Tensor> {
     {
         return Err(does_not_fit(value, DataType::Int32));
     }
+    if tensor.dtype().is_float() && dtype.is_int() {
+        match tensor.dtype() {
+            DataType::Float64 => {
+                for &value in tensor.data().as_f64_slice().unwrap_or(&[]) {
+                    check_float_fits(value, dtype)?;
+                }
+            }
+            _ => {
+                for &value in tensor.data().as_f32_slice().unwrap_or(&[]) {
+                    check_float_fits(f64::from(value), dtype)?;
+                }
+            }
+        }
+    }
     tensor.astype(dtype).map_err(_convert_error)
+}
+
+/// Refuse a float with no integer of `dtype` to truncate to: NaN, an infinity,
+/// or one whose truncation is out of the dtype's range. Every other float
+/// truncates, as any float-to-integer conversion does.
+pub(crate) fn check_float_fits(value: f64, dtype: DataType) -> PyResult<()> {
+    // The exclusive upper limit is a power of two, so it is exact as an f64
+    // where `i64::MAX` is not.
+    let (low, above) = match dtype {
+        DataType::Int32 => (f64::from(i32::MIN), f64::from(i32::MAX) + 1.0),
+        DataType::Int64 => (i64::MIN as f64, -(i64::MIN as f64)),
+        _ => return Ok(()),
+    };
+    if value.is_finite() && (low..above).contains(&value.trunc()) {
+        return Ok(());
+    }
+    let shown = if value.is_nan() {
+        "nan".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        value.to_string()
+    };
+    Err(does_not_fit(shown, dtype))
 }
 
 /// The error for a Python int outside the range of the integer `dtype` it

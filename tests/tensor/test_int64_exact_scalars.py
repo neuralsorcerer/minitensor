@@ -62,4 +62,8 @@ def test_float_arguments_and_dtypes_keep_their_path():
     np.testing.assert_allclose(mt.arange(0, 1, 0.25).numpy(), [0.0, 0.25, 0.5, 0.75])
     assert mt.arange(0, 3, 0.5, dtype="int64").tolist() == [0, 0, 1, 1, 2, 2]
     assert mt.zeros(2, dtype="int64").fill_(2.7).tolist() == [2, 2]
-    assert mt.Tensor([0, 5, 9], dtype="int64").clamp(2.5, 7.5).tolist() == [2, 5, 7]
+    # A fractional bound has no integer answer, so the clamp widens -- the
+    # rule `hardtanh` follows -- rather than truncating the bound onto it.
+    widened = mt.Tensor([0, 5, 9], dtype="int64").clamp(2.5, 7.5)
+    assert widened.dtype == "float64"
+    assert widened.tolist() == [2.5, 5.0, 7.5]

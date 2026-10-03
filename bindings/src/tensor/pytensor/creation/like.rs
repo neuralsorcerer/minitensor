@@ -224,6 +224,7 @@ impl PyTensor {
             return Self::created(tensor, asked);
         }
         let fill_value = extract_real_scalar(fill_value, "fill_value")?;
+        check_float_fits(fill_value, dtype)?;
         let tensor = create_full_tensor(shape, fill_value, dtype, device, requires_grad)?;
         Self::created(tensor, asked)
     }
@@ -295,7 +296,7 @@ impl PyTensor {
     fn new_full(
         &self,
         shape: &Bound<PyAny>,
-        fill_value: f64,
+        fill_value: &Bound<PyAny>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -309,6 +310,15 @@ impl PyTensor {
         let device = resolve_device_or(device, self.inner.device())?;
         let asked = requires_grad.unwrap_or(false);
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+        // The same conversion `full` gives its value: an integer exactly into an
+        // integer dtype, and a float only where the dtype can hold it.
+        if !dtype.is_float() && is_integer_value(fill_value) {
+            let mut tensor = Tensor::zeros(Shape::new(dims), dtype, device, false);
+            fill_from_python(&mut tensor, fill_value)?;
+            return Self::created(tensor, asked);
+        }
+        let fill_value = extract_real_scalar(fill_value, "fill_value")?;
+        check_float_fits(fill_value, dtype)?;
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Self::created(tensor, asked)
     }
@@ -518,6 +528,7 @@ impl PyTensor {
             return Self::created(tensor, asked);
         }
         let fill_value = extract_real_scalar(fill_value, "fill_value")?;
+        check_float_fits(fill_value, dtype)?;
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Self::created(tensor, asked)
     }

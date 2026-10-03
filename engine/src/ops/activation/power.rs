@@ -186,6 +186,19 @@ pub fn reciprocal(tensor: &Tensor) -> Result<Tensor> {
 
 /// Clip tensor values to range
 pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<Tensor> {
+    // The rule `hardtanh` states: a clamp answers with a bound or the value
+    // itself, so an integer keeps its dtype exactly when the bounds are whole.
+    // A fractional bound has no integer answer, and truncating it onto the
+    // integer gave a wrong one -- `clamp([1, 5], 0, 2.5)` came back `[1, 2]` --
+    // so it widens. An infinite bound clamps nothing and counts as whole.
+    let fractional = |bound: Option<f64>| bound.is_some_and(|b| b.is_finite() && b.fract() != 0.0);
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64)
+        && (fractional(min_val) || fractional(max_val))
+    {
+        let widened =
+            crate::ops::util::widen_integer_input(tensor)?.expect("an integer dtype always widens");
+        return clip(&widened, min_val, max_val);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => clip_f32(tensor, min_val, max_val)?,
         DataType::Float64 => clip_f64(tensor, min_val, max_val)?,
