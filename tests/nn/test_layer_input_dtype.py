@@ -90,3 +90,13 @@ def test_a_recurrent_layer_names_the_state_of_the_wrong_dtype(which):
     tensors[which] = tensors[which].astype("float64")
     with pytest.raises(TypeError, match=f"was given a float64 {which};"):
         layer.forward_with_state(tensors["input"], tensors["hx"], tensors["cx"])
+
+
+def test_loading_a_state_of_another_dtype_names_the_conversion():
+    saved = nn.DenseLayer(3, 2).astype("float64").state_dict()
+    model = nn.DenseLayer(3, 2)
+    with pytest.raises(
+        ValueError, match=r"convert the model with \.astype\('float64'\)"
+    ):
+        model.load_state_dict(saved)
+    model.astype("float64").load_state_dict(saved)

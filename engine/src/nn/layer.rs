@@ -462,6 +462,8 @@ struct LoadProblems {
     unexpected: Vec<String>,
     mismatched: Vec<String>,
     mistyped: Vec<String>,
+    /// The dtype each mistyped entry arrived in, for the conversion hint.
+    arrived_as: Vec<crate::tensor::DataType>,
     in_use: Vec<String>,
 }
 
@@ -485,11 +487,14 @@ impl LoadProblems {
                     tensor.shape().dims()
                 ))
             }
-            Ok(tensor) if tensor.dtype() != slot.dtype() => self.mistyped.push(format!(
-                "{name} (expected {}, got {})",
-                slot.dtype(),
-                tensor.dtype()
-            )),
+            Ok(tensor) if tensor.dtype() != slot.dtype() => {
+                self.mistyped.push(format!(
+                    "{name} (expected {}, got {})",
+                    slot.dtype(),
+                    tensor.dtype()
+                ));
+                self.arrived_as.push(tensor.dtype());
+            }
             Ok(_) => {
                 let in_place = through || slot.requires_grad();
                 if in_place && slot.is_leaf() && crate::autograd::is_consumed_by_live_graph(slot) {
@@ -531,6 +536,23 @@ impl LoadProblems {
     }
 
     fn into_result(self) -> Result<()> {
+        // A state saved from a model in another float dtype: one conversion of
+        // the model loads all of it. Only offered when that is the whole story.
+        let conversion = match self.arrived_as.split_first() {
+            Some((first, rest))
+                if first.is_float()
+                    && rest.iter().all(|dtype| dtype == first)
+                    && self.missing.is_empty()
+                    && self.unexpected.is_empty()
+                    && self.mismatched.is_empty() =>
+            {
+                Some(format!(
+                    "; the state is {first}, so convert the model with .astype('{first}') \
+                     before loading it"
+                ))
+            }
+            _ => None,
+        };
         let problems: Vec<String> = [
             ("missing from the state dict", self.missing),
             ("not in this module", self.unexpected),
@@ -553,8 +575,9 @@ impl LoadProblems {
             Ok(())
         } else {
             Err(MinitensorError::invalid_operation(format!(
-                "load_state_dict: {}",
-                problems.join("; ")
+                "load_state_dict: {}{}",
+                problems.join("; "),
+                conversion.unwrap_or_default()
             )))
         }
     }
