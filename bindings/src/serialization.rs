@@ -180,7 +180,7 @@ impl PyModelMetadata {
 
 /// How a checkpoint is encoded: `json` (readable, large), `binary` (compact) or `msgpack` (compact, cross-language).
 #[pyclass(name = "SerializationFormat", from_py_object)]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PySerializationFormat {
     inner: SerializationFormat,
 }

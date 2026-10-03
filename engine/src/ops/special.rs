@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn digamma_matches_the_values_it_is_named_for() {
-        const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
+        use std::f64::consts::EULER_GAMMA as EULER_MASCHERONI;
         let got = wide(&digamma(&f64_tensor(vec![1.0, 2.0, 0.5])).unwrap());
         assert!((got[0] + EULER_MASCHERONI).abs() < 1e-13);
         // psi(2) = 1 - gamma, from the recurrence psi(x+1) = psi(x) + 1/x.
