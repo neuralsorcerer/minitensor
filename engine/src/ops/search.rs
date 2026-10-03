@@ -43,7 +43,26 @@ use std::sync::Arc;
 /// would be inserted *before* its equals; `true` gives the first strictly
 /// greater, inserting *after* them. On a sequence with no duplicates the two
 /// agree everywhere except exactly on an element.
+///
+/// NaN takes the place `sort` gives it: after every number, and equal to
+/// itself. A NaN in the sequence already compared as larger than any value,
+/// since every comparison with it is false. A NaN *value* did not: being less
+/// than nothing it landed at index 0, before everything it sorts after, so
+/// `sequence.searchsorted(nan)` disagreed with where the sort had put the NaNs.
+/// It now lands at the first NaN, or past the last one with `right`.
 fn locate<T: PartialOrd>(sequence: &[T], value: &T, right: bool) -> usize {
+    // `x != x` holds only for NaN, and never for an integer or a bool, where
+    // it folds away.
+    #[allow(clippy::eq_op)]
+    let value_is_nan = value != value;
+    if value_is_nan {
+        if right {
+            return sequence.len();
+        }
+        // The NaNs are the run at the end of a sorted sequence; find its start.
+        #[allow(clippy::eq_op)]
+        return sequence.partition_point(|element| element == element);
+    }
     let (mut low, mut high) = (0usize, sequence.len());
     while low < high {
         let middle = low + (high - low) / 2;

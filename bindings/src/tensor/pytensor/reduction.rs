@@ -478,20 +478,22 @@ impl PyTensor {
     #[pyo3(signature = (k, dim=None, largest=true, sorted=true))]
     pub fn topk(
         &self,
-        k: usize,
+        k: isize,
         dim: Option<isize>,
         largest: Option<bool>,
         sorted: Option<bool>,
     ) -> PyResult<(Self, Self)> {
+        // Signed, so a negative count is refused with a message about `k`
+        // rather than an OverflowError from the conversion.
+        let k = usize::try_from(k)
+            .map_err(|_| PyValueError::new_err(format!("k must be non-negative, got {k}")))?;
         let largest = largest.unwrap_or(true);
         let sorted = sorted.unwrap_or(true);
-        match self.inner.topk(k, dim, largest, sorted) {
-            Ok((values, indices)) => Ok((Self::from_tensor(values), Self::from_tensor(indices))),
-            Err(err @ MinitensorError::InvalidArgument { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let (values, indices) = self
+            .inner
+            .topk(k, dim, largest, sorted)
+            .map_err(_convert_error)?;
+        Ok((Self::from_tensor(values), Self::from_tensor(indices)))
     }
 
     /// Sort along `dim`, returning the sorted values and the indices that produced them.
@@ -504,13 +506,11 @@ impl PyTensor {
     ) -> PyResult<(Self, Self)> {
         let descending = descending.unwrap_or(false);
         let stable = stable.unwrap_or(false);
-        match self.inner.sort(dim, descending, stable) {
-            Ok((values, indices)) => Ok((Self::from_tensor(values), Self::from_tensor(indices))),
-            Err(err @ MinitensorError::InvalidArgument { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let (values, indices) = self
+            .inner
+            .sort(dim, descending, stable)
+            .map_err(_convert_error)?;
+        Ok((Self::from_tensor(values), Self::from_tensor(indices)))
     }
 
     /// The indices that would sort along `dim`.
@@ -523,13 +523,11 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let descending = descending.unwrap_or(false);
         let stable = stable.unwrap_or(false);
-        match self.inner.argsort(dim, descending, stable) {
-            Ok(indices) => Ok(Self::from_tensor(indices)),
-            Err(err @ MinitensorError::InvalidArgument { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let indices = self
+            .inner
+            .argsort(dim, descending, stable)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(indices))
     }
 
     /// Standard deviation over `dim`. `unbiased` applies Bessel's correction.

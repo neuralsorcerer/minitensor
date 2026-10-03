@@ -965,7 +965,7 @@ def test_topk_zero_k():
 
 def test_topk_out_of_range():
     x = mt.tensor([[1.0, 2.0, 3.0]])
-    with pytest.raises(RuntimeError, match="selected index k out of range"):
+    with pytest.raises(ValueError, match="selected index k out of range"):
         x.topk(4, dim=1)
 
 

@@ -1382,7 +1382,9 @@ the library: comparing every value against every boundary is
   of a run of equal elements the insertion lands on. A one-dimensional sequence
   is searched by every value; a batched one is matched row for row along its
   last axis. The sequence is *assumed* sorted and never checked, since checking
-  costs the linear scan the search exists to avoid.
+  costs the linear scan the search exists to avoid. NaN sits where `sort` puts
+  it, after every number: a NaN value lands at the first NaN of the sequence,
+  or past the last one with `right=True`.
 - `bucketize(input, boundaries, right=False)` — the same call with the arguments
   the other way round, which is the reading that fits when the sequence is a
   fixed set of bucket boundaries.

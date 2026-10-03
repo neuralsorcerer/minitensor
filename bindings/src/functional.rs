@@ -1808,11 +1808,8 @@ pub fn topk(
     largest: bool,
     sorted: bool,
 ) -> PyResult<(PyTensor, PyTensor)> {
-    if k < 0 {
-        return Err(PyRuntimeError::new_err("k must be non-negative"));
-    }
     let tensor = borrow_tensor(input)?;
-    tensor.topk(k as usize, dim, Some(largest), Some(sorted))
+    tensor.topk(k, dim, Some(largest), Some(sorted))
 }
 
 /// Sort along `dim`, returning the sorted values and the indices that produced them.
