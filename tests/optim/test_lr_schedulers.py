@@ -131,6 +131,42 @@ def test_base_lr_and_last_epoch_are_reported(optimizer):
 
 
 @pytest.mark.parametrize(
+    "build,expected",
+    [
+        (lambda o: mt.optim.ConstantLR(o), "ConstantLR("),
+        (lambda o: mt.optim.StepLR(o, 3, 0.5), "StepLR(step_size=3, gamma=0.5, "),
+        (lambda o: mt.optim.ExponentialLR(o, 0.9), "ExponentialLR(gamma=0.9, "),
+        (
+            lambda o: mt.optim.CosineAnnealingLR(o, 4),
+            "CosineAnnealingLR(t_max=4, eta_min=0.0, ",
+        ),
+        (lambda o: mt.optim.LinearWarmupLR(o, 4), "LinearWarmupLR(warmup_steps=4, "),
+        (
+            lambda o: mt.optim.PolynomialDecayLR(o, 4, 0.0, 2.0),
+            "PolynomialDecayLR(decay_steps=4, end_lr=0.0, power=2.0, ",
+        ),
+        (
+            lambda o: mt.optim.MultiStepLR(o, [7, 3], 0.1),
+            "MultiStepLR(milestones=[3, 7], gamma=0.1, ",
+        ),
+    ],
+)
+def test_repr_names_the_class_and_its_settings(optimizer, build, expected):
+    # Every schedule used to print as `LRScheduler(...)` with none of the
+    # settings that told one apart from another.
+    text = repr(build(optimizer))
+    assert text.startswith(expected), text
+    assert text.endswith("base_lr=1.0, last_epoch=0, lr=" + repr(optimizer.lr) + ")")
+
+
+def test_decay_holds_past_two_to_the_thirty_one_steps(optimizer):
+    # The decay exponent was narrowed to 32 bits: 2**31 steps of halving came
+    # out infinite, and 2**32 came back to the base rate.
+    assert mt.optim.ExponentialLR(optimizer, 0.5).get_lr(2**31) == 0.0
+    assert mt.optim.StepLR(optimizer, 1, 0.5).get_lr(2**32) == 0.0
+
+
+@pytest.mark.parametrize(
     "factory,kwargs",
     [
         (lambda o, **k: mt.optim.StepLR(o, **k), dict(step_size=0)),

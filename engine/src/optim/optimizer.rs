@@ -291,6 +291,30 @@ pub trait LearningRateScheduler: Send + Sync {
 
     /// Update scheduler state (if needed)
     fn step(&mut self) {}
+
+    /// The settings that shape this schedule, as Python keyword arguments
+    /// (`step_size=3, gamma=0.5`), for a `repr`. Empty for a schedule that has
+    /// none.
+    ///
+    /// Only the arguments: the caller supplies the class name, which on the
+    /// Python side is the class the user constructed rather than this type's.
+    fn hyperparameters(&self) -> String {
+        String::new()
+    }
+}
+
+/// `gamma` to the power `times`, for any step count.
+///
+/// `powi` takes an `i32`, and casting a larger count wraps it: past 2^31 steps
+/// a decaying rate became infinite, and at 2^32 it was back to the base rate.
+/// Counts that fit keep `powi`'s exact repeated multiplication; beyond that the
+/// exponent goes to `powf` whole, since clamping it would be wrong for a
+/// `gamma` close enough to 1 that the extra steps still matter.
+pub(crate) fn gamma_power(gamma: f64, times: usize) -> f64 {
+    match i32::try_from(times) {
+        Ok(times) => gamma.powi(times),
+        Err(_) => gamma.powf(times as f64),
+    }
 }
 
 /// Constant learning rate scheduler
@@ -321,8 +345,11 @@ impl LearningRateScheduler for StepLR {
         if self.step_size == 0 {
             return base_lr;
         }
-        let decay_factor = self.gamma.powi((step / self.step_size) as i32);
-        base_lr * decay_factor
+        base_lr * gamma_power(self.gamma, step / self.step_size)
+    }
+
+    fn hyperparameters(&self) -> String {
+        format!("step_size={}, gamma={:?}", self.step_size, self.gamma)
     }
 }
 
@@ -340,7 +367,11 @@ impl ExponentialLR {
 
 impl LearningRateScheduler for ExponentialLR {
     fn get_lr(&self, step: usize, base_lr: f64) -> f64 {
-        base_lr * self.gamma.powi(step as i32)
+        base_lr * gamma_power(self.gamma, step)
+    }
+
+    fn hyperparameters(&self) -> String {
+        format!("gamma={:?}", self.gamma)
     }
 }
 
@@ -372,6 +403,10 @@ impl LearningRateScheduler for CosineAnnealingLR {
         // At t=t_max: cos(π) = -1, lr = eta_min
         self.eta_min
             + (base_lr - self.eta_min) * (1.0 + (std::f64::consts::PI * t / t_max).cos()) / 2.0
+    }
+
+    fn hyperparameters(&self) -> String {
+        format!("t_max={}, eta_min={:?}", self.t_max, self.eta_min)
     }
 }
 

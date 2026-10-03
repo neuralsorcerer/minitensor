@@ -128,13 +128,20 @@ impl PyLRScheduler {
         Ok(())
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "LRScheduler(base_lr={}, last_epoch={}, lr={})",
-            self.base_lr,
-            self.last_epoch,
-            self.get_last_lr()
-        )
+    /// The class constructed, the settings that shape its schedule, and where
+    /// it is along it: `StepLR(step_size=3, gamma=0.5, base_lr=0.1,
+    /// last_epoch=7, lr=0.025)`.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let name = slf.get_type().name()?;
+        let this = slf.borrow();
+        let settings = this.inner.hyperparameters();
+        let separator = if settings.is_empty() { "" } else { ", " };
+        Ok(format!(
+            "{name}({settings}{separator}base_lr={:?}, last_epoch={}, lr={:?})",
+            this.base_lr,
+            this.last_epoch,
+            this.get_last_lr()
+        ))
     }
 }
 

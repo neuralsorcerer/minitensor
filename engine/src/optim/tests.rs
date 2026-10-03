@@ -916,6 +916,62 @@ mod tests {
     }
 
     #[test]
+    fn test_decay_exponent_past_the_i32_range() {
+        use crate::optim::{ExponentialLR, StepLR, utils::MultiStepScheduler};
+
+        // The exponent used to be cast to i32, so 2^31 steps wrapped negative
+        // (a decaying rate went infinite) and 2^32 wrapped to zero (back to the
+        // base rate).
+        let past = 1usize << 32;
+        assert_eq!(ExponentialLR::new(0.5).get_lr(1 << 31, 1.0), 0.0);
+        assert_eq!(StepLR::new(1, 0.5).get_lr(past, 1.0), 0.0);
+        assert_eq!(ExponentialLR::new(2.0).get_lr(past, 1.0), f64::INFINITY);
+        // A gamma this close to 1 still decays measurably over those extra
+        // steps, so the exponent must be carried whole rather than clamped.
+        let gamma: f64 = 1.0 - 1e-10;
+        let expected = (past as f64 * gamma.ln()).exp();
+        let lr = ExponentialLR::new(gamma).get_lr(past, 1.0);
+        assert!((lr - expected).abs() < 1e-9, "{lr} vs {expected}");
+        // Counts in range are unchanged.
+        assert_eq!(ExponentialLR::new(0.9).get_lr(7, 1.0), 0.9f64.powi(7));
+        assert_eq!(
+            MultiStepScheduler::new(vec![2, 5], 0.1).get_lr(9, 1.0),
+            0.1f64.powi(2)
+        );
+    }
+
+    #[test]
+    fn test_scheduler_hyperparameters_read_as_python_arguments() {
+        use crate::optim::utils::{
+            LinearWarmupScheduler, MultiStepScheduler, PolynomialDecayScheduler,
+        };
+        use crate::optim::{ConstantLR, ExponentialLR, StepLR};
+
+        assert_eq!(
+            StepLR::new(3, 0.5).hyperparameters(),
+            "step_size=3, gamma=0.5"
+        );
+        assert_eq!(ExponentialLR::new(0.9).hyperparameters(), "gamma=0.9");
+        assert_eq!(
+            CosineAnnealingLR::new(4, 0.0).hyperparameters(),
+            "t_max=4, eta_min=0.0"
+        );
+        assert_eq!(
+            LinearWarmupScheduler::new(4).hyperparameters(),
+            "warmup_steps=4"
+        );
+        assert_eq!(
+            PolynomialDecayScheduler::new(4, 0.0, 2.0).hyperparameters(),
+            "decay_steps=4, end_lr=0.0, power=2.0"
+        );
+        assert_eq!(
+            MultiStepScheduler::new(vec![5, 2], 0.1).hyperparameters(),
+            "milestones=[2, 5], gamma=0.1"
+        );
+        assert_eq!(ConstantLR.hyperparameters(), "");
+    }
+
+    #[test]
     fn test_cosine_annealing_scheduler_bounds() {
         let scheduler = CosineAnnealingLR::new(4, 0.01);
         let base_lr = 0.1;

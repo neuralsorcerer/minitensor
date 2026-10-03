@@ -227,6 +227,10 @@ impl LearningRateScheduler for LinearWarmupScheduler {
             base_lr
         }
     }
+
+    fn hyperparameters(&self) -> String {
+        format!("warmup_steps={}", self.warmup_steps)
+    }
 }
 
 /// Polynomial decay learning rate scheduler
@@ -256,6 +260,13 @@ impl LearningRateScheduler for PolynomialDecayScheduler {
         let decay_factor = (1.0 - step as f64 / self.decay_steps as f64).powf(self.power);
         (base_lr - self.end_lr) * decay_factor + self.end_lr
     }
+
+    fn hyperparameters(&self) -> String {
+        format!(
+            "decay_steps={}, end_lr={:?}, power={:?}",
+            self.decay_steps, self.end_lr, self.power
+        )
+    }
 }
 
 /// Multi-step learning rate scheduler
@@ -279,7 +290,16 @@ impl LearningRateScheduler for MultiStepScheduler {
             .iter()
             .filter(|&&milestone| step >= milestone)
             .count();
-        base_lr * self.gamma.powi(decay_count as i32)
+        base_lr * super::optimizer::gamma_power(self.gamma, decay_count)
+    }
+
+    fn hyperparameters(&self) -> String {
+        let milestones: Vec<String> = self.milestones.iter().map(usize::to_string).collect();
+        format!(
+            "milestones=[{}], gamma={:?}",
+            milestones.join(", "),
+            self.gamma
+        )
     }
 }
 
