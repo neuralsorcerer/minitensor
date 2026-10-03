@@ -365,3 +365,21 @@ def test_norm_layer_composes_inside_sequential():
     out = model(_t(rng.standard_normal((2, 4)))).numpy()
     assert out.shape == (2, 4)
     assert (out >= 0).all()
+
+
+def test_forward_qkv_follows_the_layers_causality_unless_told_otherwise():
+    # A layer built causal stayed causal when called but not through
+    # forward_qkv, whose own flag defaulted to False.
+    mha = mt.nn.MultiheadAttention(8, 2, is_causal=True, dtype="float64")
+    x = _t(np.random.default_rng(3).normal(size=(1, 4, 8)))
+    called = mha(x).numpy()
+    np.testing.assert_allclose(mha.forward_qkv(x, x, x).numpy(), called)
+    open_attention = mha.forward_qkv(x, x, x, is_causal=False).numpy()
+    assert not np.allclose(open_attention, called)
+
+
+def test_forward_qkv_names_the_operand_of_the_wrong_dtype():
+    mha = mt.nn.MultiheadAttention(8, 2, dtype="float64")
+    x = _t(np.zeros((1, 4, 8)))
+    with pytest.raises(TypeError, match="was given a float32 key"):
+        mha.forward_qkv(x, x.astype("float32"), x)

@@ -1507,26 +1507,36 @@ impl PyMultiheadAttention {
     /// `key` and `value` must share a batch size and sequence length; `query`
     /// may have its own sequence length, and the output follows it. `attn_mask`
     /// broadcasts to the per-head scores `(batch, heads, query_seq, key_seq)`.
-    #[pyo3(signature = (query, key, value, attn_mask=None, is_causal=false))]
+    ///
+    /// `is_causal` defaults to the layer's own setting, so a layer built
+    /// causal stays causal here as it is when called; pass it to override.
+    #[pyo3(signature = (query, key, value, attn_mask=None, is_causal=None))]
     fn forward_qkv(
         slf: PyRef<Self>,
         query: &Bound<PyAny>,
         key: &Bound<PyAny>,
         value: &Bound<PyAny>,
         attn_mask: Option<&Bound<PyAny>>,
-        is_causal: bool,
+        is_causal: Option<bool>,
     ) -> PyResult<PyTensor> {
         let module = slf.as_ref();
-        let ModuleType::MultiheadAttention(layer) = module.inner.get()? else {
+        let inner = module.inner.get()?;
+        let ModuleType::MultiheadAttention(layer) = inner else {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Invalid layer type",
             ));
         };
+        let is_causal = is_causal.unwrap_or_else(|| layer.is_causal());
 
         let q = borrow_tensor(query)?;
         let k = borrow_tensor(key)?;
         let v = borrow_tensor(value)?;
         let mask = borrow_optional_tensor(attn_mask)?;
+        for (tensor, what) in [(&q, "query"), (&k, "key"), (&v, "value")] {
+            inner
+                .check_dtype_of(tensor.tensor(), what)
+                .map_err(_convert_error)?;
+        }
 
         let result = layer
             .forward_qkv(

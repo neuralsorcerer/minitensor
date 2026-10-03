@@ -3058,10 +3058,12 @@ wrong axis -- so a stack that mixes the two needs a transpose between them. Call
 self-attention; `is_causal=True` makes it autoregressive. For cross-attention
 use:
 
-- `forward_qkv(query, key, value, attn_mask=None, is_causal=False)` -- `key` and
+- `forward_qkv(query, key, value, attn_mask=None, is_causal=None)` -- `key` and
   `value` must share a batch size and sequence length, while `query` may have
   its own; the output follows the query's length. `attn_mask` broadcasts to the
-  per-head scores `(batch, heads, query_seq, key_seq)`.
+  per-head scores `(batch, heads, query_seq, key_seq)`. `is_causal` defaults
+  to the layer's own setting, so a layer built causal stays causal here; pass
+  it to override.
 
 ```python
 import minitensor as mt
