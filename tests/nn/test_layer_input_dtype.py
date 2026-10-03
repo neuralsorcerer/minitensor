@@ -77,3 +77,16 @@ def test_astype_keeps_a_frozen_model_frozen_and_refuses_integers():
     assert not any(p.requires_grad for p in frozen.parameters())
     with pytest.raises(ValueError, match="must be floating point"):
         nn.DenseLayer(3, 2).astype("int64")
+
+
+@pytest.mark.parametrize("which", ["input", "hx", "cx"])
+def test_a_recurrent_layer_names_the_state_of_the_wrong_dtype(which):
+    layer = nn.LSTM(3, 4)
+    tensors = {
+        "input": mt.randn(5, 2, 3),
+        "hx": mt.zeros(1, 2, 4),
+        "cx": mt.zeros(1, 2, 4),
+    }
+    tensors[which] = tensors[which].astype("float64")
+    with pytest.raises(TypeError, match=f"was given a float64 {which};"):
+        layer.forward_with_state(tensors["input"], tensors["hx"], tensors["cx"])

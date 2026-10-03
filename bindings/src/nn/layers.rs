@@ -1323,9 +1323,10 @@ macro_rules! recurrent_class {
             /// Run the stack and return the final states alongside the output.
             ///
             /// `hx` supplies the initial hidden state shaped
-            /// `(num_layers, batch, hidden_size)`; zeros are used when omitted.
-            /// LSTM additionally accepts `cx` and returns `(output, (h_n, c_n))`;
-            /// GRU returns `(output, h_n)`.
+            /// `(num_layers * num_directions, batch, hidden_size)` -- two
+            /// directions for a bidirectional layer, forward first -- and zeros
+            /// are used when it is omitted. LSTM additionally accepts `cx` and
+            /// returns `(output, (h_n, c_n))`; GRU returns `(output, h_n)`.
             #[pyo3(signature = (input, hx=None, cx=None))]
             fn forward_with_state<'py>(
                 slf: PyRef<'py, Self>,
@@ -1335,7 +1336,8 @@ macro_rules! recurrent_class {
                 cx: Option<&Bound<'py, PyAny>>,
             ) -> PyResult<Py<PyAny>> {
                 let module = slf.as_ref();
-                let ModuleType::Recurrent(layer) = module.inner.get()? else {
+                let inner = module.inner.get()?;
+                let ModuleType::Recurrent(layer) = inner else {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         "Invalid layer type",
                     ));
@@ -1344,6 +1346,15 @@ macro_rules! recurrent_class {
                 let x = borrow_tensor(input)?;
                 let h0 = borrow_optional_tensor(hx)?;
                 let c0 = borrow_optional_tensor(cx)?;
+                inner
+                    .check_dtype_of(x.tensor(), "input")
+                    .map_err(_convert_error)?;
+                if let Some(h) = &h0 {
+                    inner.check_dtype_of(h.tensor(), "hx").map_err(_convert_error)?;
+                }
+                if let Some(c) = &c0 {
+                    inner.check_dtype_of(c.tensor(), "cx").map_err(_convert_error)?;
+                }
                 if h0.is_none() && c0.is_some() {
                     return Err(PyValueError::new_err(
                         "cx was given without hx; pass both initial states or neither",

@@ -3112,7 +3112,9 @@ two, so it is worth being explicit.
 `LSTM` and `GRU` take `(seq, batch, input_size)`, or `(batch, seq, input_size)`
 when `batch_first=True`. Calling the layer returns just the output sequence;
 `forward_with_state(input, hx=None, cx=None)` also returns the final states,
-shaped `(num_layers, batch, hidden_size)` regardless of `batch_first`:
+shaped `(num_layers * num_directions, batch, hidden_size)` regardless of
+`batch_first` -- two directions for a bidirectional layer, the forward one
+first in each layer. Initial states take the same shape:
 
 - `LSTM` returns `(output, (h_n, c_n))` and accepts both `hx` and `cx`.
 - `GRU` returns `(output, h_n)` and rejects a cell state.

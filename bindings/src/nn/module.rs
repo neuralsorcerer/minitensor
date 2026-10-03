@@ -1365,6 +1365,17 @@ impl ModuleType {
     /// as the expectation, and no word of which layer. An `Embedding` reads
     /// integer indices, and a `Sequential` is checked child by child.
     fn check_input_dtype(&self, input: &engine::tensor::Tensor) -> engine::error::Result<()> {
+        self.check_dtype_of(input, "input")
+    }
+
+    /// [`Self::check_input_dtype`] for any tensor the layer is given, `what`
+    /// naming it in the message: a recurrent layer's initial states are
+    /// checked the same way as its input.
+    pub(crate) fn check_dtype_of(
+        &self,
+        input: &engine::tensor::Tensor,
+        what: &str,
+    ) -> engine::error::Result<()> {
         if matches!(self, ModuleType::Sequential(_) | ModuleType::Embedding(_)) {
             return Ok(());
         }
@@ -1381,8 +1392,8 @@ impl ModuleType {
             wanted.clone(),
             given.clone(),
             format!(
-                "{} has {wanted} parameters and was given a {given} input; to \
-                 keep the input as it is, convert the model with .astype('{given}')",
+                "{} has {wanted} parameters and was given a {given} {what}; to \
+                 keep the {what} as it is, convert the model with .astype('{given}')",
                 self.class_name()
             ),
         ))
