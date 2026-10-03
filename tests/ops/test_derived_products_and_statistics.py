@@ -191,6 +191,49 @@ def test_diff_refuses_booleans_on_either_path():
         mt.diff(mt.from_numpy(np.array([True, False, True])))
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(prepend=0),
+        dict(append=20),
+        dict(prepend=0, append=0, n=2),
+        dict(prepend=np.array([[0], [1]]), dim=1),
+        dict(prepend=np.array([[5, 5, 5]]), append=np.array([[1, 1, 1]]), dim=0),
+    ],
+    ids=["prepend", "append", "both-n2", "block-dim1", "blocks-dim0"],
+)
+def test_diff_joins_prepend_and_append_along_the_axis_first(kwargs):
+    x = np.array([[1, 4, 9], [2, 3, 7]], dtype=np.int64)
+    expected_kwargs = dict(kwargs)
+    if "dim" in expected_kwargs:
+        expected_kwargs["axis"] = expected_kwargs.pop("dim")
+    ours = {
+        key: mt.from_numpy(value) if isinstance(value, np.ndarray) else value
+        for key, value in kwargs.items()
+    }
+    got = mt.diff(mt.from_numpy(x), **ours)
+    expected = np.diff(x, **expected_kwargs)
+    assert got.dtype == "int64"
+    np.testing.assert_array_equal(got.numpy(), expected)
+
+
+def test_diff_prepend_keeps_a_fractional_value_and_carries_the_gradient():
+    x = mt.tensor([1, 4, 9], dtype="int64")
+    np.testing.assert_allclose(mt.diff(x, append=2.5).numpy(), [3.0, 5.0, -6.5])
+
+    v = mt.tensor([1.0, 4.0, 9.0], requires_grad=True)
+    mt.diff(v, prepend=0.0).sum().backward()
+    # The differences telescope to the last element minus the prepended 0.
+    np.testing.assert_allclose(v.grad.numpy(), [0.0, 0.0, 1.0])
+
+
+def test_diff_refuses_an_end_that_does_not_join_the_axis():
+    with pytest.raises(ValueError, match="prepend has shape"):
+        mt.diff(mt.zeros((2, 3)), prepend=mt.zeros((2,)))
+    with pytest.raises(ValueError, match="append has shape"):
+        mt.diff(mt.zeros((2, 3)), append=mt.zeros((3, 1)), dim=1)
+
+
 def test_diff_rejects_a_scalar_and_a_negative_order():
     with pytest.raises(ValueError, match="at least one dimension"):
         mt.diff(mt.Tensor(1.0, dtype="float64"))

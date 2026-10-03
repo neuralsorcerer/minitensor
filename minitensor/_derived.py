@@ -363,11 +363,44 @@ def histogramdd(
     return counts / (total * volume), edges
 
 
-def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
+def _diff_end(end: object, tensor: Tensor, axis: int, name: str) -> Tensor:
+    """`prepend` or `append` as a block that joins `tensor` along `axis`.
+
+    A scalar fills one slice; anything else must have the tensor's rank and
+    match it on every other axis, since there is no single way to line up a
+    lower-rank block against the axes it leaves out.
+    """
+
+    block = _atleast_tensor(end)
+    shape = list(tensor.shape)
+    if block.ndim() == 0:
+        shape[axis] = 1
+        return block.expand(shape).contiguous()
+    other = [size for i, size in enumerate(block.shape) if i != axis]
+    if block.ndim() != tensor.ndim() or other != [
+        size for i, size in enumerate(shape) if i != axis
+    ]:
+        raise ValueError(
+            f"diff: {name} has shape {tuple(block.shape)}, which does not join a "
+            f"tensor of shape {tuple(shape)} along dim {axis}; give a scalar or "
+            "a tensor matching every other dimension"
+        )
+    return block
+
+
+def diff(
+    input: object,
+    n: int = 1,
+    dim: int = -1,
+    prepend: object | None = None,
+    append: object | None = None,
+) -> Tensor:
     """The `n`-th discrete difference along `dim`.
 
     Each pass shortens the axis by one, so `n` passes over a length-`k` axis
-    leave `max(k - n, 0)` elements.
+    leave `max(k - n, 0)` elements. `prepend` and `append` are joined on along
+    `dim` first -- a scalar as one slice -- which is how a difference is made
+    to keep the length of what it was taken from.
     """
 
     tensor = _atleast_tensor(input)
@@ -379,6 +412,25 @@ def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:
         raise ValueError(f"diff requires a non-negative order, got {order}")
 
     axis = _normalize_axis(dim, tensor.ndim(), "diff")
+    if prepend is not None or append is not None:
+        # The ends promote with the tensor rather than being cast onto its
+        # dtype, so a fractional end against an integer tensor keeps its value.
+        ends = [
+            (_diff_end(end, tensor, axis, name), first)
+            for end, name, first in (
+                (prepend, "prepend", True),
+                (append, "append", False),
+            )
+            if end is not None
+        ]
+        for block, _ in ends:
+            tensor, _ = _promote_pair(tensor, block)
+        pieces = [block.astype(str(tensor.dtype)) for block, first in ends if first]
+        pieces.append(tensor)
+        pieces += [
+            block.astype(str(tensor.dtype)) for block, first in ends if not first
+        ]
+        tensor = _F.cat(pieces, axis)
     if order and not tensor.requires_grad and str(tensor.dtype) != "bool":
         # Nothing to record, so each pass is the engine's first difference:
         # one parallel subtraction of the shifted rows from the unshifted
