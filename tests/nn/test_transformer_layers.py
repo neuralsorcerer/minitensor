@@ -383,3 +383,13 @@ def test_forward_qkv_names_the_operand_of_the_wrong_dtype():
     x = _t(np.zeros((1, 4, 8)))
     with pytest.raises(TypeError, match="was given a float32 key"):
         mha.forward_qkv(x, x.astype("float32"), x)
+
+
+def test_a_causal_layer_takes_a_padding_mask_through_forward_qkv():
+    mha = mt.nn.MultiheadAttention(8, 2, is_causal=True, dtype="float64")
+    x = _t(np.random.default_rng(5).normal(size=(1, 4, 8)))
+    keep = mt.Tensor([[True, True, True, False]], dtype="bool")
+    out = mha.forward_qkv(x, x, x, attn_mask=keep).numpy()
+    # The masked last position changes nothing for the rows that could not
+    # see it anyway, and the causal rows ahead of it are untouched.
+    np.testing.assert_allclose(out[0, :3], mha(x).numpy()[0, :3], rtol=1e-12)

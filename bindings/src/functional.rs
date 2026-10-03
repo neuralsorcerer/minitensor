@@ -1960,8 +1960,9 @@ pub fn rms_norm(
 /// `attn_mask` is broadcastable to the scores `(..., L, S)`: a float mask is
 /// added to the scores (use `-inf` to disallow), a bool mask keeps `True`
 /// positions and disables `False` ones. `is_causal=True` applies an
-/// autoregressive mask (position i attends only to j <= i); combining it with an
-/// explicit `attn_mask` is rejected. `scale` overrides the default `1/sqrt(E)`.
+/// autoregressive mask (position i attends only to j <= i); with an explicit
+/// `attn_mask` as well, a position must pass both. `scale` overrides the
+/// default `1/sqrt(E)`.
 #[pyfunction]
 #[pyo3(signature = (query, key, value, attn_mask=None, is_causal=false, scale=None))]
 pub fn scaled_dot_product_attention(

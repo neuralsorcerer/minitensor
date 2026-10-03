@@ -2625,8 +2625,9 @@ subtraction and no bias.
 `(..., L, S)`: a float mask is added to them (use `-inf` to disallow a position,
 or supply a relative-position bias), while a bool mask keeps `True` positions
 and disables `False` ones. `is_causal=True` restricts query `i` to keys `j <= i`,
-aligned to the bottom right when `L != S`; combining it with an explicit
-`attn_mask` is rejected. `scale` overrides the default `1/sqrt(E)`.
+aligned to the bottom right when `L != S`; with an explicit `attn_mask` as well,
+a position must pass both -- a padding mask on an autoregressive model. `scale`
+overrides the default `1/sqrt(E)`.
 
 #### Which way round is a boolean mask?
 

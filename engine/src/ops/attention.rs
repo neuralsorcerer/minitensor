@@ -68,8 +68,9 @@ fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> 
 ///
 /// `is_causal` applies a causal (autoregressive) mask so query position `i`
 /// attends only to key positions `j <= i`. When `L != S` the mask is aligned to
-/// the bottom-right of the score matrix. Supplying both
-/// `attn_mask` and `is_causal` is rejected.
+/// the bottom-right of the score matrix. With both, a position is attended to
+/// only if the mask allows it *and* it is not in the future: a padding mask on
+/// an autoregressive model is the usual case.
 ///
 /// `scale` overrides the default `1/sqrt(E)` scaling.
 pub fn scaled_dot_product_attention(
@@ -116,12 +117,6 @@ pub fn scaled_dot_product_attention(
             "scaled_dot_product_attention requires query, key and value to have at least 2 dimensions",
         ));
     }
-    if is_causal && attn_mask.is_some() {
-        return Err(MinitensorError::invalid_operation(
-            "scaled_dot_product_attention does not accept an explicit attn_mask together with is_causal=true",
-        ));
-    }
-
     let q_dims = query.shape().dims();
     let k_dims = key.shape().dims();
     let v_dims = value.shape().dims();
@@ -198,7 +193,13 @@ pub fn scaled_dot_product_attention(
             false,
         );
         let diagonal = s as i64 - l as i64 + 1;
-        disabled = Some(ones.triu(diagonal)?);
+        let future = ones.triu(diagonal)?;
+        // A bool mask has already marked positions of its own; a future
+        // position is disabled as well, whatever the mask said about it.
+        disabled = Some(match disabled {
+            Some(masked) => crate::ops::bitwise::bitwise_or(&masked, &future)?,
+            None => future,
+        });
     }
 
     let last = scores.ndim() - 1;
@@ -345,12 +346,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mask_with_causal() {
-        let q = tensor_f32(vec![0.0, 0.0], vec![1, 2], false);
-        let k = tensor_f32(vec![0.0, 0.0], vec![1, 2], false);
-        let v = tensor_f32(vec![1.0, 2.0], vec![1, 2], false);
-        let mask = tensor_f32(vec![0.0], vec![1, 1], false);
-        assert!(scaled_dot_product_attention(&q, &k, &v, Some(&mask), true, None).is_err());
+    fn a_mask_and_causality_apply_together() {
+        // Equal scores everywhere, so each row averages the values it may see.
+        let q = tensor_f32(vec![0.0, 0.0], vec![2, 1], false);
+        let k = tensor_f32(vec![0.0, 0.0], vec![2, 1], false);
+        let v = tensor_f32(vec![1.0, 3.0], vec![2, 1], false);
+        // Key 0 is masked out for every query.
+        let mask = Tensor::new(
+            Arc::new(TensorData::from_vec_bool(vec![false, true], Device::cpu())),
+            Shape::new(vec![1, 2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        let out = scaled_dot_product_attention(&q, &k, &v, Some(&mask), true, None).unwrap();
+        let got = out.data().as_f32_slice().unwrap();
+        // Row 0 may see only key 0, which the mask removes: nothing is left.
+        assert_eq!(got[0], 0.0);
+        // Row 1 may see keys 0 and 1; the mask leaves key 1.
+        assert!((got[1] - 3.0).abs() < 1e-6);
     }
 
     #[test]

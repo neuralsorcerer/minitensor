@@ -181,8 +181,8 @@ impl MultiheadAttention {
     /// `key` and `value` must share a sequence length and batch size; `query`
     /// may have its own sequence length. `attn_mask` is broadcastable to the
     /// per-head scores `(batch, heads, query_seq, key_seq)`; a float mask is
-    /// added to the scores and a bool mask keeps `true` positions. Passing a
-    /// mask together with causal masking is rejected.
+    /// added to the scores and a bool mask keeps `true` positions. With causal
+    /// masking as well, a position must pass both.
     pub fn forward_qkv(
         &self,
         query: &Tensor,

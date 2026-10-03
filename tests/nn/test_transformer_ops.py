@@ -166,12 +166,30 @@ def test_sdpa_custom_scale(qkv):
     np.testing.assert_allclose(out.numpy(), _sdpa_np(q, k, v, scale=0.5), rtol=1e-12)
 
 
-def test_sdpa_rejects_mask_together_with_causal(qkv):
+def test_sdpa_applies_a_mask_and_causality_together(qkv):
+    # A padding mask on an autoregressive model: a position is attended to
+    # only if the mask keeps it and it is not in the future.
     q, k, v = qkv
-    with pytest.raises(Exception):
-        F.scaled_dot_product_attention(
-            _t(q), _t(k), _t(v), attn_mask=_t(np.zeros((5, 5))), is_causal=True
-        )
+    length = q.shape[-2]
+    causal = np.tril(np.ones((length, length), dtype=bool))
+    padding = np.ones((length, length), dtype=bool)
+    padding[:, -1] = False
+    expected_bool = _sdpa_np(q, k, v, mask=np.where(causal & padding, 0.0, -np.inf))
+    got = F.scaled_dot_product_attention(
+        _t(q),
+        _t(k),
+        _t(v),
+        attn_mask=mt.Tensor(padding.tolist(), dtype="bool"),
+        is_causal=True,
+    )
+    np.testing.assert_allclose(got.numpy(), expected_bool, rtol=1e-12)
+
+    bias = np.random.default_rng(7).normal(size=(length, length))
+    got = F.scaled_dot_product_attention(
+        _t(q), _t(k), _t(v), attn_mask=_t(bias), is_causal=True
+    )
+    expected = _sdpa_np(q, k, v, mask=bias, causal=True)
+    np.testing.assert_allclose(got.numpy(), expected, rtol=1e-12)
 
 
 def test_sdpa_gradients_match_finite_differences():
