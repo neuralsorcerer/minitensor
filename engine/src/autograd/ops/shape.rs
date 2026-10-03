@@ -219,6 +219,68 @@ impl GradientFunction for IndexSelectBackward {
     }
 }
 
+/// Gradient function for an output that takes none of its input's values --
+/// an empty selection, a zero-length slice -- so the input's gradient through
+/// it is zero everywhere.
+///
+/// Zero is still a gradient. These outputs used to be fresh leaves that only
+/// claimed `requires_grad`, so backward stopped at them and an input reached
+/// only through one was left with no gradient at all -- which an optimizer
+/// reads as "skip this parameter", not "step it by zero".
+pub struct NothingTakenBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub dtype: DataType,
+    pub device: crate::device::Device,
+}
+
+impl GradientFunction for NothingTakenBackward {
+    fn backward(&self, _grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let zeros = Tensor::zeros(
+            Shape::new(self.input_shape.clone()),
+            self.dtype,
+            self.device,
+            false,
+        );
+        let mut gradients = FxHashMap::default();
+        gradients.insert(self.input_id, zeros);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// An empty result of an operation over `input`, of shape `shape`, joined to
+/// the graph through [`NothingTakenBackward`] when `input` needs a gradient.
+pub(crate) fn empty_result_of(input: &Tensor, shape: Shape) -> Result<Tensor> {
+    let requires_grad = input.requires_grad();
+    let output = Tensor::new(
+        Arc::new(TensorData::zeros_on_device(
+            0,
+            input.dtype(),
+            input.device(),
+        )),
+        shape,
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+    if !requires_grad {
+        return Ok(output);
+    }
+    with_grad_fn(
+        output,
+        Arc::new(NothingTakenBackward {
+            input_id: input.id(),
+            input_shape: input.shape().dims().to_vec(),
+            dtype: input.dtype(),
+            device: input.device(),
+        }),
+    )
+}
+
 /// Gradient function for `gather` (and, reused, min/max/sort/topk along a dim).
 pub struct GatherBackward {
     pub input_id: TensorId,

@@ -466,17 +466,7 @@ pub fn sort(
     // that -- after `normalize_dim` above, so an out-of-range `dim` still
     // errors.
     if tensor.numel() == 0 {
-        let values = Tensor::new(
-            Arc::new(TensorData::zeros_on_device(
-                0,
-                tensor.dtype(),
-                tensor.device(),
-            )),
-            tensor.shape().clone(),
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        );
+        let values = crate::autograd::empty_result_of(tensor, tensor.shape().clone())?;
         let indices = Tensor::new(
             Arc::new(TensorData::zeros_on_device(
                 0,

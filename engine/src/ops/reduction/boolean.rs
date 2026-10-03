@@ -1107,13 +1107,7 @@ pub fn topk(
     let mut indices_data = TensorData::zeros_on_device(num_out, DataType::Int64, tensor.device());
 
     if k == 0 || num_out == 0 {
-        let values = Tensor::new(
-            Arc::new(values_data),
-            values_shape,
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        );
+        let values = crate::autograd::empty_result_of(tensor, values_shape)?;
         let indices = Tensor::new(
             Arc::new(indices_data),
             indices_shape,

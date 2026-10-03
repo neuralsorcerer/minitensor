@@ -450,9 +450,24 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     let inner: usize = dims[dim + 1..].iter().product();
     let _outer: usize = dims[..dim].iter().product();
 
+    // An empty result still records the node, so each input gets its
+    // (empty or zero-width) share of the gradient rather than none at all.
+    let attach_grad = |output: Tensor| -> Result<Tensor> {
+        if requires_grad && dtype.is_float() {
+            let grad_fn = Arc::new(ConcatBackward {
+                input_ids: tensors.iter().map(|t| t.id()).collect(),
+                sizes: tensors.iter().map(|t| t.shape().dims()[dim]).collect(),
+                dim,
+                input_requires_grad: tensors.iter().map(|t| t.requires_grad()).collect(),
+            });
+            return with_grad_fn(output, grad_fn);
+        }
+        Ok(output)
+    };
+
     if output_shape_obj.numel() == 0 {
         let data = TensorData::zeros_on_device(0, dtype, device);
-        return Ok(Tensor::new(
+        return attach_grad(Tensor::new(
             Arc::new(data),
             output_shape_obj,
             dtype,
@@ -531,17 +546,7 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
         requires_grad,
     );
 
-    if requires_grad && dtype.is_float() {
-        let grad_fn = Arc::new(ConcatBackward {
-            input_ids: tensors.iter().map(|t| t.id()).collect(),
-            sizes: tensors.iter().map(|t| t.shape().dims()[dim]).collect(),
-            dim,
-            input_requires_grad: tensors.iter().map(|t| t.requires_grad()).collect(),
-        });
-        return with_grad_fn(output, grad_fn);
-    }
-
-    Ok(output)
+    attach_grad(output)
 }
 
 /// Repeat `tensor` according to `repeats` along each dimension.
@@ -753,7 +758,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[i64]) -> Result<Tens
     let requires_grad = tensor.requires_grad();
 
     if output_shape_obj.numel() == 0 {
-        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+        return crate::autograd::empty_result_of(tensor, output_shape_obj);
     }
 
     let dims = tensor.shape().dims();
@@ -933,7 +938,7 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
     let output_numel = idx_slice.len();
 
     if output_numel == 0 {
-        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+        return crate::autograd::empty_result_of(tensor, output_shape_obj);
     }
 
     macro_rules! gather_impl {
@@ -1091,7 +1096,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
     let requires_grad = tensor.requires_grad();
 
     if output_shape_obj.numel() == 0 {
-        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+        return crate::autograd::empty_result_of(tensor, output_shape_obj);
     }
 
     let dims = tensor.shape().dims();
@@ -1211,12 +1216,7 @@ pub fn narrow(tensor: &Tensor, dim: isize, start: usize, length: usize) -> Resul
     if length == 0 {
         let mut out_shape = tensor.shape().dims().to_vec();
         out_shape[dim] = 0;
-        return Ok(Tensor::zeros(
-            Shape::new(out_shape),
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        ));
+        return crate::autograd::empty_result_of(tensor, Shape::new(out_shape));
     }
 
     slice(tensor, dim as isize, start, start + length, 1)

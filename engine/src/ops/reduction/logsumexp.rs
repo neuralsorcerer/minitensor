@@ -442,7 +442,10 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
         }
         Some(dims) => {
             if dims.is_empty() {
-                tensor.clone()
+                // Reducing over no axes is the tensor itself, which is already
+                // in the graph. Recording a node for it made the input its own
+                // output -- a cycle backward refused.
+                return Ok(tensor.clone());
             } else {
                 let mut result = tensor.clone();
                 if keepdim {
