@@ -64,13 +64,11 @@ impl PyTensor {
     pub fn logsumexp(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
-        match self.inner.logsumexp(dims, keepdim) {
-            Ok(result) => Ok(Self::from_tensor(result)),
-            Err(err @ MinitensorError::InvalidOperation { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let result = self
+            .inner
+            .logsumexp(dims, keepdim)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
     }
 
     /// Product over `dim`, or over every element when `dim` is omitted.

@@ -15,7 +15,7 @@ sorted in.
 `topk`, `sort` and `argsort` raised RuntimeError for an invalid argument, as a
 special case, where every other operation raises ValueError for the same kind
 of mistake; and a negative `k` was an OverflowError from the method but a
-RuntimeError from the function.
+RuntimeError from the function. `logsumexp` did the same for a bool input.
 """
 
 import math
@@ -104,3 +104,15 @@ def test_a_k_past_the_axis_is_a_value_error(call):
 def test_a_negative_k_is_a_value_error_naming_k(call):
     with pytest.raises(ValueError, match="k must be non-negative, got -1"):
         call(mt.Tensor([1.0, 2.0, 3.0]))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [lambda t: t.logsumexp(), lambda t: mt.logsumexp(t), lambda t: t.mean()],
+    ids=["logsumexp", "functional-logsumexp", "mean"],
+)
+def test_a_reduction_refusing_a_bool_raises_value_error(call):
+    # `logsumexp` raised RuntimeError for the refusal `mean` raises as
+    # ValueError.
+    with pytest.raises(ValueError, match="boolean|floating point"):
+        call(mt.tensor([True, False], dtype="bool"))
