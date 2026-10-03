@@ -1858,20 +1858,35 @@ pub struct PyCrossEntropyLoss {
     weight: Option<Py<PyAny>>,
     /// The target value whose positions are left out of the loss.
     ignore_index: i64,
+    /// The share of the target spread evenly over every class.
+    label_smoothing: f64,
 }
 
 #[pymethods]
 impl PyCrossEntropyLoss {
-    /// Create a new Cross Entropy loss. `weight` and `ignore_index` apply to
-    /// class-index targets, as they do in `functional.cross_entropy`.
+    /// Create a new Cross Entropy loss. `weight`, `ignore_index` and
+    /// `label_smoothing` mean what they do in `functional.cross_entropy`.
     #[new]
-    #[pyo3(signature = (weight=None, ignore_index=-100, reduction="mean"))]
-    fn new(weight: Option<Py<PyAny>>, ignore_index: i64, reduction: &str) -> PyResult<Self> {
+    #[pyo3(signature = (weight=None, ignore_index=-100, reduction="mean", label_smoothing=0.0))]
+    fn new(
+        weight: Option<Py<PyAny>>,
+        ignore_index: i64,
+        reduction: &str,
+        label_smoothing: f64,
+    ) -> PyResult<Self> {
         check_reduction(reduction, false).map_err(_convert_error)?;
+        // Checked here as well as in the function, so a bad value fails where
+        // it was written rather than at the first forward.
+        if !(0.0..=1.0).contains(&label_smoothing) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "CrossEntropyLoss label_smoothing must be in [0, 1], got {label_smoothing}"
+            )));
+        }
         Ok(Self {
             inner: CrossEntropyLoss::new(reduction),
             weight,
             ignore_index,
+            label_smoothing,
         })
     }
 
@@ -1892,6 +1907,7 @@ impl PyCrossEntropyLoss {
         let options = pyo3::types::PyDict::new(py);
         options.set_item("weight", self.weight.as_ref().map(|w| w.bind(py).clone()))?;
         options.set_item("ignore_index", self.ignore_index)?;
+        options.set_item("label_smoothing", self.label_smoothing)?;
         Ok(function
             .call(
                 (predictions, targets, self.inner.reduction()),
@@ -1928,6 +1944,12 @@ impl PyCrossEntropyLoss {
         self.ignore_index
     }
 
+    /// The share of the target spread evenly over every class.
+    #[getter]
+    fn label_smoothing(&self) -> f64 {
+        self.label_smoothing
+    }
+
     /// String representation
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let mut text = String::from("CrossEntropyLoss(");
@@ -1939,6 +1961,9 @@ impl PyCrossEntropyLoss {
             parts.push(format!("ignore_index={}", self.ignore_index));
         }
         parts.push(format!("reduction='{}'", self.inner.reduction()));
+        if self.label_smoothing != 0.0 {
+            parts.push(format!("label_smoothing={:?}", self.label_smoothing));
+        }
         text.push_str(&parts.join(", "));
         text.push(')');
         Ok(text)

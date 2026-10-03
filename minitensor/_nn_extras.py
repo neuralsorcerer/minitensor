@@ -129,6 +129,7 @@ def cross_entropy(
     *,
     weight: object | None = None,
     ignore_index: int = -100,
+    label_smoothing: float = 0.0,
 ) -> Tensor:
     """Softmax cross-entropy of `input` scores against `target`.
 
@@ -139,8 +140,19 @@ def cross_entropy(
     `ignore_index` drops the positions holding it, both as `nll_loss` does --
     with `reduction="mean"` the loss is divided by the total weight of the
     positions kept. Without either, the fused kernel computes it in one pass.
+
+    `label_smoothing` in `[0, 1]` trains against `(1 - label_smoothing)` on the
+    target and `label_smoothing / classes` spread over every class, rather than
+    all of it on the target. With `weight`, each class's share of that spread
+    is weighted too, and a weighted mean still divides by the total weight of
+    the targets kept, so smoothing moves the loss without rescaling it.
     """
 
+    smoothing = float(label_smoothing)
+    if not 0.0 <= smoothing <= 1.0:
+        raise ValueError(
+            f"cross_entropy label_smoothing must be in [0, 1], got {label_smoothing!r}"
+        )
     scores = _atleast_tensor(input)
     labels = _atleast_tensor(target)
     if labels.dtype not in ("int32", "int64"):
@@ -149,8 +161,17 @@ def cross_entropy(
                 "cross_entropy weight applies to class-index targets; for "
                 "per-class scores, scale the target instead"
             )
+        if smoothing:
+            axis = dim + scores.ndim() if dim < 0 else dim
+            if not 0 <= axis < scores.ndim():
+                raise IndexError(
+                    f"cross_entropy dim {dim} is out of range for a "
+                    f"{scores.ndim()}-dimensional input"
+                )
+            classes = scores.shape[axis]
+            labels = labels * (1.0 - smoothing) + smoothing / classes
         return _cross_entropy_kernel(scores, labels, reduction, dim)
-    if weight is None and not bool(_F.any(labels == ignore_index)):
+    if not smoothing and weight is None and not bool(_F.any(labels == ignore_index)):
         return _cross_entropy_kernel(scores, labels, reduction, dim)
 
     axis = dim + scores.ndim() if dim < 0 else dim
@@ -161,9 +182,39 @@ def cross_entropy(
         )
     if axis != 1:
         scores = _F.movedim(scores, axis, 1)
-    return nll_loss(
-        _F.log_softmax(scores, dim=1), labels, weight, ignore_index, reduction
-    )
+    log_probs = _F.log_softmax(scores, dim=1)
+    if not smoothing:
+        return nll_loss(log_probs, labels, weight, ignore_index, reduction)
+    if reduction not in ("none", "mean", "sum"):
+        raise ValueError(
+            f"cross_entropy reduction must be 'none', 'mean' or 'sum', got {reduction!r}"
+        )
+
+    # Per position: the weighted loss on the target, which is zero where the
+    # target is ignored, and the weighted loss spread evenly over the classes.
+    on_target = nll_loss(log_probs, labels, weight, ignore_index, "none")
+    classes = scores.shape[1]
+    spread = -log_probs
+    if weight is not None:
+        per_class = _atleast_tensor(weight).astype(str(log_probs.dtype))
+        shape = [1, classes] + [1] * (log_probs.ndim() - 2)
+        spread = spread * per_class.reshape(shape)
+    kept = labels != ignore_index
+    uniform = _F.where(kept, _F.sum(spread, 1) / classes, spread.sum(1) * 0.0)
+    losses = on_target * (1.0 - smoothing) + uniform * smoothing
+    if reduction == "none":
+        return losses
+    if reduction == "sum":
+        return _F.sum(losses)
+    # The denominator the unsmoothed weighted mean uses: the total weight of
+    # the targets kept, or their count without `weight`.
+    if weight is None:
+        total = _F.sum(kept.astype(str(losses.dtype)))
+    else:
+        safe = _F.where(kept, labels, labels * 0).reshape(-1).astype("int64")
+        chosen = _F.index_select(per_class, 0, safe).reshape(list(kept.shape))
+        total = _F.sum(chosen * kept.astype(str(losses.dtype)))
+    return _F.sum(losses) / total
 
 
 def _weighted(losses: Tensor, weight: object, reduction: str, name: str) -> Tensor:
