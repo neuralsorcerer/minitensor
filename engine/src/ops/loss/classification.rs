@@ -861,9 +861,16 @@ mod tests {
             }
         }
 
-        assert!(smooth_l1_loss(&predictions, &targets, 0.0, "none").is_err());
+        // At zero there is no quadratic region left: the L1 loss exactly.
+        let at_zero = smooth_l1_loss(&predictions, &targets, 0.0, "none").unwrap();
+        let l1 = crate::ops::loss::mae_loss(&predictions, &targets, "none").unwrap();
+        assert_eq!(
+            at_zero.data().as_f32_slice().unwrap(),
+            l1.data().as_f32_slice().unwrap()
+        );
         assert!(smooth_l1_loss(&predictions, &targets, -1.0, "none").is_err());
         assert!(smooth_l1_loss(&predictions, &targets, f64::NAN, "none").is_err());
+        assert!(smooth_l1_loss(&predictions, &targets, f64::INFINITY, "none").is_err());
     }
 
     #[test]

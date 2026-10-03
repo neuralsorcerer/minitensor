@@ -2709,7 +2709,13 @@ Lower-case callable symbols from `minitensor.nn` are mirrored into
 `minitensor.functional`, so each of the following is reachable as both
 `nn.<name>` and `functional.<name>` -- they are the same function object. These
 are the stateless counterparts of the layers and losses in section 6, useful
-when you already hold the weights and do not want a module:
+when you already hold the weights and do not want a module.
+
+Every loss hyperparameter below -- a margin, `eps`, `delta`, `beta`, `alpha`,
+`gamma` -- has to be finite, and the ones that are sizes have to be at least
+zero. A NaN or infinite one is refused, by the function and by the loss layer's
+constructor, rather than turning every loss into NaN or infinity. A norm order
+`p` may be infinite, which is the max-norm.
 
 | Function | Purpose |
 | --- | --- |
@@ -2735,11 +2741,11 @@ when you already hold the weights and do not want a module:
 | `rrelu(input, lower=0.125, upper=0.333..., training=True)` | A leaky rectifier whose negative slope is drawn uniformly from `[lower, upper]` per element while training, and is the midpoint in evaluation so the network sees the average of what it trained against. Bit-exact on the positive side, and its derivative at the origin is the negative side's, agreeing with `leaky_relu` and `prelu`. |
 | `mse_loss(input, target, reduction="mean")` | Mean squared error. |
 | `l1_loss(input, target, reduction="mean")` | Mean absolute error. |
-| `smooth_l1_loss(input, target, reduction="mean", beta=1.0)` | Smooth L1: quadratic below `beta`, linear above. `beta` must be positive and finite. |
+| `smooth_l1_loss(input, target, reduction="mean", beta=1.0)` | Smooth L1: quadratic below `beta`, linear above. `beta` must be finite and at least zero; at zero there is no quadratic region and the loss is `l1_loss` exactly. |
 | `huber_loss(input, target, reduction="mean", delta=1.0)` | Huber loss. Related to the above by `huber(x, d) == d * smooth_l1(x, beta=d)`, so the two agree only at `1.0`. |
 | `log_cosh_loss(input, target, ...)` | Log-cosh loss. |
 | `kl_div(input, target, reduction="mean")` | KL divergence over probabilities (not log-probabilities). `reduction="mean"` is the element-wise mean, as for every other loss here; `"batchmean"` divides by the leading dimension, which is the divisor that makes the result a true KL divergence per sample. |
-| `focal_loss(input, target, alpha=0.25, gamma=2.0, reduction="mean")` | Multi-class focal loss over logits, with class-index targets or a distribution over the classes per sample. `reduction="none"` gives one value per sample. `alpha` must lie strictly in `(0, 1)`. |
+| `focal_loss(input, target, alpha=0.25, gamma=2.0, reduction="mean")` | Multi-class focal loss over logits, with class-index targets or a distribution over the classes per sample. `reduction="none"` gives one value per sample. `alpha` scales every class's term alike and must lie in `(0, 1]` -- `1` is no weighting -- and `gamma` must be finite and at least zero. |
 | `binary_cross_entropy(input, target, reduction="mean", *, weight=None)` | Binary cross entropy over probabilities. A prediction or target outside `[0, 1]` raises, since the loss is meaningless there -- use `binary_cross_entropy_with_logits` for unbounded scores; a NaN still gives a NaN loss. `weight` scales each element's loss and broadcasts against it; the mean still divides by the element count. |
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class; the keyword-only `weight` scales each element's whole loss. |
 | `cross_entropy(input, target, reduction="mean", dim=1, *, weight=None, ignore_index=-100, label_smoothing=0.0)` | Softmax cross entropy over `dim`. The target is one class index per prediction, or a score per class. For class indices, `weight` scales each class's contribution and `ignore_index` drops the positions holding it, as in `nll_loss`: a weighted mean divides by the total weight kept. `label_smoothing` in `[0, 1]` trains against `1 - label_smoothing` on the target and `label_smoothing / classes` on every class; with `weight` each class's share of that spread is weighted too, and the mean keeps the unsmoothed divisor, so smoothing moves the loss without rescaling it. |
@@ -3111,13 +3117,13 @@ hidden = hidden + attn(norm(hidden))  # pre-norm residual block
 
 - `MSELoss`
 - `MAELoss`
-- `HuberLoss`
+- `HuberLoss(delta=1.0, reduction="mean")`
 - `LogCoshLoss`
-- `SmoothL1Loss`
+- `SmoothL1Loss(reduction="mean", beta=1.0)`
 - `CrossEntropyLoss(weight=None, ignore_index=-100, reduction="mean", label_smoothing=0.0)`
 - `BCELoss`
 - `BCEWithLogitsLoss(reduction="mean", pos_weight=None)`
-- `FocalLoss`
+- `FocalLoss(alpha=0.25, gamma=2.0, reduction="mean")`
 
 The 1-D convolution and pooling operations are implemented by giving the signal
 a singleton height and deferring to their 2-D counterparts, so there is one

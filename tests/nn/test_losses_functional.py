@@ -82,8 +82,13 @@ def test_huber_matches_its_definition_and_scales_smooth_l1(pair, delta):
     )
 
 
-@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
-@pytest.mark.parametrize("fn", [F.smooth_l1_loss, F.huber_loss])
+@pytest.mark.parametrize(
+    "fn,bad",
+    [(F.huber_loss, bad) for bad in (0.0, -1.0, float("nan"), float("inf"))]
+    # A zero `beta` is the L1 loss, the limit of the quadratic region
+    # shrinking away, so only `huber_loss` refuses it.
+    + [(F.smooth_l1_loss, bad) for bad in (-1.0, float("nan"), float("inf"))],
+)
 def test_non_positive_or_non_finite_thresholds_are_rejected(pair, fn, bad):
     x, y = pair
     with pytest.raises(ValueError):

@@ -1798,6 +1798,8 @@ impl PyHuberLoss {
     #[pyo3(signature = (delta=1.0, reduction="mean"))]
     fn new(delta: f64, reduction: &str) -> PyResult<Self> {
         check_reduction(reduction, false).map_err(_convert_error)?;
+        // Refused where it is written rather than at the first forward.
+        engine::ops::loss::check_huber_delta(delta).map_err(_convert_error)?;
         Ok(Self {
             inner: HuberLoss::new(delta, reduction),
         })
@@ -1812,7 +1814,7 @@ impl PyHuberLoss {
     /// String representation
     fn __repr__(&self) -> String {
         format!(
-            "HuberLoss(delta={}, reduction='{}')",
+            "HuberLoss(delta={:?}, reduction='{}')",
             self.inner.delta(),
             self.inner.reduction()
         )
@@ -1827,19 +1829,35 @@ pub struct PySmoothL1Loss {
 
 #[pymethods]
 impl PySmoothL1Loss {
-    /// Create a new Smooth L1 loss
+    /// Create a new Smooth L1 loss. `beta` is where the loss turns from
+    /// quadratic to linear, as in `functional.smooth_l1_loss`; `0` is the L1
+    /// loss itself.
     #[new]
-    #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> PyResult<Self> {
+    #[pyo3(signature = (reduction="mean", beta=1.0))]
+    fn new(reduction: &str, beta: f64) -> PyResult<Self> {
         check_reduction(reduction, false).map_err(_convert_error)?;
+        engine::ops::loss::check_smooth_l1_beta(beta).map_err(_convert_error)?;
         Ok(Self {
-            inner: SmoothL1Loss::new(reduction),
+            inner: SmoothL1Loss::new(reduction).with_beta(beta),
         })
+    }
+
+    /// Where the loss turns from quadratic to linear.
+    #[getter]
+    fn beta(&self) -> f64 {
+        self.inner.beta()
     }
 
     /// String representation
     fn __repr__(&self) -> String {
-        format!("SmoothL1Loss(reduction='{}')", self.inner.reduction())
+        if self.inner.beta() == 1.0 {
+            return format!("SmoothL1Loss(reduction='{}')", self.inner.reduction());
+        }
+        format!(
+            "SmoothL1Loss(reduction='{}', beta={:?})",
+            self.inner.reduction(),
+            self.inner.beta()
+        )
     }
 }
 
@@ -2067,6 +2085,7 @@ impl PyFocalLoss {
     #[pyo3(signature = (alpha=0.25, gamma=2.0, reduction="mean"))]
     fn new(alpha: f64, gamma: f64, reduction: &str) -> PyResult<Self> {
         check_reduction(reduction, false).map_err(_convert_error)?;
+        engine::ops::loss::check_focal_parameters(alpha, gamma).map_err(_convert_error)?;
         Ok(Self {
             inner: FocalLoss::new(alpha, gamma, reduction),
         })
@@ -2087,7 +2106,7 @@ impl PyFocalLoss {
     /// String representation
     fn __repr__(&self) -> String {
         format!(
-            "FocalLoss(alpha={}, gamma={}, reduction='{}')",
+            "FocalLoss(alpha={:?}, gamma={:?}, reduction='{}')",
             self.inner.alpha(),
             self.inner.gamma(),
             self.inner.reduction()

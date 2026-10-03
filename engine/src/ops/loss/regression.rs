@@ -780,17 +780,7 @@ pub fn focal_loss(
 
     let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
-    if alpha <= 0.0 || alpha >= 1.0 {
-        return Err(MinitensorError::invalid_operation(
-            "Alpha must be between 0 and 1 for focal loss",
-        ));
-    }
-
-    if gamma < 0.0 {
-        return Err(MinitensorError::invalid_operation(
-            "Gamma must be non-negative for focal loss",
-        ));
-    }
+    check_focal_parameters(alpha, gamma)?;
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
 
@@ -896,13 +886,7 @@ pub fn huber_loss(
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // `delta <= 0.0` alone is false for NaN, which then propagated through
-    // every comparison and returned an all-NaN loss instead of an error.
-    if !delta.is_finite() || delta <= 0.0 {
-        return Err(MinitensorError::invalid_operation(
-            "Delta must be positive and finite for Huber loss",
-        ));
-    }
+    check_huber_delta(delta)?;
 
     // The forward is computed on detached data (the exact gradient is provided
     // by HuberLossBackward from the stored diff), so gate on the inputs and
@@ -963,7 +947,8 @@ pub fn huber_loss(
 /// # Arguments
 /// * `predictions` - Model predictions tensor
 /// * `targets` - Ground truth targets tensor
-/// * `beta` - Threshold below which the loss is quadratic (must be positive)
+/// * `beta` - Threshold below which the loss is quadratic (finite, at least
+///   zero; at zero there is no quadratic region and this is `mae_loss`)
 /// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
 pub fn smooth_l1_loss(
     predictions: &Tensor,
@@ -971,10 +956,12 @@ pub fn smooth_l1_loss(
     beta: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    if !beta.is_finite() || beta <= 0.0 {
-        return Err(MinitensorError::invalid_argument(
-            "smooth_l1_loss requires a positive, finite beta",
-        ));
+    check_smooth_l1_beta(beta)?;
+    // The quadratic region shrinks to nothing as `beta` goes to zero and the
+    // loss becomes `|x - y|` exactly: the limit, taken directly rather than
+    // dividing by zero.
+    if beta == 0.0 {
+        return mae_loss(predictions, targets, reduction);
     }
 
     let loss = huber_loss(predictions, targets, beta, reduction)?;
@@ -1050,6 +1037,65 @@ pub(crate) fn reduce_detached(
 /// Applies a loss's `reduction` through the ordinary differentiable ops, for
 /// the losses whose gradients come from autograd rather than from a
 /// hand-written node.
+/// Refuse a NaN or infinite loss hyperparameter.
+///
+/// Neither is a setting: a NaN margin or eps made every loss NaN, and an
+/// infinite one made it infinite or, for `gamma`, silently zero -- a training
+/// run that went wrong at its first step with nothing to say why. The same rule
+/// optimizer hyperparameters follow.
+pub(crate) fn check_finite_parameter(loss: &str, name: &str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        return Ok(());
+    }
+    Err(MinitensorError::invalid_argument(format!(
+        "{loss} requires a finite {name}, got {value}"
+    )))
+}
+
+/// Refuse a Huber `delta` that is not positive and finite.
+///
+/// `delta <= 0.0` alone is false for NaN, which then propagated through every
+/// comparison and returned an all-NaN loss instead of an error.
+pub fn check_huber_delta(delta: f64) -> Result<()> {
+    if delta.is_finite() && delta > 0.0 {
+        return Ok(());
+    }
+    Err(MinitensorError::invalid_argument(format!(
+        "huber_loss requires a positive, finite delta, got {delta}"
+    )))
+}
+
+/// Refuse a smooth-L1 `beta` that is not finite and at least zero. Zero is
+/// the `mae_loss` limit, which `smooth_l1_loss` takes directly.
+pub fn check_smooth_l1_beta(beta: f64) -> Result<()> {
+    if beta.is_finite() && beta >= 0.0 {
+        return Ok(());
+    }
+    Err(MinitensorError::invalid_argument(format!(
+        "smooth_l1_loss requires a finite, non-negative beta, got {beta}"
+    )))
+}
+
+/// Refuse focal loss settings outside their range: `alpha` in `(0, 1]` and
+/// `gamma` finite and at least zero.
+///
+/// `alpha` scales every class's term alike, so `1` is no weighting at all and
+/// is as valid as any smaller value. The range checks were written so a NaN
+/// compared false against both bounds and passed them.
+pub fn check_focal_parameters(alpha: f64, gamma: f64) -> Result<()> {
+    if !(alpha > 0.0 && alpha <= 1.0) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "focal_loss requires alpha in (0, 1], got {alpha}"
+        )));
+    }
+    if !(gamma.is_finite() && gamma >= 0.0) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "focal_loss requires a finite, non-negative gamma, got {gamma}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn reduce_loss(values: Tensor, reduction: &str) -> Result<Tensor> {
     match reduction {
         "mean" => mean(&values, None, false),

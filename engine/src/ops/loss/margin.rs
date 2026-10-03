@@ -18,7 +18,7 @@ use crate::{
     ops::{
         activation::{relu, softplus},
         arithmetic::{add, div, mul, neg, sub},
-        loss::reduce_loss,
+        loss::{check_finite_parameter, reduce_loss},
         reduction::{norm, sum},
         selection::where_op,
         util::create_scalar_tensor,
@@ -91,9 +91,9 @@ pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Resu
     check_operands("cosine_similarity", &[x1, x2])?;
     // Spelled out rather than as `!(eps > 0.0)`: NaN compares false either way
     // round, and it is no more a floor than a negative is.
-    if eps.is_nan() || eps <= 0.0 {
+    if !(eps.is_finite() && eps > 0.0) {
         return Err(MinitensorError::invalid_argument(format!(
-            "cosine_similarity requires a positive eps, got {eps}"
+            "cosine_similarity requires a finite, positive eps, got {eps}"
         )));
     }
 
@@ -133,6 +133,7 @@ pub fn margin_ranking_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("margin_ranking_loss", &[x1, x2, target])?;
+    check_finite_parameter("margin_ranking_loss", "margin", margin)?;
     check_same_shape(
         "margin_ranking_loss",
         &[("input1", x1), ("input2", x2), ("target", target)],
@@ -153,6 +154,7 @@ pub fn hinge_embedding_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     check_operands("hinge_embedding_loss", &[input, target])?;
+    check_finite_parameter("hinge_embedding_loss", "margin", margin)?;
     check_same_shape(
         "hinge_embedding_loss",
         &[("input", input), ("target", target)],
@@ -228,9 +230,16 @@ pub fn triplet_margin_loss(
             ("negative", negative),
         ],
     )?;
+    // An infinite `p` is the max-norm, a distance like any other; NaN is not.
     if p.is_nan() || p <= 0.0 {
         return Err(MinitensorError::invalid_argument(format!(
             "triplet_margin_loss requires a positive norm order p, got {p}"
+        )));
+    }
+    check_finite_parameter("triplet_margin_loss", "margin", margin)?;
+    if !(eps.is_finite() && eps >= 0.0) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "triplet_margin_loss requires a finite, non-negative eps, got {eps}"
         )));
     }
 
@@ -276,9 +285,9 @@ pub fn poisson_nll_loss(
 ) -> Result<Tensor> {
     check_operands("poisson_nll_loss", &[input, target])?;
     check_same_shape("poisson_nll_loss", &[("input", input), ("target", target)])?;
-    if eps < 0.0 || eps.is_nan() {
+    if !(eps.is_finite() && eps >= 0.0) {
         return Err(MinitensorError::invalid_argument(format!(
-            "poisson_nll_loss requires a non-negative eps, got {eps}"
+            "poisson_nll_loss requires a finite, non-negative eps, got {eps}"
         )));
     }
 
