@@ -65,6 +65,11 @@ pub struct Conv2d {
     kernel_size: (usize, usize),
     stride: (usize, usize),
     padding: (usize, usize),
+    /// Zeros added after each spatial axis on top of `padding`: nonzero only
+    /// for `padding="same"` with an odd total, whose extra zero goes after.
+    trailing: (usize, usize),
+    /// Whether `padding` and `trailing` were chosen by `padding="same"`.
+    same: bool,
     dilation: (usize, usize),
     groups: usize,
 }
@@ -134,6 +139,8 @@ impl Conv2d {
             kernel_size,
             stride,
             padding,
+            trailing: (0, 0),
+            same: false,
             dilation,
             groups,
         })
@@ -192,6 +199,8 @@ impl Conv2d {
             kernel_size,
             stride,
             padding,
+            trailing: (0, 0),
+            same: false,
             dilation,
             groups,
         })
@@ -222,6 +231,31 @@ impl Conv2d {
         self.padding
     }
 
+    /// The same layer padded so a stride-1 convolution keeps the input's
+    /// height and width: `padding="same"`.
+    ///
+    /// Defined only for a stride of 1, where every input position has an
+    /// output; with a larger stride there is no single size to keep.
+    pub fn with_same_padding(mut self) -> Result<Self> {
+        if self.stride != (1, 1) {
+            return Err(MinitensorError::invalid_argument(format!(
+                "padding='same' needs a stride of 1, got {:?}",
+                self.stride
+            )));
+        }
+        let (top, bottom) = crate::ops::same_padding(self.kernel_size.0, self.dilation.0);
+        let (left, right) = crate::ops::same_padding(self.kernel_size.1, self.dilation.1);
+        self.padding = (top, left);
+        self.trailing = (bottom - top, right - left);
+        self.same = true;
+        Ok(self)
+    }
+
+    /// Whether this layer was built with `padding="same"`.
+    pub fn is_same_padding(&self) -> bool {
+        self.same
+    }
+
     /// Get dilation
     pub fn dilation(&self) -> (usize, usize) {
         self.dilation
@@ -248,8 +282,10 @@ impl Conv2d {
         // is what the padded input has to accommodate.
         let span_h = self.dilation.0 * (self.kernel_size.0 - 1) + 1;
         let span_w = self.dilation.1 * (self.kernel_size.1 - 1) + 1;
-        let output_height = (input_height + 2 * self.padding.0 - span_h) / self.stride.0 + 1;
-        let output_width = (input_width + 2 * self.padding.1 - span_w) / self.stride.1 + 1;
+        let output_height =
+            (input_height + 2 * self.padding.0 + self.trailing.0 - span_h) / self.stride.0 + 1;
+        let output_width =
+            (input_width + 2 * self.padding.1 + self.trailing.1 - span_w) / self.stride.1 + 1;
         (output_height, output_width)
     }
 }
@@ -258,7 +294,20 @@ impl Layer for Conv2d {
     crate::nn::layer::cloneable_layer!();
 
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Delegate actual computation to ops::conv::conv2d
+        // An odd `same` total puts its extra zero after each axis, which the
+        // symmetric padding the kernel takes cannot express on its own.
+        let padded;
+        let input = if self.trailing == (0, 0) {
+            input
+        } else {
+            padded = crate::ops::shape_ops::pad(
+                input,
+                &[0, self.trailing.1, 0, self.trailing.0],
+                crate::ops::shape_ops::PadMode::Constant,
+                0.0,
+            )?;
+            &padded
+        };
         crate::ops::conv2d(
             input,
             &self.weight,
@@ -287,6 +336,10 @@ pub struct Conv1d {
     kernel_size: usize,
     stride: usize,
     padding: usize,
+    /// Zeros added after the axis on top of `padding`; see [`Conv2d`].
+    trailing: usize,
+    /// Whether `padding` and `trailing` were chosen by `padding="same"`.
+    same: bool,
     dilation: usize,
     groups: usize,
 }
@@ -344,6 +397,8 @@ impl Conv1d {
             kernel_size,
             stride: stride.unwrap_or(1),
             padding: padding.unwrap_or(0),
+            trailing: 0,
+            same: false,
             dilation: dilation.unwrap_or(1),
             groups,
         })
@@ -369,6 +424,27 @@ impl Conv1d {
         self.padding
     }
 
+    /// The same layer padded so a stride-1 convolution keeps the input's
+    /// length: `padding="same"`. See [`Conv2d::with_same_padding`].
+    pub fn with_same_padding(mut self) -> Result<Self> {
+        if self.stride != 1 {
+            return Err(MinitensorError::invalid_argument(format!(
+                "padding='same' needs a stride of 1, got {}",
+                self.stride
+            )));
+        }
+        let (before, after) = crate::ops::same_padding(self.kernel_size, self.dilation);
+        self.padding = before;
+        self.trailing = after - before;
+        self.same = true;
+        Ok(self)
+    }
+
+    /// Whether this layer was built with `padding="same"`.
+    pub fn is_same_padding(&self) -> bool {
+        self.same
+    }
+
     pub fn dilation(&self) -> usize {
         self.dilation
     }
@@ -390,6 +466,18 @@ impl Layer for Conv1d {
     crate::nn::layer::cloneable_layer!();
 
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        let padded;
+        let input = if self.trailing == 0 {
+            input
+        } else {
+            padded = crate::ops::shape_ops::pad(
+                input,
+                &[0, self.trailing],
+                crate::ops::shape_ops::PadMode::Constant,
+                0.0,
+            )?;
+            &padded
+        };
         crate::ops::conv1d(
             input,
             &self.weight,
@@ -680,6 +768,85 @@ mod tests {
     use crate::device::Device;
     use crate::tensor::{DataType, Shape, Tensor, TensorData};
     use std::sync::Arc;
+
+    #[test]
+    fn same_padding_splits_an_odd_total_with_the_extra_zero_after() {
+        assert_eq!(crate::ops::same_padding(1, 1), (0, 0));
+        assert_eq!(crate::ops::same_padding(3, 1), (1, 1));
+        assert_eq!(crate::ops::same_padding(4, 1), (1, 2));
+        assert_eq!(crate::ops::same_padding(4, 2), (3, 3));
+        assert_eq!(crate::ops::same_padding(2, 3), (1, 2));
+    }
+
+    #[test]
+    fn same_padding_layers_keep_the_input_size() {
+        for kernel in [1usize, 2, 3, 4] {
+            let mut conv2d = Conv2d::new(
+                2,
+                3,
+                (kernel, kernel + 1),
+                None,
+                None,
+                Some((2, 1)),
+                None,
+                true,
+                Device::cpu(),
+                DataType::Float32,
+            )
+            .unwrap()
+            .with_same_padding()
+            .unwrap();
+            assert!(conv2d.is_same_padding());
+            let input = Tensor::ones(
+                Shape::new(vec![1, 2, 7, 8]),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            );
+            assert_eq!(
+                conv2d.forward(&input).unwrap().shape().dims(),
+                &[1, 3, 7, 8]
+            );
+            assert_eq!(conv2d.output_size(7, 8), (7, 8));
+
+            let mut conv1d = Conv1d::new(
+                2,
+                3,
+                kernel,
+                None,
+                None,
+                None,
+                None,
+                true,
+                Device::cpu(),
+                DataType::Float32,
+            )
+            .unwrap()
+            .with_same_padding()
+            .unwrap();
+            let signal = Tensor::ones(
+                Shape::new(vec![1, 2, 9]),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            );
+            assert_eq!(conv1d.forward(&signal).unwrap().shape().dims(), &[1, 3, 9]);
+        }
+        let strided = Conv2d::new(
+            2,
+            3,
+            (3, 3),
+            Some((2, 2)),
+            None,
+            None,
+            None,
+            true,
+            Device::cpu(),
+            DataType::Float32,
+        )
+        .unwrap();
+        assert!(strided.with_same_padding().is_err());
+    }
 
     #[test]
     fn test_conv2d_creation() {

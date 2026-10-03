@@ -98,6 +98,18 @@ impl ConvScalar for f64 {
     }
 }
 
+/// The zeros `padding="same"` puts before and after one spatial axis, so a
+/// stride-1 convolution keeps that axis's length.
+///
+/// The kernel's taps span `dilation * (kernel - 1) + 1` positions, so that many
+/// less one have to be added in total. When the total is odd the extra zero
+/// goes after the axis, which keeps every output centred on the same input
+/// position the symmetric case centres it on.
+pub fn same_padding(kernel: usize, dilation: usize) -> (usize, usize) {
+    let total = dilation * kernel.saturating_sub(1);
+    (total / 2, total - total / 2)
+}
+
 /// Perform 1D convolution on the input tensor.
 ///
 /// # Arguments

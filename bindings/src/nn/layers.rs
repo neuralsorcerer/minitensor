@@ -235,14 +235,14 @@ pub struct PyConv1d;
 impl PyConv1d {
     /// Create a new Conv1d layer
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true, device=None, dtype=None))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=None, dilation=1, groups=1, bias=true, device=None, dtype=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
         stride: usize,
-        padding: usize,
+        padding: Option<&Bound<PyAny>>,
         dilation: usize,
         groups: usize,
         bias: bool,
@@ -251,12 +251,17 @@ impl PyConv1d {
     ) -> PyResult<PyClassInitializer<Self>> {
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let layer = Conv1d::new(
+        let named = named_padding(padding, "Conv1d")?;
+        let zeros = match (named, padding) {
+            (Some(_), _) | (None, None) => 0,
+            (None, Some(value)) => value.extract::<usize>()?,
+        };
+        let mut layer = Conv1d::new(
             in_channels,
             out_channels,
             kernel_size,
             Some(stride),
-            Some(padding),
+            Some(zeros),
             Some(dilation),
             Some(groups),
             bias,
@@ -264,6 +269,9 @@ impl PyConv1d {
             dtype,
         )
         .map_err(_convert_error)?;
+        if named == Some(NamedPadding::Same) {
+            layer = layer.with_same_padding().map_err(_convert_error)?;
+        }
         Ok(PyClassInitializer::from(PyModule::from_conv1d(layer)).add_subclass(Self))
     }
 
@@ -299,10 +307,15 @@ impl PyConv1d {
         }
     }
 
+    /// The zeros on each side, or `"same"` for a layer built that way.
     #[getter]
-    fn padding(slf: PyRef<Self>) -> PyResult<usize> {
+    fn padding(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         match slf.as_ref().inner.get()? {
-            ModuleType::Conv1d(layer) => Ok(layer.padding()),
+            ModuleType::Conv1d(layer) if layer.is_same_padding() => {
+                Ok(pyo3::types::PyString::new(py, "same").into_any().unbind())
+            }
+            ModuleType::Conv1d(layer) => Ok(layer.padding().into_pyobject(py)?.into_any().unbind()),
             _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
         }
     }
@@ -546,9 +559,10 @@ impl PyConv2d {
             Some(s) => parse_tuple2(s)?,
             None => (1, 1),
         };
-        let padding = match padding {
-            Some(p) => parse_tuple2(p)?,
-            None => (0, 0),
+        let named = named_padding(padding, "Conv2d")?;
+        let padding = match (named, padding) {
+            (Some(_), _) | (None, None) => (0, 0),
+            (None, Some(p)) => parse_tuple2(p)?,
         };
         let dilation = match dilation {
             Some(d) => parse_tuple2(d)?,
@@ -559,7 +573,7 @@ impl PyConv2d {
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
-        let conv2d = Conv2d::new(
+        let mut conv2d = Conv2d::new(
             in_channels,
             out_channels,
             kernel_size,
@@ -572,6 +586,9 @@ impl PyConv2d {
             dtype,
         )
         .map_err(_convert_error)?;
+        if named == Some(NamedPadding::Same) {
+            conv2d = conv2d.with_same_padding().map_err(_convert_error)?;
+        }
 
         Ok(PyClassInitializer::from(PyModule::from_conv2d(conv2d)).add_subclass(Self))
     }

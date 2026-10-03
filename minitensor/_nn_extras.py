@@ -1404,6 +1404,44 @@ def _pooling_geometry(
     return kernel, step, margin
 
 
+def _named_conv_padding(
+    op: str,
+    tensor: Tensor,
+    padding: str,
+    kernel: tuple[int, ...],
+    stride: tuple[int, ...],
+    dilation: tuple[int, ...],
+) -> tuple[Tensor, tuple[int, ...]]:
+    """`padding` given by name, as the input to convolve and zeros per side.
+
+    `"valid"` is no padding. `"same"` keeps a stride-1 output the size of the
+    input: each axis needs `dilation * (kernel - 1)` zeros in all, and an odd
+    total puts its extra zero after the axis -- added to the input here, since
+    the convolution itself pads symmetrically.
+    """
+
+    if padding == "valid":
+        return tensor, (0,) * len(kernel)
+    if padding != "same":
+        raise ValueError(
+            f"{op} padding must be 'valid', 'same' or a count of zeros per side, "
+            f"got {padding!r}"
+        )
+    if any(step != 1 for step in stride):
+        raise ValueError(f"{op} padding='same' needs a stride of 1, got {stride}")
+    totals = [spacing * (size - 1) for size, spacing in zip(kernel, dilation)]
+    before = tuple(total // 2 for total in totals)
+    extra = [total - total // 2 - total // 2 for total in totals]
+    if any(extra):
+        # Innermost axis first, as `pad` takes it: nothing before, the odd zero
+        # after.
+        flat = []
+        for odd in reversed(extra):
+            flat += [0, odd]
+        tensor = _F.pad(tensor, flat)
+    return tensor, before
+
+
 def conv3d(
     input: object,
     weight: object,
@@ -1439,8 +1477,12 @@ def conv3d(
         # With no depth taps the sum below has no terms at all.
         raise ValueError(f"conv3d kernel size must be greater than zero, got {kernel}")
     step = _sliding_argument(stride, "stride", 3, 1, "conv3d")
-    margin = _sliding_argument(padding, "padding", 3, 0, "conv3d")
     spaced = _sliding_argument(dilation, "dilation", 3, 1, "conv3d")
+    if isinstance(padding, str):
+        tensor, padding = _named_conv_padding(
+            "conv3d", tensor, padding, kernel, step, spaced
+        )
+    margin = _sliding_argument(padding, "padding", 3, 0, "conv3d")
 
     planes, batch, out_depth = _depth_planes(
         "conv3d", tensor, kernel, step, margin, spaced, 0.0

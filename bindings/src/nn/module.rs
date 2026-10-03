@@ -171,6 +171,72 @@ fn parse_pair_arg(
     }
 }
 
+/// A convolution's `padding` given by name rather than as zeros per side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NamedPadding {
+    /// No padding: only the positions where the whole kernel fits.
+    Valid,
+    /// Enough padding that a stride-1 output keeps the input's size.
+    Same,
+}
+
+/// Read `padding` as one of the named modes, or `None` for a number or a
+/// sequence of them, which the caller parses as it always has.
+fn named_padding(padding: Option<&Bound<PyAny>>, op: &str) -> PyResult<Option<NamedPadding>> {
+    let Some(name) = padding.and_then(|value| value.extract::<String>().ok()) else {
+        return Ok(None);
+    };
+    match name.as_str() {
+        "valid" => Ok(Some(NamedPadding::Valid)),
+        "same" => Ok(Some(NamedPadding::Same)),
+        other => Err(PyValueError::new_err(format!(
+            "{op} padding must be 'valid', 'same' or a count of zeros per side, got '{other}'"
+        ))),
+    }
+}
+
+/// The input and symmetric padding a convolution runs with for `padding="same"`.
+///
+/// `same_padding` splits each axis's total so any odd zero goes after it; the
+/// kernel pads symmetrically, so that extra zero is added to the input here.
+/// `kernel` and `dilation` are per spatial axis, innermost last.
+fn same_padded_input(
+    op: &str,
+    input: &engine::tensor::Tensor,
+    kernel: &[usize],
+    stride: &[usize],
+    dilation: &[usize],
+) -> PyResult<(engine::tensor::Tensor, Vec<usize>)> {
+    if stride.iter().any(|&s| s != 1) {
+        return Err(PyValueError::new_err(format!(
+            "{op} padding='same' needs a stride of 1, got {stride:?}"
+        )));
+    }
+    let splits: Vec<(usize, usize)> = kernel
+        .iter()
+        .zip(dilation)
+        .map(|(&k, &d)| engine::ops::same_padding(k, d))
+        .collect();
+    let symmetric: Vec<usize> = splits.iter().map(|&(before, _)| before).collect();
+    if splits.iter().all(|&(before, after)| before == after) {
+        return Ok((input.clone(), symmetric));
+    }
+    // Innermost axis first, as `pad` takes it: nothing before, the odd zero after.
+    let extra: Vec<usize> = splits
+        .iter()
+        .rev()
+        .flat_map(|&(before, after)| [0, after - before])
+        .collect();
+    let padded = engine::ops::shape_ops::pad(
+        input,
+        &extra,
+        engine::ops::shape_ops::PadMode::Constant,
+        0.0,
+    )
+    .map_err(_convert_error)?;
+    Ok((padded, symmetric))
+}
+
 /// 2-D cross-correlation of `input` with `weight`. `dilation` spaces the kernel taps apart; `groups` splits the channels into that many independent convolutions, so `groups=in_channels` is a depthwise convolution.
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1))]
@@ -187,10 +253,29 @@ fn conv2d(
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
     let stride = parse_pair_arg("stride", stride, (1, 1))?;
-    let padding = parse_pair_arg("padding", padding, (0, 0))?;
     let dilation = parse_pair_arg("dilation", dilation, (1, 1))?;
+    let weight_dims = weight_tensor.tensor().shape().dims().to_vec();
+    let (input_value, padding) = match named_padding(padding, "conv2d")? {
+        Some(NamedPadding::Valid) => (input_tensor.tensor().clone(), (0, 0)),
+        // A weight of the wrong rank is left for the kernel to report.
+        Some(NamedPadding::Same) if weight_dims.len() == 4 => {
+            let (padded, symmetric) = same_padded_input(
+                "conv2d",
+                input_tensor.tensor(),
+                &weight_dims[2..],
+                &[stride.0, stride.1],
+                &[dilation.0, dilation.1],
+            )?;
+            (padded, (symmetric[0], symmetric[1]))
+        }
+        Some(NamedPadding::Same) => (input_tensor.tensor().clone(), (0, 0)),
+        None => (
+            input_tensor.tensor().clone(),
+            parse_pair_arg("padding", padding, (0, 0))?,
+        ),
+    };
     let result = conv2d_op(
-        input_tensor.tensor(),
+        &input_value,
         weight_tensor.tensor(),
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
@@ -268,23 +353,48 @@ fn conv_transpose1d(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// 1-D cross-correlation of `input` with `weight`. See `conv2d` for `dilation` and `groups`.
+/// 1-D cross-correlation of `input` with `weight`. See `conv2d` for `dilation`, `groups` and the named paddings.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1))]
+#[pyo3(signature = (input, weight, bias=None, stride=1, padding=None, dilation=1, groups=1))]
 fn conv1d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
     bias: Option<&Bound<PyAny>>,
     stride: usize,
-    padding: usize,
+    padding: Option<&Bound<PyAny>>,
     dilation: usize,
     groups: usize,
 ) -> PyResult<PyTensor> {
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
+    let weight_dims = weight_tensor.tensor().shape().dims().to_vec();
+    let (input_value, padding) = match named_padding(padding, "conv1d")? {
+        Some(NamedPadding::Valid) => (input_tensor.tensor().clone(), 0),
+        Some(NamedPadding::Same) if weight_dims.len() == 3 => {
+            let (padded, symmetric) = same_padded_input(
+                "conv1d",
+                input_tensor.tensor(),
+                &weight_dims[2..],
+                &[stride],
+                &[dilation],
+            )?;
+            (padded, symmetric[0])
+        }
+        Some(NamedPadding::Same) => (input_tensor.tensor().clone(), 0),
+        None => {
+            let zeros = match padding {
+                None => 0,
+                Some(value) => value.extract::<isize>()?,
+            };
+            if zeros < 0 {
+                return Err(PyValueError::new_err("padding must be non-negative"));
+            }
+            (input_tensor.tensor().clone(), zeros as usize)
+        }
+    };
     let result = conv1d_op(
-        input_tensor.tensor(),
+        &input_value,
         weight_tensor.tensor(),
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
@@ -1845,7 +1955,22 @@ impl PyModule {
                 pair(layer.kernel_size())
             ))
             .unless("stride", layer.stride(), (1, 1), pair(layer.stride()))
-            .unless("padding", layer.padding(), (0, 0), pair(layer.padding()))
+            .unless(
+                "padding",
+                layer.is_same_padding(),
+                false,
+                "'same'".to_string(),
+            )
+            .unless(
+                "padding",
+                if layer.is_same_padding() {
+                    (0, 0)
+                } else {
+                    layer.padding()
+                },
+                (0, 0),
+                pair(layer.padding()),
+            )
             .unless("dilation", layer.dilation(), (1, 1), pair(layer.dilation()))
             .unless("groups", layer.groups(), 1, layer.groups().to_string())
             .unless("bias", bias, true, py_bool(bias))
@@ -1857,7 +1982,22 @@ impl PyModule {
                 layer.kernel_size()
             ))
             .unless("stride", layer.stride(), 1, layer.stride().to_string())
-            .unless("padding", layer.padding(), 0, layer.padding().to_string())
+            .unless(
+                "padding",
+                layer.is_same_padding(),
+                false,
+                "'same'".to_string(),
+            )
+            .unless(
+                "padding",
+                if layer.is_same_padding() {
+                    0
+                } else {
+                    layer.padding()
+                },
+                0,
+                layer.padding().to_string(),
+            )
             .unless(
                 "dilation",
                 layer.dilation(),
