@@ -236,3 +236,26 @@ def test_a_range_the_wrong_way_round_is_refused():
 def test_a_negative_slope_bound_is_refused():
     with pytest.raises(ValueError, match="non-negative slopes"):
         F.rrelu(_t([1.0]), -0.1, 0.5)
+
+
+@pytest.mark.parametrize(
+    "drop,shape",
+    [
+        (lambda x: mt.functional.dropout(x, 1.0, True), (2, 3)),
+        (lambda x: mt.nn.Dropout(1.0)(x), (2, 3)),
+        (lambda x: mt.functional.dropout2d(x, 1.0, True), (2, 3, 2, 2)),
+        (lambda x: mt.functional.dropout1d(x, 1.0, True), (2, 3, 4)),
+    ],
+    ids=["dropout", "Dropout", "dropout2d", "dropout1d"],
+)
+def test_dropping_everything_still_hands_back_a_zero_gradient(drop, shape):
+    # `p = 1` returned a fresh tensor of zeros flagged `requires_grad` with
+    # nothing behind it, so backward stopped there and the input was left
+    # with no gradient at all.
+    x = mt.ones(shape, requires_grad=True)
+    out = drop(x)
+    assert not out.is_leaf
+    np.testing.assert_array_equal(out.numpy(), np.zeros(shape, dtype=np.float32))
+    out.sum().backward()
+    assert x.grad is not None
+    np.testing.assert_array_equal(x.grad.numpy(), np.zeros(shape, dtype=np.float32))

@@ -201,16 +201,10 @@ impl Layer for Dropout {
             return Ok(input.clone());
         }
 
-        if self.p == 1.0 {
-            // When p=1, return zeros
-            return Ok(Tensor::zeros(
-                input.shape().clone(),
-                input.dtype(),
-                input.device(),
-                input.requires_grad(),
-            ));
-        }
-
+        // `p = 1` drops everything through the same mask as any other `p`,
+        // which is all zeros there. A fresh tensor of zeros instead claimed
+        // `requires_grad` with nothing behind it: backward stopped at it, and
+        // the input was left with no gradient rather than a zero one.
         // Generate dropout mask
         let mask = self.generate_mask(input.shape(), input.dtype(), input.device())?;
 
@@ -304,16 +298,10 @@ impl Layer for Dropout2d {
             return Ok(input.clone());
         }
 
-        if self.p == 1.0 {
-            // When p=1, return zeros
-            return Ok(Tensor::zeros(
-                input.shape().clone(),
-                input.dtype(),
-                input.device(),
-                input.requires_grad(),
-            ));
-        }
-
+        // `p = 1` drops everything through the same mask as any other `p`,
+        // which is all zeros there. A fresh tensor of zeros instead claimed
+        // `requires_grad` with nothing behind it: backward stopped at it, and
+        // the input was left with no gradient rather than a zero one.
         // Generate a mask that zeroes out entire channels. The mask has
         // shape `[N, C, 1, 1]` and is broadcast across the spatial
         // dimensions when multiplied with the input.
@@ -426,6 +414,44 @@ mod tests {
         assert_eq!(output.shape(), input.shape());
         let out_data = output.data().as_f32_slice().unwrap();
         assert!(out_data.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn full_dropout_hands_back_a_zero_gradient() {
+        // p = 1 used to return a fresh zeros tensor flagged `requires_grad`
+        // with no graph behind it, so backward never reached the input.
+        let shapes = [vec![2, 3], vec![2, 3, 2, 2]];
+        for (layer, dims) in [0usize, 1].into_iter().zip(shapes) {
+            let input = Tensor::ones(Shape::new(dims), DataType::Float32, Device::cpu(), true);
+            let output = if layer == 0 {
+                Dropout::new(Some(1.0)).unwrap().forward(&input).unwrap()
+            } else {
+                Dropout2d::new(Some(1.0)).unwrap().forward(&input).unwrap()
+            };
+            assert!(
+                output
+                    .data()
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .all(|&v| v == 0.0)
+            );
+            let seed = Tensor::ones(
+                output.shape().clone(),
+                output.dtype(),
+                output.device(),
+                false,
+            );
+            let grads = crate::autograd::backward_collect(&output, Some(seed)).unwrap();
+            let grad = grads.get(&input.id()).expect("the input has a gradient");
+            assert!(
+                grad.data()
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .all(|&v| v == 0.0)
+            );
+        }
     }
 
     #[test]
