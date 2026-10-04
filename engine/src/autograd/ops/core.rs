@@ -180,8 +180,13 @@ fn implicit_gradient(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<Ten
         Some(g) => Ok(g),
         None => {
             if tensor.numel() != 1 {
-                return Err(MinitensorError::gradient_error(
-                    "Gradient can only be implicitly created for scalar tensors",
+                return Err(MinitensorError::gradient_error_with_suggestion(
+                    format!(
+                        "Gradient can only be implicitly created for scalar tensors, and this one has {} elements",
+                        tensor.numel()
+                    ),
+                    "Reduce it to a scalar first (for example with .sum()), or pass backward() a gradient of the same shape",
+                    None,
                 ));
             }
             Ok(Tensor::ones(

@@ -805,8 +805,13 @@ impl Tensor {
             Some(g) => g,
             None => {
                 if self.numel() != 1 {
-                    return Err(MinitensorError::gradient_error(
-                        "Gradient can only be implicitly created for scalar tensors",
+                    return Err(MinitensorError::gradient_error_with_suggestion(
+                        format!(
+                            "Gradient can only be implicitly created for scalar tensors, and this one has {} elements",
+                            self.numel()
+                        ),
+                        "Reduce it to a scalar first (for example with .sum()), or pass backward() a gradient of the same shape",
+                        None,
                     ));
                 }
                 // Create a tensor of ones with the same shape as self

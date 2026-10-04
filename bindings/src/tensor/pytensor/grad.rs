@@ -17,13 +17,13 @@ impl PyTensor {
     ) -> PyResult<()> {
         if create_graph {
             return Err(PyNotImplementedError::new_err(
-                "create_graph=True is not supported; all computations execute in the Rust backend",
+                "create_graph=True is not supported: the backward pass is not itself recorded, so a gradient cannot be differentiated again",
             ));
         }
 
         if !self.requires_grad() && self.is_leaf() {
             return Err(PyRuntimeError::new_err(
-                "element 0 of tensors does not require grad and does not have a grad_fn",
+                "this tensor does not require grad and does not have a grad_fn, so there is nothing to differentiate",
             ));
         }
 
