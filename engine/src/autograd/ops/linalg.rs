@@ -334,10 +334,9 @@ impl GradientFunction for MatMulBackward {
 /// Gradient function for solving linear systems.
 /// Gradient of [`crate::ops::linalg::det`].
 ///
-/// `d det(A) / dA = det(A) * A^-T` -- Jacobi's formula. The inverse is
-/// obtained by solving against the identity rather than by a second
-/// factorisation, which is also how `inv` itself is written, so there is one
-/// place where a matrix gets inverted and one place that can be wrong about it.
+/// `d det(A) / dA` is the cofactor matrix of `A` -- `det(A) * A^-T` by
+/// Jacobi's formula where `A` is comfortably invertible, and by way of the
+/// singular value decomposition where it is not; see the backward.
 pub struct DetBackward {
     pub input: Tensor,
     /// The forward result, kept so the gradient does not factorise again.
@@ -357,6 +356,114 @@ fn inverse_transpose(input: &Tensor) -> Result<Tensor> {
     crate::ops::linalg::inv(&transposed)
 }
 
+/// Whether any matrix in `input` has a 1-norm condition number past
+/// `1/sqrt(eps)`, estimated as `||A||_1 * ||A^-1||_1` from the inverse
+/// already in hand. Past it, `det(A) A^-T` keeps fewer than half its digits.
+fn ill_conditioned(input: &Tensor, inverse_t: &Tensor) -> bool {
+    let n = *input.shape().dims().last().unwrap_or(&0);
+    if n == 0 {
+        return false;
+    }
+    // The 1-norm of `A` and the infinity-norm of `A^-T` (the same number as
+    // the 1-norm of `A^-1`), per matrix of the batch.
+    fn worst<T: Copy + Into<f64>>(a: &[T], inv_t: &[T], n: usize, limit: f64) -> bool {
+        let mut columns = vec![0.0f64; n];
+        a.chunks_exact(n * n)
+            .zip(inv_t.chunks_exact(n * n))
+            .any(|(m, im)| {
+                // Column sums accumulated a row at a time, so both passes
+                // read memory in order.
+                columns.iter_mut().for_each(|c| *c = 0.0);
+                for row in m.chunks_exact(n) {
+                    for (c, &v) in columns.iter_mut().zip(row) {
+                        *c += v.into().abs();
+                    }
+                }
+                let column_sums = columns.iter().copied().fold(0.0, f64::max);
+                let row_sums = im
+                    .chunks_exact(n)
+                    .map(|row| row.iter().map(|&v| v.into().abs()).sum::<f64>())
+                    .fold(0.0, f64::max);
+                // A NaN estimate -- a NaN entry -- counts as ill-conditioned.
+                let estimate = column_sums * row_sums;
+                estimate > limit || estimate.is_nan()
+            })
+    }
+    match (input.data().as_f64_slice(), inverse_t.data().as_f64_slice()) {
+        (Some(a), Some(i)) => worst(a, i, n, 1.0 / f64::EPSILON.sqrt()),
+        _ => match (input.data().as_f32_slice(), inverse_t.data().as_f32_slice()) {
+            (Some(a), Some(i)) => worst(a, i, n, 1.0 / (f32::EPSILON as f64).sqrt()),
+            _ => true,
+        },
+    }
+}
+
+/// The cofactor matrix of a square matrix, singular or not, by way of its
+/// singular value decomposition.
+///
+/// With `A = U S V^T`, `adj(A) = det(U) det(V) V adj(S) U^T`, and the
+/// adjugate of a diagonal is the diagonal of products of every *other*
+/// entry -- which a zero singular value leaves well defined, where
+/// `det(A) A^-1` is `0 * inf`. The cofactor matrix is the transpose. Each
+/// product is built from a prefix and a suffix rather than by dividing the
+/// whole product by the entry, which a zero would also defeat.
+fn cofactor_matrix(input: &Tensor) -> Result<Tensor> {
+    let (u, s, vt) = crate::ops::linalg::svd(input, false)?;
+    let n = *s.shape().dims().last().unwrap_or(&0);
+
+    macro_rules! others_product {
+        ($ty:ty, $get:ident) => {{
+            let values = s.data().$get().ok_or_else(|| {
+                MinitensorError::internal_error("singular values of an unexpected dtype")
+            })?;
+            let mut out = vec![<$ty>::default(); values.len()];
+            for (row, target) in values
+                .chunks_exact(n.max(1))
+                .zip(out.chunks_exact_mut(n.max(1)))
+            {
+                let mut prefix: $ty = 1.0;
+                for (i, &v) in row.iter().enumerate() {
+                    target[i] = prefix;
+                    prefix *= v;
+                }
+                let mut suffix: $ty = 1.0;
+                for (i, &v) in row.iter().enumerate().rev() {
+                    target[i] *= suffix;
+                    suffix *= v;
+                }
+            }
+            crate::tensor::TensorData::from_vec(out, s.dtype(), s.device())
+        }};
+    }
+    let products = match s.dtype() {
+        crate::tensor::DataType::Float32 => others_product!(f32, as_f32_slice),
+        crate::tensor::DataType::Float64 => others_product!(f64, as_f64_slice),
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "det gradient: unsupported dtype {other}"
+            )));
+        }
+    };
+    let products = Tensor::new(
+        std::sync::Arc::new(products),
+        s.shape().clone(),
+        s.dtype(),
+        s.device(),
+        false,
+    );
+
+    // `U adj(S)` scales the columns of `U`, which is a broadcast of the
+    // products along the rows.
+    let row = crate::ops::shape_ops::unsqueeze(&products, (products.ndim() - 1) as isize)?;
+    let scaled = crate::ops::arithmetic::mul(&u, &row)?;
+    let core = crate::ops::linalg::matmul(&scaled, &vt)?;
+    let orientation = crate::ops::arithmetic::mul(
+        &crate::ops::linalg::det(&u)?,
+        &crate::ops::linalg::det(&vt)?,
+    )?;
+    crate::ops::arithmetic::mul(&core, &as_matrix_scalar(&orientation)?)
+}
+
 /// Give a batch-shaped scalar the two trailing singleton axes that let it
 /// broadcast against `[..., n, n]`. A `det` of a single matrix is 0-d, and a
 /// batched one is `[b]`; the gradient is a matrix either way.
@@ -374,12 +481,28 @@ impl GradientFunction for DetBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let inv_t = inverse_transpose(&self.input)?;
-        let scale = crate::ops::arithmetic::mul(
-            &as_matrix_scalar(grad_output)?,
-            &as_matrix_scalar(&self.determinant)?,
-        )?;
-        let grad = crate::ops::arithmetic::mul(&inv_t, &scale)?;
+        let scale = as_matrix_scalar(grad_output)?;
+        // `det(A) A^-T` is the cofactor matrix, and it is the cheap way to get
+        // one -- but only while `A` has an inverse. A singular `A` has a
+        // determinant of zero and a perfectly good derivative, the cofactor
+        // matrix still, and the forward had answered: the backward used to
+        // refuse it with "solve received a singular matrix".
+        // `det(A) A^-T` is the cofactor matrix, and the cheap way to get one --
+        // but only while `A` is comfortably invertible. A singular `A` has a
+        // determinant of zero and a perfectly good derivative, the cofactor
+        // matrix still, and the backward used to refuse it with "solve
+        // received a singular matrix" although the forward had answered. A
+        // nearly singular one inverted, and the product of a tiny determinant
+        // and a huge inverse kept few of its digits: on a rank-deficient 4x4
+        // it was wrong by half the answer. Those take the decomposition,
+        // which is accurate either way and ten times the cost.
+        let cofactors = match inverse_transpose(&self.input) {
+            Ok(inv_t) if !ill_conditioned(&self.input, &inv_t) => {
+                crate::ops::arithmetic::mul(&inv_t, &as_matrix_scalar(&self.determinant)?)?
+            }
+            _ => cofactor_matrix(&self.input)?,
+        };
+        let grad = crate::ops::arithmetic::mul(&cofactors, &scale)?;
         accumulate_grad(&mut gradients, self.input_id, grad)?;
         Ok(gradients)
     }
