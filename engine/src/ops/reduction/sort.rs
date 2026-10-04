@@ -712,7 +712,19 @@ pub fn std(
     unbiased: bool,
 ) -> Result<Tensor> {
     let variance = var(tensor, dim, keepdim, unbiased)?;
-    crate::ops::activation::sqrt(&variance)
+    if !variance.requires_grad() {
+        return crate::ops::activation::sqrt(&variance);
+    }
+    // The square root's own gradient is infinite at a zero variance, which
+    // the variance's zero gradient there turns into NaN; `StdBackward` keeps
+    // a constant slice's gradient at 0 instead.
+    let root = crate::ops::activation::sqrt(&variance.detach())?;
+    let output = root.requires_grad_(true);
+    let grad_fn = Arc::new(crate::autograd::StdBackward {
+        input_id: variance.id(),
+        output: output.clone().detach(),
+    });
+    crate::autograd::with_grad_fn(output, grad_fn)
 }
 
 /// Variance along specified dimensions

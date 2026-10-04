@@ -955,3 +955,71 @@ impl GradientFunction for RmsNormBackward {
         &self.input_ids
     }
 }
+
+/// Gradient of the square root that turns a variance into a standard
+/// deviation.
+///
+/// It is [`SqrtBackward`] except at a deviation of zero, where the square root
+/// has an infinite slope and the variance a zero one. Composed, that is
+/// `inf * 0` = NaN for every element of a constant slice; reported here as 0,
+/// the subgradient `norm` reports at the origin, which the variance's own
+/// gradient (proportional to each deviation) then carries back unchanged.
+pub struct StdBackward {
+    pub input_id: TensorId,
+    /// The standard deviation, same shape as the variance it was taken from.
+    pub output: Tensor,
+}
+
+impl GradientFunction for StdBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        if grad_output.shape() != self.output.shape() || grad_output.dtype() != self.output.dtype()
+        {
+            return Err(MinitensorError::internal_error(
+                "standard deviation gradient does not match its output",
+            ));
+        }
+
+        macro_rules! scaled {
+            ($slice:ident, $from_vec:ident, $t:ty) => {{
+                let s = self.output.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("standard deviation has an unexpected dtype")
+                })?;
+                let g = grad_output.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("gradient has an unexpected dtype")
+                })?;
+                let values: Vec<$t> = s
+                    .iter()
+                    .zip(g)
+                    .map(|(&s, &g)| if s == 0.0 { 0.0 } else { g / (s + s) })
+                    .collect();
+                TensorData::$from_vec(values, self.output.device())
+            }};
+        }
+        let data = match self.output.dtype() {
+            DataType::Float32 => scaled!(as_f32_slice, from_vec_f32, f32),
+            DataType::Float64 => scaled!(as_f64_slice, from_vec_f64, f64),
+            _ => {
+                return Err(MinitensorError::internal_error(
+                    "standard deviation of a non-float tensor",
+                ));
+            }
+        };
+        gradients.insert(
+            self.input_id,
+            Tensor::new(
+                Arc::new(data),
+                self.output.shape().clone(),
+                self.output.dtype(),
+                self.output.device(),
+                false,
+            ),
+        );
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}

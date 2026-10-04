@@ -218,13 +218,20 @@ float_kernel!(
     hypot_f32, hypot_f64, |x, y| x.hypot(y)
 );
 float_pair!(
-    /// `d/dx hypot(x, y) = x / hypot(x, y)`. Undefined at the origin, where
-    /// the surface has a cone point, and NaN says so.
-    HYPOT_D_X, |x, y| x / x.hypot(y)
+    /// `d/dx hypot(x, y) = x / hypot(x, y)`. The origin is a cone point with
+    /// no derivative; it takes the zero subgradient, as `norm` does at the
+    /// same point, rather than the `0 / 0` the formula reads there.
+    HYPOT_D_X, |x, y| {
+        let h = x.hypot(y);
+        if h == 0.0 { 0.0 } else { x / h }
+    }
 );
 float_pair!(
-    /// `d/dy hypot(x, y) = y / hypot(x, y)`.
-    HYPOT_D_Y, |x, y| y / x.hypot(y)
+    /// `d/dy hypot(x, y) = y / hypot(x, y)`, 0 at the origin as in `HYPOT_D_X`.
+    HYPOT_D_Y, |x, y| {
+        let h = x.hypot(y);
+        if h == 0.0 { 0.0 } else { y / h }
+    }
 );
 
 // --- copysign --------------------------------------------------------------
@@ -267,8 +274,11 @@ float_pair!(
     XLOGY_D_X, |_x, y| y.ln()
 );
 float_pair!(
-    /// `d/dy (x log y) = x / y`.
-    XLOGY_D_Y, |x, y| x / y
+    /// `d/dy (x log y) = x / y`, and 0 wherever `x` is zero: the value is the
+    /// constant 0 along `y` there, though `x / y` reads `0 / 0` at `y = 0`.
+    XLOGY_D_Y, |x, y| {
+        if x == 0.0 && !y.is_nan() { 0.0 } else { x / y }
+    }
 );
 
 // --- heaviside -------------------------------------------------------------

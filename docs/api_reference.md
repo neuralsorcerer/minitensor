@@ -1897,7 +1897,9 @@ Two behaviours are worth knowing:
 
 - The p-norm has a corner at the origin, so it has no derivative there. `norm`
   reports a gradient of `0` — the subgradient of least magnitude. Building the same quantity out of `(x * x).sum().sqrt()` yields
-  `0 / 0 = NaN` instead, which then spreads to everything downstream.
+  `0 / 0 = NaN` instead, which then spreads to everything downstream. `std` of
+  a constant slice, `hypot(0, 0)`, `x ** 0` at `x = 0` and `0 ** y` with
+  respect to `y` follow the same rule.
 - The 2-norm is computed by scaling with the largest magnitude rather than
   summing squares directly, so it stays finite for inputs whose squares would
   overflow. `mt.Tensor([1e20, 1e20]).norm()` returns `1.41e20`, where
@@ -2170,13 +2172,16 @@ assert row_std.shape == (2, 3)
 - `maximum`, `minimum`
 - `hypot(input, other)` — `sqrt(input**2 + other**2)` without forming either
   square, so it answers for operands whose squares would overflow or flush to
-  zero
+  zero. At the origin its gradient is `0`, the subgradient `norm` reports at
+  the same point.
 - `copysign(input, other)` — the magnitude of `input` with the sign of
   `other`. Reads the sign *bit*, so `copysign(1, -0.0)` is `-1`; the gradient
   reaches `input` only, since nothing differentiable depends on `other`.
 - `xlogy(input, other)` — `input * log(other)`, taken as `0` wherever `input`
   is zero. That is the limit entropy and cross-entropy need, where the plain
-  product gives `0 * -inf = NaN`. A NaN `other` still propagates.
+  product gives `0 * -inf = NaN`. A NaN `other` still propagates. Its
+  gradient with respect to `other` is `0` wherever `input` is zero, where the
+  value does not move.
 - `heaviside(input, other)` — the unit step: `0` below zero, `1` above it, and
   `other` at exactly zero, which is the value no two conventions agree on and
   the reason it takes a second operand. NaN stays NaN, being on neither side.

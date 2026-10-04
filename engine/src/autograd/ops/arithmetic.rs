@@ -1175,7 +1175,11 @@ where
 {
     let one = T::one();
     let power = e - one;
-    if power == one {
+    if e == T::zero() {
+        // `b^0` is 1 everywhere, so its slope is 0 everywhere, including at
+        // `b = 0` where `0 * b^-1` would read `0 * inf`.
+        vec![T::zero(); base.len()]
+    } else if power == one {
         binary_map(base, grad, move |b: T, g: T| e * b * g)
     } else if power == T::zero() {
         binary_map(base, grad, move |_: T, g: T| e * g)
@@ -1183,6 +1187,30 @@ where
         binary_map(base, grad, move |b: T, g: T| e * (b * b) * g)
     } else {
         binary_map(base, grad, move |b: T, g: T| e * b.powf(power) * g)
+    }
+}
+
+/// `d/db b^e = e * b^(e-1)`, taken as 0 for `e = 0`: `b^0` is the constant 1,
+/// though `0 * 0^-1` reads `0 * inf` = NaN at `b = 0`.
+#[inline(always)]
+fn pow_base_slope<T: num_traits::Float>(b: T, e: T) -> T {
+    if e == T::zero() {
+        T::zero()
+    } else {
+        e * b.powf(e - T::one())
+    }
+}
+
+/// `d/de b^e = b^e * ln(b)` given the power `o = b^e`, taken as 0 where the
+/// power is 0. At `b = 0` (with `e > 0`) the power is 0 for every nearby
+/// exponent, though `0 * ln(0)` reads `0 * -inf` = NaN; elsewhere a zero power
+/// is an underflow whose true slope is smaller still.
+#[inline(always)]
+fn pow_exponent_slope<T: num_traits::Float>(o: T, log_base: T) -> T {
+    if o == T::zero() {
+        T::zero()
+    } else {
+        o * log_base
     }
 }
 
@@ -1229,15 +1257,14 @@ impl GradientFunction for PowBackward {
                             exp_slice,
                             base_slice,
                             grad_out,
-                            |e: f32, b: f32, g: f32| e * b.powf(e - 1.0) * g,
+                            |e: f32, b: f32, g: f32| pow_base_slope(b, e) * g,
                         ),
                         PowBroadcast::BaseScalar => {
                             // The scalar base receives the sum over every output.
                             let base_val = base_slice[0];
                             let mut accum = 0.0_f32;
                             for i in 0..grad_out.len() {
-                                accum +=
-                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
+                                accum += pow_base_slope(base_val, exp_slice[i]) * grad_out[i];
                             }
                             vec![accum]
                         }
@@ -1265,17 +1292,20 @@ impl GradientFunction for PowBackward {
                             out_slice,
                             base_slice,
                             grad_out,
-                            |o: f32, b: f32, g: f32| o * b.ln() * g,
+                            |o: f32, b: f32, g: f32| pow_exponent_slope(o, b.ln()) * g,
                         ),
                         PowBroadcast::BaseScalar => {
                             let log_base = base_slice[0].ln();
-                            binary_map(out_slice, grad_out, move |o: f32, g: f32| o * log_base * g)
+                            binary_map(out_slice, grad_out, move |o: f32, g: f32| {
+                                pow_exponent_slope(o, log_base) * g
+                            })
                         }
                         PowBroadcast::ExponentScalar => {
                             // The scalar exponent receives the sum over every output.
                             let mut accum = 0.0_f32;
                             for i in 0..grad_out.len() {
-                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
+                                accum += pow_exponent_slope(out_slice[i], base_slice[i].ln())
+                                    * grad_out[i];
                             }
                             vec![accum]
                         }
@@ -1317,15 +1347,14 @@ impl GradientFunction for PowBackward {
                             exp_slice,
                             base_slice,
                             grad_out,
-                            |e: f64, b: f64, g: f64| e * b.powf(e - 1.0) * g,
+                            |e: f64, b: f64, g: f64| pow_base_slope(b, e) * g,
                         ),
                         PowBroadcast::BaseScalar => {
                             // The scalar base receives the sum over every output.
                             let base_val = base_slice[0];
                             let mut accum = 0.0_f64;
                             for i in 0..grad_out.len() {
-                                accum +=
-                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
+                                accum += pow_base_slope(base_val, exp_slice[i]) * grad_out[i];
                             }
                             vec![accum]
                         }
@@ -1353,17 +1382,20 @@ impl GradientFunction for PowBackward {
                             out_slice,
                             base_slice,
                             grad_out,
-                            |o: f64, b: f64, g: f64| o * b.ln() * g,
+                            |o: f64, b: f64, g: f64| pow_exponent_slope(o, b.ln()) * g,
                         ),
                         PowBroadcast::BaseScalar => {
                             let log_base = base_slice[0].ln();
-                            binary_map(out_slice, grad_out, move |o: f64, g: f64| o * log_base * g)
+                            binary_map(out_slice, grad_out, move |o: f64, g: f64| {
+                                pow_exponent_slope(o, log_base) * g
+                            })
                         }
                         PowBroadcast::ExponentScalar => {
                             // The scalar exponent receives the sum over every output.
                             let mut accum = 0.0_f64;
                             for i in 0..grad_out.len() {
-                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
+                                accum += pow_exponent_slope(out_slice[i], base_slice[i].ln())
+                                    * grad_out[i];
                             }
                             vec![accum]
                         }
