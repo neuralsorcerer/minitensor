@@ -14,6 +14,8 @@ not subscript a list, and `round`, `divmod` and a format spec did not apply.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import minitensor as mt
@@ -94,3 +96,32 @@ def test_the_truth_of_an_empty_tensor_names_the_right_problem():
         bool(mt.zeros(0))
     with pytest.raises(ValueError, match="more than one element"):
         bool(mt.zeros(2))
+
+
+@pytest.mark.parametrize("rounding", [math.floor, math.ceil, math.trunc])
+def test_math_rounding_is_exact_for_a_large_int64(rounding):
+    # `floor` and `ceil` used to go through `float()`, which rounds an int64
+    # past 2**53, and `trunc` was missing outright.
+    value = 2**62 + 1
+    got = rounding(mt.tensor(value, dtype="int64"))
+    assert type(got) is int and got == value
+
+
+@pytest.mark.parametrize("value", [2.5, -2.5, -0.5, 3.0])
+def test_math_rounding_of_a_float_matches_the_float(value):
+    t = mt.tensor(value, dtype="float64")
+    for rounding in (math.floor, math.ceil, math.trunc):
+        assert rounding(t) == rounding(value)
+
+
+def test_math_rounding_needs_one_element():
+    with pytest.raises(TypeError, match="one element"):
+        math.trunc(mt.tensor([1.0, 2.0]))
+
+
+def test_reversed_walks_the_first_axis_backwards():
+    t = mt.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    assert [row.tolist() for row in reversed(t)] == [[5.0, 6.0], [3.0, 4.0], [1.0, 2.0]]
+    assert list(reversed(mt.zeros(0, 2))) == []
+    with pytest.raises(TypeError, match="0-d"):
+        reversed(mt.tensor(1.0))

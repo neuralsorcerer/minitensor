@@ -113,13 +113,24 @@ impl PyTensor {
     /// back rounded -- `int(t)` for 2^60 + 1 gave 2^60 -- and a float
     /// outside the i64 range saturated instead of growing.
     fn __int__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(value) = self.scalar_as_i64()? {
-            return Ok(value.into_pyobject(py)?.into_any().unbind());
-        }
-        let value = self.scalar_as_f64()?;
-        Ok(pyo3::types::PyFloat::new(py, value)
-            .call_method0("__int__")?
-            .unbind())
+        self.rounded_to_int(py, "__int__")
+    }
+
+    /// `math.floor(t)`, as a Python int. Without it `math.floor` went through
+    /// `float()`, which rounds an int64 past 2^53: 2^62 + 1 came back as 2^62.
+    fn __floor__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.rounded_to_int(py, "__floor__")
+    }
+
+    /// `math.ceil(t)`, as a Python int; exact for an integer tensor.
+    fn __ceil__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.rounded_to_int(py, "__ceil__")
+    }
+
+    /// `math.trunc(t)`, as a Python int; exact for an integer tensor. It was
+    /// missing outright, where `floor` and `ceil` at least had `float()`.
+    fn __trunc__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.rounded_to_int(py, "__trunc__")
     }
 
     /// The value as an index: an integer or bool tensor of one element, so
@@ -141,17 +152,14 @@ impl PyTensor {
     /// `for x in scalar` ran zero times rather than refusing, while `len`
     /// refused.
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<TensorRows> {
-        let this = slf.borrow();
-        if this.inner.ndim() == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "iteration over a 0-d tensor",
-            ));
-        }
-        Ok(TensorRows {
-            tensor: slf.clone().into_any().unbind(),
-            next: 0,
-            len: this.inner.shape().dims()[0],
-        })
+        Self::rows(slf, false)
+    }
+
+    /// Iterate over the first axis from the last row back. `len` and
+    /// subscripting were both there, but a class defining its subscript the
+    /// way this one does is not a sequence to `reversed`, which refused it.
+    fn __reversed__(slf: &Bound<'_, Self>) -> PyResult<TensorRows> {
+        Self::rows(slf, true)
     }
 
     /// `round(t)` and `round(t, n)`: the elementwise rounding `round`
@@ -331,6 +339,7 @@ pub struct TensorRows {
     tensor: Py<PyAny>,
     next: usize,
     len: usize,
+    backwards: bool,
 }
 
 #[pymethods]
@@ -343,13 +352,46 @@ impl TensorRows {
         if self.next >= self.len {
             return Ok(None);
         }
-        let row = self.tensor.bind(py).get_item(self.next)?;
+        let position = if self.backwards {
+            self.len - 1 - self.next
+        } else {
+            self.next
+        };
+        let row = self.tensor.bind(py).get_item(position)?;
         self.next += 1;
         Ok(Some(row.unbind()))
     }
 }
 
 impl PyTensor {
+    fn rows(slf: &Bound<'_, Self>, backwards: bool) -> PyResult<TensorRows> {
+        let this = slf.borrow();
+        if this.inner.ndim() == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "iteration over a 0-d tensor",
+            ));
+        }
+        Ok(TensorRows {
+            tensor: slf.clone().into_any().unbind(),
+            next: 0,
+            len: this.inner.shape().dims()[0],
+            backwards,
+        })
+    }
+
+    /// The one element as a Python int: itself for an integer or bool
+    /// tensor, so no f64 rounds it, and a float one rounded by the float
+    /// method of the same name.
+    fn rounded_to_int(&self, py: Python<'_>, method: &str) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.scalar_as_i64()? {
+            return Ok(value.into_pyobject(py)?.into_any().unbind());
+        }
+        let value = self.scalar_as_f64()?;
+        Ok(pyo3::types::PyFloat::new(py, value)
+            .call_method0(method)?
+            .unbind())
+    }
+
     /// The value of a one-element integer or bool tensor, exactly; `None`
     /// for a float one. Mirrors `__bool__`'s single-element requirement.
     fn scalar_as_i64(&self) -> PyResult<Option<i64>> {
