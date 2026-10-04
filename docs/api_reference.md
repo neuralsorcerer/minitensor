@@ -601,7 +601,7 @@ Leading axes are a batch, so an ensemble evolves in one call.
 | --- | --- |
 | `apply_gate(state, gate, qubit)` | One single-qubit gate, counting qubits from the low index bit. `gate` is a name -- `"h"`, `"x"`, `"z"` -- or eight reals giving an arbitrary `[[a, b], [c, d]]` as `[a.real, a.imag, b.real, b.imag, c.real, c.imag, d.real, d.imag]`. |
 | `probabilities(state)` | `|amplitude|**2` per basis state; `(..., 2**q)` out. |
-| `prefix_trace(state, keep)` | Marginal probabilities of the first `keep` qubits; `(..., 2**keep)` out. |
+| `prefix_trace(state, keep)` | Marginal probabilities of the first `keep` qubits in reading order -- the most significant bits of the index, so qubits `q - 1` down to `q - keep` in the numbering `apply_gate` uses; `(..., 2**keep)` out. |
 | `expect_z(state, qubit)` | `<Z_q>`: `+1` for certainly `|0>`, `-1` for certainly `|1>`, the probability difference in between. |
 
 Applying a gate touches every amplitude once, in pairs whose indices differ only
@@ -627,6 +627,7 @@ state = mt.kernels.apply_gate(state, "h", 0)
 
 print([round(p, 4) for p in mt.kernels.probabilities(state).tolist()])
 print(round(float(mt.kernels.expect_z(state, 0).item()), 6))
+# The prefix is the most significant qubit, qubit 1, which is still |0>.
 print([round(p, 4) for p in mt.kernels.prefix_trace(state, 1).tolist()])
 ```
 

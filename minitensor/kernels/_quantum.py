@@ -84,6 +84,13 @@ def probabilities(state: Any) -> Any:
 def prefix_trace(state: Any, keep: int) -> Any:
     """Marginal probabilities of the first `keep` qubits.
 
+    "First" in reading order: the `keep` most significant bits of the
+    amplitude index. In the numbering `apply_gate` and `expect_z` use, which
+    counts from the least significant bit, those are qubits `q - 1` down to
+    `q - keep` -- so on two qubits, `prefix_trace(state, 1)` is the marginal
+    of qubit 1, not qubit 0. Entry `i` of the result is the probability that
+    those bits read `i`.
+
     Tracing out the remaining qubits of a pure state means summing
     `|amplitude|**2` over every configuration of the traced ones. With the
     prefix in the high bits of the index, the amplitudes contributing to one

@@ -141,7 +141,9 @@ fn probabilities(state: &PyTensor) -> PyResult<PyTensor> {
         .map_err(_convert_error)
 }
 
-/// Marginal probabilities of the first `keep` qubits.
+/// Marginal probabilities of the first `keep` qubits: the `keep` most
+/// significant bits of the amplitude index, which in the numbering
+/// `apply_gate_1q` uses are qubits `q - 1` down to `q - keep`.
 #[pyfunction]
 #[pyo3(text_signature = "(state, keep)")]
 fn prefix_trace(state: &PyTensor, keep: crate::Size) -> PyResult<PyTensor> {
