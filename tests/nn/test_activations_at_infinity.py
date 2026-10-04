@@ -122,3 +122,24 @@ def test_tanhshrink_keeps_its_digits_near_zero(x):
     for dtype, tolerance in (("float32", 1e-6), ("float64", 1e-14)):
         got = mt.tanhshrink(mt.tensor([x], dtype=dtype)).numpy()[0]
         assert got == pytest.approx(expected, rel=tolerance), dtype
+
+
+ELU_FORMS = [
+    pytest.param(lambda t: mt.elu(t), lambda x: math.expm1(x), id="elu"),
+    pytest.param(lambda t: nn.ELU()(t), lambda x: math.expm1(x), id="ELU-layer"),
+    pytest.param(
+        lambda t: mt.selu(t),
+        lambda x: 1.0507009873554805 * 1.6732632423543772 * math.expm1(x),
+        id="selu",
+    ),
+]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("fn,reference", ELU_FORMS)
+@pytest.mark.parametrize("x", [-1e-3, -1e-8, -1e-12, -3.0])
+def test_elu_family_keeps_its_digits_just_below_zero(fn, reference, x, dtype):
+    # `exp(x) - 1` cancels every digit there: `elu(-1e-8)` in float32 was 0,
+    # and the layer composed that same subtraction itself.
+    got = fn(mt.tensor([x], dtype=dtype)).numpy()[0]
+    assert got == pytest.approx(reference(x), rel=1e-6 if dtype == "float32" else 1e-14)

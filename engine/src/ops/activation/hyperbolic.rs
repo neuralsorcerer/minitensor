@@ -832,17 +832,38 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     ))
 }
 
-float_unary_kernel_param!(
-    elu_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    (alpha: f32),
-    |x: f32| {
-        if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
+/// `x` above zero and `scale * expm1(x)` below, through the vectorized
+/// `expm1`, then a select over the block while it is still in cache.
+///
+/// Built on `expm1` rather than `exp(x) - 1`: near zero the subtraction
+/// cancels every digit, and `elu(-1e-8)` in float32 came out as exactly 0.
+/// The scalar `exp_m1` that fixes that is three times the cost of the
+/// vectorized one.
+fn scaled_expm1_unit_f32(
+    tensor: &Tensor,
+    positive_scale: f32,
+    negative_scale: f32,
+) -> Result<TensorData> {
+    // SAFETY: `expm1` initializes every element of `dst` before the select
+    // reads it back; see `map_f32_kernel`.
+    unsafe {
+        map_f32_kernel(tensor, |kernel, src, dst| {
+            kernel.expm1(src, dst);
+            for (o, &x) in dst.iter_mut().zip(src) {
+                let em1 = o.assume_init_read();
+                o.write(if x > 0.0 {
+                    positive_scale * x
+                } else {
+                    negative_scale * em1
+                });
+            }
+        })
     }
-);
+}
+
+pub(crate) fn elu_f32(tensor: &Tensor, alpha: f32) -> Result<TensorData> {
+    scaled_expm1_unit_f32(tensor, 1.0, alpha)
+}
 
 float_unary_kernel_param!(
     elu_f64,
@@ -852,19 +873,17 @@ float_unary_kernel_param!(
     "f64",
     (alpha: f64),
     |x: f64| {
-        if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
+        // `exp_m1`, not `exp() - 1`: near zero the subtraction cancels every
+        // digit, and `elu(-1e-8)` in float32 came out as exactly 0.
+        if x > 0.0 { x } else { alpha * x.exp_m1() }
     }
 );
 
-float_unary_kernel!(selu_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
+pub(crate) fn selu_f32(tensor: &Tensor) -> Result<TensorData> {
     const ALPHA: f32 = 1.6732632;
     const SCALE: f32 = 1.050701;
-    if x > 0.0 {
-        SCALE * x
-    } else {
-        SCALE * ALPHA * (x.exp() - 1.0)
-    }
-});
+    scaled_expm1_unit_f32(tensor, SCALE, SCALE * ALPHA)
+}
 
 float_unary_kernel!(selu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     const ALPHA: f64 = 1.673_263_242_354_377_2;
@@ -872,7 +891,8 @@ float_unary_kernel!(selu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     if x > 0.0 {
         SCALE * x
     } else {
-        SCALE * ALPHA * (x.exp() - 1.0)
+        // `exp_m1`, as for `elu`.
+        SCALE * ALPHA * x.exp_m1()
     }
 });
 

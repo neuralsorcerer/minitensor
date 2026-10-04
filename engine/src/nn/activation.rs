@@ -6,64 +6,10 @@
 
 use super::Layer;
 use crate::{
-    device::Device,
-    error::{MinitensorError, Result},
-    ops::{
-        activation::{exp, gelu, leaky_relu, relu, sigmoid, softmax, tanh},
-        arithmetic,
-    },
-    tensor::{DataType, Shape, Tensor, TensorData},
+    error::Result,
+    ops::activation::{gelu, leaky_relu, relu, sigmoid, softmax, tanh},
+    tensor::Tensor,
 };
-use std::sync::Arc;
-
-fn scalar_tensor(
-    value: f64,
-    dtype: DataType,
-    device: Device,
-    requires_grad: bool,
-) -> Result<Tensor> {
-    match dtype {
-        DataType::Float32 => {
-            let td = TensorData::from_vec_f32(vec![value as f32], device);
-            Ok(Tensor::new(
-                Arc::new(td),
-                Shape::new(vec![1]),
-                dtype,
-                device,
-                requires_grad,
-            ))
-        }
-        DataType::Float64 => {
-            let td = TensorData::from_vec_f64(vec![value], device);
-            Ok(Tensor::new(
-                Arc::new(td),
-                Shape::new(vec![1]),
-                dtype,
-                device,
-                requires_grad,
-            ))
-        }
-        _ => Err(MinitensorError::invalid_argument(
-            "Scalar tensors only support floating point types".to_string(),
-        )),
-    }
-}
-
-fn cached_scalar(
-    cache: &mut Option<Tensor>,
-    value: f64,
-    dtype: DataType,
-    device: Device,
-) -> Result<&Tensor> {
-    let needs_update = match cache {
-        Some(t) => t.dtype() != dtype || t.device() != device,
-        None => true,
-    };
-    if needs_update {
-        *cache = Some(scalar_tensor(value, dtype, device, false)?);
-    }
-    Ok(cache.as_ref().unwrap())
-}
 
 /// ReLU (Rectified Linear Unit) activation layer
 ///
@@ -285,7 +231,6 @@ impl Layer for LeakyReLU {
 #[derive(Clone)]
 pub struct ELU {
     alpha: f64,
-    alpha_tensor: Option<Tensor>,
 }
 
 impl ELU {
@@ -296,7 +241,6 @@ impl ELU {
     pub fn new(alpha: Option<f64>) -> Self {
         Self {
             alpha: alpha.unwrap_or(1.0),
-            alpha_tensor: None,
         }
     }
 
@@ -316,30 +260,10 @@ impl Layer for ELU {
     crate::nn::layer::cloneable_layer!();
 
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Positive part: max(0, x)
-        let positive = relu(input)?;
-
-        // Negative part: alpha * (exp(min(0, x)) - 1)
-        // Compute negative input values (x - relu(x) gives x for x<=0 and 0 otherwise)
-        let neg_input = arithmetic::sub(input, &positive)?;
-        let exp_neg = exp(&neg_input)?;
-        let ones = Tensor::ones(
-            neg_input.shape().clone(),
-            neg_input.dtype(),
-            neg_input.device(),
-            false,
-        );
-        let exp_minus_one = arithmetic::sub(&exp_neg, &ones)?;
-        let alpha = cached_scalar(
-            &mut self.alpha_tensor,
-            self.alpha,
-            input.dtype(),
-            input.device(),
-        )?;
-        let neg_part = arithmetic::mul(&exp_minus_one, alpha)?;
-
-        // Combine positive and negative parts
-        arithmetic::add(&positive, &neg_part)
+        // The op itself, not a composition of `exp(min(x, 0)) - 1`: that
+        // subtraction cancels every digit near zero, so the layer answered
+        // exactly 0 for `-1e-8` in float32 where the op did not.
+        crate::ops::activation::elu(input, self.alpha)
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
