@@ -1378,6 +1378,8 @@ macro_rules! recurrent_class {
             /// directions for a bidirectional layer, forward first -- and zeros
             /// are used when it is omitted. LSTM additionally accepts `cx` and
             /// returns `(output, (h_n, c_n))`; GRU returns `(output, h_n)`.
+            /// An LSTM's `hx` may also be the `(h, c)` pair it returned, so the
+            /// final state of one chunk is the initial state of the next.
             #[pyo3(signature = (input, hx=None, cx=None))]
             fn forward_with_state<'py>(
                 slf: PyRef<'py, Self>,
@@ -1395,6 +1397,28 @@ macro_rules! recurrent_class {
                 };
 
                 let x = borrow_tensor(input)?;
+                // The state an LSTM returns is the pair `(h_n, c_n)`, so the
+                // pair is accepted back as `hx`: carrying the state from one
+                // chunk of a sequence into the next is what this method is
+                // for, and unpacking it by hand every time was the only way.
+                let paired = match hx {
+                    Some(hx) if $returns_cell => hx
+                        .cast::<pyo3::types::PyTuple>()
+                        .ok()
+                        .filter(|pair| pair.len() == 2)
+                        .map(|pair| -> PyResult<_> { Ok((pair.get_item(0)?, pair.get_item(1)?)) })
+                        .transpose()?,
+                    _ => None,
+                };
+                if paired.is_some() && cx.is_some_and(|cx| !cx.is_none()) {
+                    return Err(PyValueError::new_err(
+                        "the state was given both as an (h, c) pair and as cx; pass one or the other",
+                    ));
+                }
+                let (hx, cx) = match &paired {
+                    Some((h, c)) => (Some(h), Some(c)),
+                    None => (hx, cx),
+                };
                 let h0 = borrow_optional_tensor(hx)?;
                 let c0 = borrow_optional_tensor(cx)?;
                 inner

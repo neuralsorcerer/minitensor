@@ -3153,7 +3153,9 @@ shaped `(num_layers * num_directions, batch, hidden_size)` regardless of
 `batch_first` -- two directions for a bidirectional layer, the forward one
 first in each layer. Initial states take the same shape:
 
-- `LSTM` returns `(output, (h_n, c_n))` and accepts both `hx` and `cx`.
+- `LSTM` returns `(output, (h_n, c_n))` and accepts both `hx` and `cx`, or
+  the `(h, c)` pair it returned as `hx` -- so one chunk's final state is the
+  next chunk's initial state.
 - `GRU` returns `(output, h_n)` and rejects a cell state.
 
 States default to zeros when omitted. Parameters are drawn from
