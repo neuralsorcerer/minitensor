@@ -126,6 +126,11 @@ impl MultiheadAttention {
         self.head_dim
     }
 
+    /// Whether the four projections carry additive biases.
+    pub fn has_bias(&self) -> bool {
+        self.q_bias.is_some()
+    }
+
     /// Whether `forward` applies an autoregressive mask.
     pub fn is_causal(&self) -> bool {
         self.is_causal

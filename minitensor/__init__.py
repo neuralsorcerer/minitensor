@@ -319,6 +319,105 @@ for _loss_name in dir(nn):
         getattr(nn, _loss_name).__reduce__ = _reduce_to_constructor
 del _loss_name
 
+
+def _rebuild_layer(cls, keywords, state, training, frozen):
+    """The other half of `_reduce_layer`."""
+    layer = cls(**keywords)
+    if state:
+        layer.load_state_dict(state)
+    if frozen:
+        layer.requires_grad_(False)
+    layer.train(training)
+    return layer
+
+
+def _rebuild_sequential(named, training, modes):
+    """The other half of `_reduce_layer` for a `Sequential`.
+
+    The children arrive rebuilt, each with its own state, freezing and mode.
+    The container's mode is set first and the children's after it, since
+    setting a container's mode sets its children's too.
+    """
+    model = nn.Sequential()
+    for name, child in named:
+        # A module added unnamed reports its position as its name, and a
+        # position is not a name `add_module` takes.
+        if name.isdigit():
+            model.append(child)
+        else:
+            model.add_module(name, child)
+    model.train(training)
+    for child, mode in zip(model, modes):
+        child.train(mode)
+    return model
+
+
+def _reduce_layer(self):
+    """Rebuild a built-in layer from its constructor keywords and its state.
+
+    Every keyword a layer's constructor takes reads back under its own name,
+    so the configuration is the constructor call that made it; the trained
+    values travel as its state dict, which holds tensors and so pickles. The
+    training mode and whether the layer is frozen come along, so the copy is
+    the same layer in every respect anything can observe.
+
+    `pickle`, `copy.copy` and `copy.deepcopy` all go through this. A copy made
+    by `copy.copy` is therefore independent too: a layer's parameters belong
+    to it, and two layers cannot share them.
+    """
+    cls = type(self)
+    if cls is nn.Sequential:
+        children = self.named_children()
+        return (
+            _rebuild_sequential,
+            (children, self.training, [child.training for child in self]),
+        )
+    keywords = {}
+    parameters = list(self.parameters())
+    for name in _inspect.signature(cls).parameters:
+        if name == "device":
+            continue
+        if name == "dtype":
+            if parameters:
+                keywords[name] = str(parameters[0].dtype)
+            continue
+        value = getattr(self, name)
+        if name == "bias" and not isinstance(value, bool):
+            # Layers with one bias tensor report the tensor; the constructor
+            # asks whether there is one.
+            value = value is not None
+        keywords[name] = value
+    state = dict(self.state_dict())
+    # Not `any`: this module's own `any` is the tensor reduction.
+    frozen = bool(parameters) and not [p for p in parameters if p.requires_grad]
+    return (_rebuild_layer, (cls, keywords, state, self.training, frozen))
+
+
+for _layer_name in dir(nn):
+    _layer = getattr(nn, _layer_name)
+    if (
+        isinstance(_layer, type)
+        and issubclass(_layer, nn.Module)
+        and _layer is not nn.Module
+        and not _layer_name.endswith("Loss")
+    ):
+        _layer.__reduce__ = _reduce_layer
+del _layer_name, _layer
+
+
+def _copy_sequential(self):
+    """`copy.copy` of a `Sequential` is its deep copy.
+
+    Its layers can belong to only one container, so a copy cannot hold the
+    same ones; and every layer's copy is independent anyway.
+    """
+    import copy
+
+    return copy.deepcopy(self)
+
+
+nn.Sequential.__copy__ = _copy_sequential
+
 optim = _C.optim
 _sys.modules[__name__ + ".optim"] = optim
 

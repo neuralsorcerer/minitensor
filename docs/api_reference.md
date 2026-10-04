@@ -1059,9 +1059,15 @@ other alone. That is what a frozen target network or a running weight average
 kept beside a model needs. A copy made inside `no_grad()` keeps its parameters
 trainable.
 
-Layers do not pickle, because rebuilding one in another process needs its
-constructor arguments. To move a model between processes, save its weights
-with `module.save(path)` and load them into a model built on the other side.
+Layers pickle, and `copy.copy` them, the same way: every keyword a layer's
+constructor takes reads back under its own name -- `conv.stride`,
+`conv.padding` (`"same"` for a layer built that way), `norm.momentum`,
+`gelu.approximate` -- so a layer is rebuilt from the constructor call that
+made it and given its state dict, its training mode and whether it was frozen.
+A `Sequential` is rebuilt from its children, named as they were. Every copy is
+independent, `copy.copy` included: a layer's parameters belong to it, and two
+layers cannot share them. `module.save(path)` remains the way to keep only the
+weights.
 
 ## 4) Tensor instance methods
 
@@ -3056,6 +3062,10 @@ True
   so `model[0].requires_grad_(False)` freezes it in `model` -- with negative
   indices counting from the end; `len(model)` and `for part in model` follow
   the same order, and `repr(model)` lists each part under its index.
+  `model.append(module)` adds one at the end, named by its position as the
+  modules it was built with are, and `model.add_module(name, module)` adds
+  one under a name; `model.named_children()` lists `(name, module)` pairs,
+  the names its `state_dict` keys start with.
 
 #### Pooling layers
 

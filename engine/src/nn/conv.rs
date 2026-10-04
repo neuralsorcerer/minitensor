@@ -577,6 +577,11 @@ impl ConvTranspose2d {
     }
 
     /// Get input channels count
+    /// The bias tensor, if the layer has one.
+    pub fn bias(&self) -> Option<&Tensor> {
+        self.bias.as_ref()
+    }
+
     pub fn in_channels(&self) -> usize {
         self.in_channels
     }
@@ -703,6 +708,11 @@ impl ConvTranspose1d {
     }
 
     /// Get input channels count
+    /// The bias tensor, if the layer has one.
+    pub fn bias(&self) -> Option<&Tensor> {
+        self.bias.as_ref()
+    }
+
     pub fn in_channels(&self) -> usize {
         self.in_channels
     }
