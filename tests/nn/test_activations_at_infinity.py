@@ -100,3 +100,25 @@ def test_logsumexp_still_passes_gradcheck():
     rng = np.random.default_rng(5)
     x = mt.tensor(rng.standard_normal((3, 4)), dtype="float64", requires_grad=True)
     assert mt.gradcheck(lambda t: mt.logsumexp(t, 1).sum(), [x])
+
+
+@pytest.mark.parametrize("x", [1e-1, 1e-2, 1e-4, 1e-8, -3e-3, 1e-20])
+def test_tanhshrink_keeps_its_digits_near_zero(x):
+    # `x - tanh(x)` is `x**3 / 3` there, and the subtraction cancelled it
+    # away: in float32 the answer at 1e-4 came out negative and 22 times too
+    # large. The leading terms of the series are the reference.
+    expected = sum(
+        c * x**p
+        for c, p in (
+            (1 / 3, 3),
+            (-2 / 15, 5),
+            (17 / 315, 7),
+            (-62 / 2835, 9),
+            (1382 / 155925, 11),
+            (-21844 / 6081075, 13),
+            (929569 / 638512875, 15),
+        )
+    )
+    for dtype, tolerance in (("float32", 1e-6), ("float64", 1e-14)):
+        got = mt.tanhshrink(mt.tensor([x], dtype=dtype)).numpy()[0]
+        assert got == pytest.approx(expected, rel=tolerance), dtype

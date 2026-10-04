@@ -229,10 +229,67 @@ unit_grad_kernel!(
 
 // --- tanhshrink, mish, celu, logsigmoid ------------------------------------
 
-unit_kernel!(
-    /// `x - tanh(x)`: what `tanh` leaves behind, which is `x^3/3` near zero.
-    TANHSHRINK, |x, _p| x - x.tanh()
-);
+/// The Taylor coefficients of `x - tanh(x)`, of `x^3` through `x^37`, from
+/// the Bernoulli numbers: `-2^(2n) (2^(2n) - 1) B_(2n) / (2n)!` for
+/// `n = 2..=19`.
+const TANHSHRINK_SERIES: [f64; 18] = [
+    0.3333333333333333,
+    -0.13333333333333333,
+    0.05396825396825397,
+    -0.021869488536155203,
+    0.008863235529902197,
+    -0.003592128036572481,
+    0.0014558343870513183,
+    -0.000590027440945586,
+    0.00023912911424355248,
+    -9.691537956929451e-05,
+    3.927832388331683e-05,
+    -1.5918905069328964e-05,
+    6.451689215655431e-06,
+    -2.6147711512907546e-06,
+    1.0597268320104654e-06,
+    -4.294911078273806e-07,
+    1.7406618963571648e-07,
+    -7.054636946400968e-08,
+];
+
+/// `x - tanh(x)` in float64, accurately all the way to zero.
+///
+/// Near zero the two terms agree to almost every digit -- the answer is
+/// `x^3/3` -- so subtracting them leaves only noise: in float32 the
+/// difference at `x = 1e-4` came out negative and 22 times too large, and in
+/// float64 it had lost half its digits there and all of them further in.
+/// Below `|x| = 1/2` this sums the series instead; eighteen terms bring the
+/// truncation under `1e-18` of the answer at the boundary, and above it the
+/// subtraction loses at most about a dozen ulps and fewer as `x` grows.
+#[inline(always)]
+fn tanhshrink_wide(x: f64) -> f64 {
+    if x.abs() < 0.5 {
+        let x2 = x * x;
+        let mut sum = 0.0;
+        for &c in TANHSHRINK_SERIES.iter().rev() {
+            sum = sum * x2 + c;
+        }
+        sum * x2 * x
+    } else {
+        x - x.tanh()
+    }
+}
+
+/// `x - tanh(x)`: what `tanh` leaves behind, which is `x^3/3` near zero.
+/// Evaluated in float64 at both widths and rounded once; see
+/// [`tanhshrink_wide`].
+const TANHSHRINK: UnitKernel = {
+    #[inline(always)]
+    fn narrow(x: f32, _p: UnitParams<f32>) -> f32 {
+        tanhshrink_wide(x as f64) as f32
+    }
+    #[inline(always)]
+    fn wide(x: f64, _p: UnitParams<f64>) -> f64 {
+        tanhshrink_wide(x)
+    }
+    (narrow, wide)
+};
 unit_grad_kernel!(
     /// `1 - sech^2(x) = tanh^2(x)`, written as the square so no second
     /// transcendental is needed.
