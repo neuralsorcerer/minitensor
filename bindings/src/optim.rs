@@ -421,18 +421,11 @@ fn resolve_betas_with_defaults(
         ));
     }
 
-    let (beta1, beta2) = if let Some((b1, b2)) = betas {
-        (b1, b2)
-    } else {
-        match (beta1, beta2) {
-            (Some(b1), Some(b2)) => (b1, b2),
-            (None, None) => defaults,
-            _ => {
-                return Err(PyTypeError::new_err(
-                    "both beta1 and beta2 must be provided",
-                ));
-            }
-        }
+    // One beta named alone keeps the default for the other, as any keyword
+    // left out does.
+    let (beta1, beta2) = match betas {
+        Some(pair) => pair,
+        None => (beta1.unwrap_or(defaults.0), beta2.unwrap_or(defaults.1)),
     };
 
     validate_beta("beta1", beta1)?;
@@ -816,26 +809,27 @@ pub struct PyNAdam;
 impl PyNAdam {
     /// Create a new NAdam optimizer
     #[new]
-    #[pyo3(signature = (parameters, lr=0.002, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, momentum_decay=0.004))]
+    ///
+    /// The betas are given the way every other Adam-family optimizer here
+    /// takes them, as a `betas` pair or as `beta1`/`beta2`; this one took
+    /// only the latter, so `NAdam(params, betas=(0.9, 0.99))` was a TypeError.
+    #[pyo3(signature = (parameters, lr=0.002, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0, momentum_decay=0.004))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,
         lr: f64,
-        beta1: f64,
-        beta2: f64,
+        betas: Option<(f64, f64)>,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
         eps: f64,
         weight_decay: f64,
         momentum_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let (beta1, beta2) = resolve_betas(betas, beta1, beta2)?;
         if !(lr > 0.0 && lr.is_finite()) {
             return Err(PyValueError::new_err(
                 "Learning rate must be positive and finite.",
-            ));
-        }
-        if !(0.0..1.0).contains(&beta1) || !(0.0..1.0).contains(&beta2) {
-            return Err(PyValueError::new_err(
-                "Beta coefficients must be in the range [0, 1).",
             ));
         }
         if !(eps > 0.0 && eps.is_finite()) {

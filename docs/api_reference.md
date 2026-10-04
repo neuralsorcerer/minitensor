@@ -3340,13 +3340,17 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 - `Adam(params, lr=1e-3, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0, amsgrad=False)`
 - `AdamW`
 - `RMSprop(params, lr, alpha=0.99, eps=1e-8, weight_decay=0.0, momentum=0.0, centered=False)`
-- `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, momentum_decay=0.004)`
+- `NAdam(params, lr=0.002, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0, momentum_decay=0.004)` — betas default to `(0.9, 0.999)`
 - `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, eps=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
 - `Adadelta(params, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0.0)`
 - `Adamax(params, lr=0.002, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0)`
 - `RAdam(params, lr=0.001, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0)`
 - `Rprop(params, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0))`
+
+An optimizer that takes betas takes them as a `betas=(beta1, beta2)` pair or
+as `beta1=`/`beta2=`; naming one alone keeps the default for the other, and
+giving the pair together with either is refused.
 
 `SGD`'s `dampening` scales the incoming gradient by `1 - dampening` before it
 enters the momentum buffer, so the buffer leans further on its history. The
