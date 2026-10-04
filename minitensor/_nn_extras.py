@@ -341,8 +341,10 @@ def gumbel_softmax(
     """
 
     scores = _atleast_tensor(logits)
-    if tau <= 0.0:
-        raise ValueError(f"gumbel_softmax requires a positive tau, got {tau}")
+    # Written so a NaN fails it: `tau <= 0.0` is false for NaN, which then
+    # turned every probability into zero.
+    if not (0.0 < tau < _math.inf):
+        raise ValueError(f"gumbel_softmax requires a finite, positive tau, got {tau}")
     axis = _normalize_axis(dim, scores.ndim(), "gumbel_softmax")
 
     # Gumbel(0, 1) by inverse transform: -log(-log(u)) for u uniform on (0, 1).
@@ -747,6 +749,9 @@ def rrelu(
 
     tensor = _atleast_tensor(input)
     low, high = float(lower), float(upper)
+    # A NaN bound passed both range checks below and made every slope NaN.
+    if not (_math.isfinite(low) and _math.isfinite(high)):
+        raise ValueError(f"rrelu requires finite slope bounds, got [{low}, {high}]")
     if low > high:
         raise ValueError(
             f"rrelu takes a range with the lower bound first, got [{low}, {high}]"

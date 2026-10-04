@@ -522,6 +522,13 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
             "softplus beta must be positive and finite, got {beta}"
         )));
     }
+    // An infinite threshold is a setting -- never take the linear tail -- but
+    // a NaN one compares false everywhere and is no threshold at all.
+    if threshold.is_nan() {
+        return Err(MinitensorError::invalid_argument(
+            "softplus threshold must not be NaN",
+        ));
+    }
 
     // An integer argument widens rather than being refused, as it does for
     // the rest of this family: none of these has an integer answer. See

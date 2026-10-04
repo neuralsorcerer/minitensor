@@ -472,6 +472,13 @@ pub fn relu6(tensor: &Tensor) -> Result<Tensor> {
 
 /// `x` where it exceeds `threshold`, `value` everywhere else.
 pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> {
+    // Nothing exceeds a NaN threshold, so every element became `value`. A NaN
+    // `value` is a fill like any other and is left alone.
+    if threshold.is_nan() {
+        return Err(MinitensorError::invalid_argument(
+            "threshold must not be NaN",
+        ));
+    }
     // An integer argument widens: `value` is not an integer, so neither is
     // the answer.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {

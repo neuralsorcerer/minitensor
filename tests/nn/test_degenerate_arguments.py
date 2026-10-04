@@ -75,3 +75,39 @@ def test_conv_layers_refuse_a_window_that_cannot_slide(build, name):
 def test_a_non_finite_activation_parameter_is_refused(call, value):
     with pytest.raises(ValueError, match="finite"):
         call(value)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: F.gumbel_softmax(mt.tensor([[1.0, 2.0]]), math.nan),
+        lambda: F.gumbel_softmax(mt.tensor([[1.0, 2.0]]), math.inf),
+        lambda: F.rrelu(mt.tensor([-1.0, 2.0]), math.nan, 0.3),
+        lambda: F.rrelu(mt.tensor([-1.0, 2.0]), 0.1, math.nan),
+        lambda: F.softplus(mt.tensor([-1.0, 2.0]), 1.0, math.nan),
+        lambda: F.threshold(mt.tensor([-1.0, 2.0]), math.nan, 0.0),
+    ],
+    ids=[
+        "gumbel tau nan",
+        "gumbel tau inf",
+        "rrelu lower",
+        "rrelu upper",
+        "softplus threshold",
+        "threshold",
+    ],
+)
+def test_a_nan_parameter_that_compared_false_is_refused(call):
+    # Each was checked with `<=` or `>`, which a NaN fails in both directions,
+    # so it passed: `gumbel_softmax` returned all zeros, `rrelu` NaN slopes,
+    # and `threshold` replaced every element.
+    with pytest.raises(ValueError):
+        call()
+
+
+def test_an_infinite_threshold_and_a_nan_fill_are_still_settings():
+    x = mt.tensor([-1.0, 2.0])
+    assert F.threshold(x, math.inf, -9.0).tolist() == [-9.0, -9.0]
+    assert math.isnan(F.threshold(x, 0.0, math.nan).tolist()[0])
+    assert F.softplus(x, 1.0, math.inf).tolist() == pytest.approx(
+        [math.log1p(math.exp(-1.0)), math.log1p(math.exp(2.0))]
+    )
