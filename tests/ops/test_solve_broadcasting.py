@@ -112,3 +112,18 @@ def test_gradients_reach_broadcast_operands_at_their_own_shapes():
 def test_a_right_hand_side_that_fits_neither_reading_is_refused(shape):
     with pytest.raises(ValueError, match="right-hand side|rhs|Shape mismatch"):
         mt.solve(_t(STACK), _t(RNG.standard_normal(shape)))
+
+
+@pytest.mark.parametrize(
+    "a_shape, b_shape",
+    [((2, 6, 3), (6, 2)), ((2, 6, 3), (6,)), ((2, 6, 3), (2, 6)), ((6, 3), (4, 6, 2))],
+)
+def test_lstsq_reads_its_right_hand_side_as_solve_does(a_shape, b_shape):
+    a = RNG.standard_normal(a_shape)
+    b = RNG.standard_normal(b_shape)
+    vectors = b.ndim == 1 or (b.ndim == a.ndim - 1 and b.shape[-1] == a.shape[-2])
+    rhs = b[..., None] if vectors else b
+    want = np.linalg.pinv(a) @ rhs
+    want = want[..., 0] if vectors else want
+    got = mt.lstsq(_t(a), _t(b)).numpy()
+    np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-12)

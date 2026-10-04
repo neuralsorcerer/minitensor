@@ -1601,7 +1601,8 @@ non-singular matrix and `qr` needs full column rank; these need nothing.
   least-squares answer rather than a failure.
 - `lstsq(a, b, rcond=None)` -- the `x` minimising `||a @ x - b||`, and the one of
   smallest norm when there are many. `b` may be a matrix of right-hand sides or
-  a single vector, and the result matches.
+  a single vector, and the result matches; the batches broadcast, and `b` is
+  read as vectors or matrices by the same rule as `solve`'s.
 - `matrix_rank(input, tol=None)` -- how many singular values are
   distinguishable from zero, as `int64`. The only numerically meaningful rank
   for inexact entries: a matrix one rounding away from rank three has rank

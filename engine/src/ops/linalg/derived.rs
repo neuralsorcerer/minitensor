@@ -200,12 +200,14 @@ pub fn cond(tensor: &Tensor) -> Result<Tensor> {
 /// neither, which is the whole reason it exists.
 ///
 /// `b` may be a matrix of right-hand sides or a single vector, and the result
-/// matches: a vector in gives a vector out.
+/// matches: a vector in gives a vector out. The batches broadcast, and `b` is
+/// read as `solve` reads it: vectors when it is one rank below `a`, or 1-D,
+/// and ends in `a`'s row count; matrices otherwise.
 pub fn lstsq(a: &Tensor, b: &Tensor, rcond: Option<f64>) -> Result<Tensor> {
     let (_, m, _) = layout(a, "lstsq")?;
 
     // A single right-hand side is a matrix with one column for the duration.
-    let vector = b.ndim() + 1 == a.ndim();
+    let vector = (b.ndim() + 1 == a.ndim() || b.ndim() == 1) && b.shape().dims().last() == Some(&m);
     let rhs = if vector {
         shape_ops::unsqueeze(b, b.ndim() as isize)?
     } else {
