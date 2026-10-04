@@ -367,3 +367,44 @@ def test_one_output_size_means_that_size_on_every_axis():
     sequence = F.max_unpool1d(pooled, indices, 2, output_size=[8])
     np.testing.assert_array_equal(scalar.numpy(), sequence.numpy())
     assert tuple(scalar.shape) == (1, 1, 8)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "shape", [(3, 2, 7, 9), (2, 3, 6, 6), (1, 1, 2, 2), (2, 1, 3, 2), (1, 2, 5, 3)]
+)
+def test_the_two_by_two_window_matches_a_reference(dtype, shape):
+    """The 2x2, stride-2 window has a path of its own, so it is held to a
+    reference rather than only to the other paths, which share it.
+
+    Odd extents leave a row and a column no window reads. NaNs, ties, an
+    all-NaN window and infinities are where a quicker comparison could pick a
+    different element: the first NaN in reading order wins, and of equal
+    maxima the first.
+    """
+    values = RNG.standard_normal(shape)
+    values.flat[::7] = np.nan
+    values.flat[2::13] = 3.0
+    values.flat[3::13] = 3.0
+    values.flat[5::17] = np.inf
+    values.flat[6::19] = -np.inf
+    values[0, 0, :2, :2] = np.nan
+    values = values.astype(dtype)
+    tensor = mt.Tensor(np.ascontiguousarray(values), dtype=dtype)
+
+    expected = _reference_indices(values, (2, 2), (2, 2), (0, 0))
+    flat = values.reshape(shape[0], shape[1], -1)
+    expected_values = np.take_along_axis(
+        flat, expected.reshape(shape[0], shape[1], -1), axis=2
+    ).reshape(expected.shape)
+
+    pooled, indices = F.max_pool2d(tensor, 2, return_indices=True)
+    np.testing.assert_array_equal(indices.numpy(), expected)
+    np.testing.assert_array_equal(pooled.numpy(), expected_values)
+    np.testing.assert_array_equal(F.max_pool2d(tensor, 2).numpy(), expected_values)
+
+    tracked = mt.Tensor(np.ascontiguousarray(values), dtype=dtype, requires_grad=True)
+    F.max_pool2d(tracked, 2).sum().backward()
+    scattered = np.zeros(flat.shape, dtype=dtype)
+    np.put_along_axis(scattered, expected.reshape(shape[0], shape[1], -1), 1.0, axis=2)
+    np.testing.assert_array_equal(tracked.grad.numpy(), scattered.reshape(shape))

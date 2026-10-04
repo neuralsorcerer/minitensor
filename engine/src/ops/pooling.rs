@@ -135,6 +135,107 @@ macro_rules! max_pool2d_kernel {
                 )
             };
 
+            // The window nearly every network pools with: 2x2, stride 2, no
+            // padding. Every window lies wholly inside the plane, so it is
+            // four loads and three selects, with nothing resolved per window
+            // and nothing for the loop to carry -- the index too, which the
+            // general loop below has to drag through a branch. On a
+            // `[64, 16, 28, 28]` input that loop took 1.54ms with the index
+            // and 0.47 without.
+            if kernel == (2, 2) && stride == (2, 2) && padding == (0, 0) {
+                // The two rows of the plane one output row reads, each cut to
+                // the `2 * out_w` columns its windows cover.
+                let rows_of = |base: usize, oh: usize| {
+                    let top = base + 2 * oh * in_w;
+                    (
+                        &data[top..top + 2 * out_w],
+                        &data[top + in_w..top + in_w + 2 * out_w],
+                    )
+                };
+                if !want_indices {
+                    par_out_chunks(&mut values, plane_out, &|first, out_values| {
+                        let base = (first / plane_out) * plane_in;
+                        for (oh, out_row) in out_values.chunks_exact_mut(out_w).enumerate() {
+                            let (top, bottom) = rows_of(base, oh);
+                            for ((slot, t), b) in out_row
+                                .iter_mut()
+                                .zip(top.chunks_exact(2))
+                                .zip(bottom.chunks_exact(2))
+                            {
+                                let nan = (t[0] != t[0])
+                                    | (t[1] != t[1])
+                                    | (b[0] != b[0])
+                                    | (b[1] != b[1]);
+                                let upper = if t[1] > t[0] { t[1] } else { t[0] };
+                                let lower = if b[1] > b[0] { b[1] } else { b[0] };
+                                let best = if lower > upper { lower } else { upper };
+                                *slot = if nan { <$ty>::NAN } else { best };
+                            }
+                        }
+                    });
+                    return Ok((values, Vec::new()));
+                }
+                let mut indices = vec![0i64; batch * channels * plane_out];
+                par_out_chunks2(
+                    &mut values,
+                    &mut indices,
+                    plane_out,
+                    &|first, out_values, out_indices| {
+                        let base = (first / plane_out) * plane_in;
+                        let below = in_w as i64;
+                        for (oh, (value_row, index_row)) in out_values
+                            .chunks_exact_mut(out_w)
+                            .zip(out_indices.chunks_exact_mut(out_w))
+                            .enumerate()
+                        {
+                            let (top, bottom) = rows_of(base, oh);
+                            let row_start = (2 * oh * in_w) as i64;
+                            for (ow, (((value, index), t), b)) in value_row
+                                .iter_mut()
+                                .zip(index_row.iter_mut())
+                                .zip(top.chunks_exact(2))
+                                .zip(bottom.chunks_exact(2))
+                                .enumerate()
+                            {
+                                // The first of equal maxima in reading order,
+                                // as the general loop finds it: each pair keeps
+                                // its left element on a tie, and the bottom
+                                // pair wins only by being strictly greater.
+                                let (upper, upper_at) =
+                                    if t[1] > t[0] { (t[1], 1) } else { (t[0], 0) };
+                                let (lower, lower_at) = if b[1] > b[0] {
+                                    (b[1], below + 1)
+                                } else {
+                                    (b[0], below)
+                                };
+                                let (best, at) = if lower > upper {
+                                    (lower, lower_at)
+                                } else {
+                                    (upper, upper_at)
+                                };
+                                // And the first NaN in reading order, if any.
+                                let nan_at = if t[0] != t[0] {
+                                    0
+                                } else if t[1] != t[1] {
+                                    1
+                                } else if b[0] != b[0] {
+                                    below
+                                } else {
+                                    below + 1
+                                };
+                                let nan = (t[0] != t[0])
+                                    | (t[1] != t[1])
+                                    | (b[0] != b[0])
+                                    | (b[1] != b[1]);
+                                *value = if nan { <$ty>::NAN } else { best };
+                                *index = row_start + 2 * ow as i64 + if nan { nan_at } else { at };
+                            }
+                        }
+                    },
+                );
+                return Ok((values, indices));
+            }
+
             if !want_indices {
                 par_out_chunks(&mut values, plane_out, &|first, out_values| {
                     let base = (first / plane_out) * plane_in;
