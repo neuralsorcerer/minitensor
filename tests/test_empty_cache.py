@@ -6,7 +6,7 @@
 
 """`empty_cache()` hands the allocator's kept blocks back to the system.
 
-Blocks of a megabyte or more that a tensor frees are kept for the next tensor
+Blocks of 64 KiB or more that a tensor frees are kept for the next tensor
 of the same size, which spares a loop over same-shaped batches the page faults
 of fresh memory. The price is that freeing a large tensor no longer lowers the
 process's resident memory -- with the system allocator alone, a block that
@@ -65,3 +65,37 @@ def test_emptying_the_cache_leaves_live_tensors_alone():
     assert kept.sum().item() == 3.0 * (1 << 20)
     again = mt.full([1 << 20], 7.0)
     assert again.sum().item() == 7.0 * (1 << 20)
+
+
+# A chain over half-megabyte tensors: each call frees several temporaries
+# together, which is what had the system allocator return them and fault them
+# back in on the next call while the floor of the cache was a megabyte.
+_FAULTS = """
+import resource
+import minitensor as mt
+
+w = mt.randn(128 << 10)
+g = mt.randn(128 << 10)
+
+def chain():
+    return ((w * 2 + g) * 3 - g) * 0.5 + w.exp()
+
+for _ in range(20):
+    chain()
+before = resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+for _ in range(100):
+    chain()
+print((resource.getrusage(resource.RUSAGE_SELF).ru_minflt - before) / 100)
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="counts the process's page faults"
+)
+def test_a_loop_over_sub_megabyte_tensors_does_not_fault_every_call():
+    result = subprocess.run(
+        [sys.executable, "-c", _FAULTS], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    # Each fresh 512 KiB block is 128 pages; uncached, the chain made ~350.
+    assert float(result.stdout) < 32

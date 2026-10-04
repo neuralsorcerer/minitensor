@@ -13,9 +13,13 @@
 //! float64 values made 10456 page faults a call and took 12.9ms, most of it in
 //! the faults. Kept and reused, its temporaries fault once.
 //!
-//! Only blocks of at least [`MIN_BYTES`], below which the system allocator's
-//! own reuse already works, and never more than [`CAPACITY_BYTES`] held at
-//! once, the oldest going first. A block is reused only for a request of
+//! Only blocks of at least [`MIN_BYTES`] are kept, and never more than
+//! [`CAPACITY_BYTES`] at once, the oldest going first. The floor was 1 MiB,
+//! and the system allocator's own reuse did not cover what lay under it: a
+//! chain of five operations over 160 KiB to 1 MiB tensors faulted on every
+//! call, 88 faults a call at 160 KiB and 722 at 1000 KiB, which ran at 1.7 to
+//! 2.1ms per MiB against 0.39 just above the floor. Under 128 KiB nothing
+//! faulted, so the floor sits a factor of two below that. A block is reused only for a request of
 //! exactly its size and alignment, which is what a loop over same-shaped
 //! tensors asks for, and which lets every block go back to the system
 //! allocator under the layout it was allocated with. A failed allocation gives
@@ -31,7 +35,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Blocks smaller than this are not cached.
-pub const MIN_BYTES: usize = 1 << 20;
+pub const MIN_BYTES: usize = 64 << 10;
 /// The most the cache holds at once.
 pub const CAPACITY_BYTES: usize = 256 << 20;
 /// How many blocks the cache can hold.
