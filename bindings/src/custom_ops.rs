@@ -23,13 +23,19 @@ use std::sync::Arc;
 /// The message is the exception's own, because a user debugging their own
 /// forward function needs to see their own traceback text -- not a wrapper
 /// saying only that "the custom operation failed".
+///
+/// The exception itself is kept as well, and raised in place of the engine
+/// error when that reaches Python, so the caller sees their own exception
+/// type and traceback; see [`crate::error::stash_python_error`].
 fn from_python(op: &str, stage: &str, error: PyErr) -> MinitensorError {
-    Python::attach(|py| {
-        MinitensorError::invalid_operation(format!(
-            "custom op '{op}': its {stage} raised {}",
-            error.value(py)
-        ))
-    })
+    let message =
+        Python::attach(|py| format!("custom op '{op}': its {stage} raised {}", error.value(py)));
+    crate::error::stash_python_error(
+        &message,
+        error,
+        format!("raised in the {stage} of custom op '{op}'"),
+    );
+    MinitensorError::invalid_operation(message)
 }
 
 /// The tensors of a slice, as Python objects a callable can be handed.

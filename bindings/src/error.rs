@@ -7,10 +7,61 @@
 use engine::MinitensorError;
 use pyo3::prelude::*;
 
+/// A Python exception raised inside a callback the engine ran -- a custom
+/// operation's forward or backward -- kept with the engine error it was turned
+/// into and a note saying where it came from.
+struct PendingPythonError {
+    message: String,
+    error: PyErr,
+    note: String,
+}
+
+thread_local! {
+    static PENDING_PYTHON_ERROR: std::cell::RefCell<Option<PendingPythonError>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keep `error`, raised by Python code the engine called, so that when the
+/// engine error carrying `message` reaches Python it is raised as itself.
+///
+/// The engine's error type holds no Python objects, so a callback's exception
+/// crossing it became a `ValueError` with the original's text: a `KeyError`
+/// in a backward lost its type and its traceback, which are the two things
+/// that point at the bug.
+pub(crate) fn stash_python_error(message: &str, error: PyErr, note: String) {
+    PENDING_PYTHON_ERROR.with(|pending| {
+        *pending.borrow_mut() = Some(PendingPythonError {
+            message: message.to_owned(),
+            error,
+            note,
+        });
+    });
+}
+
+/// The stashed exception, if it is the one `detailed` was made from. Taken
+/// either way, so a stale one never outlives the error that follows it.
+fn take_python_error(detailed: &str) -> Option<PyErr> {
+    let pending = PENDING_PYTHON_ERROR.with(|pending| pending.borrow_mut().take())?;
+    if !detailed.contains(&pending.message) {
+        return None;
+    }
+    Python::attach(|py| {
+        // Best effort: an exception that refuses a note is still raised.
+        let _ = pending
+            .error
+            .value(py)
+            .call_method1(pyo3::intern!(py, "add_note"), (pending.note,));
+    });
+    Some(pending.error)
+}
+
 /// Convert Rust errors to Python exceptions with detailed messages
 pub fn _convert_error(err: MinitensorError) -> PyErr {
     // Use the detailed message that includes suggestions and context
     let detailed_msg = err.detailed_message();
+    if let Some(original) = take_python_error(&detailed_msg) {
+        return original;
+    }
 
     match err {
         MinitensorError::ShapeError { .. } => {

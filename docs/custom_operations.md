@@ -96,8 +96,9 @@ mt.unregister_custom_op_py("weighted")
 
 A gradient whose shape or dtype does not match its input is refused rather than
 accumulated into a buffer it does not fit, and an exception raised inside either
-callable is reported with its own message -- so what you see is a traceback from
-your own code.
+callable reaches you as itself -- the same type, and a traceback down to the
+line in your own code that raised it -- with a note naming the operation and
+whether its forward or its backward was running.
 
 An input that did not ask for a gradient does not come back with one. The
 backward is written for the operation and answers for every input; it has no
