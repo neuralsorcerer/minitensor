@@ -197,3 +197,14 @@ def test_logaddexp_slopes_do_not_inherit_the_outputs_rounding(dtype):
     tol = 1.2e-7 if dtype == "float32" else 2.3e-16
     assert ga == pytest.approx(sig, rel=tol)
     assert gb == pytest.approx([1.0 - s for s in sig], rel=tol)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_an_infinite_exponent_of_a_small_base_has_a_flat_slope(dtype):
+    # `b ** inf` is 0 for every |b| < 1, so its slope in `b` is 0 there --
+    # `inf * b ** inf` reads `inf * 0`.
+    base, exponent = [0.0, 0.5, -0.5], [INF, INF, INF]
+    gb, _ = _grad(mt.pow, base, exponent, dtype=dtype)
+    assert gb == [0.0, 0.0, 0.0]
+    (gb,) = _grad(lambda b: b**INF, base, dtype=dtype)
+    assert gb == [0.0, 0.0, 0.0]

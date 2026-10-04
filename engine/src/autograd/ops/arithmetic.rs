@@ -1336,18 +1336,21 @@ where
     } else if power == one + one {
         binary_map(base, grad, move |b: T, g: T| e * (b * b) * g)
     } else {
-        binary_map(base, grad, move |b: T, g: T| e * b.powf(power) * g)
+        binary_map(base, grad, move |b: T, g: T| pow_base_slope(b, e) * g)
     }
 }
 
-/// `d/db b^e = e * b^(e-1)`, taken as 0 for `e = 0`: `b^0` is the constant 1,
-/// though `0 * 0^-1` reads `0 * inf` = NaN at `b = 0`.
+/// `d/db b^e = e * b^(e-1)`, taken as 0 for `e = 0` -- `b^0` is the constant
+/// 1, though `0 * 0^-1` reads `0 * inf` = NaN at `b = 0` -- and wherever
+/// `b^(e-1)` is 0, which against an infinite `e` (`0^inf`, flat at 0) is
+/// `inf * 0` the same way.
 #[inline(always)]
 fn pow_base_slope<T: num_traits::Float>(b: T, e: T) -> T {
-    if e == T::zero() {
+    let power = b.powf(e - T::one());
+    if e == T::zero() || power == T::zero() {
         T::zero()
     } else {
-        e * b.powf(e - T::one())
+        e * power
     }
 }
 
