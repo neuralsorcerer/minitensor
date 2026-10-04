@@ -403,6 +403,13 @@ pub(crate) fn logcumsumexp_backward(
             for k in 0..numel {
                 let weight = gs[k] as f64;
                 let shifted = -(ys[k] as f64);
+                // `y_k = -inf` means every `x_i` it sums is `-inf` as well, and
+                // its terms are `exp(-inf + inf)`. They take the slope an all
+                // `-inf` row of `logsumexp` takes, which is none, rather than
+                // turning every one of those positions NaN.
+                if shifted == f64::INFINITY {
+                    continue;
+                }
                 if weight > 0.0 {
                     rising[k] = weight.ln() + shifted;
                 } else if weight < 0.0 {

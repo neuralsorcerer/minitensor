@@ -312,8 +312,11 @@ def test_logaddexp_matches_numpy_and_grad():
     np.testing.assert_allclose(result.numpy(), expected, rtol=1e-6)
 
     result.sum().backward()
-    expected_grad_a = np.exp(a_vals - expected)
-    expected_grad_b = np.exp(b_vals - expected)
+    # The slopes are sigmoids of the difference, taken in float64: float32's
+    # `exp(a - logaddexp(a, b))` is itself 8e-7 off the exact 0.5 at a == b.
+    a64, b64 = a_vals.astype(np.float64), b_vals.astype(np.float64)
+    expected_grad_a = 1.0 / (1.0 + np.exp(b64 - a64))
+    expected_grad_b = 1.0 / (1.0 + np.exp(a64 - b64))
     np.testing.assert_allclose(a.grad.numpy(), expected_grad_a, rtol=1e-6)
     np.testing.assert_allclose(b.grad.numpy(), expected_grad_b, rtol=1e-6)
 

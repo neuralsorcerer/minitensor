@@ -135,3 +135,51 @@ def test_xlogy_is_flat_in_y_wherever_x_is_zero(dtype):
     # where `x / y` reads `0 / 0`.
     _, gy = _grad(mt.xlogy, [0.0, 0.0, 2.0], [0.0, 3.0, 4.0], dtype=dtype)
     assert gy == pytest.approx([0.0, 0.0, 0.5])
+
+
+# --- the log-sum-exp family and atan2 at infinities -------------------------
+
+INF = math.inf
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_logaddexp_takes_the_limit_of_its_slopes(dtype):
+    a = [-INF, INF, INF, 1.0, -INF, 2.0]
+    b = [-INF, 1.0, INF, -INF, 3.0, 2.0]
+    ga, gb = _grad(mt.logaddexp, a, b, dtype=dtype)
+    # Two `-inf` operands take no slope, as an all `-inf` row of `logsumexp`
+    # does; an operand at `+inf` takes all of it, and two share it.
+    assert ga[:5] == [0.0, 1.0, 0.5, 1.0, 0.0]
+    assert gb[:5] == [0.0, 0.0, 0.5, 0.0, 1.0]
+    assert ga[5] == pytest.approx(0.5) and gb[5] == pytest.approx(0.5)
+
+
+def test_logaddexp_matches_central_differences():
+    a = mt.tensor([[0.5], [-3.0], [40.0]], dtype="float64", requires_grad=True)
+    b = mt.tensor([1.0, -2.0, 39.5], dtype="float64", requires_grad=True)
+    assert mt.gradcheck(lambda a, b: mt.logaddexp(a, b).sum(), (a, b), rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_logcumsumexp_with_leading_negative_infinities(dtype):
+    (grad,) = _grad(
+        lambda x: mt.logcumsumexp(x, 0), [-INF, -INF, 0.0, 1.0], dtype=dtype
+    )
+    e = math.e
+    # Position 2 feeds out[2] (weight 1) and out[3] (weight 1 / (1 + e)).
+    assert grad[:2] == [0.0, 0.0]
+    assert grad[2] == pytest.approx(1.0 + 1.0 / (1.0 + e), rel=1e-6)
+    assert grad[3] == pytest.approx(e / (1.0 + e), rel=1e-6)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_nanstd_of_a_constant_has_a_zero_gradient(dtype):
+    (grad,) = _grad(lambda x: mt.nanstd(x), [2.0, 2.0, math.nan], dtype=dtype)
+    assert grad == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_atan2_slopes_vanish_at_an_infinite_point(dtype):
+    gy, gx = _grad(mt.atan2, [INF, 1.0, -INF], [INF, INF, 2.0], dtype=dtype)
+    assert gy == [0.0, 0.0, 0.0]
+    assert gx == [0.0, 0.0, 0.0]

@@ -844,42 +844,35 @@ pub struct SumBackward {
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
 }
-/// Gradient function for logaddexp
+/// Gradient function for logaddexp. Each slope is a sigmoid of the operands'
+/// difference; see [`crate::ops::binary_math::LOGADDEXP_D_LHS`].
 pub struct LogAddExpBackward {
+    /// The operands at the output dtype.
     pub lhs: Tensor,
     pub rhs: Tensor,
-    pub output: Tensor,
     pub input_ids: [TensorId; 2],
     pub input_shapes: [Vec<usize>; 2],
-    /// Which inputs actually need a gradient; frozen inputs skip their
-    /// exp/sub/mul/reduce chain entirely.
+    /// Which inputs actually need a gradient; a frozen input's slope is never
+    /// evaluated.
     pub input_requires_grad: [bool; 2],
 }
 impl GradientFunction for LogAddExpBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::binary_math::{LOGADDEXP_D_LHS, LOGADDEXP_D_RHS, float_binary_tensor};
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        if self.input_requires_grad[0] {
-            let lhs_diff = arithmetic::sub(&self.lhs.detach(), &self.output.detach())?;
-            let lhs_term = lhs_diff.exp()?;
-            let lhs_mul = arithmetic::mul(&lhs_term, grad_output)?;
-            let lhs_grad = reduce_gradient_for_broadcasting(
-                &lhs_mul,
-                &Shape::new(self.input_shapes[0].clone()),
+        for (side, kernel) in [LOGADDEXP_D_LHS, LOGADDEXP_D_RHS].into_iter().enumerate() {
+            if !self.input_requires_grad[side] {
+                continue;
+            }
+            let slope = float_binary_tensor(&self.lhs, &self.rhs, kernel)?;
+            let contribution = arithmetic::mul(&slope, grad_output)?;
+            let grad = reduce_gradient_for_broadcasting(
+                &contribution,
+                &Shape::new(self.input_shapes[side].clone()),
             )?;
-            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        }
-
-        if self.input_requires_grad[1] {
-            let rhs_diff = arithmetic::sub(&self.rhs.detach(), &self.output.detach())?;
-            let rhs_term = rhs_diff.exp()?;
-            let rhs_mul = arithmetic::mul(&rhs_term, grad_output)?;
-            let rhs_grad = reduce_gradient_for_broadcasting(
-                &rhs_mul,
-                &Shape::new(self.input_shapes[1].clone()),
-            )?;
-            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+            accumulate_grad(&mut gradients, self.input_ids[side], grad)?;
         }
 
         Ok(gradients)

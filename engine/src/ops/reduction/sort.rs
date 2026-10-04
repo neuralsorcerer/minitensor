@@ -711,13 +711,18 @@ pub fn std(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    let variance = var(tensor, dim, keepdim, unbiased)?;
+    std_from_variance(&var(tensor, dim, keepdim, unbiased)?)
+}
+
+/// The square root of a variance, as a standard deviation.
+///
+/// The square root's own gradient is infinite at a zero variance, which the
+/// variance's zero gradient there turns into NaN; `StdBackward` keeps a
+/// constant slice's gradient at 0 instead.
+pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
     if !variance.requires_grad() {
-        return crate::ops::activation::sqrt(&variance);
+        return crate::ops::activation::sqrt(variance);
     }
-    // The square root's own gradient is infinite at a zero variance, which
-    // the variance's zero gradient there turns into NaN; `StdBackward` keeps
-    // a constant slice's gradient at 0 instead.
     let root = crate::ops::activation::sqrt(&variance.detach())?;
     let output = root.requires_grad_(true);
     let grad_fn = Arc::new(crate::autograd::StdBackward {

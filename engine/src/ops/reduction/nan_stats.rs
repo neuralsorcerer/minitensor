@@ -27,7 +27,6 @@ use crate::ops::map::{outputs_per_task, par_map_indexed};
 use crate::{
     error::{MinitensorError, Result},
     ops::{
-        activation::sqrt,
         arithmetic::{div, mul, sub},
         comparison::eq,
         minmax::maximum,
@@ -354,7 +353,7 @@ pub fn nanstd(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    sqrt(&nanvar(tensor, dim, keepdim, unbiased)?)
+    super::sort_impl::std_from_variance(&nanvar(tensor, dim, keepdim, unbiased)?)
 }
 
 /// Product over the non-NaN entries, taking an all-NaN slice as 1.

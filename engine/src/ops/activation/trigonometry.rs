@@ -502,7 +502,6 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         let grad_fn = Arc::new(LogAddExpBackward {
             lhs: lhs_tensor.detach(),
             rhs: rhs_tensor.detach(),
-            output: output.clone().detach(),
             input_ids: [lhs.id(), rhs.id()],
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],

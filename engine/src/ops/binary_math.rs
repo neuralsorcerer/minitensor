@@ -70,9 +70,9 @@ macro_rules! float_kernel {
 /// widths. Used for the partial derivatives, which are stored rather than
 /// called directly. Same typechecking rule as [`float_kernel!`].
 macro_rules! float_pair {
-    ($(#[$meta:meta])* $name:ident, |$a:pat_param, $b:pat_param| $body:expr) => {
+    ($(#[$meta:meta])* $vis:vis $name:ident, |$a:pat_param, $b:pat_param| $body:expr) => {
         $(#[$meta])*
-        const $name: FloatBinaryKernel = {
+        $vis const $name: FloatBinaryKernel = {
             #[inline(always)]
             fn narrow($a: f32, $b: f32) -> f32 {
                 $body
@@ -97,17 +97,60 @@ float_kernel!(
 float_pair!(
     /// `d/dy atan2(y, x) = x / (x^2 + y^2)`, grouped through `hypot` so the
     /// sum of squares cannot overflow for operands past the square root of
-    /// the dtype's range.
+    /// the dtype's range. Its magnitude is at most `1 / hypot`, so it is 0
+    /// at an infinite point, where `inf / inf` would read NaN.
     ATAN2_D_Y, |y, x| {
         let h = y.hypot(x);
-        (x / h) / h
+        if h.is_infinite() { 0.0 } else { (x / h) / h }
     }
 );
 float_pair!(
-    /// `d/dx atan2(y, x) = -y / (x^2 + y^2)`, grouped as in `ATAN2_D_Y`.
+    /// `d/dx atan2(y, x) = -y / (x^2 + y^2)`, grouped and bounded as in
+    /// `ATAN2_D_Y`.
     ATAN2_D_X, |y, x| {
         let h = y.hypot(x);
-        (-y / h) / h
+        if h.is_infinite() { 0.0 } else { (-y / h) / h }
+    }
+);
+
+// --- logaddexp -------------------------------------------------------------
+
+float_pair!(
+    /// `d/da log(e^a + e^b) = sigmoid(a - b)`, taken from the operands rather
+    /// than as `exp(a - out)`, which is `exp(inf - inf)` wherever `a` is the
+    /// infinity the output took. The limits are kept at the infinities: an
+    /// operand at `+inf` takes the whole slope (half of it each when both
+    /// are), and two operands at `-inf` take none, as an all `-inf` row of
+    /// `logsumexp` does.
+    pub(crate) LOGADDEXP_D_LHS, |a, b| {
+        if a == b {
+            if a.is_infinite() && a < 0.0 { 0.0 } else { 0.5 }
+        } else {
+            let d = a - b;
+            if d >= 0.0 {
+                1.0 / (1.0 + (-d).exp())
+            } else {
+                let e = d.exp();
+                e / (1.0 + e)
+            }
+        }
+    }
+);
+float_pair!(
+    /// `d/db log(e^a + e^b)`, which is [`LOGADDEXP_D_LHS`] with the operands
+    /// swapped.
+    pub(crate) LOGADDEXP_D_RHS, |a, b| {
+        if a == b {
+            if b.is_infinite() && b < 0.0 { 0.0 } else { 0.5 }
+        } else {
+            let d = b - a;
+            if d >= 0.0 {
+                1.0 / (1.0 + (-d).exp())
+            } else {
+                let e = d.exp();
+                e / (1.0 + e)
+            }
+        }
     }
 );
 
