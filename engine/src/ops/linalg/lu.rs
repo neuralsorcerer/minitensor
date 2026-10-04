@@ -599,6 +599,76 @@ pub fn lu(tensor: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
     ))
 }
 
+/// `matrices` (`(..., n, n)`) and `rhs` broadcast to a common batch, for a
+/// solve of `A X = B`.
+///
+/// `rhs` is a stack of vectors when it is one rank below the matrices or a
+/// single vector, ending in `n`, with a batch that broadcasts; otherwise a
+/// stack of matrices with `n` rows. Vectors are tried first, so every input
+/// that was read that way when the batches had to match exactly still is. The
+/// expansion is `expand`'s, which is recorded, so a gradient reaching either
+/// expanded operand is summed back to the shape it was given.
+///
+/// Returns the two operands at the common batch, and whether `rhs` is vectors.
+pub(crate) fn broadcast_system(
+    matrices: &Tensor,
+    rhs: &Tensor,
+    op: &str,
+) -> Result<(Tensor, Tensor, bool)> {
+    let lhs_shape = matrices.shape().dims();
+    let lhs_ndim = lhs_shape.len();
+    if lhs_ndim < 2 || lhs_shape[lhs_ndim - 1] != lhs_shape[lhs_ndim - 2] {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{op} expects square matrices of shape [..., n, n], got {lhs_shape:?}"
+        )));
+    }
+    let n = lhs_shape[lhs_ndim - 1];
+    let rhs_shape = rhs.shape().dims();
+    let rhs_ndim = rhs_shape.len();
+    if rhs_ndim == 0 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{op} expects the right-hand side to have at least one dimension"
+        )));
+    }
+    let lhs_batch = Shape::new(lhs_shape[..lhs_ndim - 2].to_vec());
+    let batch_of = |dims: &[usize]| lhs_batch.broadcast_with(&Shape::new(dims.to_vec())).ok();
+    let as_vectors = ((rhs_ndim + 1 == lhs_ndim || rhs_ndim == 1) && rhs_shape[rhs_ndim - 1] == n)
+        .then(|| batch_of(&rhs_shape[..rhs_ndim - 1]))
+        .flatten();
+    let vectors = as_vectors.is_some();
+    let (trailing, batch): (Vec<usize>, Shape) = if let Some(batch) = as_vectors {
+        (vec![n], batch)
+    } else if rhs_ndim >= 2 && rhs_shape[rhs_ndim - 2] == n {
+        let batch = batch_of(&rhs_shape[..rhs_ndim - 2]).ok_or_else(|| {
+            MinitensorError::shape_mismatch(
+                lhs_shape[..lhs_ndim - 2].to_vec(),
+                rhs_shape[..rhs_ndim - 2].to_vec(),
+            )
+        })?;
+        (vec![n, rhs_shape[rhs_ndim - 1]], batch)
+    } else {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{op}: the matrices are {n}x{n}, so the right-hand side must be vectors of \
+             length {n} (shape [..., {n}]) or matrices with {n} rows (shape [..., {n}, k]) \
+             whose batch broadcasts against {:?}, but it is {rhs_shape:?}",
+            &lhs_shape[..lhs_ndim - 2]
+        )));
+    };
+    let expand_to = |tensor: &Tensor, tail: &[usize]| -> Result<Tensor> {
+        let target: Vec<usize> = batch.dims().iter().chain(tail).copied().collect();
+        if tensor.shape().dims() == target.as_slice() {
+            Ok(tensor.clone())
+        } else {
+            tensor.expand(target.iter().map(|&d| d as isize).collect())
+        }
+    };
+    Ok((
+        expand_to(matrices, &[n, n])?,
+        expand_to(rhs, &trailing)?,
+        vectors,
+    ))
+}
+
 /// The right-hand side of a batched solve, checked against the matrices.
 ///
 /// One validator for all three solves below, because they take the same shapes
@@ -691,6 +761,8 @@ pub fn solve_triangular(
     }
 
     agree(a, b)?;
+    let (a, b, _) = broadcast_system(a, b, "solve_triangular")?;
+    let (a, b) = (&a, &b);
     let (batch_dims, n) = square_layout(a, "solve_triangular")?;
     let found = systems(b, n, &batch_dims, "solve_triangular")?;
     let triangle = Triangle {
@@ -790,21 +862,31 @@ fn substitute_batched<T: Factorable>(
 /// to ask this question, and it runs the same factorisation.
 pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor> {
     agree(factors, b)?;
-    let (batch_dims, n) = square_layout(factors, "lu_solve")?;
-    let found = systems(b, n, &batch_dims, "lu_solve")?;
-
+    let (given_batch, n) = square_layout(factors, "lu_solve")?;
     if pivots.dtype() != DataType::Int64 {
         return Err(MinitensorError::invalid_operation(
             "lu_solve: the pivots must be an int64 tensor, as lu_factor returns",
         ));
     }
-    let expected: Vec<usize> = batch_dims.iter().copied().chain([n]).collect();
+    let expected: Vec<usize> = given_batch.iter().copied().chain([n]).collect();
     if pivots.shape().dims() != expected.as_slice() {
         return Err(MinitensorError::shape_mismatch(
             expected,
             pivots.shape().dims().to_vec(),
         ));
     }
+    // The factors and the right-hand side broadcast as `solve`'s operands do;
+    // the pivots belong to the factors and are expanded with them.
+    let (factors, b, _) = broadcast_system(factors, b, "lu_solve")?;
+    let (factors, b) = (&factors, &b);
+    let (batch_dims, n) = square_layout(factors, "lu_solve")?;
+    let found = systems(b, n, &batch_dims, "lu_solve")?;
+    let pivots = &if batch_dims == given_batch {
+        pivots.clone()
+    } else {
+        let target: Vec<isize> = batch_dims.iter().chain([&n]).map(|&d| d as isize).collect();
+        pivots.expand(target)?
+    };
 
     let matrices = factors.contiguous()?;
     let sides = b.contiguous()?;

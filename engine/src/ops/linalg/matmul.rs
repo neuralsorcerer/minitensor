@@ -1217,8 +1217,10 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 ///
 /// Both `lhs` (`A`) and `rhs` (`B`) must be float tensors that live on the CPU.
 /// `lhs` must have shape `[..., n, n]` (square matrices) and `rhs` can either have
-/// shape `[..., n]` (a collection of vectors) or `[..., n, k]` (multiple right
-/// hand sides). Batch dimensions need to match exactly across the operands.
+/// shape `[..., n]` (a collection of vectors, one rank below `lhs`) or
+/// `[..., n, k]` (multiple right hand sides). The batch dimensions broadcast
+/// against each other, as every other batched operation's here do: one system
+/// against a stack of right-hand sides, or a stack of systems against one.
 pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if lhs.device() != rhs.device() {
         return Err(MinitensorError::device_mismatch(
@@ -1257,35 +1259,14 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
+    let (lhs, rhs, vectors) = crate::ops::linalg::broadcast_system(lhs, rhs, "solve")?;
+    let (lhs, rhs) = (&lhs, &rhs);
     let rhs_shape = rhs.shape().dims();
-    let (rhs_cols, rhs_batch_dims) = if rhs_ndim == lhs_ndim {
-        if rhs_shape[rhs_ndim - 2] != n {
-            return Err(MinitensorError::shape_mismatch(
-                vec![n],
-                vec![rhs_shape[rhs_ndim - 2]],
-            ));
-        }
-        (rhs_shape[rhs_ndim - 1], &rhs_shape[..rhs_ndim - 2])
-    } else if rhs_ndim + 1 == lhs_ndim {
-        if rhs_shape[rhs_ndim - 1] != n {
-            return Err(MinitensorError::shape_mismatch(
-                vec![n],
-                vec![rhs_shape[rhs_ndim - 1]],
-            ));
-        }
-        (1usize, &rhs_shape[..rhs_ndim - 1])
+    let rhs_cols = if vectors {
+        1
     } else {
-        return Err(MinitensorError::invalid_operation(
-            "solve expects rhs to have either the same rank as lhs or one less",
-        ));
+        rhs_shape[rhs_shape.len() - 1]
     };
-
-    if &lhs_shape[..lhs_ndim - 2] != rhs_batch_dims {
-        return Err(MinitensorError::shape_mismatch(
-            lhs_shape[..lhs_ndim - 2].to_vec(),
-            rhs_batch_dims.to_vec(),
-        ));
-    }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
 

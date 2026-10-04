@@ -1581,6 +1581,13 @@ change.
 written without the trailing one, `(..., n)`, and the result matches whichever
 was given.
 
+The batch dimensions broadcast, here and in `solve`, as every other batched
+operation's do: one system against a stack of right-hand sides, or a stack of
+systems against one, with no `expand` written out. A `b` one rank below the
+matrices -- or a single 1-D vector -- ending in `n` is read as vectors when its
+batch broadcasts; anything else ending in `(n, k)` is read as matrices. The
+gradient reaching a broadcast operand is summed back to the shape it was given.
+
 #### What a decomposition is usually for
 
 Four operations are a singular value decomposition read out a particular way,
