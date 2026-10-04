@@ -43,7 +43,7 @@ pub(crate) fn resolve_device(device: Option<&PyDevice>) -> PyResult<Device> {
 }
 
 /// Where a tensor's data lives. `cpu()` and `cuda(index)` construct one.
-#[pyclass(name = "Device", from_py_object)]
+#[pyclass(name = "Device", module = "minitensor._core", from_py_object)]
 #[derive(Clone)]
 pub struct PyDevice {
     inner: Device,
@@ -135,6 +135,35 @@ impl PyDevice {
     /// String representation
     fn __str__(&self) -> String {
         self.inner.to_string()
+    }
+
+    /// A device equals another naming the same device, and the string that
+    /// names it -- which is what `Tensor.device` gives, so
+    /// `t.device == Device.cpu()` holds. Without this, two `Device("cpu")`
+    /// compared unequal, being two objects.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<PyRef<'_, PyDevice>>() {
+            return self.inner == other.inner;
+        }
+        if let Ok(name) = other.extract::<&str>() {
+            return Device::from_str(name).is_ok_and(|device| device == self.inner);
+        }
+        false
+    }
+
+    /// The hash of the device's name, so a device and the string naming it,
+    /// which compare equal, also hash alike.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        pyo3::types::PyString::new(py, &self.inner.to_string()).hash()
+    }
+
+    /// Pickling support, which `copy` and `deepcopy` use too: a device is its
+    /// name.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, (String,))> {
+        Ok((
+            py.get_type::<PyDevice>().into_any(),
+            (self.inner.to_string(),),
+        ))
     }
 }
 

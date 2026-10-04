@@ -382,6 +382,21 @@ impl ShapeSequence {
         Ok(false)
     }
 
+    /// The hash of the dimensions as a tuple, since a shape equals the tuple
+    /// (and the list) of its dimensions. Without it a shape could not key a
+    /// dict or join a set.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        PyTuple::new(py, &self.dims)?.hash()
+    }
+
+    /// Pickling support, which `copy` and `deepcopy` use too.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, (Vec<usize>,))> {
+        Ok((
+            py.get_type::<ShapeSequence>().into_any(),
+            (self.dims.clone(),),
+        ))
+    }
+
     fn to_list(&self) -> Vec<usize> {
         self.dims.clone()
     }

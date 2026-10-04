@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import copyreg as _copyreg
+import inspect as _inspect
 import sys as _sys
 import types as _types
 from contextlib import contextmanager as _contextmanager
@@ -294,6 +296,27 @@ for _alias, _target in _elementwise._ALIASES.items():
 # to name them twice.
 for _extra_name in _nn_extras._NN_EXTRAS:
     setattr(nn, _extra_name, getattr(_nn_extras, _extra_name))
+
+
+def _reduce_to_constructor(self):
+    """Rebuild a loss from the keywords that built it.
+
+    A loss holds its configuration and nothing else, and each piece is
+    readable under the name of the keyword that set it -- so that is all
+    `pickle`, `copy` and `deepcopy` need. Without it none of the three could
+    handle a loss, which left a training configuration holding one
+    uncopyable as a whole.
+    """
+    keywords = {
+        name: getattr(self, name) for name in _inspect.signature(type(self)).parameters
+    }
+    return (_copyreg.__newobj_ex__, (type(self), (), keywords))
+
+
+for _loss_name in dir(nn):
+    if _loss_name.endswith("Loss") and isinstance(getattr(nn, _loss_name), type):
+        getattr(nn, _loss_name).__reduce__ = _reduce_to_constructor
+del _loss_name
 
 optim = _C.optim
 _sys.modules[__name__ + ".optim"] = optim

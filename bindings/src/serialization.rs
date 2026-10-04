@@ -18,7 +18,11 @@ use pyo3::types::{PyIterator, PyList};
 use std::collections::{BTreeMap, HashMap};
 
 /// The format version a checkpoint was written with, and whether a given reader can load it.
-#[pyclass(name = "ModelVersion", from_py_object)]
+#[pyclass(
+    name = "ModelVersion",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyModelVersion {
     inner: ModelVersion,
@@ -84,7 +88,11 @@ impl PyModelVersion {
 }
 
 /// Name, description, architecture and shapes recorded alongside a saved model. Carried through save and load but not used by either.
-#[pyclass(name = "ModelMetadata", from_py_object)]
+#[pyclass(
+    name = "ModelMetadata",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyModelMetadata {
     inner: ModelMetadata,
@@ -179,7 +187,11 @@ impl PyModelMetadata {
 }
 
 /// How a checkpoint is encoded: `json` (readable, large), `binary` (compact) or `msgpack` (compact, cross-language).
-#[pyclass(name = "SerializationFormat", from_py_object)]
+#[pyclass(
+    name = "SerializationFormat",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PySerializationFormat {
     inner: SerializationFormat,
@@ -238,7 +250,7 @@ impl PySerializationFormat {
 }
 
 /// Reads and writes `SerializedModel` files in any of the `SerializationFormat`s.
-#[pyclass(name = "ModelSerializer")]
+#[pyclass(name = "ModelSerializer", module = "minitensor.serialization")]
 pub struct PyModelSerializer;
 
 #[pymethods]
@@ -286,7 +298,11 @@ impl PyModelSerializer {
 }
 
 /// A model's metadata and state dictionary together, as written to a file.
-#[pyclass(name = "SerializedModel", from_py_object)]
+#[pyclass(
+    name = "SerializedModel",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PySerializedModel {
     inner: SerializedModel,
@@ -342,7 +358,11 @@ impl PySerializedModel {
 }
 
 /// A model's parameters and buffers by name, as returned by `module.state_dict()`. Buffers are the non-trainable tensors a layer needs to reproduce its behaviour, such as BatchNorm's running statistics.
-#[pyclass(name = "StateDict", from_py_object)]
+#[pyclass(
+    name = "StateDict",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyStateDict {
     pub(crate) inner: StateDict,
@@ -512,7 +532,11 @@ impl PyStateDict {
 }
 
 /// A saved model packaged with inference configuration, for loading without the training-time layer definitions.
-#[pyclass(name = "DeploymentModel", from_py_object)]
+#[pyclass(
+    name = "DeploymentModel",
+    module = "minitensor.serialization",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyDeploymentModel {
     inner: DeploymentModel,

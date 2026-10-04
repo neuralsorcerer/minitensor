@@ -9,7 +9,7 @@ use engine::debug::{MemoryTracker, OperationProfiler, TensorDebugger, TensorInfo
 use pyo3::prelude::*;
 
 /// Python wrapper for TensorInfo
-#[pyclass(name = "TensorInfo")]
+#[pyclass(name = "TensorInfo", module = "minitensor._core")]
 pub struct PyTensorInfo {
     inner: TensorInfo,
 }
@@ -90,7 +90,7 @@ impl PyTensorInfo {
 }
 
 /// Python wrapper for TensorDebugger
-#[pyclass(name = "TensorDebugger")]
+#[pyclass(name = "TensorDebugger", module = "minitensor._core")]
 pub struct PyTensorDebugger;
 
 #[pymethods]
@@ -124,7 +124,7 @@ impl PyTensorDebugger {
 }
 
 /// Python wrapper for MemoryTracker
-#[pyclass(name = "MemoryTracker")]
+#[pyclass(name = "MemoryTracker", module = "minitensor._core")]
 pub struct PyMemoryTracker {
     inner: MemoryTracker,
 }
@@ -197,7 +197,7 @@ impl PyMemoryTracker {
 }
 
 /// Python wrapper for OperationProfiler
-#[pyclass(name = "OperationProfiler")]
+#[pyclass(name = "OperationProfiler", module = "minitensor._core")]
 pub struct PyOperationProfiler {
     inner: OperationProfiler,
 }
@@ -247,7 +247,7 @@ impl PyOperationProfiler {
 }
 
 /// Context manager for timing operations
-#[pyclass(name = "Timer")]
+#[pyclass(name = "Timer", module = "minitensor._core")]
 pub struct PyTimer {
     start_time: std::time::Instant,
     operation: String,

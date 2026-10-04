@@ -1081,7 +1081,7 @@ fn binary_cross_entropy_with_logits_functional(
 }
 
 /// Base class for neural network modules
-#[pyclass(name = "Module", subclass)]
+#[pyclass(name = "Module", module = "minitensor.nn", subclass)]
 pub struct PyModule {
     inner: SharedModule,
 }
@@ -2711,7 +2711,7 @@ impl PyModule {
 }
 
 /// DenseLayer (fully connected) layer
-#[pyclass(name = "DenseLayer", extends = PyModule)]
+#[pyclass(name = "DenseLayer", module = "minitensor.nn", extends = PyModule)]
 pub struct PyDenseLayer;
 
 #[pymethods]
@@ -2792,7 +2792,7 @@ impl PyDenseLayer {
 }
 
 /// ReLU activation layer
-#[pyclass(name = "ReLU", extends = PyModule)]
+#[pyclass(name = "ReLU", module = "minitensor.nn", extends = PyModule)]
 pub struct PyReLU;
 
 /// `module` as an instance of `class`, which must be `Module` or one of the

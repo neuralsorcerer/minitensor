@@ -29,7 +29,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule as Pyo3Module};
 
 /// Base class for learning-rate schedulers.
-#[pyclass(name = "LRScheduler", subclass)]
+#[pyclass(name = "LRScheduler", module = "minitensor.optim", subclass)]
 pub struct PyLRScheduler {
     inner: Box<dyn LearningRateScheduler + Send + Sync>,
     optimizer: Py<PyOptimizer>,
@@ -190,7 +190,7 @@ fn finite_non_negative(name: &str, value: f64) -> PyResult<f64> {
 
 /// Holds the learning rate constant. Useful as a no-op in a training loop that
 /// always constructs a scheduler.
-#[pyclass(name = "ConstantLR", extends = PyLRScheduler)]
+#[pyclass(name = "ConstantLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyConstantLR;
 
 #[pymethods]
@@ -203,7 +203,7 @@ impl PyConstantLR {
 }
 
 /// Multiplies the learning rate by `gamma` every `step_size` steps.
-#[pyclass(name = "StepLR", extends = PyLRScheduler)]
+#[pyclass(name = "StepLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyStepLR;
 
 #[pymethods]
@@ -225,7 +225,7 @@ impl PyStepLR {
 }
 
 /// Multiplies the learning rate by `gamma` every step.
-#[pyclass(name = "ExponentialLR", extends = PyLRScheduler)]
+#[pyclass(name = "ExponentialLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyExponentialLR;
 
 #[pymethods]
@@ -246,7 +246,7 @@ impl PyExponentialLR {
 /// Follows a half cosine from the base learning rate down to `eta_min`.
 ///
 /// Reaches `eta_min` after `t_max` steps and holds it there.
-#[pyclass(name = "CosineAnnealingLR", extends = PyLRScheduler)]
+#[pyclass(name = "CosineAnnealingLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyCosineAnnealingLR;
 
 #[pymethods]
@@ -273,7 +273,7 @@ impl PyCosineAnnealingLR {
 
 /// Ramps the learning rate linearly from 0 to its base value over
 /// `warmup_steps`, then holds it.
-#[pyclass(name = "LinearWarmupLR", extends = PyLRScheduler)]
+#[pyclass(name = "LinearWarmupLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyLinearWarmupLR;
 
 #[pymethods]
@@ -298,7 +298,7 @@ impl PyLinearWarmupLR {
 
 /// Decays polynomially from the base learning rate to `end_lr` over
 /// `decay_steps`, then holds at `end_lr`.
-#[pyclass(name = "PolynomialDecayLR", extends = PyLRScheduler)]
+#[pyclass(name = "PolynomialDecayLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyPolynomialDecayLR;
 
 #[pymethods]
@@ -328,7 +328,7 @@ impl PyPolynomialDecayLR {
 }
 
 /// Multiplies the learning rate by `gamma` once at each milestone step.
-#[pyclass(name = "MultiStepLR", extends = PyLRScheduler)]
+#[pyclass(name = "MultiStepLR", module = "minitensor.optim", extends = PyLRScheduler)]
 pub struct PyMultiStepLR;
 
 #[pymethods]

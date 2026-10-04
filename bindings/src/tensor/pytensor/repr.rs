@@ -334,7 +334,7 @@ impl Assignment {
 
 /// A lazy iterator over a tensor's first axis, each row read with the same
 /// subscript `t[i]` a caller would write.
-#[pyclass(name = "TensorRows")]
+#[pyclass(name = "TensorRows", module = "minitensor._core")]
 pub struct TensorRows {
     tensor: Py<PyAny>,
     next: usize,

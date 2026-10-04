@@ -22,7 +22,7 @@ use pyo3::types::{PyAny, PyModule as Pyo3Module};
 ///
 /// Every optimizer subclasses this, so `isinstance(opt, optim.Optimizer)`
 /// identifies any of them. See `step`, `zero_grad`, `state_dict` and `lr`.
-#[pyclass(name = "Optimizer", subclass)]
+#[pyclass(name = "Optimizer", module = "minitensor.optim", subclass)]
 pub struct PyOptimizer {
     /// Held as a trait object rather than an enum of the seven concrete
     /// types. Everything this class does -- step, zero_grad, lr, state_dict,
@@ -456,7 +456,7 @@ fn resolve_betas_with_defaults(
 }
 
 /// SGD optimizer
-#[pyclass(name = "SGD", extends = PyOptimizer)]
+#[pyclass(name = "SGD", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PySGD;
 
 #[pymethods]
@@ -552,7 +552,7 @@ impl PySGD {
 }
 
 /// Adam optimizer
-#[pyclass(name = "Adam", extends = PyOptimizer)]
+#[pyclass(name = "Adam", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyAdam;
 
 #[pymethods]
@@ -645,7 +645,7 @@ impl PyAdam {
 }
 
 /// AdamW optimizer
-#[pyclass(name = "AdamW", extends = PyOptimizer)]
+#[pyclass(name = "AdamW", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyAdamW;
 
 #[pymethods]
@@ -726,7 +726,7 @@ impl PyAdamW {
 }
 
 /// RMSprop optimizer
-#[pyclass(name = "RMSprop", extends = PyOptimizer)]
+#[pyclass(name = "RMSprop", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyRMSprop;
 
 #[pymethods]
@@ -823,7 +823,7 @@ impl PyRMSprop {
 }
 
 /// NAdam optimizer (Dozat, 2016) — Adam with Nesterov momentum.
-#[pyclass(name = "NAdam", extends = PyOptimizer)]
+#[pyclass(name = "NAdam", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyNAdam;
 
 #[pymethods]
@@ -914,7 +914,7 @@ impl PyNAdam {
 }
 
 /// Adagrad optimizer
-#[pyclass(name = "Adagrad", extends = PyOptimizer)]
+#[pyclass(name = "Adagrad", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyAdagrad;
 
 #[pymethods]
@@ -1007,7 +1007,7 @@ impl PyAdagrad {
 /// weight decay. Half the optimizer state of Adam and often a stronger
 /// large-model optimizer; because updates are sign-based, use a smaller learning
 /// rate (≈3-10×) and a larger weight decay than AdamW.
-#[pyclass(name = "Lion", extends = PyOptimizer)]
+#[pyclass(name = "Lion", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyLion;
 
 #[pymethods]
@@ -1076,7 +1076,7 @@ impl PyLion {
 /// Adadelta optimizer (Zeiler, 2012) — an adaptive method whose step is
 /// measured in the parameter's own units, so the learning rate defaults to 1
 /// and is a multiplier rather than the scale that decides convergence.
-#[pyclass(name = "Adadelta", extends = PyOptimizer)]
+#[pyclass(name = "Adadelta", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyAdadelta;
 
 #[pymethods]
@@ -1139,7 +1139,7 @@ impl PyAdadelta {
 /// by a decaying infinity norm rather than a mean of squares, so one enormous
 /// gradient decays out of the denominator geometrically instead of being
 /// squared into an average that takes far longer to forget.
-#[pyclass(name = "Adamax", extends = PyOptimizer)]
+#[pyclass(name = "Adamax", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyAdamax;
 
 #[pymethods]
@@ -1224,7 +1224,7 @@ impl PyAdamax {
 /// RAdam optimizer (Liu et al., 2020) — Adam with its early steps scaled by
 /// the variance its second-moment estimate actually has, so the warmup a plain
 /// Adam needs scheduled falls out of the method instead.
-#[pyclass(name = "RAdam", extends = PyOptimizer)]
+#[pyclass(name = "RAdam", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyRAdam;
 
 #[pymethods]
@@ -1316,7 +1316,7 @@ impl PyRAdam {
 /// size in the gradient's direction, reading only its sign. Immune to badly
 /// scaled gradients and unsuited to mini-batches, where a noisy sign flips for
 /// reasons that have nothing to do with the surface: it is a full-batch method.
-#[pyclass(name = "Rprop", extends = PyOptimizer)]
+#[pyclass(name = "Rprop", module = "minitensor.optim", extends = PyOptimizer)]
 pub struct PyRprop;
 
 #[pymethods]

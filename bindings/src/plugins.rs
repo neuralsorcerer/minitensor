@@ -17,7 +17,7 @@ use pyo3::types::PyList;
 use std::collections::HashMap;
 
 /// A plugin's semantic version, and whether it is compatible with another.
-#[pyclass(name = "VersionInfo", from_py_object)]
+#[pyclass(name = "VersionInfo", module = "minitensor.plugins", from_py_object)]
 #[derive(Clone)]
 pub struct PyVersionInfo {
     inner: VersionInfo,
@@ -76,7 +76,7 @@ impl PyVersionInfo {
 }
 
 /// A plugin's name, version, author and description, as reported by the plugin itself.
-#[pyclass(name = "PluginInfo", from_py_object)]
+#[pyclass(name = "PluginInfo", module = "minitensor.plugins", from_py_object)]
 #[derive(Clone)]
 pub struct PyPluginInfo {
     inner: PluginInfo,
@@ -137,7 +137,7 @@ impl PyPluginInfo {
 }
 
 /// Python interface for creating custom plugins
-#[pyclass(name = "CustomPlugin", from_py_object)]
+#[pyclass(name = "CustomPlugin", module = "minitensor.plugins", from_py_object)]
 pub struct PyCustomPlugin {
     info: PluginInfo,
     initialize_fn: Option<Py<PyAny>>,
@@ -259,7 +259,7 @@ fn is_plugin_loaded(name: &str) -> PyResult<bool> {
 }
 
 /// Plugin registry for managing Python-based plugins
-#[pyclass(name = "PluginRegistry")]
+#[pyclass(name = "PluginRegistry", module = "minitensor.plugins")]
 pub struct PyPluginRegistry {
     plugins: HashMap<String, PyCustomPlugin>,
 }
@@ -350,7 +350,7 @@ impl PyPluginRegistry {
 }
 
 /// Helper class for creating custom layers in Python
-#[pyclass(name = "CustomLayer", subclass)]
+#[pyclass(name = "CustomLayer", module = "minitensor.plugins", subclass)]
 pub struct PyCustomLayer {
     name: String,
     forward_fn: Option<Py<PyAny>>,
@@ -411,7 +411,7 @@ impl PyCustomLayer {
 }
 
 /// Plugin development utilities
-#[pyclass(name = "PluginBuilder")]
+#[pyclass(name = "PluginBuilder", module = "minitensor.plugins")]
 pub struct PyPluginBuilder {
     name: Option<String>,
     version: Option<VersionInfo>,

@@ -172,7 +172,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 /// recurses -- overwrote the mode its outer entry had saved, and the outer
 /// exit found nothing to restore: recording stayed off for the rest of the
 /// thread, with no error anywhere.
-#[pyclass(name = "GradMode")]
+#[pyclass(name = "GradMode", module = "minitensor._core")]
 struct GradMode {
     target: bool,
     previous: Vec<bool>,

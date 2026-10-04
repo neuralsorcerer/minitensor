@@ -17,7 +17,7 @@ impl PyReLU {
 }
 
 /// Sigmoid activation layer
-#[pyclass(name = "Sigmoid", extends = PyModule)]
+#[pyclass(name = "Sigmoid", module = "minitensor.nn", extends = PyModule)]
 pub struct PySigmoid;
 
 #[pymethods]
@@ -31,7 +31,7 @@ impl PySigmoid {
 }
 
 /// Tanh activation layer
-#[pyclass(name = "Tanh", extends = PyModule)]
+#[pyclass(name = "Tanh", module = "minitensor.nn", extends = PyModule)]
 pub struct PyTanh;
 
 #[pymethods]
@@ -45,7 +45,7 @@ impl PyTanh {
 }
 
 /// Softmax activation layer
-#[pyclass(name = "Softmax", extends = PyModule)]
+#[pyclass(name = "Softmax", module = "minitensor.nn", extends = PyModule)]
 pub struct PySoftmax;
 
 #[pymethods]
@@ -73,7 +73,7 @@ impl PySoftmax {
 }
 
 /// LeakyReLU activation layer
-#[pyclass(name = "LeakyReLU", extends = PyModule)]
+#[pyclass(name = "LeakyReLU", module = "minitensor.nn", extends = PyModule)]
 pub struct PyLeakyReLU;
 
 #[pymethods]
@@ -110,7 +110,7 @@ impl PyLeakyReLU {
 }
 
 /// ELU activation layer
-#[pyclass(name = "ELU", extends = PyModule)]
+#[pyclass(name = "ELU", module = "minitensor.nn", extends = PyModule)]
 pub struct PyELU;
 
 #[pymethods]
@@ -147,7 +147,7 @@ impl PyELU {
 /// Gaussian Error Linear Unit, `x * Phi(x)`, from the tanh approximation --
 /// which is half again as quick and about 5e-4 away from the error function
 /// the free `gelu` uses. `approximate="none"` asks for that one instead.
-#[pyclass(name = "GELU", extends = PyModule)]
+#[pyclass(name = "GELU", module = "minitensor.nn", extends = PyModule)]
 pub struct PyGELU;
 
 #[pymethods]
@@ -170,7 +170,7 @@ impl PyGELU {
 }
 
 /// Dropout layer
-#[pyclass(name = "Dropout", extends = PyModule)]
+#[pyclass(name = "Dropout", module = "minitensor.nn", extends = PyModule)]
 pub struct PyDropout;
 
 #[pymethods]
@@ -199,7 +199,7 @@ impl PyDropout {
 }
 
 /// 2D Dropout layer
-#[pyclass(name = "Dropout2d", extends = PyModule)]
+#[pyclass(name = "Dropout2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyDropout2d;
 
 #[pymethods]
@@ -228,7 +228,7 @@ impl PyDropout2d {
 }
 
 /// 1-D convolution over the last dimension, learning `out_channels` filters.
-#[pyclass(name = "Conv1d", extends = PyModule)]
+#[pyclass(name = "Conv1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyConv1d;
 
 #[pymethods]
@@ -328,7 +328,7 @@ impl PyConv1d {
 }
 
 /// MaxPool1d layer
-#[pyclass(name = "MaxPool1d", extends = PyModule)]
+#[pyclass(name = "MaxPool1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyMaxPool1d;
 
 #[pymethods]
@@ -374,7 +374,7 @@ impl PyMaxPool1d {
 }
 
 /// AvgPool1d layer
-#[pyclass(name = "AvgPool1d", extends = PyModule)]
+#[pyclass(name = "AvgPool1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAvgPool1d;
 
 #[pymethods]
@@ -428,7 +428,7 @@ impl PyAvgPool1d {
 }
 
 /// MaxPool2d layer
-#[pyclass(name = "MaxPool2d", extends = PyModule)]
+#[pyclass(name = "MaxPool2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyMaxPool2d;
 
 #[pymethods]
@@ -481,7 +481,7 @@ impl PyMaxPool2d {
 }
 
 /// AvgPool2d layer
-#[pyclass(name = "AvgPool2d", extends = PyModule)]
+#[pyclass(name = "AvgPool2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAvgPool2d;
 
 #[pymethods]
@@ -534,7 +534,7 @@ impl PyAvgPool2d {
 }
 
 /// 2-D convolution over the last two dimensions, learning `out_channels` filters.
-#[pyclass(name = "Conv2d", extends = PyModule)]
+#[pyclass(name = "Conv2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyConv2d;
 
 #[pymethods]
@@ -649,7 +649,7 @@ impl PyConv2d {
 }
 
 /// ConvTranspose2d layer
-#[pyclass(name = "ConvTranspose2d", extends = PyModule)]
+#[pyclass(name = "ConvTranspose2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyConvTranspose2d;
 
 #[pymethods]
@@ -766,7 +766,7 @@ impl PyConvTranspose2d {
 }
 
 /// ConvTranspose1d layer
-#[pyclass(name = "ConvTranspose1d", extends = PyModule)]
+#[pyclass(name = "ConvTranspose1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyConvTranspose1d;
 
 #[pymethods]
@@ -860,7 +860,7 @@ impl PyConvTranspose1d {
 }
 
 /// Upsample layer
-#[pyclass(name = "Upsample", extends = PyModule)]
+#[pyclass(name = "Upsample", module = "minitensor.nn", extends = PyModule)]
 pub struct PyUpsample;
 
 #[pymethods]
@@ -907,7 +907,7 @@ impl PyUpsample {
 }
 
 /// AdaptiveAvgPool2d layer
-#[pyclass(name = "AdaptiveAvgPool2d", extends = PyModule)]
+#[pyclass(name = "AdaptiveAvgPool2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAdaptiveAvgPool2d;
 
 #[pymethods]
@@ -937,7 +937,7 @@ impl PyAdaptiveAvgPool2d {
 }
 
 /// AdaptiveAvgPool1d layer
-#[pyclass(name = "AdaptiveAvgPool1d", extends = PyModule)]
+#[pyclass(name = "AdaptiveAvgPool1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAdaptiveAvgPool1d;
 
 #[pymethods]
@@ -967,7 +967,7 @@ impl PyAdaptiveAvgPool1d {
 }
 
 /// AdaptiveMaxPool2d layer
-#[pyclass(name = "AdaptiveMaxPool2d", extends = PyModule)]
+#[pyclass(name = "AdaptiveMaxPool2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAdaptiveMaxPool2d;
 
 #[pymethods]
@@ -997,7 +997,7 @@ impl PyAdaptiveMaxPool2d {
 }
 
 /// AdaptiveMaxPool1d layer
-#[pyclass(name = "AdaptiveMaxPool1d", extends = PyModule)]
+#[pyclass(name = "AdaptiveMaxPool1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyAdaptiveMaxPool1d;
 
 #[pymethods]
@@ -1027,7 +1027,7 @@ impl PyAdaptiveMaxPool1d {
 }
 
 /// BatchNorm1d layer
-#[pyclass(name = "BatchNorm1d", extends = PyModule)]
+#[pyclass(name = "BatchNorm1d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyBatchNorm1d;
 
 #[pymethods]
@@ -1078,7 +1078,7 @@ impl PyBatchNorm1d {
 }
 
 /// BatchNorm2d layer
-#[pyclass(name = "BatchNorm2d", extends = PyModule)]
+#[pyclass(name = "BatchNorm2d", module = "minitensor.nn", extends = PyModule)]
 pub struct PyBatchNorm2d;
 
 #[pymethods]
@@ -1129,7 +1129,7 @@ impl PyBatchNorm2d {
 }
 
 /// Embedding lookup table
-#[pyclass(name = "Embedding", extends = PyModule)]
+#[pyclass(name = "Embedding", module = "minitensor.nn", extends = PyModule)]
 pub struct PyEmbedding;
 
 #[pymethods]
@@ -1210,7 +1210,7 @@ impl PyEmbedding {
 }
 
 /// Layer normalization
-#[pyclass(name = "LayerNorm", extends = PyModule)]
+#[pyclass(name = "LayerNorm", module = "minitensor.nn", extends = PyModule)]
 pub struct PyLayerNorm;
 
 #[pymethods]
@@ -1269,7 +1269,7 @@ impl PyLayerNorm {
 }
 
 /// Root-mean-square layer normalization
-#[pyclass(name = "RMSNorm", extends = PyModule)]
+#[pyclass(name = "RMSNorm", module = "minitensor.nn", extends = PyModule)]
 pub struct PyRMSNorm;
 
 #[pymethods]
@@ -1332,7 +1332,7 @@ impl PyRMSNorm {
 macro_rules! recurrent_class {
     ($py_name:literal, $ty:ident, $ctor:ident, $doc:literal, $returns_cell:literal) => {
         #[doc = $doc]
-        #[pyclass(name = $py_name, extends = PyModule)]
+        #[pyclass(name = $py_name, module = "minitensor.nn", extends = PyModule)]
         pub struct $ty;
 
         #[pymethods]
@@ -1545,7 +1545,7 @@ recurrent_class!(
 /// Called with one tensor it is self-attention; called with separate query,
 /// key and value sequences it is cross-attention. `embed_dim` must divide
 /// evenly by `num_heads`.
-#[pyclass(name = "MultiheadAttention", extends = PyModule)]
+#[pyclass(name = "MultiheadAttention", module = "minitensor.nn", extends = PyModule)]
 pub struct PyMultiheadAttention;
 
 #[pymethods]
@@ -1682,7 +1682,7 @@ impl PyMultiheadAttention {
 
 /// Accept either an int or a sequence of ints for `normalized_shape`.
 /// Sequential container for layers
-#[pyclass(name = "Sequential", extends = PyModule)]
+#[pyclass(name = "Sequential", module = "minitensor.nn", extends = PyModule)]
 pub struct PySequential;
 
 #[pymethods]
@@ -1783,7 +1783,7 @@ fn parse_tuple2(obj: &Bound<PyAny>) -> PyResult<(usize, usize)> {
 }
 
 /// MSE Loss function
-#[pyclass(name = "MSELoss")]
+#[pyclass(name = "MSELoss", module = "minitensor.nn")]
 pub struct PyMSELoss {
     inner: MSELoss,
 }
@@ -1807,7 +1807,7 @@ impl PyMSELoss {
 }
 
 /// MAE Loss function
-#[pyclass(name = "MAELoss")]
+#[pyclass(name = "MAELoss", module = "minitensor.nn")]
 pub struct PyMAELoss {
     inner: MAELoss,
 }
@@ -1831,7 +1831,7 @@ impl PyMAELoss {
 }
 
 /// Huber Loss function
-#[pyclass(name = "HuberLoss")]
+#[pyclass(name = "HuberLoss", module = "minitensor.nn")]
 pub struct PyHuberLoss {
     inner: HuberLoss,
 }
@@ -1867,7 +1867,7 @@ impl PyHuberLoss {
 }
 
 /// Smooth L1 Loss function
-#[pyclass(name = "SmoothL1Loss")]
+#[pyclass(name = "SmoothL1Loss", module = "minitensor.nn")]
 pub struct PySmoothL1Loss {
     inner: SmoothL1Loss,
 }
@@ -1907,7 +1907,7 @@ impl PySmoothL1Loss {
 }
 
 /// Log-cosh Loss function
-#[pyclass(name = "LogCoshLoss")]
+#[pyclass(name = "LogCoshLoss", module = "minitensor.nn")]
 pub struct PyLogCoshLoss {
     inner: LogCoshLoss,
 }
@@ -1931,7 +1931,7 @@ impl PyLogCoshLoss {
 }
 
 /// Cross Entropy Loss function
-#[pyclass(name = "CrossEntropyLoss")]
+#[pyclass(name = "CrossEntropyLoss", module = "minitensor.nn")]
 pub struct PyCrossEntropyLoss {
     inner: CrossEntropyLoss,
     /// One weight per class, for class-index targets.
@@ -2054,7 +2054,7 @@ impl PyCrossEntropyLoss {
 }
 
 /// Binary Cross Entropy Loss function
-#[pyclass(name = "BCELoss")]
+#[pyclass(name = "BCELoss", module = "minitensor.nn")]
 pub struct PyBCELoss {
     inner: BCELoss,
 }
@@ -2078,7 +2078,7 @@ impl PyBCELoss {
 }
 
 /// Binary Cross Entropy Loss function taking logits instead of probabilities
-#[pyclass(name = "BCEWithLogitsLoss")]
+#[pyclass(name = "BCEWithLogitsLoss", module = "minitensor.nn")]
 pub struct PyBCEWithLogitsLoss {
     inner: BCEWithLogitsLoss,
 }
@@ -2121,7 +2121,7 @@ impl PyBCEWithLogitsLoss {
 }
 
 /// Focal Loss function
-#[pyclass(name = "FocalLoss")]
+#[pyclass(name = "FocalLoss", module = "minitensor.nn")]
 pub struct PyFocalLoss {
     inner: FocalLoss,
 }
