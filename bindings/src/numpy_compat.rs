@@ -83,6 +83,10 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(tensor_std, m)?)?;
+    // `std` is the name the rest of this module's spelling leads a caller to
+    // reach for; `sum`, `max` and `min` already share their names with
+    // builtins here, and `std` shares its with none.
+    m.add("std", m.getattr("tensor_std")?)?;
     m.add_function(wrap_pyfunction!(var, m)?)?;
     m.add_function(wrap_pyfunction!(prod, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
@@ -449,6 +453,45 @@ fn nanmean(
     tensor.nanmean(axis, keepdims)
 }
 
+/// The variance with `ddof` degrees of freedom taken from the count.
+///
+/// The engine computes two of these itself -- `ddof` 0 and 1 are its biased
+/// and unbiased variances -- and any other is the population variance
+/// rescaled by `n / (n - ddof)`, so a `ddof` past 1 is no reason to refuse.
+/// A divisor of zero or less is treated as zero, so the answer is the
+/// infinity (or NaN, for a variance of zero) that dividing by it gives.
+fn variance_with_ddof(
+    tensor: &engine::Tensor,
+    axis: Option<isize>,
+    keepdims: bool,
+    ddof: usize,
+) -> PyResult<engine::Tensor> {
+    let dims = axis.map(|axis| vec![axis]);
+    if ddof <= 1 {
+        return tensor
+            .var(dims, keepdims, ddof == 1)
+            .map_err(_convert_error);
+    }
+    let count = match axis {
+        Some(axis) => {
+            let axis = engine::ops::normalize_dim(axis, tensor.ndim()).map_err(_convert_error)?;
+            tensor.shape().dims()[axis]
+        }
+        None => tensor.numel(),
+    };
+    let population = tensor.var(dims, keepdims, false).map_err(_convert_error)?;
+    let factor = count as f64 / count.saturating_sub(ddof) as f64;
+    let scale = engine::nn::init::init_constant(
+        Shape::new(vec![]),
+        factor,
+        population.dtype(),
+        population.device(),
+        false,
+    )
+    .map_err(_convert_error)?;
+    mul(&population, &scale).map_err(_convert_error)
+}
+
 /// Compute standard deviation along axis
 #[pyfunction]
 #[pyo3(signature = (tensor, axis=None, keepdims=None, ddof=None))]
@@ -458,24 +501,20 @@ fn tensor_std(
     keepdims: Option<bool>,
     ddof: Option<crate::Size>,
 ) -> PyResult<PyTensor> {
-    let ddof = ddof.map(crate::Size::get);
-    let ddof = ddof.unwrap_or(0);
-    if ddof > 1 {
-        return Err(PyValueError::new_err(
-            "minitensor only supports ddof values of 0 or 1",
-        ));
-    }
+    let ddof = ddof.map(crate::Size::get).unwrap_or(0);
+    let keepdims = keepdims.unwrap_or(false);
     let tensor = PyTensor::from_python_value(tensor)?;
-    Ok(PyTensor::from_tensor(
+    let result = if ddof <= 1 {
         tensor
             .tensor()
-            .std(
-                axis.map(|axis| vec![axis]),
-                keepdims.unwrap_or(false),
-                ddof == 1,
-            )
-            .map_err(_convert_error)?,
-    ))
+            .std(axis.map(|axis| vec![axis]), keepdims, ddof == 1)
+            .map_err(_convert_error)?
+    } else {
+        variance_with_ddof(tensor.tensor(), axis, keepdims, ddof)?
+            .sqrt()
+            .map_err(_convert_error)?
+    };
+    Ok(PyTensor::from_tensor(result))
 }
 
 /// Compute variance along axis
@@ -487,24 +526,14 @@ fn var(
     keepdims: Option<bool>,
     ddof: Option<crate::Size>,
 ) -> PyResult<PyTensor> {
-    let ddof = ddof.map(crate::Size::get);
-    let ddof = ddof.unwrap_or(0);
-    if ddof > 1 {
-        return Err(PyValueError::new_err(
-            "minitensor only supports ddof values of 0 or 1",
-        ));
-    }
+    let ddof = ddof.map(crate::Size::get).unwrap_or(0);
     let tensor = PyTensor::from_python_value(tensor)?;
-    Ok(PyTensor::from_tensor(
-        tensor
-            .tensor()
-            .var(
-                axis.map(|axis| vec![axis]),
-                keepdims.unwrap_or(false),
-                ddof == 1,
-            )
-            .map_err(_convert_error)?,
-    ))
+    Ok(PyTensor::from_tensor(variance_with_ddof(
+        tensor.tensor(),
+        axis,
+        keepdims.unwrap_or(false),
+        ddof,
+    )?))
 }
 
 /// Compute product along axis

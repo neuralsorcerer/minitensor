@@ -3698,18 +3698,17 @@ one, and `hsplit` cuts a vector along the only axis it has.
 
 ### Statistics
 
-- `mean`, `nanmean`, `tensor_std`, `var`, `prod`, `sum`, `nansum`
+- `mean`, `nanmean`, `std` (also spelled `tensor_std`), `var`, `prod`, `sum`,
+  `nansum`
 - `max`, `min`, `nanmax`, `nanmin`
 
-The standard-deviation helper is exported as `tensor_std`, not `std`, so it does
-not shadow the builtin-shaped name when the module is star-imported.
-
-`numpy_compat.tensor_std(tensor, axis=None, keepdims=None, ddof=None)` and
+`numpy_compat.std(tensor, axis=None, keepdims=None, ddof=None)` and
 `numpy_compat.var(tensor, axis=None, keepdims=None, ddof=None)` accept a single
-integer axis or `None`; `ddof=0` maps to population statistics and `ddof=1` maps
-to unbiased sample statistics. Values outside `0` and `1` are rejected because
-the current tensor engine exposes a boolean unbiased flag rather than arbitrary
-correction values.
+integer axis or `None`. `ddof` is the number of degrees of freedom taken from
+the count: the variance divides the summed squared deviations by `n - ddof`,
+so `0` gives the population statistic and `1` the unbiased sample one. Any
+non-negative `ddof` is accepted; one that leaves no degrees of freedom divides
+by zero and gives infinity, or NaN where every value is the same.
 
 ```python
 from minitensor import numpy_compat as npc
@@ -3725,11 +3724,7 @@ print(npc.sum(a).tolist(), npc.mean(a).tolist(), npc.max(a).tolist())
 # ddof selects population (0) vs unbiased sample (1) statistics
 print(npc.var(a, ddof=0).tolist(), round(npc.var(a, ddof=1).tolist(), 4))
 print(npc.allclose(a, a), npc.array_equal(a, b))
-
-try:
-    npc.tensor_std(a, ddof=2)
-except ValueError as exc:
-    print("ddof=2 rejected:", isinstance(exc, ValueError))
+print(round(npc.std(a, ddof=2).item(), 4))
 ```
 
 ```text
@@ -3739,7 +3734,7 @@ Shape([4, 2])
 10.0 2.5 4.0
 1.25 1.6667
 True False
-ddof=2 rejected: True
+1.5811
 ```
 
 ## 9) Serialization (`minitensor.serialization`)

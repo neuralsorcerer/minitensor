@@ -51,6 +51,20 @@ CASES = [
     ("min", lambda: nc.min(T(A)), lambda: np.min(A)),
     ("var", lambda: nc.var(T(A)), lambda: np.var(A)),
     ("tensor_std", lambda: nc.tensor_std(T(A)), lambda: np.std(A)),
+    ("std", lambda: nc.std(T(A)), lambda: np.std(A)),
+    # Any `ddof` is the population variance rescaled by `n / (n - ddof)`; the
+    # engine's own flag covers only 0 and 1, and the rest used to be refused.
+    ("var-ddof2", lambda: nc.var(T(A), ddof=2), lambda: np.var(A, ddof=2)),
+    (
+        "var-ddof3-axis",
+        lambda: nc.var(T(A), 1, ddof=3),
+        lambda: np.var(A, axis=1, ddof=3),
+    ),
+    (
+        "std-ddof2-axis",
+        lambda: nc.std(T(A), 0, ddof=2),
+        lambda: np.std(A, axis=0, ddof=2),
+    ),
     ("nansum", lambda: nc.nansum(T(A)), lambda: np.nansum(A)),
     ("nanmean", lambda: nc.nanmean(T(A)), lambda: np.nanmean(A)),
     ("nanmax", lambda: nc.nanmax(T(A)), lambda: np.nanmax(A)),
