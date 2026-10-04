@@ -1140,13 +1140,27 @@ impl PyEmbedding {
     fn new(
         num_embeddings: crate::Size,
         embedding_dim: crate::Size,
-        padding_idx: Option<crate::Size>,
+        padding_idx: Option<isize>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
         let num_embeddings = num_embeddings.get();
         let embedding_dim = embedding_dim.get();
-        let padding_idx = padding_idx.map(crate::Size::get);
+        // Counted from the end when negative, as `embedding` counts it and as
+        // an index into the table would be.
+        let padding_idx = padding_idx
+            .map(|index| {
+                let rows = num_embeddings as isize;
+                let position = if index < 0 { index + rows } else { index };
+                if (0..rows).contains(&position) {
+                    Ok(position as usize)
+                } else {
+                    Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                        "embedding padding_idx {index} is out of range for a table of {num_embeddings} rows"
+                    )))
+                }
+            })
+            .transpose()?;
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
