@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import collections.abc as _collections_abc
 import copyreg as _copyreg
 import inspect as _inspect
 import sys as _sys
@@ -354,6 +355,10 @@ if plugins is not None:
 serialization = getattr(_C, "serialization", None)
 if serialization is not None:
     _sys.modules[__name__ + ".serialization"] = serialization
+    # A state dict has the whole read side of a mapping -- subscripting,
+    # `len`, `in`, iteration, `keys`, `values`, `items`, `get` -- so code that
+    # checks for one before reading it should find one.
+    _collections_abc.Mapping.register(serialization.StateDict)
 
 _OPTIONAL_TOP_LEVEL_EXPORTS = (
     "register_custom_op",

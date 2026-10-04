@@ -455,6 +455,17 @@ impl StateDict {
         check_tensors("buffer", &self.buffers)
     }
 
+    /// This state dict in the binary encoding, in memory.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        encode_binary(self)
+    }
+
+    /// Read a state dict from the bytes [`Self::to_bytes`] wrote, with the
+    /// same checks a loaded file gets.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        read_bytes(bytes, SerializationFormat::Binary)
+    }
+
     /// Create empty state dict
     pub fn new() -> Self {
         Self {
@@ -725,9 +736,7 @@ impl OptimizerState {
 
     /// This state in the binary format [`Self::save`] writes, in memory.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
-            MinitensorError::serialization_error(format!("Binary serialization failed: {}", e))
-        })
+        encode_binary(self)
     }
 
     /// Read a state from the bytes [`Self::to_bytes`] wrote, with the same
@@ -1061,6 +1070,13 @@ fn decode_file<T: serde::de::DeserializeOwned>(
         .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
     decode_from(BufReader::new(file), size, format)
+}
+
+/// `value` in the binary encoding the files use, in memory.
+fn encode_binary<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(|e| {
+        MinitensorError::serialization_error(format!("Binary serialization failed: {}", e))
+    })
 }
 
 /// [`read_file`] for bytes already in memory -- a pickled state, say -- with

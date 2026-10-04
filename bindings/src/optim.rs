@@ -296,8 +296,8 @@ impl PyOptimizerState {
     }
 
     /// Pickling support, so a checkpoint can hold this state beside a
-    /// model's `state_dict()` in one file -- which, being a dict of tensors,
-    /// already pickled. The state travels as the bytes `save` writes.
+    /// model's `state_dict()` and a scheduler's in one file. The state
+    /// travels as the bytes `save` writes.
     fn __reduce__<'py>(
         &self,
         py: Python<'py>,

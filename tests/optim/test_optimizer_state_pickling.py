@@ -6,10 +6,10 @@
 
 """An optimizer's saved state pickles, so a checkpoint can be one file.
 
-A model's `state_dict()` is a dict of tensors and a scheduler's is a dict of
-numbers, and both pickled; the optimizer's `OptimizerState` did not, so
-`pickle.dump({"model": ..., "optim": opt.state_dict()}, f)` failed. It now
-travels as the bytes `save` writes, checked on the way back in as a file is.
+A scheduler's state is a dict of numbers and pickled; the optimizer's
+`OptimizerState` did not, so `pickle.dump({"optim": opt.state_dict()}, f)`
+failed. It now travels as the bytes `save` writes, checked on the way back in
+as a file is. (The model's half is in `tests/test_one_file_checkpoint.py`.)
 """
 
 import copy

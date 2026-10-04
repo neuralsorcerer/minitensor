@@ -512,6 +512,39 @@ impl PyStateDict {
         Ok(PyIterator::from_object(&names)?.into_any().unbind())
     }
 
+    /// The tensor named `name`, or `default` when there is none -- the
+    /// mapping method a caller reaches for first when a name may be absent.
+    #[pyo3(signature = (name, default=None))]
+    fn get(&self, py: Python<'_>, name: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        if self.__contains__(name) {
+            Ok(Py::new(py, self.__getitem__(name)?)?.into_any())
+        } else {
+            Ok(default.unwrap_or_else(|| py.None()))
+        }
+    }
+
+    /// Pickling support, which `copy` and `deepcopy` use too, so a checkpoint
+    /// can hold a model's state beside an optimizer's in one file. The state
+    /// travels in the binary encoding `save` writes and is checked on the way
+    /// back in as a loaded file is.
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, (Bound<'py, pyo3::types::PyBytes>,))> {
+        let rebuild = py
+            .get_type::<PyStateDict>()
+            .getattr(pyo3::intern!(py, "_from_bytes"))?;
+        let bytes = self.inner.to_bytes().map_err(_convert_error)?;
+        Ok((rebuild, (pyo3::types::PyBytes::new(py, &bytes),)))
+    }
+
+    /// The other half of [`Self::__reduce__`].
+    #[staticmethod]
+    fn _from_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = StateDict::from_bytes(data).map_err(_convert_error)?;
+        Ok(Self { inner })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "StateDict({} parameters, {} buffers)",
