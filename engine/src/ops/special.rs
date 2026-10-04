@@ -271,38 +271,114 @@ pub fn logit(tensor: &Tensor, eps: Option<f64>) -> Result<Tensor> {
 
 // --- sinc ------------------------------------------------------------------
 
-unit_kernel!(
-    /// `sin(pi x) / (pi x)`, and `1` at the origin, where the quotient is
-    /// `0 / 0` but the limit is not.
-    ///
-    /// `p[0]` carries pi at the working width. The quotient loses nothing near
-    /// zero -- `sin(u)` and `u` agree there to the last bit, so the ratio is
-    /// accurate -- which is why only the derivative below needs a series.
-    ///
-    /// The sine is of `pi` times `x` reduced mod 2, not of `pi * x`: that
-    /// product is rounded before the sine sees it, so at an integer the sine
-    /// was of a near-multiple of pi rather than of one, and `sinc(50)` came
-    /// out 6e-18 where it is 0. The reduction is exact, and it also keeps the
-    /// digits a large argument loses in the product. At the infinities the
-    /// value is its limit, 0.
-    SINC, |x, p| {
-        if x == 0.0 {
-            1.0
-        } else if x.is_infinite() {
-            0.0
-        } else {
-            let r = x - 2.0 * (x * 0.5).round();
-            let folded = if r > 0.5 {
-                1.0 - r
-            } else if r < -0.5 {
-                -1.0 - r
-            } else {
-                r
-            };
-            (p[0] * folded).sin() / (p[0] * x)
-        }
+/// `x` reduced mod 2 into `[-1, 1]`, exactly, with no rounding call.
+///
+/// Adding and subtracting `2^p` (`p` the mantissa width, signed as `x / 2`)
+/// rounds `x / 2` to an integer in the floating-point unit's own rounding, so
+/// this is two adds and a select a lane and vectorizes. `round` instead is a
+/// libm call on the baseline target, which kept the whole kernel scalar and
+/// made `sinc` twice as slow as the unreduced form it replaced. Past `2^p`,
+/// `x / 2` is an integer already, so `x` is even and the remainder is 0.
+#[inline(always)]
+fn reduced_mod_two<T: num_traits::Float>(x: T) -> T {
+    let big = T::one() / T::epsilon();
+    let half = x * (T::one() + T::one()).recip();
+    let shift = big.copysign(half);
+    let nearest = (half + shift) - shift;
+    if half.abs() >= big {
+        T::zero()
+    } else {
+        x - (nearest + nearest)
     }
-);
+}
+
+/// [`reduced_mod_two`] folded into `[-1/2, 1/2]` by `sin(pi r) = sin(pi (1 - r))`.
+///
+/// Both candidates are formed and one is selected, so the loop it sits in
+/// vectorizes; branching on which half `r` lies in mispredicts on most data.
+#[inline(always)]
+fn folded_for_sin<T: num_traits::Float>(r: T) -> T {
+    let half = (T::one() + T::one()).recip();
+    let mirrored = T::one().copysign(r) - r;
+    if r.abs() > half { mirrored } else { r }
+}
+
+/// `sin(pi x) / (pi x)` over a whole tensor, and `1` at the origin, where the
+/// quotient is `0 / 0` but the limit is not. At the infinities the value is
+/// its limit, 0.
+///
+/// The sine is of `pi` times `x` reduced mod 2, not of `pi * x`: that product
+/// is rounded before the sine sees it, so at an integer the sine was of a
+/// near-multiple of pi rather than of one, and `sinc(50)` came out 6e-18
+/// where it is 0. The reduction is exact, and it also keeps the digits a large
+/// argument loses in the product. The quotient loses nothing near zero --
+/// `sin(u)` and `u` agree there to the last bit -- which is why only the
+/// derivative below needs a series.
+///
+/// A block at a time, in three loops: the reductions, which are arithmetic and
+/// selects and vectorize; the sines, through the vectorized float32 kernel or
+/// float64's own; and the quotients. Written as one per-element body, the
+/// reduction kept the sine from being batched and cost the kernel 1.7x.
+fn sinc_values(tensor: &Tensor) -> Result<TensorData> {
+    use crate::ops::map::{outputs_per_task, par_out_chunks};
+    let tensor = tensor.contiguous()?;
+    macro_rules! run {
+        ($ty:ty, $slice:ident, $pi:expr, $sin_block:expr) => {{
+            let xs = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("sinc: dtype does not match the data")
+            })?;
+            let mut out = vec![<$ty>::default(); xs.len()];
+            par_out_chunks(&mut out, outputs_per_task(1), &|offset, block| {
+                let x = &xs[offset..offset + block.len()];
+                let arguments: Vec<$ty> = x
+                    .iter()
+                    .map(|&v| $pi * folded_for_sin(reduced_mod_two(v)))
+                    .collect();
+                $sin_block(&arguments, &mut *block);
+                for (o, &v) in block.iter_mut().zip(x) {
+                    let quotient = *o / ($pi * v);
+                    *o = if v == 0.0 {
+                        1.0
+                    } else if v.is_infinite() {
+                        0.0
+                    } else {
+                        quotient
+                    };
+                }
+            });
+            TensorData::from_vec::<$ty>(out, tensor.dtype(), tensor.device())
+        }};
+    }
+    Ok(match tensor.dtype() {
+        DataType::Float32 => run!(
+            f32,
+            as_f32_slice,
+            std::f32::consts::PI,
+            |a: &[f32], o: &mut [f32]| {
+                // An initialized `f32` is a valid `MaybeUninit<f32>`, and the
+                // kernel only writes.
+                let uninit = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        o.as_mut_ptr() as *mut std::mem::MaybeUninit<f32>,
+                        o.len(),
+                    )
+                };
+                crate::ops::simd::F32Kernel::select().sin(a, uninit);
+            }
+        ),
+        DataType::Float64 => run!(f64, as_f64_slice, PI, |a: &[f64], o: &mut [f64]| {
+            for (o, &a) in o.iter_mut().zip(a) {
+                *o = a.sin();
+            }
+        }),
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "sinc needs a floating-point tensor, got {other:?}"
+            )));
+        }
+    })
+}
+
 unit_grad_kernel!(
     /// `d/dx sinc(x) = pi (u cos u - sin u) / u^2`, with `u = pi x`.
     ///
@@ -327,16 +403,9 @@ unit_grad_kernel!(
             // `(cos(pi x) - sinc(x)) / x`, both reduced as in `SINC`; the
             // cosine as `sin(pi (1/2 - |r|))`, which is exactly 0 where it
             // should be.
-            let r = x - 2.0 * (x * 0.5).round();
-            let folded = if r > 0.5 {
-                1.0 - r
-            } else if r < -0.5 {
-                -1.0 - r
-            } else {
-                r
-            };
+            let r = reduced_mod_two(x);
             let cosine = (pi * (0.5 - r.abs())).sin();
-            let value = (pi * folded).sin() / u;
+            let value = (pi * folded_for_sin(r)).sin() / u;
             (cosine - value) / x
         };
         g * derivative
@@ -350,7 +419,8 @@ pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sinc(&widened);
     }
-    unary_unit!(tensor, "sinc", SINC, SINC_D, [PI, 0.0])
+    let values = sinc_values(tensor)?;
+    unary_unit_from_data!(tensor, "sinc", values, SINC_D, [PI, 0.0])
 }
 
 // --- lgamma and digamma ----------------------------------------------------
