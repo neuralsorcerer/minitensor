@@ -127,6 +127,21 @@ fresh pool the first time it needs one. A fork copies only the thread that
 called it, and on the global pool the child's first large operation waited
 forever on workers the fork had not copied.
 
+That pool shares the cores with the BLAS NumPy loads, which the dense
+products go to, and after each product OpenBLAS keeps its threads
+busy-waiting for the next one -- by default for 2^28 cycles, about 130ms,
+without yielding. The engine's operations between two products then had
+their workers waiting for a scheduler tick behind those threads: an MLP
+training step averaged 1.72ms, with a 99th percentile of 13-21ms, against a
+median of 1.2ms. Importing minitensor sets `OPENBLAS_THREAD_TIMEOUT=22`
+unless it is already set, a 2ms wait, and the same step averages 1.33ms with
+a 99th percentile of 3.4ms. OpenBLAS reads the variable once, as it loads, so
+this only takes effect when minitensor is imported before NumPy; a script
+that imports NumPy first gets the same by setting the variable in its
+environment. A shorter wait was faster still for training, but NumPy's own
+products a millisecond apart then had to wake the threads each time, which
+this one does not.
+
 Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
 `log`, `sin`, `cos` and `tan` are bit-identical to the correctly-rounded
 float64 value on **all 2^32 float32 inputs**, checked exhaustively; `erf`,

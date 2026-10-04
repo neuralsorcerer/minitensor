@@ -11,9 +11,22 @@ from __future__ import annotations
 import collections.abc as _collections_abc
 import copyreg as _copyreg
 import inspect as _inspect
+import os as _os
 import sys as _sys
 import types as _types
 from contextlib import contextmanager as _contextmanager
+
+# Dense products go to the BLAS NumPy loads, and after each one OpenBLAS keeps
+# its threads busy-waiting for the next -- by default for 2^28 cycles, about
+# 130ms on a 2.1GHz core, without yielding. The engine's own pool runs the
+# operations between those products on the same cores, so its workers waited
+# for a scheduler tick behind the spinning threads: an MLP training step
+# averaged 1.72ms with a 99th percentile of 13-21ms. Spinning for 2^22 cycles,
+# 2ms, averages 1.39ms. Shorter still was faster here but put a wake-up on
+# NumPy's own products a millisecond apart, which this length does not.
+# OpenBLAS reads the variable once, as it loads, so it only takes effect when
+# NumPy has not been imported yet, and never over a value already set.
+_os.environ.setdefault("OPENBLAS_THREAD_TIMEOUT", "22")
 
 from . import _api as _api_helpers
 from . import _core as _C
