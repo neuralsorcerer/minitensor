@@ -278,9 +278,29 @@ unit_kernel!(
     /// `p[0]` carries pi at the working width. The quotient loses nothing near
     /// zero -- `sin(u)` and `u` agree there to the last bit, so the ratio is
     /// accurate -- which is why only the derivative below needs a series.
+    ///
+    /// The sine is of `pi` times `x` reduced mod 2, not of `pi * x`: that
+    /// product is rounded before the sine sees it, so at an integer the sine
+    /// was of a near-multiple of pi rather than of one, and `sinc(50)` came
+    /// out 6e-18 where it is 0. The reduction is exact, and it also keeps the
+    /// digits a large argument loses in the product. At the infinities the
+    /// value is its limit, 0.
     SINC, |x, p| {
-        let u = p[0] * x;
-        if u == 0.0 { 1.0 } else { u.sin() / u }
+        if x == 0.0 {
+            1.0
+        } else if x.is_infinite() {
+            0.0
+        } else {
+            let r = x - 2.0 * (x * 0.5).round();
+            let folded = if r > 0.5 {
+                1.0 - r
+            } else if r < -0.5 {
+                -1.0 - r
+            } else {
+                r
+            };
+            (p[0] * folded).sin() / (p[0] * x)
+        }
     }
 );
 unit_grad_kernel!(
@@ -301,8 +321,23 @@ unit_grad_kernel!(
             pi * u
                 * (-1.0 / 3.0
                     + square * (1.0 / 30.0 + square * (-1.0 / 840.0 + square / 45360.0)))
+        } else if x.is_infinite() {
+            0.0
         } else {
-            pi * (u * u.cos() - u.sin()) / (u * u)
+            // `(cos(pi x) - sinc(x)) / x`, both reduced as in `SINC`; the
+            // cosine as `sin(pi (1/2 - |r|))`, which is exactly 0 where it
+            // should be.
+            let r = x - 2.0 * (x * 0.5).round();
+            let folded = if r > 0.5 {
+                1.0 - r
+            } else if r < -0.5 {
+                -1.0 - r
+            } else {
+                r
+            };
+            let cosine = (pi * (0.5 - r.abs())).sin();
+            let value = (pi * folded).sin() / u;
+            (cosine - value) / x
         };
         g * derivative
     }
@@ -514,6 +549,24 @@ fn digamma_asymptotic(x: f64) -> f64 {
     x.ln() - 0.5 / x + s * inverse_square
 }
 
+/// `pi * cot(pi * x)`, with its argument reduced exactly.
+///
+/// The cotangent has period one, so it is taken at the distance `r` to the
+/// nearest integer, which is exact and at most a half; `pi * x` itself is
+/// rounded before the tangent sees it, and next to a pole that rounding is the
+/// whole answer -- within 7e-5 of `-20` it left `digamma` 2e-11 relative out.
+/// Past a quarter, `cot(pi r) = tan(pi (1/2 - r))` instead, whose argument is
+/// exact too and small where the cotangent is: dividing by the tangent of a
+/// rounded near-`pi/2` left 1e-14 relative on `digamma(-0.4999999999)`.
+fn pi_cot_pi(x: f64) -> f64 {
+    let r = x - x.round();
+    if r.abs() <= 0.25 {
+        PI / (PI * r).tan()
+    } else {
+        PI * (PI * (0.5f64.copysign(r) - r)).tan()
+    }
+}
+
 /// `digamma(x)`, the logarithmic derivative of the gamma function.
 ///
 /// Three routes, because no one of them holds everywhere. The negative half
@@ -546,13 +599,7 @@ fn digamma_scalar(x: f64) -> f64 {
     if x < 0.0 {
         // `digamma(1 - x) - digamma(x) = pi * cot(pi * x)`, and `1 - x` is
         // above one for every negative `x`, so this recurses exactly once.
-        //
-        // The tangent takes `pi * x` and not `pi * fract(x)`. The two differ
-        // by a whole number of periods and are the same value, and reducing
-        // the argument first looks like it should round better -- but
-        // measured over the negative half it is twice as far out, so the
-        // reduction `tan` does for itself is the better of the two.
-        return digamma_scalar(1.0 - x) - PI / (PI * x).tan();
+        return digamma_scalar(1.0 - x) - pi_cot_pi(x);
     }
 
     let d = (x - DIGAMMA_ROOT_HI) - DIGAMMA_ROOT_LO;
@@ -586,7 +633,8 @@ fn trigamma(x: f64) -> f64 {
         return f64::INFINITY;
     }
     if x < 0.0 {
-        let sine = (PI * x).sin();
+        // `sin(pi x)^2` has period one; reduced as in `digamma_scalar`.
+        let sine = (PI * (x - x.round())).sin();
         return PI * PI / (sine * sine) - trigamma(1.0 - x);
     }
     polygamma_series(1, x)
@@ -632,8 +680,7 @@ fn polygamma_scalar(order: u32, x: f64) -> f64 {
         // left. What avoids it is the reflection formula, and for a general
         // order that needs the `n`-th derivative of the cotangent -- a
         // polynomial in `cot(pi x)` whose coefficients overflow well before the
-        // orders here do. `scipy` stops at the same place, for the same reason:
-        // its `zeta(s, q)` is defined for positive `q` only.
+        // orders here do.
         //
         // Orders zero and one keep the whole line, because `digamma` and
         // `trigamma` reach it by routes this one does not have.
@@ -1147,8 +1194,12 @@ mod tests {
         assert_close(&got, &want, 1e-15, "sinc");
         assert_eq!(got[0], 1.0);
         for index in [1, 2, 3] {
-            assert!(got[index].abs() < 1e-15, "sinc at an integer");
+            assert_eq!(got[index], 0.0, "sinc at an integer");
         }
+        // Far out too, where `pi * x` has lost the digits that say it is a
+        // multiple of pi.
+        let far = wide(&sinc(&f64_tensor(vec![50.0, -1e6, 2f64.powi(60), 1e300])).unwrap());
+        assert_eq!(far, vec![0.0; 4]);
     }
 
     #[test]
@@ -1329,6 +1380,31 @@ mod tests {
             assert!(
                 relative < 4e-15,
                 "digamma({x}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
+    /// Next to a negative pole the reflection's cotangent is the whole
+    /// answer, and it used to be taken of `pi * x` rounded: 2e-11 relative
+    /// within 7e-5 of `-20`. References from 300-bit arithmetic.
+    #[test]
+    fn digamma_and_trigamma_keep_their_digits_next_to_a_pole() {
+        let cases = [
+            (-19.999931993712902, -14701.502067778356, 216222994.37518352),
+            (-3.0000000001, 9999999173.852476, 9.999998345192786e+19),
+            (-0.4999999999, 0.03648997487205682, 8.9348022004618),
+            (-7.5, 2.08009081757942, 9.744766282170433),
+        ];
+        for (x, psi, psi1) in cases {
+            let got = digamma_scalar(x);
+            assert!(
+                (got - psi).abs() <= 4e-16 * psi.abs(),
+                "digamma({x}) = {got}, want {psi}"
+            );
+            let got = trigamma(x);
+            assert!(
+                (got - psi1).abs() <= 4e-16 * psi1.abs(),
+                "trigamma({x}) = {got}, want {psi1}"
             );
         }
     }

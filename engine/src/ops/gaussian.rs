@@ -34,10 +34,9 @@
 //!   is correctly rounded to within an ulp or two across the whole range,
 //!   including the far tail where the naive `1 - Phi(-x)` form has no
 //!   significant digits left.
-//! * The quantile is Wichura's AS241 (the `PPND16` variant), the algorithm
-//!   R's `qnorm` and SciPy's `ndtri` both use. Its rational approximations are
-//!   accurate to about 16 significant figures over `(0, 1)`, which is as good
-//!   as the double it returns.
+//! * The quantile is Wichura's AS241 (the `PPND16` variant). Its rational
+//!   approximations are accurate to about 16 significant figures over
+//!   `(0, 1)`, which is as good as the double it returns.
 
 // The AS241 coefficient tables below are quoted exactly as Wichura published
 // them, at more decimal places than an `f64` can hold. Trimming them to the

@@ -90,10 +90,29 @@ def test_sinc_matches_numpy():
     np.testing.assert_allclose(mt.sinc(_t(values)).numpy(), np.sinc(values), atol=1e-15)
 
 
-def test_sinc_is_one_at_zero_and_zero_at_the_other_integers():
-    got = mt.sinc(_t([0.0, 1.0, -1.0, 2.0, -5.0])).numpy()
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sinc_is_one_at_zero_and_exactly_zero_at_the_other_integers(dtype):
+    # Exactly, and far out too: `sin` of a rounded `pi * x` is the sine of a
+    # near-multiple of pi, which left `sinc(50)` at 6e-18 (1.9e-8 in float32).
+    values = [0.0, 1.0, -1.0, 2.0, -5.0, 50.0, -1e6, 2.0**40]
+    got = mt.sinc(mt.tensor(values, dtype=dtype)).tolist()
     assert got[0] == 1.0
-    np.testing.assert_allclose(got[1:], 0.0, atol=1e-15)
+    assert got[1:] == [0.0] * (len(values) - 1)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sinc_keeps_its_digits_for_large_arguments(dtype):
+    # At a half-integer `sin(pi x)` is +-1 exactly, so `sinc` is
+    # `+-1 / (pi x)`; the product `pi * x` alone loses that for large `x`.
+    x = 2.0**20 + 0.5
+    got = mt.sinc(mt.tensor([x, -x], dtype=dtype)).tolist()
+    want = [1.0 / (math.pi * x), 1.0 / (math.pi * x)]
+    assert got == pytest.approx(want, rel=1e-6 if dtype == "float32" else 1e-15)
+
+
+def test_sinc_is_zero_at_the_infinities():
+    got = mt.sinc(_t([math.inf, -math.inf, math.nan])).tolist()
+    assert got[:2] == [0.0, 0.0] and math.isnan(got[2])
 
 
 @pytest.mark.parametrize(

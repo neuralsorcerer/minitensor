@@ -2134,8 +2134,7 @@ assert row_std.shape == (2, 3)
   beside the answer and alternate in sign — by order 6 at `x = -100` there is
   nothing left of it — and the reflection formula that avoids that needs the
   `n`-th derivative of the cotangent, whose coefficients overflow well before
-  these orders do. `scipy` stops in the same place. Orders 0 and 1 keep the
-  whole line. The order itself must be at most 169, which is where the
+  these orders do. Orders 0 and 1 keep the whole line. The order itself must be at most 169, which is where the
   factorial in the derivative stops fitting a double.
 - `i0(input)`, `i1(input)`, `i0e(input)`, `i1e(input)` — the modified Bessel
   functions of the first kind, orders zero and one, and each scaled by
