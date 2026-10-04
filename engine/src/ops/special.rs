@@ -808,6 +808,29 @@ fn scaled_bessel_asymptotic(order: u32, t: f64) -> f64 {
     total / (2.0 * PI * t).sqrt()
 }
 
+/// `d/dt` of [`scaled_bessel_asymptotic`], term by term:
+/// `-1/(t sqrt(2 pi t)) sum_k (k + 1/2) (-1)^k a_k / t^k`.
+///
+/// What the `e`-suffixed gradients need past the crossover. Their closed forms,
+/// `i1e - i0e` and `i0e - i1e (1 + 1/t)`, subtract two values that agree to
+/// `2t` parts in one; at `t = 1e8` that was eight digits gone. Differentiating
+/// the series instead leaves nothing to cancel.
+fn scaled_bessel_asymptotic_slope(order: u32, t: f64) -> f64 {
+    let mu = 4.0 * (order as f64) * (order as f64);
+    let mut total = 0.5;
+    let mut coefficient = 1.0;
+    let mut sign = -1.0;
+    let mut power = 1.0;
+    for k in 1..=BESSEL_ASYMPTOTIC_TERMS {
+        let step = 2.0 * k as f64 - 1.0;
+        coefficient *= (mu - step * step) / (8.0 * k as f64);
+        power *= t;
+        total += sign * (k as f64 + 0.5) * coefficient / power;
+        sign = -sign;
+    }
+    -total / (t * (2.0 * PI * t).sqrt())
+}
+
 /// `exp(-|x|) I_0(x)`. Even, and bounded by one.
 fn i0e_scalar(x: f64) -> f64 {
     let t = x.abs();
@@ -878,17 +901,29 @@ wide_kernel!(
     I0E, |x, _p| i0e_scalar(x)
 );
 wide_grad_kernel!(
-    /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`.
-    I0E_D, |x, g, _p| g * (i1e_scalar(x) - direction(x) * i0e_scalar(x))
+    /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`; past the
+    /// crossover, the asymptotic series' own slope, odd as `i0e` is even.
+    I0E_D, |x, g, _p| {
+        if x.abs() >= BESSEL_CROSSOVER {
+            g * direction(x) * scaled_bessel_asymptotic_slope(0, x.abs())
+        } else {
+            g * (i1e_scalar(x) - direction(x) * i0e_scalar(x))
+        }
+    }
 );
 wide_kernel!(
     /// `exp(-|x|) I_1(x)`.
     I1E, |x, _p| i1e_scalar(x)
 );
 wide_grad_kernel!(
-    /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`.
+    /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`; past
+    /// the crossover, the asymptotic series' own slope, even as `i1e` is odd.
     I1E_D, |x, g, _p| {
-        g * (i0e_scalar(x) - scaled_i1_over_x(x) - direction(x) * i1e_scalar(x))
+        if x.abs() >= BESSEL_CROSSOVER {
+            g * scaled_bessel_asymptotic_slope(1, x.abs())
+        } else {
+            g * (i0e_scalar(x) - scaled_i1_over_x(x) - direction(x) * i1e_scalar(x))
+        }
     }
 );
 
@@ -952,6 +987,33 @@ const ERFCX_CROSSOVER: f64 = 8.0;
 /// with margin.
 const ERFCX_ASYMPTOTIC_TERMS: i32 = 20;
 
+/// `exp(x^2)`, with `x^2` split exactly into `hi + lo` first.
+///
+/// `exp` multiplies the relative error of its argument by the argument, so the
+/// rounding of `x * x` alone cost `erfcx` 60 ulp near `x = 8`, where `x^2` is
+/// 64. The fused multiply-add recovers that rounding as `lo`, which is far
+/// below an ulp of `hi`, so `exp(lo)` is `1 + lo` to the last bit.
+fn exp_of_square(x: f64) -> f64 {
+    let hi = x * x;
+    let lo = x.mul_add(x, -hi);
+    let e = hi.exp();
+    // Past the overflow `e * lo` is `inf * lo`, NaN for a zero or negative `lo`.
+    if e.is_infinite() { e } else { e + e * lo }
+}
+
+/// `sum_{k >= 1} (-1)^k (2k-1)!! / (2 x^2)^k`: the asymptotic series of
+/// `x sqrt(pi) erfcx(x)` without its leading 1.
+fn erfcx_asymptotic_tail(x: f64) -> f64 {
+    let mut total = 0.0;
+    let mut term = 1.0;
+    let denominator = 2.0 * x * x;
+    for k in 1..=ERFCX_ASYMPTOTIC_TERMS {
+        term *= -(2.0 * k as f64 - 1.0) / denominator;
+        total += term;
+    }
+    total
+}
+
 /// `exp(x^2) erfc(x)`, the scaled complementary error function.
 fn erfcx_scalar(x: f64) -> f64 {
     if x.is_nan() {
@@ -960,21 +1022,28 @@ fn erfcx_scalar(x: f64) -> f64 {
     if x < 0.0 {
         // `erfcx(-x) = 2 exp(x^2) - erfcx(x)`, which recurses exactly once and
         // overflows below about -27 -- where the true value does too.
-        return 2.0 * (x * x).exp() - erfcx_scalar(-x);
+        return 2.0 * exp_of_square(x) - erfcx_scalar(-x);
     }
     if x < ERFCX_CROSSOVER {
-        return (x * x).exp() * erfc(x);
+        return exp_of_square(x) * erfc(x);
     }
 
     // `1/(x sqrt(pi)) sum_k (-1)^k (2k-1)!! / (2 x^2)^k`.
-    let mut total = 1.0;
-    let mut term = 1.0;
-    let denominator = 2.0 * x * x;
-    for k in 1..=ERFCX_ASYMPTOTIC_TERMS {
-        term *= -(2.0 * k as f64 - 1.0) / denominator;
-        total += term;
+    (1.0 + erfcx_asymptotic_tail(x)) / (x * PI.sqrt())
+}
+
+/// `d/dx erfcx(x) = 2 x erfcx(x) - 2/sqrt(pi)`.
+///
+/// Past the crossover the two terms agree to `2 x^2` parts in one, so the
+/// difference is taken from the series instead: `2 x erfcx(x)` is
+/// `2/sqrt(pi)` times one plus the tail, and the difference is the tail
+/// alone, with nothing cancelling. Subtracted, it lost seven digits at
+/// `x = 1e4` and had the wrong sign by `1e12`; at `+inf` it is 0, the limit.
+fn erfcx_derivative(x: f64) -> f64 {
+    if x >= ERFCX_CROSSOVER {
+        return 2.0 / PI.sqrt() * erfcx_asymptotic_tail(x);
     }
-    total / (x * PI.sqrt())
+    2.0 * x * erfcx_scalar(x) - 2.0 / PI.sqrt()
 }
 
 wide_kernel!(
@@ -987,7 +1056,7 @@ wide_grad_kernel!(
     /// From differentiating the product: the `exp(x^2)` contributes the first
     /// term and `erfc` the second, and the second is a constant because
     /// `erfc'(x) = -2/sqrt(pi) exp(-x^2)` cancels the scaling exactly.
-    ERFCX_D, |x, g, _p| g * (2.0 * x * erfcx_scalar(x) - 2.0 / PI.sqrt())
+    ERFCX_D, |x, g, _p| g * erfcx_derivative(x)
 );
 
 /// `erfcx(input)`, `exp(x**2) erfc(x)`.
@@ -1580,6 +1649,44 @@ mod tests {
             (asymptotic - product).abs() <= 1e-14 * product,
             "{asymptotic} against {product}"
         );
+    }
+
+    /// References from 300-bit arithmetic. The slope used to be formed as
+    /// `2 x erfcx(x) - 2/sqrt(pi)`, two terms that agree to `2 x^2` parts in
+    /// one: seven digits gone at `1e4`, the wrong sign at `1e12`.
+    #[test]
+    fn erfcx_and_its_slope_keep_their_digits_far_out() {
+        let cases = [
+            (3.0, 0.17900115118138996, -0.05437226000717287),
+            (7.9, 0.07085747736739713, -0.008831024690637856),
+            (8.0, 0.06998516620088092, -0.008616507881417731),
+            (10.0, 0.05614099274382259, -0.0055593122190608565),
+            (100.0, 0.005641613782989433, -5.6410497625993184e-05),
+            (1e4, 5.641895807268084e-05, -5.641895750849127e-09),
+            (1e8, 5.641895835477562e-09, -5.641895835477562e-17),
+            (1e12, 5.641895835477563e-13, -5.641895835477563e-25),
+            (-3.0, 16205.988853999586, -97237.06150316462),
+        ];
+        for (x, value, slope) in cases {
+            let got = erfcx_scalar(x);
+            assert!(
+                (got - value).abs() <= 4e-16 * value.abs(),
+                "erfcx({x}) = {got}, want {value}"
+            );
+            // Below the crossover the slope is still that subtraction, which
+            // multiplies `erfcx`'s own error by up to `1 + 2 x^2`.
+            let conditioning = if (0.0..ERFCX_CROSSOVER).contains(&x) {
+                1.0 + 2.0 * x * x
+            } else {
+                4.0
+            };
+            let got = erfcx_derivative(x);
+            assert!(
+                (got - slope).abs() <= 4e-16 * conditioning * slope.abs(),
+                "erfcx'({x}) = {got}, want {slope}"
+            );
+        }
+        assert_eq!(erfcx_derivative(f64::INFINITY), 0.0);
     }
 
     #[test]

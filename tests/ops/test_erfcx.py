@@ -137,7 +137,17 @@ def test_the_gradient_is_its_own_closed_form():
         np.ascontiguousarray(values), dtype="float64", requires_grad=True
     )
     F.erfcx(tracked).sum().backward()
-    expected = 2.0 * np.asarray(values) * _at(values) - 2.0 / math.sqrt(math.pi)
+    # `2 x erfcx(x) - 2/sqrt(pi)`, from 300-bit arithmetic rather than by
+    # evaluating it: its two terms agree to `2 x^2` parts in one, so in double
+    # precision it is itself 1.7e-13 out at `x = 20`.
+    expected = [
+        -1.1283791670955126,
+        -0.5126888229025867,
+        -0.05437226000717287,
+        -0.007652084595846594,
+        -0.0014052174534598012,
+        -436.8919967270074,
+    ]
     np.testing.assert_allclose(tracked.grad.numpy(), expected, rtol=1e-14)
     mt.clear_autograd_graph()
 
