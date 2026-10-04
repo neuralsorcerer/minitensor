@@ -722,6 +722,19 @@ impl OptimizerState {
     pub fn load<P: AsRef<Path>>(path: P, format: SerializationFormat) -> Result<Self> {
         read_file(path.as_ref(), format)
     }
+
+    /// This state in the binary format [`Self::save`] writes, in memory.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
+            MinitensorError::serialization_error(format!("Binary serialization failed: {}", e))
+        })
+    }
+
+    /// Read a state from the bytes [`Self::to_bytes`] wrote, with the same
+    /// checks [`Self::load`] makes of a file.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        read_bytes(bytes, SerializationFormat::Binary)
+    }
 }
 
 /// Complete serialized model
@@ -1047,8 +1060,25 @@ fn decode_file<T: serde::de::DeserializeOwned>(
     let file = File::open(path)
         .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-    let mut reader = BufReader::new(file);
-    // The file opened, so this is its contents, not its permissions or the
+    decode_from(BufReader::new(file), size, format)
+}
+
+/// [`read_file`] for bytes already in memory -- a pickled state, say -- with
+/// the same allocation bound, set by their length.
+fn read_bytes<T: Loaded>(bytes: &[u8], format: SerializationFormat) -> Result<T> {
+    let value: T = decode_from(bytes, bytes.len() as u64, format)?;
+    value.check()?;
+    Ok(value)
+}
+
+/// Decode `size` bytes from `reader`, bounding what the binary decoder may
+/// allocate by that size as [`read_file`] describes.
+fn decode_from<T: serde::de::DeserializeOwned, R: std::io::Read>(
+    mut reader: R,
+    size: u64,
+    format: SerializationFormat,
+) -> Result<T> {
+    // The source opened, so this is its contents, not its permissions or the
     // disk -- which is what the generic serialization hint suggests checking.
     let failed = |kind: &str, e: &dyn std::fmt::Display| MinitensorError::SerializationError {
         message: format!("{kind} deserialization failed: {e}"),

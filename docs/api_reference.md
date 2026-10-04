@@ -3532,6 +3532,10 @@ All optimizer classes share a common interface:
   as training went is where the run is. To resume at a different rate, set
   `lr` after loading.
 - `save(path)` / `load(path)` -- the same, through a file.
+- The state `state_dict()` returns pickles and copies, so a checkpoint can be
+  one file holding the model's state dict, the optimizer's and a scheduler's
+  together. It travels as the bytes `save` writes, and corrupt bytes are
+  refused as a corrupt file is.
 
 ### Checkpointing a training run
 

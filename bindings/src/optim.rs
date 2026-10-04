@@ -248,7 +248,7 @@ fn borrow_tensor<'py>(py: Python<'py>, value: &'py Py<PyAny>) -> PyResult<PyRef<
 }
 
 /// A saved optimizer state, as returned by `Optimizer.state_dict()`.
-#[pyclass(name = "OptimizerState")]
+#[pyclass(name = "OptimizerState", module = "minitensor.optim")]
 pub struct PyOptimizerState {
     inner: OptimizerState,
 }
@@ -292,6 +292,27 @@ impl PyOptimizerState {
     fn load(path: &str) -> PyResult<Self> {
         let inner =
             OptimizerState::load(path, SerializationFormat::Binary).map_err(_convert_error)?;
+        Ok(Self { inner })
+    }
+
+    /// Pickling support, so a checkpoint can hold this state beside a
+    /// model's `state_dict()` in one file -- which, being a dict of tensors,
+    /// already pickled. The state travels as the bytes `save` writes.
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, (Bound<'py, pyo3::types::PyBytes>,))> {
+        let rebuild = py
+            .get_type::<PyOptimizerState>()
+            .getattr(pyo3::intern!(py, "_from_bytes"))?;
+        let bytes = self.inner.to_bytes().map_err(_convert_error)?;
+        Ok((rebuild, (pyo3::types::PyBytes::new(py, &bytes),)))
+    }
+
+    /// The other half of [`Self::__reduce__`].
+    #[staticmethod]
+    fn _from_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = OptimizerState::from_bytes(data).map_err(_convert_error)?;
         Ok(Self { inner })
     }
 
