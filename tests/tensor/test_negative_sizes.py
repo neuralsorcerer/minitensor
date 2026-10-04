@@ -77,3 +77,25 @@ def test_valid_sizes_keep_working():
     assert F.layer_norm(X, [3, 8]).shape == (2, 3, 8)
     assert X.narrow(2, 1, 0).shape == (2, 3, 0)
     assert mt.eye(0).shape == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [lambda: X.split(-1), lambda: mt.split(X, -2, 1), lambda: X.split(0)],
+)
+def test_a_negative_split_size_is_a_value_error_not_a_type_error(call):
+    # An int is a chunk size whatever its sign; a negative one used to be
+    # reported as "must be int or sequence".
+    with pytest.raises(ValueError, match="greater than zero"):
+        call()
+
+
+def test_a_negative_repeat_count_is_a_value_error_not_a_type_error():
+    with pytest.raises(ValueError, match="non-negative integers, got -1"):
+        X.repeat_interleave(-1)
+
+
+def test_integer_scalars_from_arrays_still_count():
+    np = pytest.importorskip("numpy")
+    assert [p.shape for p in X.split(np.int64(4), 2)] == [(2, 3, 4), (2, 3, 4)]
+    assert mt.repeat_interleave(X, np.int64(2)).shape == (96,)

@@ -385,7 +385,12 @@ impl PyTensor {
         output_size: Option<crate::Size>,
     ) -> PyResult<Self> {
         let output_size = output_size.map(crate::Size::get);
-        if let Ok(value) = repeats.extract::<usize>() {
+        if let Ok(value) = repeats.extract::<i64>() {
+            let value = usize::try_from(value).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "repeat_interleave: repeats must be non-negative integers, got {value}"
+                ))
+            })?;
             // Same growth as `repeat`, one element at a time instead of whole
             // copies: every element becomes `value` of them.
             reject_unallocatable(

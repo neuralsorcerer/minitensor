@@ -130,12 +130,16 @@ impl PyTensor {
 
         let mut sections: Vec<usize> = Vec::new();
 
-        if let Ok(split_size) = split_size_or_sections.extract::<usize>() {
-            if split_size == 0 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "split_size must be greater than zero",
-                ));
+        if let Ok(split_size) = split_size_or_sections.extract::<isize>() {
+            // An int is a chunk size whatever its sign; a negative one used to
+            // miss the unsigned extraction and land on "must be int or
+            // sequence", which it is.
+            if split_size <= 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "split_size must be greater than zero, got {split_size}"
+                )));
             }
+            let split_size = split_size as usize;
             if dim_size == 0 {
                 // An empty axis is one empty piece, not no pieces. The loop
                 // below never runs for it, which left `cat(t.split(n, d), d)`
