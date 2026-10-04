@@ -2795,6 +2795,15 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only two, so a 3-D convolution is the same product with a rank-three kernel. |
 | `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged; fold a tensor of ones and divide to average. |
 
+A target that is a score -- a probability, a soft label, a per-class
+distribution -- receives a gradient whenever it requires one: the regression
+losses, `kl_div`, `poisson_nll_loss`, `soft_margin_loss`, both binary cross
+entropies, and `cross_entropy` and `focal_loss` given per-class scores all
+differentiate it, so a soft label produced by another model trains through the
+loss like any other input. Class indices, being integers, never do, and
+neither do the `+1`/`-1` labels of `hinge_embedding_loss`, which select a
+branch rather than enter one.
+
 ```python
 import minitensor as mt
 from minitensor import functional as F

@@ -214,11 +214,17 @@ impl GradientFunction for HuberLossBackward {
 pub struct CrossEntropyLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
-    /// Cross-entropy differentiates only with respect to logits. Targets are
-    /// saved values, not graph inputs, so do not retain or traverse their tape.
-    pub input_ids: [TensorId; 1],
+    /// The inputs a gradient is produced for: the logits when they require
+    /// one, and dense targets when they do. Class indices never do.
+    pub input_ids: Vec<TensorId>,
+    pub predictions_id: Option<TensorId>,
+    pub targets_id: Option<TensorId>,
     pub reduction: String,
-    pub softmax_predictions: Tensor,
+    /// `softmax(logits)`, kept when the logits need a gradient.
+    pub softmax_predictions: Option<Tensor>,
+    /// `log_softmax(logits)`, kept when dense targets need a gradient: the
+    /// loss is linear in the target, with slope `-log_softmax`.
+    pub log_predictions: Option<Tensor>,
     /// One-hot (or soft) targets, for the general formula below.
     pub targets: Option<Tensor>,
     /// Class indices, when that is what the caller passed. The gradient is
@@ -263,16 +269,20 @@ cross_entropy_index_grad!(ce_index_grad_f64_i64, f64, i64);
 impl GradientFunction for CrossEntropyLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
+        gradients.reserve(self.input_ids.len());
 
         // For L = -sum(t * log_softmax(z)), dL/dz is
         // softmax(z) * sum(t) - t. The commonly quoted `softmax - target`
         // assumes each target row sums to one; keeping the sum explicit makes
         // probability/weighted targets mathematically correct while reducing
         // to the usual formula for class-index and normalized one-hot targets.
-        let probabilities = self.softmax_predictions.detach();
+        let probabilities = self.softmax_predictions.as_ref().map(|p| p.detach());
 
         if let Some(indices) = &self.target_indices {
+            let (Some(probabilities), Some(predictions_id)) = (probabilities, self.predictions_id)
+            else {
+                return Ok(gradients);
+            };
             let classes = *self.predictions_shape.last().unwrap_or(&1);
             let rows = indices.numel();
             // Per-row scaling: grad_output is a scalar for `mean`/`sum` and one
@@ -370,83 +380,55 @@ impl GradientFunction for CrossEntropyLossBackward {
                 probabilities.device(),
                 false,
             );
-            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+            accumulate_grad(&mut gradients, predictions_id, grad)?;
             return Ok(gradients);
         }
 
-        let targets = self
-            .targets
-            .as_ref()
-            .ok_or_else(|| {
-                MinitensorError::internal_error("cross_entropy backward: no targets saved")
-            })?
-            .detach();
-        let class_dim = (targets.ndim() - 1) as isize;
-        let target_mass = reduction::sum(&targets, Some(vec![class_dim]), true)?;
-        let weighted_probabilities = arithmetic::mul(&probabilities, &target_mass)?;
-        let mut base_grad = arithmetic::sub(&weighted_probabilities, &targets)?;
-
-        // Apply reduction scaling
-        match self.reduction.as_str() {
+        // Both gradients are scaled the same way: `mean` divides by the batch,
+        // and `reduction="none"` returns one loss per sample while each
+        // gradient keeps the trailing class dimension. That missing dimension
+        // is made explicit: ordinary trailing-dimension broadcasting would
+        // otherwise reject most batch/class combinations and can silently
+        // scale columns instead of samples when the two sizes happen to match.
+        let grad_output = match self.reduction.as_str() {
             "mean" => {
                 let batch = self.targets_shape[0] as f64;
-                let mut scalar_data =
-                    TensorData::zeros_on_device(1, base_grad.dtype(), base_grad.device());
-                match base_grad.dtype() {
-                    DataType::Float32 => {
-                        let slice = scalar_data.as_f32_slice_mut().ok_or_else(|| {
-                            MinitensorError::internal_error(
-                                "Failed to get mutable f32 slice from scalar",
-                            )
-                        })?;
-                        slice[0] = (1.0 / batch) as f32;
-                    }
-                    DataType::Float64 => {
-                        let slice = scalar_data.as_f64_slice_mut().ok_or_else(|| {
-                            MinitensorError::internal_error(
-                                "Failed to get mutable f64 slice from scalar",
-                            )
-                        })?;
-                        slice[0] = 1.0 / batch;
-                    }
-                    _ => {
-                        return Err(MinitensorError::invalid_operation(
-                            "CrossEntropy backward only supports floating point tensors",
-                        ));
-                    }
-                }
-                let scalar_tensor = Tensor::new(
-                    Arc::new(scalar_data),
-                    Shape::new(vec![1]),
-                    base_grad.dtype(),
-                    base_grad.device(),
-                    false,
-                );
-                base_grad = arithmetic::mul(&base_grad, &scalar_tensor)?;
+                let scale =
+                    create_scalar_tensor(1.0 / batch, grad_output.dtype(), grad_output.device())?;
+                arithmetic::mul(grad_output, &scale)?
             }
-            "sum" | "none" => {}
+            "sum" => grad_output.clone(),
+            "none" => crate::ops::shape_ops::unsqueeze(grad_output, grad_output.ndim() as isize)?,
             _ => {
                 return Err(MinitensorError::gradient_error(format!(
                     "Unknown reduction mode: {}",
                     self.reduction
                 )));
             }
+        };
+
+        if let (Some(targets_id), Some(log_predictions)) = (self.targets_id, &self.log_predictions)
+        {
+            let slope = arithmetic::neg(&log_predictions.detach())?;
+            let target_grad = arithmetic::mul(&slope, &grad_output)?;
+            accumulate_grad(&mut gradients, targets_id, target_grad)?;
         }
 
-        // `reduction="none"` returns one loss per sample, while `base_grad`
-        // retains the trailing class dimension. Make that missing dimension
-        // explicit: ordinary trailing-dimension broadcasting would otherwise
-        // reject most batch/class combinations and can silently scale columns
-        // instead of samples when the two sizes happen to match.
-        let grad_output = if self.reduction == "none" {
-            crate::ops::shape_ops::unsqueeze(grad_output, grad_output.ndim() as isize)?
-        } else {
-            grad_output.clone()
-        };
-        let pred_grad = arithmetic::mul(&base_grad, &grad_output)?;
-
-        // Targets typically have no gradient
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        if let (Some(predictions_id), Some(probabilities)) = (self.predictions_id, probabilities) {
+            let targets = self
+                .targets
+                .as_ref()
+                .ok_or_else(|| {
+                    MinitensorError::internal_error("cross_entropy backward: no targets saved")
+                })?
+                .detach();
+            let class_dim = (targets.ndim() - 1) as isize;
+            let target_mass = reduction::sum(&targets, Some(vec![class_dim]), true)?;
+            let weighted_probabilities = arithmetic::mul(&probabilities, &target_mass)?;
+            let base_grad = arithmetic::sub(&weighted_probabilities, &targets)?;
+            let pred_grad = arithmetic::mul(&base_grad, &grad_output)?;
+            accumulate_grad(&mut gradients, predictions_id, pred_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -460,8 +442,8 @@ pub struct BCELossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Only the
-    /// prediction gradient is ever produced; it is skipped when frozen.
+    /// Which of [predictions, targets] actually need a gradient; each is
+    /// computed only when it does.
     pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub predictions: Tensor,
@@ -470,10 +452,20 @@ pub struct BCELossBackward {
 impl GradientFunction for BCELossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+        if self.input_requires_grad[1] {
+            let scale = if self.reduction == "mean" {
+                1.0 / self.predictions.numel().max(1) as f64
+            } else {
+                1.0
+            };
+            let target_grad = bce_target_grad(&self.predictions, scale)?;
+            let target_grad = arithmetic::mul(&target_grad, grad_output)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
         if !self.input_requires_grad[0] {
             return Ok(gradients);
         }
-        gradients.reserve(1);
 
         // BCE gradient: (predictions - targets) / (predictions * (1 - predictions))
         let one = create_scalar_tensor(1.0, self.predictions.dtype(), self.predictions.device())?;
@@ -502,6 +494,44 @@ impl GradientFunction for BCELossBackward {
         &self.input_ids
     }
 }
+/// `scale * d/dt` of binary cross entropy: `ln(1 - p) - ln(p)`, with each
+/// logarithm clamped at -100 as the forward clamps it, since the loss is
+/// linear in the target given those two logarithms.
+fn bce_target_grad(predictions: &Tensor, scale: f64) -> Result<Tensor> {
+    macro_rules! grad_for {
+        ($ty:ty, $slice:ident) => {{
+            let p = predictions.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from predictions")
+            })?;
+            let scale = scale as $ty;
+            let values = crate::ops::map::unary_map(p, move |p: $ty| {
+                let lp = p.ln();
+                let lq = (1.0 - p).ln();
+                let lp = if lp < -100.0 { -100.0 } else { lp };
+                let lq = if lq < -100.0 { -100.0 } else { lq };
+                scale * (lq - lp)
+            });
+            TensorData::from_vec::<$ty>(values, predictions.dtype(), predictions.device())
+        }};
+    }
+    let data = match predictions.dtype() {
+        DataType::Float32 => grad_for!(f32, as_f32_slice),
+        DataType::Float64 => grad_for!(f64, as_f64_slice),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "binary_cross_entropy requires floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        predictions.shape().clone(),
+        predictions.dtype(),
+        predictions.device(),
+        false,
+    ))
+}
+
 /// Gradient function for binary cross entropy computed from logits.
 ///
 /// The whole point of fusing the sigmoid into the loss is that this gradient
@@ -519,8 +549,8 @@ impl GradientFunction for BCELossBackward {
 /// behind rather than the -1 the maths calls for.
 pub struct BCEWithLogitsLossBackward {
     pub input_ids: [TensorId; 2],
-    /// Which of [logits, targets] actually need a gradient. Only the logit
-    /// gradient is ever produced; it is skipped when frozen.
+    /// Which of [logits, targets] actually need a gradient; each is computed
+    /// only when it does.
     pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub logits: Tensor,
@@ -532,16 +562,23 @@ pub struct BCEWithLogitsLossBackward {
 impl GradientFunction for BCEWithLogitsLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        if !self.input_requires_grad[0] {
-            return Ok(gradients);
-        }
-        gradients.reserve(1);
+        gradients.reserve(2);
 
         let scale = if self.reduction == "mean" {
             1.0 / self.logits.numel() as f64
         } else {
             1.0
         };
+
+        if self.input_requires_grad[1] {
+            let target_grad =
+                bce_with_logits_target_grad(&self.logits, self.pos_weight.as_ref(), scale)?;
+            let target_grad = arithmetic::mul(&target_grad, grad_output)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
 
         let base_grad =
             bce_with_logits_grad(&self.logits, &self.targets, self.pos_weight.as_ref(), scale)?;
@@ -615,6 +652,55 @@ fn bce_with_logits_grad(
         false,
     ))
 }
+
+/// `scale * d/dt` of the loss from logits, `-x + (w - 1) * softplus(-x)`: the
+/// loss is `(1 - t) x + (1 + (w - 1) t) softplus(-x)`, linear in the target.
+fn bce_with_logits_target_grad(
+    logits: &Tensor,
+    pos_weight: Option<&Tensor>,
+    scale: f64,
+) -> Result<Tensor> {
+    use crate::ops::util::NegLogSigmoid;
+    macro_rules! grad_for {
+        ($ty:ty, $slice:ident) => {{
+            let x = logits.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from logits")
+            })?;
+            let scale = scale as $ty;
+            let values = match pos_weight {
+                Some(w) => {
+                    let w = w.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get slice from pos_weight")
+                    })?;
+                    let mut softplus = vec![<$ty>::default(); x.len()];
+                    <$ty>::neg_log_sigmoid_into(x, &mut softplus);
+                    ternary_map(x, w, &softplus, move |x: $ty, w: $ty, sp: $ty| {
+                        scale * ((w - 1.0) * sp - x)
+                    })
+                }
+                None => crate::ops::map::unary_map(x, move |x: $ty| -scale * x),
+            };
+            TensorData::from_vec::<$ty>(values, logits.dtype(), logits.device())
+        }};
+    }
+    let data = match logits.dtype() {
+        DataType::Float32 => grad_for!(f32, as_f32_slice),
+        DataType::Float64 => grad_for!(f64, as_f64_slice),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "binary_cross_entropy_with_logits requires floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        logits.shape().clone(),
+        logits.dtype(),
+        logits.device(),
+        false,
+    ))
+}
+
 /// Gradient function for KL Divergence loss
 pub struct KLDivLossBackward {
     pub predictions_shape: Vec<usize>,
@@ -687,22 +773,22 @@ pub struct FocalLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Only the
-    /// prediction gradient is ever produced; it is skipped when frozen.
+    /// Which of [predictions, targets] actually need a gradient; each is
+    /// computed only when it does. Class indices never do.
     pub input_requires_grad: [bool; 2],
     pub alpha: f64,
     pub gamma: f64,
     pub reduction: String,
     pub softmax_predictions: Tensor,
+    /// `log_softmax(logits)`, kept when the targets need a gradient: the loss
+    /// is linear in them, with slope `-alpha (1 - p)^gamma ln p`.
+    pub log_predictions: Option<Tensor>,
     pub targets: Tensor,
 }
 impl GradientFunction for FocalLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        if !self.input_requires_grad[0] {
-            return Ok(gradients);
-        }
-        gradients.reserve(1);
+        gradients.reserve(2);
 
         // Per sample, FL = alpha * sum_j t_j f(p_j) with f(p) = -(1 - p)^gamma
         // ln p, summed over the class axis, for targets that are one-hot or
@@ -716,16 +802,8 @@ impl GradientFunction for FocalLossBackward {
         // soft targets: their gradient came back wrong while their loss was
         // right.
         let p = self.softmax_predictions.detach();
-        let t = self.targets.detach();
         let dtype = p.dtype();
         let device = p.device();
-
-        let u = focal_weighted_derivative(&t, &p, self.gamma)?;
-        let class_dim = (p.ndim() - 1) as isize;
-        let total = reduction::sum(&u, Some(vec![class_dim]), true)?;
-        let alpha = create_scalar_tensor(self.alpha, dtype, device)?;
-        let mut base_grad =
-            arithmetic::mul(&arithmetic::sub(&u, &arithmetic::mul(&p, &total)?)?, &alpha)?;
 
         // The upstream gradient is a scalar after `"mean"` or `"sum"` and one
         // value per sample after `"none"`, which spreads over that sample's
@@ -736,14 +814,30 @@ impl GradientFunction for FocalLossBackward {
                 let num_classes = *self.predictions_shape.last().unwrap_or(&1);
                 let num_samples =
                     (self.predictions_shape.iter().product::<usize>() / num_classes.max(1)) as f64;
-                base_grad = arithmetic::mul(
-                    &base_grad,
+                arithmetic::mul(
+                    grad_output,
                     &create_scalar_tensor(1.0 / num_samples, dtype, device)?,
-                )?;
-                grad_output.clone()
+                )?
             }
             _ => grad_output.clone(),
         };
+
+        if let (true, Some(log_p)) = (self.input_requires_grad[1], &self.log_predictions) {
+            let slope = focal_target_slope(&log_p.detach(), &p, self.alpha, self.gamma)?;
+            let target_grad = arithmetic::mul(&slope, &upstream)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
+
+        let t = self.targets.detach();
+        let u = focal_weighted_derivative(&t, &p, self.gamma)?;
+        let class_dim = (p.ndim() - 1) as isize;
+        let total = reduction::sum(&u, Some(vec![class_dim]), true)?;
+        let alpha = create_scalar_tensor(self.alpha, dtype, device)?;
+        let base_grad =
+            arithmetic::mul(&arithmetic::sub(&u, &arithmetic::mul(&p, &total)?)?, &alpha)?;
 
         let pred_grad = arithmetic::mul(&base_grad, &upstream)?;
         accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
@@ -754,6 +848,41 @@ impl GradientFunction for FocalLossBackward {
     fn input_ids(&self) -> &[TensorId] {
         &self.input_ids
     }
+}
+
+/// `-alpha (1 - p)^gamma ln p`, the focal loss's slope in each target entry.
+fn focal_target_slope(log_p: &Tensor, p: &Tensor, alpha: f64, gamma: f64) -> Result<Tensor> {
+    macro_rules! slope_for {
+        ($ty:ty, $slice:ident) => {{
+            let lp = log_p.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from focal log-probabilities")
+            })?;
+            let pr = p.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from focal probabilities")
+            })?;
+            let (alpha, gamma) = (alpha as $ty, gamma as $ty);
+            let values = binary_map(lp, pr, move |lp: $ty, p: $ty| {
+                -(lp * (1.0 - p).powf(gamma) * alpha)
+            });
+            TensorData::from_vec::<$ty>(values, p.dtype(), p.device())
+        }};
+    }
+    let data = match p.dtype() {
+        DataType::Float32 => slope_for!(f32, as_f32_slice),
+        DataType::Float64 => slope_for!(f64, as_f64_slice),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "focal_loss requires floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        p.shape().clone(),
+        p.dtype(),
+        p.device(),
+        false,
+    ))
 }
 
 /// `t * p * f'(p)` for the focal term `f(p) = -(1 - p)^gamma ln p`:

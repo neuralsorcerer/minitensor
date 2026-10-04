@@ -236,7 +236,14 @@ pub fn cross_entropy_loss(
     // cannot alter any result it does not also speed up.
     let index_targets = targets.ndim() + 1 == predictions.ndim()
         && matches!(targets.dtype(), DataType::Int32 | DataType::Int64);
-    let needs_grad = predictions.requires_grad() && crate::autograd::is_grad_enabled();
+    let grad_enabled = crate::autograd::is_grad_enabled();
+    let predictions_need_grad = predictions.requires_grad() && grad_enabled;
+    // Dense targets are scores, and a score can be learned -- a soft label
+    // produced by another model, say. The loss is linear in them, so their
+    // gradient is cheap; it is taken whenever they ask for one, since leaving
+    // it out would read to an optimizer as "this target was never used".
+    let targets_need_grad = !index_targets && targets.requires_grad() && grad_enabled;
+    let needs_grad = predictions_need_grad || targets_need_grad;
     // The backward takes indices directly, so the one-hot is only ever needed
     // for soft/dense targets now -- never materialized for class indices.
     let targets_one_hot = if index_targets {
@@ -244,24 +251,32 @@ pub fn cross_entropy_loss(
     } else {
         Some(prepare_classification_targets(predictions, targets)?)
     };
+    // The tensor the target gradient is recorded against: the targets in the
+    // logits' dtype, through a recorded cast when they arrived in another.
+    let tracked_targets = if targets_need_grad {
+        Some(targets.astype(predictions.dtype())?)
+    } else {
+        None
+    };
 
     // Cross-entropy owns an analytical backward node. Do not record the
     // primitive log-softmax/multiply/reduction graph as well: those nodes are
     // unreachable after the final grad_fn is replaced and would retain saved
     // tensors until the whole graph is cleared. Outputs still propagate
     // `requires_grad`, so the custom node below remains correctly enabled.
-    let (loss, softmax_predictions) = {
+    let (loss, softmax_predictions, log_predictions) = {
         let _guard = NoGradGuard::new();
         let log_predictions = log_softmax(predictions, None)?;
         // Keep probabilities only for the analytical backward formula, and only
         // when there is one to take. The loss itself remains in log-space so
         // finite log-probabilities cannot be turned into infinity by
         // exponentiation underflow.
-        let softmax_predictions = if needs_grad {
+        let softmax_predictions = if predictions_need_grad {
             Some(exp(&log_predictions.detach())?)
         } else {
             None
         };
+        let saved_log_predictions = targets_need_grad.then(|| log_predictions.detach());
         let per_sample = if index_targets {
             nll_from_indices(&log_predictions, targets)?
         } else {
@@ -276,23 +291,26 @@ pub fn cross_entropy_loss(
         // sample is non-zero.
         let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
         let loss = reduce_detached(per_sample, reduction, batch, None)?;
-        (loss, softmax_predictions)
+        (loss, softmax_predictions, saved_log_predictions)
     };
 
     // Set up gradient function if needed
     if needs_grad {
-        let softmax_predictions =
-            softmax_predictions.expect("probabilities computed whenever a gradient is needed");
         let targets_shape = targets_one_hot
             .as_ref()
             .map(|t| t.shape().dims().to_vec())
             .unwrap_or_else(|| predictions.shape().dims().to_vec());
+        let predictions_id = predictions_need_grad.then(|| predictions.id());
+        let targets_id = tracked_targets.as_ref().map(|t| t.id());
         let grad_fn = Arc::new(CrossEntropyLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape,
-            input_ids: [predictions.id()],
+            input_ids: predictions_id.into_iter().chain(targets_id).collect(),
+            predictions_id,
+            targets_id,
             reduction: reduction.to_string(),
-            softmax_predictions: softmax_predictions.detach(),
+            softmax_predictions,
+            log_predictions,
             targets: targets_one_hot.map(|t| t.detach()),
             target_indices: index_targets.then(|| targets.detach()),
         });
@@ -783,16 +801,25 @@ pub fn focal_loss(
     check_focal_parameters(alpha, gamma)?;
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
+    // A distribution target that asks for a gradient gets one, recorded
+    // against its cast to the logits' dtype as `cross_entropy_loss` records it.
+    let tracked_targets =
+        if needs_grad && targets.requires_grad() && targets.ndim() == predictions.ndim() {
+            Some(targets.astype(predictions.dtype())?)
+        } else {
+            None
+        };
 
     // Analytical backward below, so the primitive graph is not recorded as
     // well -- see [`manual_backward_needed`].
-    let (loss, softmax_for_grad) = {
+    let (loss, softmax_for_grad, log_for_grad) = {
         let _guard = NoGradGuard::new();
 
         // Apply log-softmax to predictions for numerical stability
         let log_predictions = log_softmax(predictions, None)?;
         let softmax_predictions = exp(&log_predictions)?;
         let softmax_for_grad = softmax_predictions.clone().detach();
+        let log_for_grad = tracked_targets.as_ref().map(|_| log_predictions.detach());
 
         // alpha * (1 - p)^gamma * -(t * log p), in one pass. Spelled as tensor
         // ops it was eight passes, and the power -- a `powf` per element --
@@ -837,7 +864,7 @@ pub fn focal_loss(
         } else {
             reduce_detached(focal_values, reduction, n, None)?
         };
-        (loss, softmax_for_grad)
+        (loss, softmax_for_grad, log_for_grad)
     };
 
     // Set up gradient function if needed
@@ -845,12 +872,16 @@ pub fn focal_loss(
         let grad_fn = Arc::new(FocalLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets_one_hot.shape().dims().to_vec(),
-            input_ids: [predictions.id(), targets.id()],
-            input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
+            input_ids: [
+                predictions.id(),
+                tracked_targets.as_ref().map_or(targets.id(), |t| t.id()),
+            ],
+            input_requires_grad: [predictions.requires_grad(), tracked_targets.is_some()],
             alpha,
             gamma,
             reduction: reduction.to_string(),
             softmax_predictions: softmax_for_grad,
+            log_predictions: log_for_grad,
             targets: targets_one_hot.clone().detach(),
         });
 
@@ -1333,10 +1364,9 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
         // Probability/one-hot targets participate in the same element-wise
         // kernels as the logits and must therefore use the logits dtype.
         // Normalizing here also keeps the saved target and analytical
-        // backward gradient in the prediction dtype. Target gradients are not
-        // part of the classification-loss contract, so detach the normalized
-        // value explicitly instead of leaving an untracked cast that appears
-        // differentiable.
+        // backward gradient in the prediction dtype. This is the saved value
+        // only, so it is detached; a target gradient, when one is needed, is
+        // recorded by the caller against a cast of its own.
         Ok(targets.astype(predictions.dtype())?.detach())
     } else {
         Err(MinitensorError::shape_mismatch(

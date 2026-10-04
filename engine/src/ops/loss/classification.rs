@@ -198,8 +198,20 @@ pub(crate) fn compute_bce_with_logits_elementwise(
             };
             // The loss given `-log(sigmoid(x))`, which is the only part of it
             // that costs anything.
+            //
+            // At an infinite logit one of the two terms is `0 * inf` (`t = 1`
+            // against `+inf`) or the pair is `inf - inf` (`-inf`, where the
+            // softplus grows as `-x`). The loss there is the limit,
+            // `k * |x|` for the coefficient `k` of `|x|` -- `1 - t` above,
+            // `w t` below -- and 0 when that coefficient is: a target of 1
+            // against a logit of `+inf` is a perfect prediction.
             let combine = |x: $ty, t: $ty, w: $ty, neg_log_sigmoid: $ty| {
-                (1.0 - t) * x + (1.0 + (w - 1.0) * t) * neg_log_sigmoid
+                if x.is_infinite() {
+                    let k = if x > 0.0 { 1.0 - t } else { w * t };
+                    if k == 0.0 { 0.0 } else { k * x.abs() }
+                } else {
+                    (1.0 - t) * x + (1.0 + (w - 1.0) * t) * neg_log_sigmoid
+                }
             };
 
             // One pass, with the transcendental done a block at a time rather
