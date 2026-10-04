@@ -265,20 +265,30 @@ impl GradientFunction for ProdBackward {
         let prod_nonzero = reduction::prod(&safe_input, reduce_dims, true)?;
 
         let one_scalar = create_scalar_tensor(1.0, dtype, device)?;
-        let no_zero = crate::ops::comparison::eq(&zero_count, &zero)?.astype(dtype)?;
-        let one_zero = crate::ops::comparison::eq(&zero_count, &one_scalar)?.astype(dtype)?;
+        let no_zero = crate::ops::comparison::eq(&zero_count, &zero)?;
+        let one_zero = crate::ops::comparison::eq(&zero_count, &one_scalar)?;
 
-        // Contribution at the (unique) zero position: product of the others.
-        let zero_term = arithmetic::mul(&is_zero_f, &one_zero)?;
-        let zero_term = arithmetic::mul(&zero_term, &prod_nonzero)?;
-
-        // Contribution at non-zero positions when the group has no zeros.
-        let nonzero_mask = arithmetic::sub(&one, &is_zero_f)?;
-        let quotient = arithmetic::div(&prod_nonzero, &safe_input)?;
-        let nonzero_term = arithmetic::mul(&nonzero_mask, &no_zero)?;
-        let nonzero_term = arithmetic::mul(&nonzero_term, &quotient)?;
-
-        let per_element = arithmetic::add(&zero_term, &nonzero_term)?;
+        // The cases are folded into the per-group products first, where a
+        // select costs one value a group: `others` is P where the group has
+        // no zero and 0 where it has one, `at_zero` is P where it has exactly
+        // one and 0 otherwise. Then
+        //   grad_i = others / x_i + [x_i == 0] * at_zero,
+        // which is P / x_i without zeros, the product of the others at a lone
+        // zero, and 0 beside it -- with no 0 * inf: `others / x_i` is a
+        // division of 0 wherever the zero masks it, and `at_zero` is the only
+        // factor left that can be infinite.
+        use crate::ops::selection::where_op;
+        let others = where_op(&no_zero, &prod_nonzero, &zero)?;
+        let at_zero = where_op(&one_zero, &prod_nonzero, &zero)?;
+        let quotient = arithmetic::div(&others, &safe_input)?;
+        let per_element = if contains_non_finite(&at_zero) {
+            // `prod([1e300, -1e300, 0])`: the slope at the zero is the product
+            // of the others, which overflows as it should, and 0 * inf would
+            // make every position beside it NaN. A select keeps them apart.
+            where_op(&is_zero, &at_zero, &quotient)?
+        } else {
+            arithmetic::add(&quotient, &arithmetic::mul(&is_zero_f, &at_zero)?)?
+        };
         let grad_input = arithmetic::mul(&grad, &per_element)?;
         gradients.insert(self.input_id, grad_input);
 
@@ -846,17 +856,50 @@ pub struct SumBackward {
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
 }
-/// Whether a float tensor holds a NaN anywhere.
-fn contains_nan(tensor: &Tensor) -> bool {
+/// Whether a float tensor holds an infinity or a NaN anywhere.
+fn contains_non_finite(tensor: &Tensor) -> bool {
     match tensor.dtype() {
         DataType::Float32 => tensor
             .data()
             .as_f32_slice()
-            .is_some_and(|values| values.iter().any(|v| v.is_nan())),
+            .is_some_and(|values| values.iter().any(|v| !v.is_finite())),
         DataType::Float64 => tensor
             .data()
             .as_f64_slice()
-            .is_some_and(|values| values.iter().any(|v| v.is_nan())),
+            .is_some_and(|values| values.iter().any(|v| !v.is_finite())),
+        _ => false,
+    }
+}
+
+/// Whether a float tensor holds a NaN anywhere.
+///
+/// A fold within each block rather than `any`, whose early exit keeps the
+/// loop from vectorizing: over a million float32 that was the difference
+/// between a scan costing more than the gradient it guards and one that
+/// does not.
+///
+/// Past a band's worth of elements the bands are scanned on the pool.
+fn contains_nan(tensor: &Tensor) -> bool {
+    const BAND: usize = 1 << 16;
+    fn serial<T: num_traits::Float>(values: &[T]) -> bool {
+        values
+            .chunks(4096)
+            .any(|block| block.iter().fold(false, |found, v| found | v.is_nan()))
+    }
+    fn scan<T: num_traits::Float + Sync>(values: &[T]) -> bool {
+        if values.len() <= BAND {
+            return serial(values);
+        }
+        let bands = values.len().div_ceil(BAND);
+        crate::ops::map::par_map_indexed(bands, &|band| {
+            serial(&values[band * BAND..((band + 1) * BAND).min(values.len())])
+        })
+        .into_iter()
+        .any(|found| found)
+    }
+    match tensor.dtype() {
+        DataType::Float32 => tensor.data().as_f32_slice().is_some_and(scan),
+        DataType::Float64 => tensor.data().as_f64_slice().is_some_and(scan),
         _ => false,
     }
 }

@@ -208,3 +208,24 @@ def test_an_infinite_exponent_of_a_small_base_has_a_flat_slope(dtype):
     assert gb == [0.0, 0.0, 0.0]
     (gb,) = _grad(lambda b: b**INF, base, dtype=dtype)
     assert gb == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("dim", [None, 1])
+def test_prod_keeps_the_slopes_beside_a_zero_when_the_others_overflow(dim):
+    # The slope at a zero is the product of the others, here `-1e600`, which
+    # overflows to `-inf`; beside the zero it is 0. The cases used to be
+    # combined by multiplying with 0/1 masks, and `0 * -inf` made every
+    # position NaN.
+    x = mt.tensor(
+        [[1e300, -1e300, 0.0], [2.0, 3.0, 4.0]], dtype="float64", requires_grad=True
+    )
+    out = x.prod() if dim is None else x.prod(dim=dim).sum()
+    out.backward()
+    grad = x.grad.tolist()
+    if dim is None:
+        # A zero in the whole tensor: the slope is the others' product at it.
+        assert grad[0][:2] == [0.0, 0.0] and grad[1] == [0.0, 0.0, 0.0]
+        assert grad[0][2] == -INF
+    else:
+        assert grad[0] == [0.0, 0.0, -INF]
+        assert grad[1] == [12.0, 8.0, 6.0]
