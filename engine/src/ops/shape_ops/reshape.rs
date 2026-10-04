@@ -197,6 +197,27 @@ pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
     reshape(tensor, Shape::new(new_dims))
 }
 
+/// Drop each of `dims` that has size 1, as [`squeeze`] does for one.
+///
+/// A non-unit axis among them is kept, the rule for a single axis, and an axis
+/// named twice is dropped once -- the dimensions are a set, as the reductions
+/// take theirs.
+pub fn squeeze_dims(tensor: &Tensor, dims: &[isize]) -> Result<Tensor> {
+    let shape = tensor.shape().dims();
+    let mut drop = vec![false; shape.len()];
+    for &dim in dims {
+        let axis = normalize_dim(dim, tensor.ndim())?;
+        drop[axis] = shape[axis] == 1;
+    }
+    let kept: Vec<usize> = shape
+        .iter()
+        .zip(&drop)
+        .filter(|&(_, &dropped)| !dropped)
+        .map(|(&size, _)| size)
+        .collect();
+    reshape(tensor, Shape::new(kept))
+}
+
 /// Unsqueeze operation - add a dimension of size 1. See [`squeeze`] for why this
 /// goes through [`reshape`] rather than the view-based `Tensor::unsqueeze`.
 pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {

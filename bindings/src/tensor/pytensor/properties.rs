@@ -291,9 +291,15 @@ impl PyTensor {
         self.transpose(Some(dim0), Some(dim1))
     }
 
+    /// Drop every axis of size 1, or only those `dim` names -- one axis or a
+    /// sequence of them. A named axis that is not size 1 is kept.
     #[pyo3(signature = (dim=None))]
-    pub fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
-        let result = engine::ops::shape_ops::squeeze(&self.inner, dim).map_err(_convert_error)?;
+    pub fn squeeze(&self, dim: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let result = match normalize_optional_axes(dim)? {
+            None => engine::ops::shape_ops::squeeze(&self.inner, None),
+            Some(dims) => engine::ops::shape_ops::squeeze_dims(&self.inner, &dims),
+        }
+        .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -451,10 +457,25 @@ impl PyTensor {
         ))
     }
 
+    /// `length` entries along `dim` from `start`, which counts back from the
+    /// end when negative, as an index does.
     #[pyo3(signature = (dim, start, length))]
-    pub fn narrow(&self, dim: isize, start: usize, length: usize) -> PyResult<Self> {
-        let result = engine::ops::shape_ops::narrow(&self.inner, dim, start, length)
-            .map_err(_convert_error)?;
+    pub fn narrow(&self, dim: isize, start: isize, length: usize) -> PyResult<Self> {
+        let axis = engine::ops::normalize_dim(dim, self.inner.ndim()).map_err(_convert_error)?;
+        let size = self.inner.shape().dims()[axis];
+        let from = if start < 0 {
+            start + size as isize
+        } else {
+            start
+        };
+        if from < 0 {
+            return Err(_convert_error(engine::MinitensorError::index_error(
+                start, axis, size,
+            )));
+        }
+        let result =
+            engine::ops::shape_ops::narrow(&self.inner, axis as isize, from as usize, length)
+                .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 

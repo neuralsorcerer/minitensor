@@ -165,7 +165,7 @@ pub fn view(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> 
 /// A slice of `length` entries along `dim`, starting at `start`.
 #[pyfunction]
 #[pyo3(signature = (input, dim, start, length))]
-pub fn narrow(input: &Bound<PyAny>, dim: isize, start: usize, length: usize) -> PyResult<PyTensor> {
+pub fn narrow(input: &Bound<PyAny>, dim: isize, start: isize, length: usize) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.narrow(dim, start, length)
 }
@@ -183,10 +183,10 @@ pub fn first_difference(input: &Bound<PyAny>, dim: usize) -> PyResult<PyTensor> 
         .map_err(_convert_error)
 }
 
-/// Drop dimensions of size 1, or just the one named by `dim`.
+/// Drop dimensions of size 1, or just the ones named by `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
-pub fn squeeze(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
+pub fn squeeze(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.squeeze(dim)
 }

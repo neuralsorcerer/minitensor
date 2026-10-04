@@ -1106,8 +1106,12 @@ count a negative `dim` from the end of that tensor.
 - `flatten`, `ravel`
 
 `squeeze(dim)` on an axis that is not length 1 returns the tensor unchanged
-instead of raising. `squeeze()` with
+instead of raising. `dim` may also be a sequence of axes, each dropped if it is
+length 1 and kept otherwise, an axis named twice counting once. `squeeze()` with
 no argument drops every length-1 axis.
+
+`narrow(dim, start, length)` takes `length` entries from `start`, which counts
+back from the end of the axis when negative, as an index does.
 
 ### Splitting an axis
 
