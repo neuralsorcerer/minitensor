@@ -1501,8 +1501,12 @@ def geomspace(
             exact[-1] = abs(last)
         values = _from_numpy(exact)
     result = values * sign
-    if dtype is not None and str(result.dtype) != str(dtype):
-        result = result.astype(str(dtype))
+    # Computed in float64 so the spacing is accurate, and delivered in the
+    # dtype asked for -- or, as `linspace` and `logspace` deliver it, the
+    # default one. It used to come back float64 whenever none was named.
+    target = str(dtype) if dtype is not None else str(_C.get_default_dtype())
+    if str(result.dtype) != target:
+        result = result.astype(target)
     if requires_grad:
         result.requires_grad_(True)
     return result

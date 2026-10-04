@@ -413,12 +413,38 @@ impl PyTensor {
     #[pyo3(signature = (low, high=None, *shape, dtype=None, device=None, requires_grad=false))]
     fn randint(
         low: i64,
-        high: Option<i64>,
+        high: Option<&Bound<PyAny>>,
         shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        // `randint(5, (3,))`: a sequence is never a bound, so one in the
+        // second place is the shape, and the single bound is the upper one.
+        // It used to be read as `high` and refused as "'tuple' object cannot
+        // be interpreted as an integer".
+        let mut shape = shape.clone();
+        let high = match high {
+            Some(value)
+                if shape.is_empty()
+                    && (value.is_instance_of::<PyTuple>() || value.is_instance_of::<PyList>()) =>
+            {
+                shape = PyTuple::new(value.py(), [value])?;
+                None
+            }
+            Some(value) => Some(value.extract::<i64>().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "randint takes its bounds as integers, got {} for high",
+                    value
+                        .get_type()
+                        .name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_default()
+                ))
+            })?),
+            None => None,
+        };
+        let shape = &shape;
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (0, low),

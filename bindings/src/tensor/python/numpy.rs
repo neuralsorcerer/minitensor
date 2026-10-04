@@ -735,12 +735,6 @@ pub(crate) fn create_linspace_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    if steps == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Number of steps must be positive",
-        ));
-    }
-
     let step = if steps > 1 {
         (end - start) / (steps - 1) as f64
     } else {
@@ -771,12 +765,6 @@ pub(crate) fn create_logspace_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    if steps == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Number of steps must be positive",
-        ));
-    }
-
     let step = if steps > 1 {
         (end - start) / (steps - 1) as f64
     } else {

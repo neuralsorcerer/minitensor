@@ -63,10 +63,8 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        // Zero steps is an empty range, as `arange(1, 0)` is.
         let steps = steps.get();
-        if steps == 0 {
-            return Err(PyValueError::new_err("steps must be greater than zero"));
-        }
 
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         let device = resolve_device(device)?;
@@ -89,10 +87,8 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        // Zero steps is an empty range, as `arange(1, 0)` is.
         let steps = steps.get();
-        if steps == 0 {
-            return Err(PyValueError::new_err("steps must be greater than zero"));
-        }
 
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         let device = resolve_device(device)?;

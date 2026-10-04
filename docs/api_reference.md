@@ -662,7 +662,9 @@ its values, so nothing flows back to the source through it.
 - `randn`, `randn_like`
 - `truncated_normal`, `truncated_normal_like`
 - `uniform`, `uniform_like`
-- `randint`, `randint_like`
+- `randint`, `randint_like` — `randint(low, high, *shape)`, or `randint(high, *shape)`
+  for `[0, high)`; the shape may follow as separate ints or as one sequence, so
+  `randint(5, (3,))` is `randint(0, 5, (3,))`
 - `randperm`
 
 ### Initialization schemes
@@ -684,6 +686,9 @@ its values, so nothing flows back to the source through it.
 - `arange`
 - `linspace`
 - `logspace`
+
+`linspace`, `logspace` and `geomspace` with `steps=0` give an empty tensor, as
+`arange(1, 0)` does; with no `dtype` they give the default one.
 
 ### NumPy interop
 
