@@ -22,7 +22,9 @@ use std::sync::Arc;
 /// to call. Capturing that in one trait lets the forward and both gradient
 /// kernels be written once instead of once per dtype -- which is why they were
 /// f32-only: nobody wanted to copy them.
-pub(crate) trait ConvScalar: Copy + Default + Send + Sync + std::ops::AddAssign {
+pub(crate) trait ConvScalar:
+    Copy + Default + Send + Sync + std::ops::AddAssign + std::ops::Mul<Output = Self>
+{
     const DTYPE: DataType;
     fn slice(data: &TensorData) -> Option<&[Self]>;
     fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData;
@@ -855,6 +857,10 @@ pub(crate) fn scatter_columns<T: ConvScalar>(
     if ohw == 0 || in_stride == 0 {
         return destination;
     }
+    if direct_pays(geometry) {
+        scatter_direct(&mut destination, source, weight, geometry);
+        return destination;
+    }
 
     // `k` runs channel-major, so a group owns a contiguous row-block of every
     // `[k_dim, ...]` buffer here and the weight owns one of `[C_out, group_k]`.
@@ -975,6 +981,10 @@ pub(crate) fn column_weight_gradient<T: ConvScalar>(
 
     let mut gradient = vec![T::default(); out_channels * group_k];
     if ohw == 0 || batch == 0 {
+        return gradient;
+    }
+    if direct_pays(geometry) {
+        weight_gradient_direct(&mut gradient, image, source, geometry);
         return gradient;
     }
 
@@ -1195,6 +1205,382 @@ fn lower_positions<T: ConvScalar>(
     );
 }
 
+/// The most taps a direct convolution takes for an output channel, `3 * 7 *
+/// 7`: a stem over an image's three channels.
+const DIRECT_MAX_TAPS: usize = 147;
+
+/// Whether a convolution goes straight from the input -- [`conv2d_direct`], and
+/// [`scatter_direct`] and [`weight_gradient_direct`] for its gradients --
+/// rather than through the lowered columns and a GEMM.
+///
+/// The lowering writes every tap of every position once, and pays that back
+/// only when the multiply reuses it across many output channels. A group with
+/// few of them -- a depthwise convolution has one -- is a GEMM with a handful
+/// of rows, and was the slowest thing in a network: a 3x3 depthwise layer over
+/// `[16, 32, 56, 56]` took 29.2ms forward and 55.9ms with its backward, and
+/// takes 1.2 and 4.8 straight from the input. A first layer reading one or
+/// three channels is the same shape of problem. Measured forward and backward,
+/// four threads, float32:
+///
+/// ```text
+///   conv                       lowered    direct
+///   depthwise 3x3, 32 ch        55.9ms     4.8ms
+///   depthwise 7x7, 96 ch       146.0      25.0
+///   64 -> 1, 3x3                14.5       2.4
+///   64 -> 4, 3x3                19.4      10.0
+///   3 -> 8, 3x3                  5.0       2.1
+///   1 -> 16, 3x3                 4.8       3.5
+///   64 -> 64, 3x3, 8 groups     22.2      16.4
+///   ---- kept lowered ----
+///   64 -> 4, 3x3, stride 2       6.4       8.5
+///   64 -> 8, 3x3                13.3      15.7
+///   32 -> 8, 3x3                 8.1       8.2
+/// ```
+///
+/// Each output costs the direct path all of its taps, where the GEMM shares
+/// the lowering between output channels, so with more than four of them it
+/// pays only for a small kernel, and with more than eight only for one as
+/// small as a 3x3 over one channel into sixteen. It also needs rows: a stride
+/// along them makes its inner loop a gather instead of a contiguous
+/// multiply-add, and a short row is mostly loop overhead.
+fn direct_pays(geometry: &ConvGeometry) -> bool {
+    let group_out = geometry.out_channels / geometry.groups;
+    let group_k = (geometry.in_channels / geometry.groups) * geometry.kernel_h * geometry.kernel_w;
+    let contiguous = geometry.stride.1 == 1;
+    (group_out <= 4 && (contiguous || group_k <= DIRECT_MAX_TAPS))
+        || (group_out <= 8
+            && contiguous
+            && geometry.output_width >= 14
+            && group_k <= DIRECT_MAX_TAPS)
+        || (contiguous && group_out * group_k <= 144)
+}
+
+/// [`scatter_columns`] without the columns: each tap of each output channel is
+/// added straight into the input planes it was read from.
+fn scatter_direct<T: ConvScalar>(
+    destination: &mut [T],
+    source: &[T],
+    weight: &[T],
+    geometry: &ConvGeometry,
+) {
+    let plane_in = geometry.input_height * geometry.input_width;
+    par_out_chunks(destination, plane_in, &|first, plane| {
+        let index = first / plane_in;
+        let (n, ic) = (index / geometry.in_channels, index % geometry.in_channels);
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { scatter_plane_avx2(plane, n, ic, source, weight, geometry) };
+        }
+        scatter_plane(plane, n, ic, source, weight, geometry)
+    });
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn scatter_plane_avx2<T: ConvScalar>(
+    plane: &mut [T],
+    n: usize,
+    ic: usize,
+    source: &[T],
+    weight: &[T],
+    geometry: &ConvGeometry,
+) {
+    scatter_plane(plane, n, ic, source, weight, geometry)
+}
+
+/// Input plane `(n, ic)` of [`scatter_direct`].
+#[inline(always)]
+fn scatter_plane<T: ConvScalar>(
+    plane: &mut [T],
+    n: usize,
+    ic: usize,
+    source: &[T],
+    weight: &[T],
+    geometry: &ConvGeometry,
+) {
+    let ConvGeometry {
+        in_channels,
+        input_height,
+        input_width,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+        dilation,
+        groups,
+        ..
+    } = *geometry;
+    let group_in = in_channels / groups;
+    let group_out = out_channels / groups;
+    let (group, local) = (ic / group_in, ic % group_in);
+    let plane_out = output_height * output_width;
+    for oc in group * group_out..(group + 1) * group_out {
+        let signal = &source[(n * out_channels + oc) * plane_out..][..plane_out];
+        for ky in 0..kernel_h {
+            let ky_off = ky * dilation.0;
+            let (oh_lo, oh_hi) =
+                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+            for kx in 0..kernel_w {
+                let kx_off = kx * dilation.1;
+                let (ow_lo, ow_hi) =
+                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+                if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                    continue;
+                }
+                let tap = weight[((oc * group_in + local) * kernel_h + ky) * kernel_w + kx];
+                for oh in oh_lo..oh_hi {
+                    let from = &signal[oh * output_width + ow_lo..oh * output_width + ow_hi];
+                    let row = &mut plane[(oh * stride.0 + ky_off - padding.0) * input_width..]
+                        [..input_width];
+                    if stride.1 == 1 {
+                        let start = ow_lo + kx_off - padding.1;
+                        for (o, &g) in row[start..start + from.len()].iter_mut().zip(from) {
+                            *o += tap * g;
+                        }
+                    } else {
+                        for (i, &g) in from.iter().enumerate() {
+                            row[(ow_lo + i) * stride.1 + kx_off - padding.1] += tap * g;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Lanes a direct weight gradient sums each dot product across, so the sum
+/// vectorizes. Fixed, so the answer does not depend on the machine.
+const DOT_LANES: usize = 8;
+
+/// [`column_weight_gradient`] without the columns: one task per kernel slice
+/// `(oc, ic)`, which reads each pair of rows once for all of its taps.
+fn weight_gradient_direct<T: ConvScalar>(
+    gradient: &mut [T],
+    image: &[T],
+    source: &[T],
+    geometry: &ConvGeometry,
+) {
+    let taps = geometry.kernel_h * geometry.kernel_w;
+    par_out_chunks(gradient, taps, &|first, slice| {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { weight_slice_avx2(slice, first / taps, image, source, geometry) };
+        }
+        weight_slice(slice, first / taps, image, source, geometry)
+    });
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn weight_slice_avx2<T: ConvScalar>(
+    slice: &mut [T],
+    index: usize,
+    image: &[T],
+    source: &[T],
+    geometry: &ConvGeometry,
+) {
+    weight_slice(slice, index, image, source, geometry)
+}
+
+/// Kernel slice `index = oc * (in_channels / groups) + local` of
+/// [`weight_gradient_direct`].
+#[inline(always)]
+fn weight_slice<T: ConvScalar>(
+    slice: &mut [T],
+    index: usize,
+    image: &[T],
+    source: &[T],
+    geometry: &ConvGeometry,
+) {
+    let ConvGeometry {
+        batch_size,
+        in_channels,
+        input_height,
+        input_width,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+        dilation,
+        groups,
+    } = *geometry;
+    let group_in = in_channels / groups;
+    let group_out = out_channels / groups;
+    let (oc, local) = (index / group_in, index % group_in);
+    let ic = (oc / group_out) * group_in + local;
+    let plane_in = input_height * input_width;
+    let plane_out = output_height * output_width;
+    let taps = kernel_h * kernel_w;
+    // One row of lanes per tap: 8 per tap, a few kilobytes at the widest
+    // kernels this path takes.
+    let mut lanes = vec![[T::default(); DOT_LANES]; taps];
+    for n in 0..batch_size {
+        let signal = &source[(n * out_channels + oc) * plane_out..][..plane_out];
+        let picture = &image[(n * in_channels + ic) * plane_in..][..plane_in];
+        for ky in 0..kernel_h {
+            let ky_off = ky * dilation.0;
+            let (oh_lo, oh_hi) =
+                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+            for kx in 0..kernel_w {
+                let kx_off = kx * dilation.1;
+                let (ow_lo, ow_hi) =
+                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+                if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                    continue;
+                }
+                let acc = &mut lanes[ky * kernel_w + kx];
+                for oh in oh_lo..oh_hi {
+                    let from = &signal[oh * output_width + ow_lo..oh * output_width + ow_hi];
+                    let row = &picture[(oh * stride.0 + ky_off - padding.0) * input_width..]
+                        [..input_width];
+                    if stride.1 == 1 {
+                        let start = ow_lo + kx_off - padding.1;
+                        let read = &row[start..start + from.len()];
+                        let (g_blocks, g_tail) = from.as_chunks::<DOT_LANES>();
+                        let (x_blocks, x_tail) = read.as_chunks::<DOT_LANES>();
+                        for (g, x) in g_blocks.iter().zip(x_blocks) {
+                            for lane in 0..DOT_LANES {
+                                acc[lane] += g[lane] * x[lane];
+                            }
+                        }
+                        for (lane, (&g, &x)) in g_tail.iter().zip(x_tail).enumerate() {
+                            acc[lane] += g * x;
+                        }
+                    } else {
+                        for (i, &g) in from.iter().enumerate() {
+                            acc[i % DOT_LANES] +=
+                                g * row[(ow_lo + i) * stride.1 + kx_off - padding.1];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (slot, acc) in slice.iter_mut().zip(&lanes) {
+        let mut total = T::default();
+        for &value in acc {
+            total += value;
+        }
+        *slot = total;
+    }
+}
+
+/// Convolve by accumulating each tap straight from the input: one task per
+/// output plane, which adds each tap's weight times the input rows it reads,
+/// shifted, into its own rows. Each output sums its taps in the lowered order,
+/// channel-major, and then adds its bias, as the GEMM path does.
+fn conv2d_direct<T: ConvScalar>(
+    output: &mut [T],
+    input: &[T],
+    weight: &[T],
+    bias: Option<&[T]>,
+    geometry: &ConvGeometry,
+) {
+    let ohw = geometry.output_height * geometry.output_width;
+    par_out_chunks(output, ohw, &|first, plane| {
+        let index = first / ohw;
+        let (n, oc) = (index / geometry.out_channels, index % geometry.out_channels);
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { direct_plane_avx2(plane, n, oc, input, weight, bias, geometry) };
+        }
+        direct_plane(plane, n, oc, input, weight, bias, geometry)
+    });
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn direct_plane_avx2<T: ConvScalar>(
+    plane: &mut [T],
+    n: usize,
+    oc: usize,
+    input: &[T],
+    weight: &[T],
+    bias: Option<&[T]>,
+    geometry: &ConvGeometry,
+) {
+    direct_plane(plane, n, oc, input, weight, bias, geometry)
+}
+
+/// One output plane `(n, oc)` of [`conv2d_direct`].
+#[inline(always)]
+fn direct_plane<T: ConvScalar>(
+    plane: &mut [T],
+    n: usize,
+    oc: usize,
+    input: &[T],
+    weight: &[T],
+    bias: Option<&[T]>,
+    geometry: &ConvGeometry,
+) {
+    let ConvGeometry {
+        in_channels,
+        input_height,
+        input_width,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+        dilation,
+        groups,
+        ..
+    } = *geometry;
+    let group_in = in_channels / groups;
+    let group = oc / (out_channels / groups);
+    let input_plane = input_height * input_width;
+    for local in 0..group_in {
+        let ic = group * group_in + local;
+        let source = &input[(n * in_channels + ic) * input_plane..][..input_plane];
+        for ky in 0..kernel_h {
+            let ky_off = ky * dilation.0;
+            let (oh_lo, oh_hi) =
+                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+            for kx in 0..kernel_w {
+                let kx_off = kx * dilation.1;
+                let (ow_lo, ow_hi) =
+                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+                if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                    continue;
+                }
+                let tap = weight[((oc * group_in + local) * kernel_h + ky) * kernel_w + kx];
+                for oh in oh_lo..oh_hi {
+                    let row = &source[(oh * stride.0 + ky_off - padding.0) * input_width..]
+                        [..input_width];
+                    let out = &mut plane[oh * output_width + ow_lo..oh * output_width + ow_hi];
+                    if stride.1 == 1 {
+                        let start = ow_lo + kx_off - padding.1;
+                        let span = out.len();
+                        for (o, &x) in out.iter_mut().zip(&row[start..start + span]) {
+                            *o += tap * x;
+                        }
+                    } else {
+                        for (i, o) in out.iter_mut().enumerate() {
+                            *o += tap * row[(ow_lo + i) * stride.1 + kx_off - padding.1];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(bias) = bias {
+        for o in plane.iter_mut() {
+            *o += bias[oc];
+        }
+    }
+}
+
 /// Scratch the lowering may hold at once, in bytes.
 ///
 /// Large enough that the GEMM sees a few thousand columns, which is where it
@@ -1253,6 +1639,13 @@ fn conv2d_forward<T: ConvScalar>(
     let group_k = group_in * kh_kw;
 
     let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
+
+    if direct_pays(&geom) {
+        if !output_vec.is_empty() {
+            conv2d_direct(&mut output_vec, input_data, weight_data, bias_data, &geom);
+        }
+        return Ok(T::into_tensor_data(output_vec, input.device()));
+    }
 
     if !output_vec.is_empty() {
         // Lowering the whole image set at once means `k_dim * n_cols` elements

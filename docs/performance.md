@@ -238,7 +238,13 @@ for them:
   a geometric mean of 0.94x -- a loss. A conv GEMM is not an isolated product:
   the forward lowers and multiplies one cache-sized block at a time and the
   lowering already fills the thread pool, so handing each block to OpenBLAS
-  puts a second pool on the same cores and pays a crossing per block.
+  puts a second pool on the same cores and pays a crossing per block. And a
+  convolution whose groups have few output channels -- depthwise, or a first
+  layer over an image's few channels -- is not lowered at all. The lowering
+  only pays when the multiply shares it across many output channels; with one,
+  each group was a GEMM with a single row, and a 3x3 depthwise layer over
+  `[16, 32, 56, 56]` took 55.9ms forward and backward. It, and both of its
+  gradients, now go straight from the input, in 4.8ms.
 
 The boundary is reachable from Python, and is meant for measuring rather than
 tuning: `minitensor._core.dispatch.gemm_thresholds()` reports it and
