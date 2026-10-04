@@ -1970,7 +1970,9 @@ pub fn rms_norm(
 /// `attn_mask` is broadcastable to the scores `(..., L, S)`: a float mask is
 /// added to the scores (use `-inf` to disallow), a bool mask keeps `True`
 /// positions and disables `False` ones. `is_causal=True` applies an
-/// autoregressive mask (position i attends only to j <= i); with an explicit
+/// autoregressive mask (position i attends only to j <= i), aligned to the
+/// bottom right when `L != S` -- so the queries are the last `L` of the `S`
+/// positions, as when keys from earlier steps are kept; with an explicit
 /// `attn_mask` as well, a position must pass both. `scale` overrides the
 /// default `1/sqrt(E)`.
 #[pyfunction]

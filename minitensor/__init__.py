@@ -616,3 +616,24 @@ _ALL_EXPORT_CANDIDATES = (
 _ensure_unique_names(_ALL_EXPORT_CANDIDATES, "top-level public exports")
 
 __all__ = [name for name in _ALL_EXPORT_CANDIDATES if name in globals()]
+
+# A compiled submodule's `__all__` lists what the extension registered, and
+# nothing attached to it from here joined the list -- so `from minitensor.nn
+# import *` left out `conv3d`, `embedding` and the rest of the Python-level
+# layer functions, and `functional` left out more than half of itself. Each
+# extended namespace now advertises everything public it holds, in its own
+# order first.
+for _extended in (functional, nn, numpy_compat):
+    if _extended is None:
+        continue
+    _listed = getattr(_extended, "__all__", ())
+    _listed = list(_listed) if isinstance(_listed, (list, tuple)) else []
+    _attached = sorted(
+        _name
+        for _name in dir(_extended)
+        if not _name.startswith("_")
+        and _name not in _listed
+        and not isinstance(getattr(_extended, _name), _types.ModuleType)
+    )
+    _extended.__all__ = _listed + _attached
+del _extended, _listed, _attached
