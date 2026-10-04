@@ -183,3 +183,17 @@ def test_atan2_slopes_vanish_at_an_infinite_point(dtype):
     gy, gx = _grad(mt.atan2, [INF, 1.0, -INF], [INF, INF, 2.0], dtype=dtype)
     assert gy == [0.0, 0.0, 0.0]
     assert gx == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_logaddexp_slopes_do_not_inherit_the_outputs_rounding(dtype):
+    # The slopes are sigmoids of the operands' difference. Read off the output
+    # as `exp(a - out)` they carried its rounding, which at |a| = 1e4 in
+    # float32 is a few parts in 1e4.
+    a = [1e4, 1e4, -1e4, 3.0]
+    b = [1e4, 1e4 - 1.0, -1e4 + 2.0, 3.0]
+    ga, gb = _grad(mt.logaddexp, a, b, dtype=dtype)
+    sig = [1.0 / (1.0 + math.exp(y - x)) for x, y in zip(a, b)]
+    tol = 1.2e-7 if dtype == "float32" else 2.3e-16
+    assert ga == pytest.approx(sig, rel=tol)
+    assert gb == pytest.approx([1.0 - s for s in sig], rel=tol)

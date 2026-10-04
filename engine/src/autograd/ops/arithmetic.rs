@@ -8,7 +8,9 @@ use super::*;
 use crate::{
     error::{MinitensorError, Result},
     ops::binary_math::{FloatBinaryKernel, float_binary_tensor},
-    ops::map::{binary_map, outputs_per_task, par_out_chunks, ternary_map, unary_map},
+    ops::map::{
+        binary_map, outputs_per_task, par_out_chunks, par_out_chunks2, ternary_map, unary_map,
+    },
     ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -844,6 +846,139 @@ pub struct SumBackward {
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
 }
+/// Whether a float tensor holds a NaN anywhere.
+fn contains_nan(tensor: &Tensor) -> bool {
+    match tensor.dtype() {
+        DataType::Float32 => tensor
+            .data()
+            .as_f32_slice()
+            .is_some_and(|values| values.iter().any(|v| v.is_nan())),
+        DataType::Float64 => tensor
+            .data()
+            .as_f64_slice()
+            .is_some_and(|values| values.iter().any(|v| v.is_nan())),
+        _ => false,
+    }
+}
+
+/// Both of logaddexp's gradients, `g * sigmoid(a - b)` and
+/// `g * sigmoid(b - a)`, in one pass, when the operands and the upstream
+/// gradient share a shape -- `None` otherwise, for the general path.
+///
+/// One `exp(-|a - b|)` serves both sides: with `e` that, the slopes are
+/// `1 / (1 + e)` and `e / (1 + e)`, the larger going to the larger operand,
+/// so neither is formed as `1 - s` and both keep their relative accuracy. The
+/// exponential is the vectorized kernel for float32, finished in float64. A
+/// NaN difference -- two operands at the same infinity, or a NaN -- takes the
+/// exact per-element kernels, which hold the limits.
+///
+/// Composed from tensor ops this was seven passes and as many buffers; here it
+/// is one read of the three inputs.
+fn logaddexp_fused_grads(lhs: &Tensor, rhs: &Tensor, g: &Tensor) -> Result<Option<[Tensor; 2]>> {
+    use crate::ops::binary_math::{LOGADDEXP_D_LHS, LOGADDEXP_D_RHS};
+    if lhs.shape() != rhs.shape() || g.shape() != lhs.shape() || g.dtype() != lhs.dtype() {
+        return Ok(None);
+    }
+    let g = g.contiguous()?;
+    let len = lhs.numel();
+    macro_rules! fused {
+        ($ty:ty, $slice:ident, $exp_block:expr, $exact:tt) => {{
+            let (Some(a), Some(b), Some(go)) =
+                (lhs.data().$slice(), rhs.data().$slice(), g.data().$slice())
+            else {
+                return Ok(None);
+            };
+            let mut left = vec![<$ty>::default(); len];
+            let mut right = vec![<$ty>::default(); len];
+            par_out_chunks2(
+                &mut left,
+                &mut right,
+                outputs_per_task(3),
+                &|offset, l, r| {
+                    let n = l.len();
+                    let (a, b, go) = (
+                        &a[offset..offset + n],
+                        &b[offset..offset + n],
+                        &go[offset..offset + n],
+                    );
+                    for i in 0..n {
+                        r[i] = -(a[i] - b[i]).abs();
+                    }
+                    // `l` takes `exp(r)`; `r` is overwritten below.
+                    $exp_block(&*r, l);
+                    // Selects only, so the loop vectorizes; a NaN difference is only
+                    // noted here, and patched below in the rare block that has one.
+                    let mut undefined = false;
+                    for i in 0..n {
+                        let d = a[i] - b[i];
+                        undefined |= d.is_nan();
+                        let e = l[i] as f64;
+                        let big = 1.0 / (1.0 + e);
+                        let small = e * big;
+                        let left_is_larger = d >= 0.0;
+                        let sl = if left_is_larger { big } else { small };
+                        let sr = if left_is_larger { small } else { big };
+                        let gi = go[i] as f64;
+                        l[i] = (sl * gi) as $ty;
+                        r[i] = (sr * gi) as $ty;
+                    }
+                    if undefined {
+                        for i in 0..n {
+                            if (a[i] - b[i]).is_nan() {
+                                l[i] = LOGADDEXP_D_LHS.$exact(a[i], b[i]) * go[i];
+                                r[i] = LOGADDEXP_D_RHS.$exact(a[i], b[i]) * go[i];
+                            }
+                        }
+                    }
+                },
+            );
+            [left, right].map(|values| {
+                Tensor::new(
+                    Arc::new(TensorData::from_vec::<$ty>(
+                        values,
+                        lhs.dtype(),
+                        lhs.device(),
+                    )),
+                    lhs.shape().clone(),
+                    lhs.dtype(),
+                    lhs.device(),
+                    false,
+                )
+            })
+        }};
+    }
+    let grads = match lhs.dtype() {
+        DataType::Float32 => fused!(
+            f32,
+            as_f32_slice,
+            |input: &[f32], out: &mut [f32]| {
+                // An initialized `f32` is a valid `MaybeUninit<f32>`, and the
+                // kernel only writes.
+                let uninit = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        out.as_mut_ptr() as *mut std::mem::MaybeUninit<f32>,
+                        out.len(),
+                    )
+                };
+                crate::ops::simd::F32Kernel::select().exp(input, uninit);
+            },
+            0
+        ),
+        DataType::Float64 => fused!(
+            f64,
+            as_f64_slice,
+            |input: &[f64], out: &mut [f64]| {
+                for (o, &x) in out.iter_mut().zip(input) {
+                    *o = x.exp();
+                }
+            },
+            1
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(grads))
+}
+
 /// Gradient function for logaddexp. Each slope is a sigmoid of the operands'
 /// difference; see [`crate::ops::binary_math::LOGADDEXP_D_LHS`].
 pub struct LogAddExpBackward {
@@ -858,15 +993,37 @@ pub struct LogAddExpBackward {
 }
 impl GradientFunction for LogAddExpBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        use crate::ops::binary_math::{LOGADDEXP_D_LHS, LOGADDEXP_D_RHS, float_binary_tensor};
+        use crate::ops::binary_math::{LOGADDEXP_D_LHS, LOGADDEXP_D_RHS};
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
+        if let Some(slopes) = logaddexp_fused_grads(&self.lhs, &self.rhs, grad_output)? {
+            for (side, grad) in slopes.into_iter().enumerate() {
+                if self.input_requires_grad[side] {
+                    accumulate_grad(&mut gradients, self.input_ids[side], grad)?;
+                }
+            }
+            return Ok(gradients);
+        }
+
+        // Broadcast operands: `sigmoid(a - b)` through the vectorized kernels,
+        // which is a third of the time the per-element kernels take. Its one
+        // gap is `inf - inf`, two operands at the same infinity, which reads
+        // NaN; the kernels take the limit there, so a difference with a NaN
+        // in it sends both slopes to them. A NaN operand gives NaN either way.
+        let difference = arithmetic::sub(&self.lhs, &self.rhs)?;
+        let exact = contains_nan(&difference);
         for (side, kernel) in [LOGADDEXP_D_LHS, LOGADDEXP_D_RHS].into_iter().enumerate() {
             if !self.input_requires_grad[side] {
                 continue;
             }
-            let slope = float_binary_tensor(&self.lhs, &self.rhs, kernel)?;
+            let slope = if exact {
+                float_binary_tensor(&self.lhs, &self.rhs, kernel)?
+            } else if side == 0 {
+                crate::ops::activation::sigmoid(&difference)?
+            } else {
+                crate::ops::activation::sigmoid(&arithmetic::neg(&difference)?)?
+            };
             let contribution = arithmetic::mul(&slope, grad_output)?;
             let grad = reduce_gradient_for_broadcasting(
                 &contribution,
