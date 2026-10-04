@@ -71,9 +71,17 @@ fn attach_repeat_backward(mut output: Tensor, input: &Tensor, repeats: &[usize])
 pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
     // Check if the total number of elements matches
     if tensor.numel() != new_shape.numel() {
-        return Err(MinitensorError::shape_mismatch(
+        return Err(MinitensorError::shape_mismatch_explained(
             vec![tensor.numel()],
             vec![new_shape.numel()],
+            format!(
+                "a tensor of shape {:?} holds {} elements and cannot be reshaped to {:?}, \
+                 which holds {}; one dimension may be -1 to have it inferred",
+                tensor.shape().dims(),
+                tensor.numel(),
+                new_shape.dims(),
+                new_shape.numel()
+            ),
         ));
     }
 
@@ -136,9 +144,10 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
         }
 
         if dim < 0 {
-            return Err(MinitensorError::invalid_operation(
-                "invalid negative dimension".to_string(),
-            ));
+            return Err(MinitensorError::invalid_operation(format!(
+                "reshape dimensions must be non-negative, or -1 for the one to infer, \
+                 got {dims:?}"
+            )));
         }
 
         let dim_usize = dim as usize;
@@ -157,16 +166,23 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
         }
 
         if !total_elements.is_multiple_of(known_product) {
-            return Err(MinitensorError::invalid_operation(
-                "cannot infer reshape dimension".to_string(),
-            ));
+            return Err(MinitensorError::invalid_operation(format!(
+                "cannot reshape a tensor of shape {:?} to {dims:?}: its {total_elements} \
+                 elements are not a whole number of the {known_product} the other \
+                 dimensions hold, so there is no size for the -1",
+                tensor.shape().dims()
+            )));
         }
 
         out_dims[index] = total_elements / known_product;
     } else if known_product != total_elements {
-        return Err(MinitensorError::shape_mismatch(
+        return Err(MinitensorError::shape_mismatch_explained(
             vec![total_elements],
             vec![known_product],
+            format!(
+                "a tensor of {total_elements} elements cannot be reshaped to {out_dims:?}, \
+                 which holds {known_product}; one dimension may be -1 to have it inferred"
+            ),
         ));
     }
 
@@ -404,9 +420,15 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     // Validate that all tensors have the same number of dimensions
     for tensor in tensors.iter().skip(1) {
         if tensor.ndim() != first_tensor.ndim() {
-            return Err(MinitensorError::shape_mismatch(
+            return Err(MinitensorError::shape_mismatch_explained(
                 vec![first_tensor.ndim()],
                 vec![tensor.ndim()],
+                format!(
+                    "concatenation joins tensors of one rank, but the first is {:?} \
+                     and another is {:?}; stack adds a new dimension instead",
+                    first_tensor.shape().dims(),
+                    tensor.shape().dims()
+                ),
             ));
         }
 
@@ -440,9 +462,15 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             .enumerate()
         {
             if i != dim && size1 != size2 {
-                return Err(MinitensorError::shape_mismatch(
+                return Err(MinitensorError::shape_mismatch_explained(
                     first_tensor.shape().dims().to_vec(),
                     tensor.shape().dims().to_vec(),
+                    format!(
+                        "concatenating along dimension {dim} needs every other dimension to \
+                         match, but dimension {i} is {size1} in {:?} and {size2} in {:?}",
+                        first_tensor.shape().dims(),
+                        tensor.shape().dims()
+                    ),
                 ));
             }
         }
@@ -1713,7 +1741,7 @@ mod reshape_tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("invalid negative dimension")
+                .contains("must be non-negative, or -1")
         );
     }
 

@@ -438,12 +438,16 @@ mod tests {
     }
 
     #[test]
-    fn test_matmul_dtype_mismatch() {
+    fn test_matmul_promotes_mixed_dtypes() {
         let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let b = create_test_tensor_f64(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2], false);
 
-        let result = matmul(&a, &b);
-        assert!(result.is_err());
+        let result = matmul(&a, &b).unwrap();
+        assert_eq!(result.dtype(), DataType::Float64);
+        assert_eq!(
+            result.data().as_f64_slice().unwrap(),
+            &[19.0, 22.0, 43.0, 50.0]
+        );
     }
 
     #[test]

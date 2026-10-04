@@ -163,9 +163,17 @@ impl Shape {
             } else if other_dim == 1 {
                 self_dim
             } else {
-                return Err(MinitensorError::shape_mismatch(
+                return Err(MinitensorError::shape_mismatch_explained(
                     self.dims.clone(),
                     other.dims.clone(),
+                    format!(
+                        "shapes {:?} and {:?} do not broadcast: aligned from the right, \
+                         dimension -{} is {self_dim} in one and {other_dim} in the other, and \
+                         two sizes broadcast only when they are equal or one of them is 1",
+                        self.dims,
+                        other.dims,
+                        i + 1
+                    ),
                 ));
             };
 

@@ -249,9 +249,17 @@ pub fn conv2d(
     // the weight is `[C_out, C_in / groups, kH, kW]`. At `groups == 1` this is
     // the ordinary check.
     if in_channels / groups != weight_in_channels {
-        return Err(MinitensorError::shape_mismatch(
+        return Err(MinitensorError::shape_mismatch_explained(
             vec![weight_in_channels],
             vec![in_channels / groups],
+            format!(
+                "conv2d: the input has {in_channels} channels (shape {:?}), but the weight \
+                 {:?} with groups={groups} reads {} -- check the input's channel axis, \
+                 dimension 1",
+                input.shape().dims(),
+                weight.shape().dims(),
+                weight_in_channels * groups
+            ),
         ));
     }
 
@@ -497,9 +505,16 @@ pub fn conv_transpose2d(
     // convolution's -- it is the same tensor a convolution would use, read from
     // the side that scatters rather than the side that gathers.
     if weight.size(0)? != in_channels {
-        return Err(MinitensorError::shape_mismatch(
+        return Err(MinitensorError::shape_mismatch_explained(
             vec![in_channels],
             vec![weight.size(0)?],
+            format!(
+                "conv_transpose2d: the input has {in_channels} channels (shape {:?}), but \
+                 the weight {:?} reads {} -- its first axis is the input channels",
+                input.shape().dims(),
+                weight.shape().dims(),
+                weight.size(0)?
+            ),
         ));
     }
     if !in_channels.is_multiple_of(groups) {

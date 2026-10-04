@@ -1039,12 +1039,14 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Check data type compatibility
+    // Mixed dtypes promote as `*` promotes them -- as `dot` and every
+    // element-wise op already did -- so a float32 activation times a float64
+    // weight is a float64 product rather than a refusal. The casts are
+    // recorded, so a gradient returns to each operand in its own dtype.
     if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
+        validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;
+        let (lhs, rhs, _) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
+        return matmul(&lhs, &rhs);
     }
 
     validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;

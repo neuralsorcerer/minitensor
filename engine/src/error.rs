@@ -171,6 +171,25 @@ impl MinitensorError {
         }
     }
 
+    /// A shape error whose suggestion says which rule the shapes broke.
+    ///
+    /// The generic suggestion compares the two shapes position by position and
+    /// recommends a reshape, which is the wrong advice wherever the shapes are
+    /// not meant to be equal -- two shapes that fail to broadcast, an element
+    /// count that does not divide, a tensor that does not join another.
+    pub fn shape_mismatch_explained(
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+        explanation: impl Into<String>,
+    ) -> Self {
+        Self::ShapeError {
+            expected,
+            actual,
+            suggestion: Some(explanation.into()),
+            context: None,
+        }
+    }
+
     /// Create a shape error with custom context
     pub fn shape_mismatch_with_context(
         expected: Vec<usize>,

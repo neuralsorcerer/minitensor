@@ -835,9 +835,17 @@ impl Tensor {
     #[inline(always)]
     pub fn view(&self, new_shape: Shape) -> Result<Self> {
         if new_shape.numel() != self.numel() {
-            return Err(MinitensorError::shape_mismatch(
+            return Err(MinitensorError::shape_mismatch_explained(
                 vec![self.numel()],
                 vec![new_shape.numel()],
+                format!(
+                    "a tensor of shape {:?} holds {} elements and cannot be viewed as {:?}, \
+                     which holds {}",
+                    self.shape.dims(),
+                    self.numel(),
+                    new_shape.dims(),
+                    new_shape.numel()
+                ),
             ));
         }
 
