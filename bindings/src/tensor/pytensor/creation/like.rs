@@ -456,11 +456,16 @@ impl PyTensor {
     #[staticmethod]
     #[pyo3(signature = (n, dtype=None, device=None, requires_grad=false))]
     fn randperm(
-        n: usize,
+        n: isize,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        // Signed, so a negative length is refused by name rather than by the
+        // conversion's OverflowError.
+        let n = usize::try_from(n).map_err(|_| {
+            PyValueError::new_err(format!("randperm requires a non-negative n, got {n}"))
+        })?;
         let dtype = match dtype {
             Some(name) => dtype::parse_dtype(name)?,
             None => DataType::Int64,

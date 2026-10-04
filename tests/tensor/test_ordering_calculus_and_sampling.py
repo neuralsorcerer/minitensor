@@ -17,6 +17,7 @@ mean something.
 from __future__ import annotations
 
 import itertools
+import math
 
 import numpy as np
 import pytest
@@ -498,3 +499,58 @@ def test_normal_refuses_a_spread_that_is_not_at_least_zero(spread):
         mt.normal(0.0, spread, (3,))
     with pytest.raises(ValueError, match="non-negative standard deviation"):
         mt.normal(_t([0.0, 0.0]), _t([1.0, spread]))
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [[0.5, math.nan, 0.6], [1.0, math.inf], [[1.0, 2.0], [math.nan, 1.0]]],
+    ids=["nan", "inf", "nan-in-a-row"],
+)
+def test_multinomial_refuses_a_weight_that_is_not_a_finite_number(weights):
+    # A NaN passed `amin(rows) < 0` and was drawn from as though it were a
+    # weight; an infinite one made its row's probabilities NaN.
+    with pytest.raises(ValueError, match="finite, non-negative weights"):
+        mt.multinomial(mt.tensor(weights), 1)
+
+
+@pytest.mark.parametrize(
+    "mean,std",
+    [
+        (math.inf, 1.0),
+        (0.0, math.inf),
+        (math.nan, 1.0),
+        (0.0, math.nan),
+        (mt.tensor([0.0, math.nan]), 1.0),
+        (0.0, mt.tensor([1.0, math.inf])),
+    ],
+    ids=[
+        "inf-mean",
+        "inf-std",
+        "nan-mean",
+        "nan-std",
+        "nan-mean-tensor",
+        "inf-std-tensor",
+    ],
+)
+def test_normal_refuses_a_mean_or_spread_that_is_not_finite(mean, std):
+    with pytest.raises(ValueError, match="finite"):
+        mt.normal(mean, std, (2,))
+
+
+def test_a_zero_spread_is_still_the_mean():
+    assert mt.normal(mt.tensor([0.0, 5.0]), 0.0).tolist() == [0.0, 5.0]
+
+
+def test_randperm_refuses_a_negative_length_by_name():
+    with pytest.raises(ValueError, match="non-negative n, got -1"):
+        mt.randperm(-1)
+    assert mt.randperm(0).tolist() == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [dict(std=-1.0), dict(std=math.nan), dict(mean=math.inf), dict(std=math.inf)],
+)
+def test_the_normal_initializer_refuses_what_is_not_a_normal(kwargs):
+    with pytest.raises(ValueError, match="finite"):
+        mt.nn.init.normal((3, 3), **kwargs)

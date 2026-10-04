@@ -194,6 +194,15 @@ pub fn init_normal(
     device: Device,
     requires_grad: bool,
 ) -> Result<Tensor> {
+    // The sampler accepts a negative deviation -- a mirrored normal -- and an
+    // infinite mean, which draws infinities; neither is a normal to initialize
+    // with. Written so a NaN fails it too.
+    if !(mean.is_finite() && std.is_finite() && std >= 0.0) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "normal requires a finite mean and a finite, non-negative std, got mean={mean} \
+             and std={std}"
+        )));
+    }
     let numel = shape.numel();
     let spread = |error: rand_distr::NormalError| {
         MinitensorError::invalid_argument(format!("normal(mean={mean}, std={std}): {error}"))

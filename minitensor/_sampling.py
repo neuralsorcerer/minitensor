@@ -17,6 +17,7 @@ implementation to disagree with the first.
 
 from __future__ import annotations
 
+import math as _math
 import operator as _operator
 
 from . import _core as _C
@@ -79,14 +80,21 @@ def normal(mean: object = 0.0, std: object = 1.0, size: object = None) -> Tensor
         if isinstance(operand, Tensor) and "float64" in str(operand.dtype):
             dtype = "float64"
 
-    # Asked as "is every spread at least zero" rather than "is any below
-    # zero", so that a NaN spread -- which is neither -- is refused too.
+    # Asked as "is every spread at least zero and below infinity" rather than
+    # "is any out of range", so that a NaN spread -- which is neither -- is
+    # refused too. An infinite mean or spread gave infinite or NaN draws.
     if std_is_tensor:
-        valid = bool(_F.all(std >= 0.0).item())
+        valid = bool(_F.all((std >= 0.0) & (std < _math.inf)).item())
     else:
-        valid = float(std) >= 0.0
+        valid = 0.0 <= float(std) < _math.inf
     if not valid:
-        raise ValueError("normal requires a non-negative standard deviation")
+        raise ValueError("normal requires a finite, non-negative standard deviation")
+    if mean_is_tensor:
+        finite_mean = bool(_F.all(_F.isfinite(mean)).item())
+    else:
+        finite_mean = _math.isfinite(float(mean))
+    if not finite_mean:
+        raise ValueError("normal requires a finite mean")
 
     draw = _C.Tensor.randn(*shape, dtype=dtype)
     return draw * std + mean
@@ -131,8 +139,11 @@ def multinomial(input: object, num_samples: int, replacement: bool = False) -> T
             f"multinomial cannot draw {count} of {categories} categories without "
             "replacement"
         )
-    if _F.amin(rows).item() < 0.0:
-        raise ValueError("multinomial requires non-negative weights")
+    # Every weight at least zero and below infinity: a NaN fails both, where
+    # `amin(rows) < 0` let it through to be drawn as though it were a weight,
+    # and an infinite weight made every probability in its row NaN.
+    if not bool(_F.all((rows >= 0.0) & (rows < _math.inf)).item()):
+        raise ValueError("multinomial requires finite, non-negative weights")
 
     totals = _F.sum(rows, [1], True)
     if _F.amin(totals).item() <= 0.0:
