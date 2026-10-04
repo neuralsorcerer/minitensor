@@ -743,6 +743,33 @@ fn banded_columns<T: ShiftedExp + Send + Sync>(
     (col_max, col_sum)
 }
 
+/// The largest value in `values` that is not NaN, or `-inf` if there is none.
+///
+/// Across eight lanes, so the comparison vectorizes: one running maximum is a
+/// chain of dependent compare-and-selects, and on a softmax over rows of 64 it
+/// cost more than the exponentials. The maximum of a set does not depend on
+/// the order it is taken in, so this is the value the single chain found.
+#[inline]
+pub(crate) fn slice_max<T: Float>(values: &[T]) -> T {
+    const LANES: usize = 8;
+    let mut lanes = [T::neg_infinity(); LANES];
+    let (blocks, tail) = values.as_chunks::<LANES>();
+    for block in blocks {
+        for (lane, &v) in lanes.iter_mut().zip(block) {
+            if v > *lane {
+                *lane = v;
+            }
+        }
+    }
+    let mut max_val = T::neg_infinity();
+    for &v in lanes.iter().chain(tail) {
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    max_val
+}
+
 /// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
 fn softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
@@ -753,7 +780,6 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
     let Some((dim_size, after, group)) = softmax_geometry(dims, dim) else {
         return Ok(());
     };
-    let neg_inf = T::neg_infinity();
 
     // One block is one task, and a softmax along the first axis has exactly one
     // block however large the tensor is -- so it would run on one core with the
@@ -769,45 +795,100 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
+    if after == 1 {
+        // Softmax over the last (contiguous) dimension: each row is a single
+        // slice laid out contiguously.
+        par_out_chunks_gated(
+            output_slice,
+            rows_per_task(dim_size) * dim_size,
+            T::SPLIT_THRESHOLD,
+            &|offset, out_rows| {
+                let in_rows = &input_data[offset..offset + out_rows.len()];
+                last_axis_rows::<T, false>(in_rows, out_rows, dim_size);
+            },
+        );
+        return Ok(());
+    }
+
     par_out_chunks_gated(
         output_slice,
         group,
         T::SPLIT_THRESHOLD,
         &|block_offset, out_block| {
             let in_block = &input_data[block_offset..block_offset + out_block.len()];
-            if after == 1 {
-                // Softmax over the last (contiguous) dimension: each block is a
-                // single slice laid out contiguously.
-                let mut max_val = neg_inf;
-                for &v in in_block.iter() {
-                    if v > max_val {
-                        max_val = v;
-                    }
-                }
-                if max_val == neg_inf {
-                    out_block.fill(T::zero());
-                    return;
-                }
-                T::exp_shifted_into(in_block, max_val, out_block);
-                // Blocked: a running total over a long axis loses the small terms,
-                // and every term here but the largest *is* small. Over a 250k-class
-                // vocabulary the probabilities came back summing to 1.0004 rather
-                // than 1, a relative error of 4.2e-4; blocked, it is 1.0e-7.
-                let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
-                for o in out_block.iter_mut() {
-                    *o = *o / sum;
-                }
-            } else {
-                // Softmax over a non-last dimension: the block is a
-                // `[dim_size, after]` row-major matrix and the reduction runs
-                // down the rows. Column accumulators keep every pass contiguous
-                // instead of striding by `after` per element.
-                softmax_block_columnwise(in_block, out_block, after);
-            }
+            // Softmax over a non-last dimension: the block is a
+            // `[dim_size, after]` row-major matrix and the reduction runs down
+            // the rows. Column accumulators keep every pass contiguous instead
+            // of striding by `after` per element.
+            softmax_block_columnwise(in_block, out_block, after);
         },
     );
 
     Ok(())
+}
+
+/// Rows of `len` one task of a last-axis softmax takes: enough that a task is
+/// at least [`EXP_GROUP`] elements, so a short row is not a call of its own.
+fn rows_per_task(len: usize) -> usize {
+    EXP_GROUP.div_ceil(len.max(1))
+}
+
+/// `softmax` (or, with `LOG`, `log_softmax`) of each `len`-long row of `input`
+/// into the same row of `out`.
+///
+/// A row's passes -- its maximum, the shifted exponentials, their sum and the
+/// division -- are each a few instructions an element, so over the rows of 64
+/// an attention layer has, what they cost was mostly getting to them: a call
+/// per row, and three of the four loops compiled for the baseline, where only
+/// the exponential has a vectorized kernel. A run of rows in one call, built
+/// with AVX2 where the CPU has it, and the maximum taken across lanes (see
+/// [`slice_max`]) took a `[8192, 64]` softmax from 0.60-0.70ms to 0.42-0.45
+/// on four threads, and rows of 8192 from 0.57-0.68 to 0.35-0.58. What is
+/// left is the exponential and the division, which is at the rate the
+/// hardware divides. Every row is computed exactly as it was one at a time,
+/// to the bit.
+fn last_axis_rows<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], len: usize) {
+    #[inline(always)]
+    fn body<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], len: usize) {
+        for (in_row, out_row) in input.chunks_exact(len).zip(out.chunks_exact_mut(len)) {
+            let max_val = slice_max(in_row);
+            if max_val == T::neg_infinity() {
+                out_row.fill(if LOG { T::neg_infinity() } else { T::zero() });
+                continue;
+            }
+            // The exponentials are formed into the output row and summed from
+            // there: the vectorized kernel needs somewhere to write, and for
+            // `log_softmax` the row's final values are computed from `in_row`
+            // below, so it is free to borrow until then.
+            T::exp_shifted_into(in_row, max_val, out_row);
+            // Blocked: a running total over a long axis loses the small terms,
+            // and every term here but the largest *is* small. Over a 250k-class
+            // vocabulary the probabilities came back summing to 1.0004 rather
+            // than 1, a relative error of 4.2e-4; blocked, it is 1.0e-7.
+            let sum = accurate_indexed_sum(len, T::zero(), |k| out_row[k]);
+            if LOG {
+                let logsum = sum.ln() + max_val;
+                for (o, &v) in out_row.iter_mut().zip(in_row) {
+                    *o = v - logsum;
+                }
+            } else {
+                for o in out_row.iter_mut() {
+                    *o = *o / sum;
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn body_avx2<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], len: usize) {
+        body::<T, LOG>(input, out, len)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { body_avx2::<T, LOG>(input, out, len) };
+    }
+    body::<T, LOG>(input, out, len)
 }
 
 /// `softmax` restricted to the unmasked positions.
@@ -973,67 +1054,56 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     }
 
+    if after == 1 {
+        // Log-softmax over the last (contiguous) dimension.
+        par_out_chunks_gated(
+            output_slice,
+            rows_per_task(dim_size) * dim_size,
+            T::SPLIT_THRESHOLD,
+            &|offset, out_rows| {
+                let in_rows = &input_data[offset..offset + out_rows.len()];
+                last_axis_rows::<T, true>(in_rows, out_rows, dim_size);
+            },
+        );
+        return Ok(());
+    }
+
     par_out_chunks_gated(
         output_slice,
         group,
         T::SPLIT_THRESHOLD,
         &|block_offset, out_block| {
             let in_block = &input_data[block_offset..block_offset + out_block.len()];
-            if after == 1 {
-                // Log-softmax over the last (contiguous) dimension.
-                let mut max_val = neg_inf;
-                for &v in in_block.iter() {
-                    if v > max_val {
-                        max_val = v;
+            // Non-last dimension: process the `[dim_size, after]` block
+            // column-wise with `after`-sized accumulators so every pass is
+            // contiguous instead of striding by `after`.
+            let mut col_logsum = vec![neg_inf; after];
+            for k in 0..dim_size {
+                let row = &in_block[k * after..k * after + after];
+                for (m, &v) in col_logsum.iter_mut().zip(row) {
+                    if v > *m {
+                        *m = v;
                     }
                 }
-                if max_val == neg_inf {
-                    out_block.fill(neg_inf);
-                    return;
+            }
+            let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
+            // Fold each column's max into log(sum) + max; -inf columns stay
+            // -inf so their outputs are all -inf.
+            for a in 0..after {
+                if col_logsum[a] != neg_inf {
+                    col_logsum[a] = col_sum[a].ln() + col_logsum[a];
                 }
-                // The exponentials are formed into `out_block` and summed from
-                // there rather than one at a time inside the sum: the vectorized
-                // kernel needs somewhere to write, and the block's own final
-                // values are computed from `in_block` below, so it is free to
-                // borrow until then.
-                T::exp_shifted_into(in_block, max_val, out_block);
-                let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
-                let logsum = sum.ln() + max_val;
-                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                    *o = v - logsum;
-                }
-            } else {
-                // Non-last dimension: process the `[dim_size, after]` block
-                // column-wise with `after`-sized accumulators so every pass is
-                // contiguous instead of striding by `after`.
-                let mut col_logsum = vec![neg_inf; after];
-                for k in 0..dim_size {
-                    let row = &in_block[k * after..k * after + after];
-                    for (m, &v) in col_logsum.iter_mut().zip(row) {
-                        if v > *m {
-                            *m = v;
-                        }
-                    }
-                }
-                let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
-                // Fold each column's max into log(sum) + max; -inf columns stay
-                // -inf so their outputs are all -inf.
+            }
+            for k in 0..dim_size {
+                let in_row = &in_block[k * after..k * after + after];
+                let out_row = &mut out_block[k * after..k * after + after];
                 for a in 0..after {
-                    if col_logsum[a] != neg_inf {
-                        col_logsum[a] = col_sum[a].ln() + col_logsum[a];
-                    }
-                }
-                for k in 0..dim_size {
-                    let in_row = &in_block[k * after..k * after + after];
-                    let out_row = &mut out_block[k * after..k * after + after];
-                    for a in 0..after {
-                        let ls = col_logsum[a];
-                        out_row[a] = if ls == neg_inf {
-                            neg_inf
-                        } else {
-                            in_row[a] - ls
-                        };
-                    }
+                    let ls = col_logsum[a];
+                    out_row[a] = if ls == neg_inf {
+                        neg_inf
+                    } else {
+                        in_row[a] - ls
+                    };
                 }
             }
         },
