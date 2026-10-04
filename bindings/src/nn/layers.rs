@@ -235,20 +235,26 @@ pub struct PyConv1d;
 impl PyConv1d {
     /// Create a new Conv1d layer
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=None, dilation=1, groups=1, bias=true, device=None, dtype=None))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=crate::Size(1), padding=None, dilation=crate::Size(1), groups=crate::Size(1), bias=true, device=None, dtype=None), text_signature = "(in_channels, out_channels, kernel_size, stride=1, padding=None, dilation=1, groups=1, bias=True, device=None, dtype=None)")]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
+        in_channels: crate::Size,
+        out_channels: crate::Size,
+        kernel_size: crate::Size,
+        stride: crate::Size,
         padding: Option<&Bound<PyAny>>,
-        dilation: usize,
-        groups: usize,
+        dilation: crate::Size,
+        groups: crate::Size,
         bias: bool,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let in_channels = in_channels.get();
+        let out_channels = out_channels.get();
+        let kernel_size = kernel_size.get();
+        let stride = stride.get();
+        let dilation = dilation.get();
+        let groups = groups.get();
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         let named = named_padding(padding, "Conv1d")?;
@@ -328,12 +334,15 @@ pub struct PyMaxPool1d;
 #[pymethods]
 impl PyMaxPool1d {
     #[new]
-    #[pyo3(signature = (kernel_size, stride=None, padding=0))]
+    #[pyo3(signature = (kernel_size, stride=None, padding=crate::Size(0)), text_signature = "(kernel_size, stride=None, padding=0)")]
     fn new(
-        kernel_size: usize,
-        stride: Option<usize>,
-        padding: usize,
+        kernel_size: crate::Size,
+        stride: Option<crate::Size>,
+        padding: crate::Size,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let kernel_size = kernel_size.get();
+        let stride = stride.map(crate::Size::get);
+        let padding = padding.get();
         // Pooling defaults its stride to the window, unlike convolution.
         let layer = MaxPool1d::new(kernel_size, stride, Some(padding));
         Ok(PyClassInitializer::from(PyModule::from_max_pool1d(layer)).add_subclass(Self))
@@ -371,13 +380,16 @@ pub struct PyAvgPool1d;
 #[pymethods]
 impl PyAvgPool1d {
     #[new]
-    #[pyo3(signature = (kernel_size, stride=None, padding=0, count_include_pad=true))]
+    #[pyo3(signature = (kernel_size, stride=None, padding=crate::Size(0), count_include_pad=true), text_signature = "(kernel_size, stride=None, padding=0, count_include_pad=True)")]
     fn new(
-        kernel_size: usize,
-        stride: Option<usize>,
-        padding: usize,
+        kernel_size: crate::Size,
+        stride: Option<crate::Size>,
+        padding: crate::Size,
         count_include_pad: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let kernel_size = kernel_size.get();
+        let stride = stride.map(crate::Size::get);
+        let padding = padding.get();
         let layer = AvgPool1d::new(kernel_size, stride, Some(padding), count_include_pad);
         Ok(PyClassInitializer::from(PyModule::from_avg_pool1d(layer)).add_subclass(Self))
     }
@@ -543,17 +555,20 @@ impl PyConv2d {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        in_channels: usize,
-        out_channels: usize,
+        in_channels: crate::Size,
+        out_channels: crate::Size,
         kernel_size: &Bound<PyAny>,
         stride: Option<&Bound<PyAny>>,
         padding: Option<&Bound<PyAny>>,
         dilation: Option<&Bound<PyAny>>,
-        groups: Option<usize>,
+        groups: Option<crate::Size>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let in_channels = in_channels.get();
+        let out_channels = out_channels.get();
+        let groups = groups.map(crate::Size::get);
         let kernel_size = parse_tuple2(kernel_size)?;
         let stride = match stride {
             Some(s) => parse_tuple2(s)?,
@@ -656,18 +671,21 @@ impl PyConvTranspose2d {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        in_channels: usize,
-        out_channels: usize,
+        in_channels: crate::Size,
+        out_channels: crate::Size,
         kernel_size: &Bound<PyAny>,
         stride: Option<&Bound<PyAny>>,
         padding: Option<&Bound<PyAny>>,
         output_padding: Option<&Bound<PyAny>>,
         dilation: Option<&Bound<PyAny>>,
-        groups: Option<usize>,
+        groups: Option<crate::Size>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let in_channels = in_channels.get();
+        let out_channels = out_channels.get();
+        let groups = groups.map(crate::Size::get);
         let kernel_size = parse_tuple2(kernel_size)?;
         let stride = match stride {
             Some(s) => parse_tuple2(s)?,
@@ -759,29 +777,37 @@ impl PyConvTranspose1d {
         in_channels,
         out_channels,
         kernel_size,
-        stride=1,
-        padding=0,
-        output_padding=0,
-        dilation=1,
+        stride=crate::Size(1),
+        padding=crate::Size(0),
+        output_padding=crate::Size(0),
+        dilation=crate::Size(1),
         groups=None,
         bias=None,
         device=None,
         dtype=None
-    ))]
+    ), text_signature = "(in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, dilation=1, groups=None, bias=None, device=None, dtype=None)")]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
-        output_padding: usize,
-        dilation: usize,
-        groups: Option<usize>,
+        in_channels: crate::Size,
+        out_channels: crate::Size,
+        kernel_size: crate::Size,
+        stride: crate::Size,
+        padding: crate::Size,
+        output_padding: crate::Size,
+        dilation: crate::Size,
+        groups: Option<crate::Size>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let in_channels = in_channels.get();
+        let out_channels = out_channels.get();
+        let kernel_size = kernel_size.get();
+        let stride = stride.get();
+        let padding = padding.get();
+        let output_padding = output_padding.get();
+        let dilation = dilation.get();
+        let groups = groups.map(crate::Size::get);
         let layer = ConvTranspose1d::new(
             in_channels,
             out_channels,
@@ -1010,13 +1036,14 @@ impl PyBatchNorm1d {
     #[new]
     #[pyo3(signature = (num_features, eps=None, momentum=None, affine=None, device=None, dtype=None))]
     fn new(
-        num_features: usize,
+        num_features: crate::Size,
         eps: Option<f64>,
         momentum: Option<f64>,
         affine: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let num_features = num_features.get();
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let affine = affine.unwrap_or(true);
@@ -1060,13 +1087,14 @@ impl PyBatchNorm2d {
     #[new]
     #[pyo3(signature = (num_features, eps=None, momentum=None, affine=None, device=None, dtype=None))]
     fn new(
-        num_features: usize,
+        num_features: crate::Size,
         eps: Option<f64>,
         momentum: Option<f64>,
         affine: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let num_features = num_features.get();
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let affine = affine.unwrap_or(true);
@@ -1110,12 +1138,15 @@ impl PyEmbedding {
     #[new]
     #[pyo3(signature = (num_embeddings, embedding_dim, padding_idx=None, device=None, dtype=None))]
     fn new(
-        num_embeddings: usize,
-        embedding_dim: usize,
-        padding_idx: Option<usize>,
+        num_embeddings: crate::Size,
+        embedding_dim: crate::Size,
+        padding_idx: Option<crate::Size>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let num_embeddings = num_embeddings.get();
+        let embedding_dim = embedding_dim.get();
+        let padding_idx = padding_idx.map(crate::Size::get);
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
@@ -1194,7 +1225,7 @@ impl PyLayerNorm {
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let shape = parse_normalized_shape_arg(normalized_shape)?;
+        let shape = crate::functional::parse_normalized_shape(normalized_shape)?;
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
@@ -1253,7 +1284,7 @@ impl PyRMSNorm {
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let shape = parse_normalized_shape_arg(normalized_shape)?;
+        let shape = crate::functional::parse_normalized_shape(normalized_shape)?;
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
@@ -1309,18 +1340,21 @@ macro_rules! recurrent_class {
             #[new]
             // Kept on one line: rustfmt re-indents attribute bodies inside a
             // macro on every pass and never converges.
-            #[pyo3(signature = (input_size, hidden_size, num_layers=1, bias=true, batch_first=false, bidirectional=false, device=None, dtype=None))]
+            #[pyo3(signature = (input_size, hidden_size, num_layers=crate::Size(1), bias=true, batch_first=false, bidirectional=false, device=None, dtype=None), text_signature = "(input_size, hidden_size, num_layers=1, bias=True, batch_first=False, bidirectional=False, device=None, dtype=None)")]
             #[allow(clippy::too_many_arguments)]
             fn new(
-                input_size: usize,
-                hidden_size: usize,
-                num_layers: usize,
+                input_size: crate::Size,
+                hidden_size: crate::Size,
+                num_layers: crate::Size,
                 bias: bool,
                 batch_first: bool,
                 bidirectional: bool,
                 device: Option<&PyDevice>,
                 dtype: Option<&str>,
             ) -> PyResult<PyClassInitializer<Self>> {
+                let input_size = input_size.get();
+                let hidden_size = hidden_size.get();
+                let num_layers = num_layers.get();
                 let device = resolve_device(device)?;
                 let dtype = dtype::resolve_dtype_arg(dtype)?;
                 let layer = Recurrent::$ctor(
@@ -1496,13 +1530,15 @@ impl PyMultiheadAttention {
     #[new]
     #[pyo3(signature = (embed_dim, num_heads, bias=None, is_causal=None, device=None, dtype=None))]
     fn new(
-        embed_dim: usize,
-        num_heads: usize,
+        embed_dim: crate::Size,
+        num_heads: crate::Size,
         bias: Option<bool>,
         is_causal: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let embed_dim = embed_dim.get();
+        let num_heads = num_heads.get();
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
@@ -1621,21 +1657,6 @@ impl PyMultiheadAttention {
 }
 
 /// Accept either an int or a sequence of ints for `normalized_shape`.
-fn parse_normalized_shape_arg(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
-    if let Ok(value) = arg.extract::<usize>() {
-        return Ok(vec![value]);
-    }
-    let seq = arg.extract::<Vec<usize>>().map_err(|_| {
-        PyValueError::new_err("normalized_shape must be an int or a sequence of ints")
-    })?;
-    if seq.is_empty() {
-        return Err(PyValueError::new_err(
-            "normalized_shape must contain at least one dimension",
-        ));
-    }
-    Ok(seq)
-}
-
 /// Sequential container for layers
 #[pyclass(name = "Sequential", extends = PyModule)]
 pub struct PySequential;
@@ -1902,7 +1923,10 @@ impl PyCrossEntropyLoss {
     /// Create a new Cross Entropy loss. `weight`, `ignore_index` and
     /// `label_smoothing` mean what they do in `functional.cross_entropy`.
     #[new]
-    #[pyo3(signature = (weight=None, ignore_index=-100, reduction="mean", label_smoothing=0.0))]
+    #[pyo3(
+        signature = (weight=None, ignore_index=-100, reduction="mean", label_smoothing=0.0),
+        text_signature = "(weight=None, ignore_index=-100, reduction='mean', label_smoothing=0.0)"
+    )]
     fn new(
         weight: Option<Py<PyAny>>,
         ignore_index: i64,

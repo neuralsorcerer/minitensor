@@ -43,6 +43,36 @@ use device::PyDevice;
 use error::_convert_error;
 use tensor::{PyTensor, ShapeSequence};
 
+/// A count, length or size taken from Python: a non-negative int.
+///
+/// Taken as `usize` directly, a negative value was refused by the conversion
+/// itself, with `OverflowError: can't convert negative int to unsigned` -- the
+/// binding's type rather than the rule the caller broke, and a different
+/// exception from the `ValueError` every other bad value raises. pyo3 notes
+/// which argument was being read on whatever this raises, so the message only
+/// has to state the rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Size(pub usize);
+
+impl Size {
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Size {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let value = obj.extract::<isize>()?;
+        usize::try_from(value).map(Size).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "expected a non-negative integer, got {value}"
+            ))
+        })
+    }
+}
+
 /// Python module for minitensor core
 // The engine relies on the interpreter lock: an optimizer step updates a
 // parameter's storage in place through every handle that shares it, and is

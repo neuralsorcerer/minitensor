@@ -493,12 +493,14 @@ impl PyTensor {
     #[staticmethod]
     #[pyo3(signature = (n, m=None, dtype=None, device=None, requires_grad=false))]
     fn eye(
-        n: usize,
-        m: Option<usize>,
+        n: crate::Size,
+        m: Option<crate::Size>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let n = n.get();
+        let m = m.map(crate::Size::get);
         let m = m.unwrap_or(n);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         reject_unallocatable(n.saturating_mul(m), dtype, "eye")?;

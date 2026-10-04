@@ -55,7 +55,8 @@ impl PyLRScheduler {
     ///
     /// Useful for plotting a schedule before training, and for asserting on it
     /// in a test without driving an optimizer.
-    fn get_lr(&self, step: usize) -> f64 {
+    fn get_lr(&self, step: crate::Size) -> f64 {
+        let step = step.get();
         self.inner.get_lr(step, self.base_lr)
     }
 
@@ -212,9 +213,10 @@ impl PyStepLR {
     fn new(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,
-        step_size: usize,
+        step_size: crate::Size,
         gamma: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let step_size = step_size.get();
         let step_size = positive("step_size", step_size)?;
         let gamma = finite_non_negative("gamma", gamma)?;
         let base = PyLRScheduler::build(py, optimizer, Box::new(StepLR::new(step_size, gamma)))?;
@@ -254,9 +256,10 @@ impl PyCosineAnnealingLR {
     fn new(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,
-        t_max: usize,
+        t_max: crate::Size,
         eta_min: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let t_max = t_max.get();
         let t_max = positive("t_max", t_max)?;
         let eta_min = finite_non_negative("eta_min", eta_min)?;
         let base = PyLRScheduler::build(
@@ -280,8 +283,9 @@ impl PyLinearWarmupLR {
     fn new(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,
-        warmup_steps: usize,
+        warmup_steps: crate::Size,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let warmup_steps = warmup_steps.get();
         let warmup_steps = positive("warmup_steps", warmup_steps)?;
         let base = PyLRScheduler::build(
             py,
@@ -304,10 +308,11 @@ impl PyPolynomialDecayLR {
     fn new(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,
-        decay_steps: usize,
+        decay_steps: crate::Size,
         end_lr: f64,
         power: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let decay_steps = decay_steps.get();
         let decay_steps = positive("decay_steps", decay_steps)?;
         let end_lr = finite_non_negative("end_lr", end_lr)?;
         if !power.is_finite() || power <= 0.0 {
@@ -333,9 +338,10 @@ impl PyMultiStepLR {
     fn new(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,
-        milestones: Vec<usize>,
+        milestones: Vec<crate::Size>,
         gamma: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let milestones: Vec<usize> = milestones.into_iter().map(crate::Size::get).collect();
         if milestones.is_empty() {
             return Err(PyValueError::new_err("milestones must not be empty"));
         }

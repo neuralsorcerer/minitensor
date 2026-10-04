@@ -244,7 +244,11 @@ Validation and edge cases:
 
 - Boolean dimensions are rejected even though Python `bool` is integer-like.
 - Negative dimensions raise `ValueError`; non-integer dimensions raise
-  `TypeError`.
+  `TypeError`. The same holds library-wide for any argument that is a count,
+  length or size (`eye(n)`, `chunk(chunks)`, `narrow(..., length)`, pooling
+  output sizes, layer widths, `normalized_shape`, scheduler milestones): a
+  negative value raises `ValueError: expected a non-negative integer, got -1`,
+  and the error carries a note naming the argument.
 - Zero-sized dimensions follow the ordinary broadcasting rules: they can broadcast
   with missing dimensions or `1`, but not with another non-one positive size.
 - Incompatible shapes raise `ValueError`. Use `can_broadcast(*shapes)` when a

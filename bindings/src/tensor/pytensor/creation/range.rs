@@ -58,11 +58,12 @@ impl PyTensor {
     fn linspace(
         start: f64,
         end: f64,
-        steps: usize,
+        steps: crate::Size,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let steps = steps.get();
         if steps == 0 {
             return Err(PyValueError::new_err("steps must be greater than zero"));
         }
@@ -82,12 +83,13 @@ impl PyTensor {
     fn logspace(
         start: f64,
         end: f64,
-        steps: usize,
+        steps: crate::Size,
         base: Option<f64>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let steps = steps.get();
         if steps == 0 {
             return Err(PyValueError::new_err("steps must be greater than zero"));
         }

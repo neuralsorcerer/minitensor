@@ -13,7 +13,7 @@ use engine::{DataType, Device, Tensor};
 use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PyTuple};
+use pyo3::types::{PyAny, PyInt, PyList, PyTuple};
 use std::sync::Arc;
 
 /// [`borrow_wrapped_tensor`] with a message, for the free functions that want
@@ -32,23 +32,25 @@ fn borrow_optional_tensor<'py>(
     }
 }
 
-fn parse_normalized_shape(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
-    if let Ok(value) = arg.extract::<usize>() {
-        return Ok(vec![value]);
+/// The trailing dimensions a layer or RMS norm runs over: one int, or a
+/// non-empty sequence of them. A negative size is a `ValueError`, not a
+/// "wrong type".
+pub(crate) fn parse_normalized_shape(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
+    if arg.is_instance_of::<PyInt>() {
+        return Ok(vec![arg.extract::<crate::Size>()?.get()]);
     }
-
-    if let Ok(seq) = arg.extract::<Vec<usize>>() {
-        if seq.is_empty() {
-            return Err(PyValueError::new_err(
-                "layer_norm requires normalized_shape to contain at least one dimension",
-            ));
-        }
-        return Ok(seq);
+    if arg.extract::<Vec<isize>>().is_err() {
+        return Err(PyTypeError::new_err(
+            "normalized_shape must be an int or a sequence of ints",
+        ));
     }
-
-    Err(PyTypeError::new_err(
-        "normalized_shape must be an int or sequence of ints",
-    ))
+    let seq: Vec<crate::Size> = arg.extract()?;
+    if seq.is_empty() {
+        return Err(PyValueError::new_err(
+            "normalized_shape must contain at least one dimension",
+        ));
+    }
+    Ok(seq.into_iter().map(crate::Size::get).collect())
 }
 
 fn one_hot_input_to_tensor(input: &Bound<PyAny>) -> PyResult<Tensor> {
@@ -165,7 +167,12 @@ pub fn view(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> 
 /// A slice of `length` entries along `dim`, starting at `start`.
 #[pyfunction]
 #[pyo3(signature = (input, dim, start, length))]
-pub fn narrow(input: &Bound<PyAny>, dim: isize, start: isize, length: usize) -> PyResult<PyTensor> {
+pub fn narrow(
+    input: &Bound<PyAny>,
+    dim: isize,
+    start: isize,
+    length: crate::Size,
+) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.narrow(dim, start, length)
 }
@@ -176,7 +183,8 @@ pub fn narrow(input: &Bound<PyAny>, dim: isize, start: isize, length: usize) -> 
 /// `diff` is the public spelling.
 #[pyfunction]
 #[pyo3(name = "_first_difference", signature = (input, dim))]
-pub fn first_difference(input: &Bound<PyAny>, dim: usize) -> PyResult<PyTensor> {
+pub fn first_difference(input: &Bound<PyAny>, dim: crate::Size) -> PyResult<PyTensor> {
+    let dim = dim.get();
     let tensor = borrow_tensor(input)?;
     engine::ops::first_difference(tensor.tensor(), dim)
         .map(PyTensor::from_tensor)
@@ -279,7 +287,7 @@ pub fn repeat_interleave(
     input: &Bound<PyAny>,
     repeats: &Bound<PyAny>,
     dim: Option<isize>,
-    output_size: Option<usize>,
+    output_size: Option<crate::Size>,
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.repeat_interleave(repeats, dim, output_size)
@@ -506,7 +514,7 @@ pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
 /// Split into `sections` equal parts along `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, sections, dim=0))]
-pub fn chunk(input: &Bound<PyAny>, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
+pub fn chunk(input: &Bound<PyAny>, sections: crate::Size, dim: isize) -> PyResult<Vec<PyTensor>> {
     let tensor = borrow_tensor(input)?;
     tensor.chunk(sections, dim)
 }
@@ -525,7 +533,7 @@ pub fn split(
 
 /// The dot product along `dim`, with every other axis a batch.
 #[pyfunction]
-#[pyo3(signature = (input, other, dim = -1))]
+#[pyo3(signature = (input, other, dim = -1), text_signature = "(input, other, dim=-1)")]
 pub fn vecdot(input: &Bound<PyAny>, other: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     let lhs = borrow_tensor(input)?;
     let rhs = borrow_tensor(other)?;
@@ -1634,8 +1642,9 @@ pub fn histogram(
 
 /// Counts over `bins` equal-width bins spanning `[min, max]`, or the data's own range when they are equal. A second spelling of `histogram`.
 #[pyfunction]
-#[pyo3(signature = (input, bins=100, min=0.0, max=0.0))]
-pub fn histc(input: &Bound<PyAny>, bins: usize, min: f64, max: f64) -> PyResult<PyTensor> {
+#[pyo3(signature = (input, bins=crate::Size(100), min=0.0, max=0.0), text_signature = "(input, bins=100, min=0.0, max=0.0)")]
+pub fn histc(input: &Bound<PyAny>, bins: crate::Size, min: f64, max: f64) -> PyResult<PyTensor> {
+    let bins = bins.get();
     let values = PyTensor::from_python_value(input)?;
     let result = engine::ops::histc(values.tensor(), bins, min, max).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -1924,7 +1933,7 @@ pub fn layer_norm(
     let weight_tensor = borrow_optional_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
     tensor.layer_norm(
-        shape,
+        shape.into_iter().map(crate::Size).collect(),
         weight_tensor.as_deref(),
         bias_tensor.as_deref(),
         Some(eps),
@@ -1945,7 +1954,11 @@ pub fn rms_norm(
     let tensor = borrow_tensor(input)?;
     let shape = parse_normalized_shape(normalized_shape)?;
     let weight_tensor = borrow_optional_tensor(weight)?;
-    tensor.rms_norm(shape, weight_tensor.as_deref(), eps)
+    tensor.rms_norm(
+        shape.into_iter().map(crate::Size).collect(),
+        weight_tensor.as_deref(),
+        eps,
+    )
 }
 
 /// Scaled dot-product attention — the core Transformer primitive
@@ -1992,8 +2005,9 @@ pub fn scaled_dot_product_attention(
 /// injecting relative position with no learned parameters. `offset` shifts the
 /// starting position (KV-cache decoding); `base` sets the frequency spectrum.
 #[pyfunction]
-#[pyo3(signature = (x, base=10000.0, offset=0))]
-pub fn rope(x: &Bound<PyAny>, base: f64, offset: usize) -> PyResult<PyTensor> {
+#[pyo3(signature = (x, base=10000.0, offset=crate::Size(0)), text_signature = "(x, base=10000.0, offset=0)")]
+pub fn rope(x: &Bound<PyAny>, base: f64, offset: crate::Size) -> PyResult<PyTensor> {
+    let offset = offset.get();
     let tensor = borrow_tensor(x)?;
     let result = engine::ops::rope(tensor.tensor(), base, offset).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

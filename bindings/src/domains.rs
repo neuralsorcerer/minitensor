@@ -62,7 +62,7 @@ fn black_scholes(
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(
-    signature = (price, spot, strike, rate, time, kind="call", tolerance=1e-10, max_iterations=100),
+    signature = (price, spot, strike, rate, time, kind="call", tolerance=1e-10, max_iterations=crate::Size(100)),
     text_signature = "(price, spot, strike, rate, time, kind='call', tolerance=1e-10, max_iterations=100)"
 )]
 fn implied_volatility(
@@ -73,8 +73,9 @@ fn implied_volatility(
     time: &PyTensor,
     kind: &str,
     tolerance: f64,
-    max_iterations: usize,
+    max_iterations: crate::Size,
 ) -> PyResult<PyTensor> {
+    let max_iterations = max_iterations.get();
     finance::implied_volatility(
         price.tensor(),
         spot.tensor(),
@@ -124,7 +125,8 @@ fn resolve_gate(gate: &Bound<PyAny>) -> PyResult<quantum::Gate1> {
 /// Apply a single-qubit gate to a state vector shaped `(..., 2**q, 2)`.
 #[pyfunction]
 #[pyo3(text_signature = "(state, gate, qubit)")]
-fn apply_gate_1q(state: &PyTensor, gate: &Bound<PyAny>, qubit: usize) -> PyResult<PyTensor> {
+fn apply_gate_1q(state: &PyTensor, gate: &Bound<PyAny>, qubit: crate::Size) -> PyResult<PyTensor> {
+    let qubit = qubit.get();
     quantum::apply_gate_1q(state.tensor(), &resolve_gate(gate)?, qubit)
         .map(PyTensor::from_tensor)
         .map_err(_convert_error)
@@ -142,7 +144,8 @@ fn probabilities(state: &PyTensor) -> PyResult<PyTensor> {
 /// Marginal probabilities of the first `keep` qubits.
 #[pyfunction]
 #[pyo3(text_signature = "(state, keep)")]
-fn prefix_trace(state: &PyTensor, keep: usize) -> PyResult<PyTensor> {
+fn prefix_trace(state: &PyTensor, keep: crate::Size) -> PyResult<PyTensor> {
+    let keep = keep.get();
     quantum::prefix_trace(state.tensor(), keep)
         .map(PyTensor::from_tensor)
         .map_err(_convert_error)
@@ -151,7 +154,8 @@ fn prefix_trace(state: &PyTensor, keep: usize) -> PyResult<PyTensor> {
 /// The expectation of Pauli-Z on one qubit.
 #[pyfunction]
 #[pyo3(text_signature = "(state, qubit)")]
-fn expect_z(state: &PyTensor, qubit: usize) -> PyResult<PyTensor> {
+fn expect_z(state: &PyTensor, qubit: crate::Size) -> PyResult<PyTensor> {
+    let qubit = qubit.get();
     quantum::expect_z(state.tensor(), qubit)
         .map(PyTensor::from_tensor)
         .map_err(_convert_error)

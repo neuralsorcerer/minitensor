@@ -382,8 +382,9 @@ impl PyTensor {
         &self,
         repeats: &Bound<PyAny>,
         dim: Option<isize>,
-        output_size: Option<usize>,
+        output_size: Option<crate::Size>,
     ) -> PyResult<Self> {
+        let output_size = output_size.map(crate::Size::get);
         if let Ok(value) = repeats.extract::<usize>() {
             // Same growth as `repeat`, one element at a time instead of whole
             // copies: every element becomes `value` of them.
@@ -460,7 +461,8 @@ impl PyTensor {
     /// `length` entries along `dim` from `start`, which counts back from the
     /// end when negative, as an index does.
     #[pyo3(signature = (dim, start, length))]
-    pub fn narrow(&self, dim: isize, start: isize, length: usize) -> PyResult<Self> {
+    pub fn narrow(&self, dim: isize, start: isize, length: crate::Size) -> PyResult<Self> {
+        let length = length.get();
         let axis = engine::ops::normalize_dim(dim, self.inner.ndim()).map_err(_convert_error)?;
         let size = self.inner.shape().dims()[axis];
         let from = if start < 0 {

@@ -239,7 +239,7 @@ fn same_padded_input(
 
 /// 2-D cross-correlation of `input` with `weight`. `dilation` spaces the kernel taps apart; `groups` splits the channels into that many independent convolutions, so `groups=in_channels` is a depthwise convolution.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1))]
+#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, dilation=None, groups=crate::Size(1)), text_signature = "(input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1)")]
 fn conv2d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
@@ -247,8 +247,9 @@ fn conv2d(
     stride: Option<&Bound<PyAny>>,
     padding: Option<&Bound<PyAny>>,
     dilation: Option<&Bound<PyAny>>,
-    groups: usize,
+    groups: crate::Size,
 ) -> PyResult<PyTensor> {
+    let groups = groups.get();
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
@@ -289,7 +290,7 @@ fn conv2d(
 
 /// 2-D transposed convolution: scatters each input position across a neighbourhood, growing the grid where `conv2d` shrinks it. `weight` is `[C_in, C_out // groups, kH, kW]` -- input channels first. `output_padding` picks among the input sizes that convolve to the same output size, and must be smaller than `stride`.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=1))]
+#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=crate::Size(1)), text_signature = "(input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=1)")]
 #[allow(clippy::too_many_arguments)]
 fn conv_transpose2d(
     input: &Bound<PyAny>,
@@ -299,8 +300,9 @@ fn conv_transpose2d(
     padding: Option<&Bound<PyAny>>,
     output_padding: Option<&Bound<PyAny>>,
     dilation: Option<&Bound<PyAny>>,
-    groups: usize,
+    groups: crate::Size,
 ) -> PyResult<PyTensor> {
+    let groups = groups.get();
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
@@ -324,18 +326,23 @@ fn conv_transpose2d(
 
 /// 1-D transposed convolution. See `conv_transpose2d`; `weight` is `[C_in, C_out // groups, K]`.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0, output_padding=0, dilation=1, groups=1))]
+#[pyo3(signature = (input, weight, bias=None, stride=crate::Size(1), padding=crate::Size(0), output_padding=crate::Size(0), dilation=crate::Size(1), groups=crate::Size(1)), text_signature = "(input, weight, bias=None, stride=1, padding=0, output_padding=0, dilation=1, groups=1)")]
 #[allow(clippy::too_many_arguments)]
 fn conv_transpose1d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
     bias: Option<&Bound<PyAny>>,
-    stride: usize,
-    padding: usize,
-    output_padding: usize,
-    dilation: usize,
-    groups: usize,
+    stride: crate::Size,
+    padding: crate::Size,
+    output_padding: crate::Size,
+    dilation: crate::Size,
+    groups: crate::Size,
 ) -> PyResult<PyTensor> {
+    let stride = stride.get();
+    let padding = padding.get();
+    let output_padding = output_padding.get();
+    let dilation = dilation.get();
+    let groups = groups.get();
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
@@ -355,16 +362,19 @@ fn conv_transpose1d(
 
 /// 1-D cross-correlation of `input` with `weight`. See `conv2d` for `dilation`, `groups` and the named paddings.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=1, padding=None, dilation=1, groups=1))]
+#[pyo3(signature = (input, weight, bias=None, stride=crate::Size(1), padding=None, dilation=crate::Size(1), groups=crate::Size(1)), text_signature = "(input, weight, bias=None, stride=1, padding=None, dilation=1, groups=1)")]
 fn conv1d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
     bias: Option<&Bound<PyAny>>,
-    stride: usize,
+    stride: crate::Size,
     padding: Option<&Bound<PyAny>>,
-    dilation: usize,
-    groups: usize,
+    dilation: crate::Size,
+    groups: crate::Size,
 ) -> PyResult<PyTensor> {
+    let stride = stride.get();
+    let dilation = dilation.get();
+    let groups = groups.get();
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
@@ -408,15 +418,18 @@ fn conv1d(
 
 /// Largest value in each window along the last dimension. Stride defaults to the window, unlike convolution. With `return_indices` the result is `(values, indices)`, where each index is the position along the axis -- what `max_unpool1d` scatters back into.
 #[pyfunction]
-#[pyo3(signature = (input, kernel_size, stride=None, padding=0, return_indices=false))]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=crate::Size(0), return_indices=false), text_signature = "(input, kernel_size, stride=None, padding=0, return_indices=False)")]
 fn max_pool1d(
     py: Python<'_>,
     input: &Bound<PyAny>,
-    kernel_size: usize,
-    stride: Option<usize>,
-    padding: usize,
+    kernel_size: crate::Size,
+    stride: Option<crate::Size>,
+    padding: crate::Size,
     return_indices: bool,
 ) -> PyResult<Py<PyAny>> {
+    let kernel_size = kernel_size.get();
+    let stride = stride.map(crate::Size::get);
+    let padding = padding.get();
     let input_tensor = borrow_tensor(input)?;
     // Pooling defaults its stride to the window, unlike convolution.
     let stride = stride.unwrap_or(kernel_size);
@@ -438,14 +451,17 @@ fn max_pool1d(
 
 /// Mean of each window along the last dimension. Stride defaults to the window.
 #[pyfunction]
-#[pyo3(signature = (input, kernel_size, stride=None, padding=0, count_include_pad=true))]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=crate::Size(0), count_include_pad=true), text_signature = "(input, kernel_size, stride=None, padding=0, count_include_pad=True)")]
 fn avg_pool1d(
     input: &Bound<PyAny>,
-    kernel_size: usize,
-    stride: Option<usize>,
-    padding: usize,
+    kernel_size: crate::Size,
+    stride: Option<crate::Size>,
+    padding: crate::Size,
     count_include_pad: bool,
 ) -> PyResult<PyTensor> {
+    let kernel_size = kernel_size.get();
+    let stride = stride.map(crate::Size::get);
+    let padding = padding.get();
     let input_tensor = borrow_tensor(input)?;
     let stride = stride.unwrap_or(kernel_size);
     let result = avg_pool1d_op(
@@ -570,7 +586,8 @@ fn adaptive_max_pool2d(input: &Bound<PyAny>, output_size: &Bound<PyAny>) -> PyRe
 /// 1-D adaptive average pooling over `[N, C, L]`.
 #[pyfunction]
 #[pyo3(signature = (input, output_size))]
-fn adaptive_avg_pool1d(input: &Bound<PyAny>, output_size: usize) -> PyResult<PyTensor> {
+fn adaptive_avg_pool1d(input: &Bound<PyAny>, output_size: crate::Size) -> PyResult<PyTensor> {
+    let output_size = output_size.get();
     let input_tensor = borrow_tensor(input)?;
     let result =
         adaptive_avg_pool1d_op(input_tensor.tensor(), output_size).map_err(_convert_error)?;
@@ -580,7 +597,8 @@ fn adaptive_avg_pool1d(input: &Bound<PyAny>, output_size: usize) -> PyResult<PyT
 /// 1-D adaptive max pooling over `[N, C, L]`.
 #[pyfunction]
 #[pyo3(signature = (input, output_size))]
-fn adaptive_max_pool1d(input: &Bound<PyAny>, output_size: usize) -> PyResult<PyTensor> {
+fn adaptive_max_pool1d(input: &Bound<PyAny>, output_size: crate::Size) -> PyResult<PyTensor> {
+    let output_size = output_size.get();
     let input_tensor = borrow_tensor(input)?;
     let result =
         adaptive_max_pool1d_op(input_tensor.tensor(), output_size).map_err(_convert_error)?;
@@ -952,17 +970,18 @@ fn poisson_nll_loss_functional(
 
 /// Connectionist temporal classification: the total probability of every alignment of `targets` to `log_probs`, for a model whose output is longer than its target and unaligned with it. `log_probs` is `(steps, batch, classes)` and is expected to be log probabilities already. `targets` is either a padded `(batch, length)` block or the rows concatenated into a vector, and may not contain the blank class. `reduction="mean"` divides each loss by its own target length before averaging. `zero_infinity` replaces the infinite loss of a target too long to fit its input, and its gradient, with zero.
 #[pyfunction(name = "ctc_loss")]
-#[pyo3(signature = (log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=false))]
+#[pyo3(signature = (log_probs, targets, input_lengths, target_lengths, blank=crate::Size(0), reduction="mean", zero_infinity=false), text_signature = "(log_probs, targets, input_lengths, target_lengths, blank=0, reduction='mean', zero_infinity=False)")]
 #[allow(clippy::too_many_arguments)]
 fn ctc_loss_functional(
     log_probs: &Bound<PyAny>,
     targets: &Bound<PyAny>,
     input_lengths: &Bound<PyAny>,
     target_lengths: &Bound<PyAny>,
-    blank: usize,
+    blank: crate::Size,
     reduction: &str,
     zero_infinity: bool,
 ) -> PyResult<PyTensor> {
+    let blank = blank.get();
     let probabilities = borrow_tensor(log_probs)?;
     let labels = PyTensor::from_python_value(targets)?;
     let inputs = PyTensor::from_python_value(input_lengths)?;
@@ -1825,10 +1844,12 @@ impl PyModule {
     /// budgeting, not to decide whether a model fits.
     fn forward_memory_estimate(
         &self,
-        input_shape: Vec<usize>,
-        batch_size: usize,
+        input_shape: Vec<crate::Size>,
+        batch_size: crate::Size,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
+        let input_shape: Vec<usize> = input_shape.into_iter().map(crate::Size::get).collect();
+        let batch_size = batch_size.get();
         if let ModuleType::Sequential(model) = self.inner.get()? {
             let est = SequentialUtils::estimate_forward_memory(model, &input_shape, batch_size);
             let dict = PyDict::new(py);
@@ -2699,12 +2720,14 @@ impl PyDenseLayer {
     #[new]
     #[pyo3(signature = (in_features, out_features, bias=None, device=None, dtype=None))]
     fn new(
-        in_features: usize,
-        out_features: usize,
+        in_features: crate::Size,
+        out_features: crate::Size,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let in_features = in_features.get();
+        let out_features = out_features.get();
         let bias = bias.unwrap_or(true);
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;

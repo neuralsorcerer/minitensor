@@ -619,7 +619,9 @@ fn gemm_thresholds() -> (usize, usize) {
 /// is how a differential test gets both answers out of one build.
 #[pyfunction]
 #[pyo3(signature = (min_flops, min_k))]
-fn set_gemm_thresholds(min_flops: usize, min_k: usize) -> (usize, usize) {
+fn set_gemm_thresholds(min_flops: crate::Size, min_k: crate::Size) -> (usize, usize) {
+    let min_k = min_k.get();
+    let min_flops = min_flops.get();
     (
         MIN_FLOPS.swap(min_flops, Ordering::Relaxed),
         MIN_K.swap(min_k, Ordering::Relaxed),
@@ -643,7 +645,8 @@ fn ufunc_threshold() -> usize {
 /// every delegated ufunc at any size, and a very large value none.
 #[pyfunction]
 #[pyo3(signature = (min_len))]
-fn set_ufunc_threshold(min_len: usize) -> usize {
+fn set_ufunc_threshold(min_len: crate::Size) -> usize {
+    let min_len = min_len.get();
     MIN_UFUNC_LEN.swap(min_len, Ordering::Relaxed)
 }
 

@@ -96,7 +96,8 @@ impl PyTensor {
 
     /// Split tensor into multiple sub-tensors of equal size (``chunk``)
     #[pyo3(signature = (sections, dim=0))]
-    pub fn chunk(&self, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
+    pub fn chunk(&self, sections: crate::Size, dim: isize) -> PyResult<Vec<PyTensor>> {
+        let sections = sections.get();
         if sections == 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Sections must be greater than zero",

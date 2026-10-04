@@ -513,11 +513,13 @@ impl PyTensor {
     #[pyo3(signature = (normalized_shape, weight=None, bias=None, eps=1e-5))]
     pub fn layer_norm(
         &self,
-        normalized_shape: Vec<usize>,
+        normalized_shape: Vec<crate::Size>,
         weight: Option<&PyTensor>,
         bias: Option<&PyTensor>,
         eps: Option<f64>,
     ) -> PyResult<Self> {
+        let normalized_shape: Vec<usize> =
+            normalized_shape.into_iter().map(crate::Size::get).collect();
         if normalized_shape.is_empty() {
             return Err(PyValueError::new_err(
                 "layer_norm requires normalized_shape to contain at least one dimension",
@@ -547,10 +549,12 @@ impl PyTensor {
     #[pyo3(signature = (normalized_shape, weight=None, eps=1e-6))]
     pub fn rms_norm(
         &self,
-        normalized_shape: Vec<usize>,
+        normalized_shape: Vec<crate::Size>,
         weight: Option<&PyTensor>,
         eps: f64,
     ) -> PyResult<Self> {
+        let normalized_shape: Vec<usize> =
+            normalized_shape.into_iter().map(crate::Size::get).collect();
         if normalized_shape.is_empty() {
             return Err(PyValueError::new_err(
                 "rms_norm requires normalized_shape to contain at least one dimension",

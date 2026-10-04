@@ -139,7 +139,8 @@ impl PyMemoryTracker {
     }
 
     /// Record a memory allocation
-    fn allocate(&mut self, name: String, size: usize) {
+    fn allocate(&mut self, name: String, size: crate::Size) {
+        let size = size.get();
         self.inner.allocate(name, size);
     }
 
@@ -216,7 +217,8 @@ impl PyOperationProfiler {
     }
 
     /// Record memory usage for an operation
-    fn record_memory(&mut self, operation: String, memory_bytes: usize) {
+    fn record_memory(&mut self, operation: String, memory_bytes: crate::Size) {
+        let memory_bytes = memory_bytes.get();
         self.inner.record_memory(operation, memory_bytes);
     }
 

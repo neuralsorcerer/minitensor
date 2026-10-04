@@ -90,13 +90,14 @@ fn tensor_from_result(
 /// sensibly mean, and which one they get is decided by whether they wrote a
 /// backward.
 #[pyfunction]
-#[pyo3(signature = (name, forward, backward=None, num_inputs=1))]
+#[pyo3(signature = (name, forward, backward=None, num_inputs=crate::Size(1)), text_signature = "(name, forward, backward=None, num_inputs=1)")]
 fn register_custom_op(
     name: &str,
     forward: Py<PyAny>,
     backward: Option<Py<PyAny>>,
-    num_inputs: usize,
+    num_inputs: crate::Size,
 ) -> PyResult<()> {
+    let num_inputs = num_inputs.get();
     if num_inputs == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "a custom operation needs at least one input",
@@ -189,13 +190,14 @@ impl PyCustomOpHandle {
 /// Build a custom operation without registering it, for a caller that will
 /// hold the handle rather than look the operation up by name.
 #[pyfunction]
-#[pyo3(signature = (name, forward, backward=None, num_inputs=1))]
+#[pyo3(signature = (name, forward, backward=None, num_inputs=crate::Size(1)), text_signature = "(name, forward, backward=None, num_inputs=1)")]
 fn build_custom_op(
     name: &str,
     forward: Py<PyAny>,
     backward: Option<Py<PyAny>>,
-    num_inputs: usize,
+    num_inputs: crate::Size,
 ) -> PyResult<PyCustomOpHandle> {
+    let num_inputs = num_inputs.get();
     if num_inputs == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "a custom operation needs at least one input",

@@ -71,7 +71,8 @@ impl PyDevice {
     /// Create a CUDA device
     #[staticmethod]
     #[pyo3(signature = (device_id=None))]
-    fn cuda(device_id: Option<usize>) -> Self {
+    fn cuda(device_id: Option<crate::Size>) -> Self {
+        let device_id = device_id.map(crate::Size::get);
         Self {
             inner: Device::cuda(device_id),
         }
@@ -88,7 +89,8 @@ impl PyDevice {
     /// Create an OpenCL device
     #[staticmethod]
     #[pyo3(signature = (device_id=None))]
-    fn opencl(device_id: Option<usize>) -> Self {
+    fn opencl(device_id: Option<crate::Size>) -> Self {
+        let device_id = device_id.map(crate::Size::get);
         Self {
             inner: Device::opencl(device_id),
         }
@@ -164,7 +166,7 @@ mod tests {
         assert!(!cpu.is_gpu());
         assert_eq!(cpu.__str__(), cpu.__repr__());
 
-        let cuda = PyDevice::cuda(Some(1));
+        let cuda = PyDevice::cuda(Some(crate::Size(1)));
         assert_eq!(cuda.device_type(), "cuda");
         assert_eq!(cuda.device_id(), Some(1));
         assert!(!cuda.is_cpu());
@@ -174,7 +176,7 @@ mod tests {
         assert_eq!(metal.device_type(), "metal");
         assert!(metal.is_gpu());
 
-        let opencl = PyDevice::opencl(Some(2));
+        let opencl = PyDevice::opencl(Some(crate::Size(2)));
         assert_eq!(opencl.device_type(), "opencl");
         assert_eq!(opencl.device_id(), Some(2));
         assert!(opencl.is_gpu());

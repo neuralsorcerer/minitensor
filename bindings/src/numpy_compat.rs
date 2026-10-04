@@ -237,7 +237,7 @@ fn stack(tensors: &Bound<PyList>, axis: isize) -> PyResult<PyTensor> {
 /// Split tensor into multiple sub-tensors
 #[pyfunction]
 #[pyo3(signature = (tensor, sections, axis=None))]
-fn split(tensor: &PyTensor, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
+fn split(tensor: &PyTensor, sections: crate::Size, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
     let dim = axis.unwrap_or(0);
     tensor.chunk(sections, dim)
 }
@@ -456,8 +456,9 @@ fn tensor_std(
     tensor: &Bound<PyAny>,
     axis: Option<isize>,
     keepdims: Option<bool>,
-    ddof: Option<usize>,
+    ddof: Option<crate::Size>,
 ) -> PyResult<PyTensor> {
+    let ddof = ddof.map(crate::Size::get);
     let ddof = ddof.unwrap_or(0);
     if ddof > 1 {
         return Err(PyValueError::new_err(
@@ -484,8 +485,9 @@ fn var(
     tensor: &Bound<PyAny>,
     axis: Option<isize>,
     keepdims: Option<bool>,
-    ddof: Option<usize>,
+    ddof: Option<crate::Size>,
 ) -> PyResult<PyTensor> {
+    let ddof = ddof.map(crate::Size::get);
     let ddof = ddof.unwrap_or(0);
     if ddof > 1 {
         return Err(PyValueError::new_err(
