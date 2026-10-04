@@ -2079,7 +2079,12 @@ assert row_std.shape == (2, 3)
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
   `negative_slope`, the same side `relu` takes
 - `isnan`, `isinf`, `isfinite`
-- `clip`, `clamp`, `clamp_min`, `clamp_max`
+- `clip`, `clamp`, `clamp_min`, `clamp_max` — `clip` is `clamp` under another
+  name. A bound of `clamp` may be a tensor, which bounds each element
+  separately: it broadcasts against the input, promotes the dtype as any
+  operand does, and receives the gradient wherever it is the value that came
+  out. The lower bound is applied first, so where two tensor bounds cross the
+  upper one wins; a pair of scalar bounds that cross is refused.
 - `round`, `floor`, `ceil`, `trunc`, `frac` — `trunc` rounds towards zero and
   `frac` is what it leaves behind, `x - trunc(x)`, carrying `x`'s sign. `frac`
   is the only differentiable one (its gradient is 1); the rest are step

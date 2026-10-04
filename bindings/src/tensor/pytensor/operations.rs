@@ -141,15 +141,20 @@ impl PyTensor {
     /// Alias of `clamp`, under its array-library spelling.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clip(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
-        let min_val = parse_clip_bound(min, "min")?;
-        let max_val = parse_clip_bound(max, "max")?;
-        let result = self.inner.clip(min_val, max_val).map_err(_convert_error)?;
-        Ok(Self::from_tensor(result))
+        // The same path, not a parallel one: this used to send its bounds
+        // straight through an f64, so `clip` of an int64 tensor rounded a
+        // bound past 2^53 that `clamp` honoured exactly.
+        self.clamp(min, max)
     }
 
     /// Limit every element to `[min, max]`. Either bound may be omitted.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clamp(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let low = tensor_bound(min)?;
+        let high = tensor_bound(max)?;
+        if low.is_some() || high.is_some() {
+            return self.clamp_between_tensors(min, low, max, high);
+        }
         if let Some(result) = self.clamp_exact_int(min, max)? {
             return Ok(Self::from_tensor(result));
         }
@@ -228,7 +233,45 @@ impl PyTensor {
     }
 }
 
+/// A clamp bound given as a tensor, which bounds each element separately.
+fn tensor_bound(value: Option<&Bound<PyAny>>) -> PyResult<Option<Tensor>> {
+    match value {
+        Some(value) if !value.is_none() => Ok(value
+            .extract::<PyRef<PyTensor>>()
+            .ok()
+            .map(|bound| bound.inner.clone())),
+        _ => Ok(None),
+    }
+}
+
 impl PyTensor {
+    /// `clamp` with at least one bound given per element.
+    ///
+    /// The lower bound is applied first and the upper second, each as an
+    /// elementwise maximum or minimum, so the bounds broadcast against the
+    /// input like any other operand, the dtype promotes as it does for them,
+    /// and a clamped position passes its gradient to the bound that held it.
+    /// Where the two bounds cross, the upper one wins: unlike a pair of
+    /// scalars, finding out that they cross would cost a pass over both. A
+    /// scalar on the other side takes the scalar path.
+    fn clamp_between_tensors(
+        &self,
+        min: Option<&Bound<PyAny>>,
+        low: Option<Tensor>,
+        max: Option<&Bound<PyAny>>,
+        high: Option<Tensor>,
+    ) -> PyResult<Self> {
+        let mut result = match low {
+            Some(low) => Self::from_tensor(self.inner.maximum(&low).map_err(_convert_error)?),
+            None => self.clamp(min, None)?,
+        };
+        result = match high {
+            Some(high) => Self::from_tensor(result.inner.minimum(&high).map_err(_convert_error)?),
+            None => result.clamp(None, max)?,
+        };
+        Ok(result)
+    }
+
     /// `clamp` of an integer tensor between Python-int bounds, exactly.
     ///
     /// The bounds otherwise pass through an f64, which rounds an int64 bound

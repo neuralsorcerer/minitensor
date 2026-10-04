@@ -220,7 +220,7 @@ fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option
                 Ok(Some(int_val as f64))
             } else {
                 Err(PyTypeError::new_err(format!(
-                    "{name} must be a real number or None",
+                    "{name} must be a real number, a Tensor or None",
                 )))
             }
         }
