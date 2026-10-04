@@ -41,6 +41,41 @@ pub type UnitGradKernel = (
     fn(f64, f64, UnitParams<f64>) -> f64,
 );
 
+/// Apply a unit: `unary_unit!(tensor, name, KERNEL, GRAD_KERNEL, params)`.
+///
+/// A macro so that each kernel reaches the element loop as a closure naming
+/// the constant, which the compiler calls -- and inlines -- directly. Passed
+/// as a function pointer it was a value carried into the pool's workers and
+/// called indirectly once per element, with nothing inlined or vectorized:
+/// `hardtanh` cost ten times the `clamp` it is.
+macro_rules! unary_unit {
+    ($tensor:expr, $name:expr, $kernel:expr, $grad:expr, $params:expr $(,)?) => {
+        $crate::ops::activation::units::unary_unit_with(
+            $tensor,
+            $name,
+            (|x, p| ($kernel.0)(x, p), |x, p| ($kernel.1)(x, p)),
+            (|x, g, p| ($grad.0)(x, g, p), |x, g, p| ($grad.1)(x, g, p)),
+            $params,
+        )
+    };
+}
+pub(crate) use unary_unit;
+
+/// Attach a unit's chain rule to values computed some other way:
+/// `unary_unit_from_data!(tensor, name, values, GRAD_KERNEL, params)`.
+macro_rules! unary_unit_from_data {
+    ($tensor:expr, $name:expr, $values:expr, $grad:expr, $params:expr $(,)?) => {
+        $crate::ops::activation::units::unary_unit_from_data_with(
+            $tensor,
+            $name,
+            $values,
+            (|x, g, p| ($grad.0)(x, g, p), |x, g, p| ($grad.1)(x, g, p)),
+            $params,
+        )
+    };
+}
+pub(crate) use unary_unit_from_data;
+
 /// Defines one [`UnitKernel`] from a single body, instantiated at both widths.
 /// The body has to typecheck as `f32` and as `f64`, so it may not name either.
 macro_rules! unit_kernel {
@@ -279,21 +314,25 @@ unit_grad_kernel!(
 );
 
 /// Applies one value kernel over a float tensor.
-fn unit_forward_data(
+fn unit_forward_data<VN, VW>(
     tensor: &Tensor,
     name: &str,
-    kernel: UnitKernel,
+    narrow: VN,
+    wide: VW,
     params: UnitParams<f64>,
-) -> Result<TensorData> {
+) -> Result<TensorData>
+where
+    VN: Fn(f32, UnitParams<f32>) -> f32 + Copy + Send + Sync,
+    VW: Fn(f64, UnitParams<f64>) -> f64 + Copy + Send + Sync,
+{
     match tensor.dtype() {
         DataType::Float32 => {
             let input = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from input tensor")
             })?;
-            let narrow = [params[0] as f32, params[1] as f32];
-            let op = kernel.0;
+            let narrow_params = [params[0] as f32, params[1] as f32];
             Ok(TensorData::from_vec::<f32>(
-                unary_map(input, move |v| op(v, narrow)),
+                unary_map(input, move |v| narrow(v, narrow_params)),
                 DataType::Float32,
                 tensor.device(),
             ))
@@ -302,9 +341,8 @@ fn unit_forward_data(
             let input = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from input tensor")
             })?;
-            let op = kernel.1;
             Ok(TensorData::from_vec::<f64>(
-                unary_map(input, move |v| op(v, params)),
+                unary_map(input, move |v| wide(v, params)),
                 DataType::Float64,
                 tensor.device(),
             ))
@@ -315,32 +353,43 @@ fn unit_forward_data(
     }
 }
 
-/// The shared body: run the value kernel, and record the chain rule if the
-/// input wants a gradient.
-pub(crate) fn unary_unit(
+/// The shared body behind [`unary_unit!`]: run the value kernel, and record
+/// the chain rule if the input wants a gradient.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unary_unit_with<VN, VW, GN, GW>(
     tensor: &Tensor,
     name: &'static str,
-    kernel: UnitKernel,
-    grad_kernel: UnitGradKernel,
+    value: (VN, VW),
+    grad: (GN, GW),
     params: UnitParams<f64>,
-) -> Result<Tensor> {
-    let output_data = unit_forward_data(tensor, name, kernel, params)?;
-    unary_unit_from_data(tensor, name, output_data, grad_kernel, params)
+) -> Result<Tensor>
+where
+    VN: Fn(f32, UnitParams<f32>) -> f32 + Copy + Send + Sync,
+    VW: Fn(f64, UnitParams<f64>) -> f64 + Copy + Send + Sync,
+    GN: Fn(f32, f32, UnitParams<f32>) -> f32 + Copy + Send + Sync + 'static,
+    GW: Fn(f64, f64, UnitParams<f64>) -> f64 + Copy + Send + Sync + 'static,
+{
+    let output_data = unit_forward_data(tensor, name, value.0, value.1, params)?;
+    unary_unit_from_data_with(tensor, name, output_data, grad, params)
 }
 
-/// The half of [`unary_unit`] after the values exist: wrap them in a tensor
-/// and record the chain rule.
+/// The half of [`unary_unit!`] after the values exist: wrap them in a tensor
+/// and record the chain rule; see [`unary_unit_from_data!`].
 ///
 /// Split out for the units whose forward has a vectorized kernel and whose
 /// backward does not, so they can compute their own values without also
 /// restating how a unit's gradient is attached.
-pub(crate) fn unary_unit_from_data(
+pub(crate) fn unary_unit_from_data_with<GN, GW>(
     tensor: &Tensor,
     name: &'static str,
     output_data: TensorData,
-    grad_kernel: UnitGradKernel,
+    grad: (GN, GW),
     params: UnitParams<f64>,
-) -> Result<Tensor> {
+) -> Result<Tensor>
+where
+    GN: Fn(f32, f32, UnitParams<f32>) -> f32 + Copy + Send + Sync + 'static,
+    GW: Fn(f64, f64, UnitParams<f64>) -> f64 + Copy + Send + Sync + 'static,
+{
     let output = Tensor::new(
         Arc::new(output_data),
         tensor.shape().clone(),
@@ -356,7 +405,8 @@ pub(crate) fn unary_unit_from_data(
                 input_id: tensor.id(),
                 input: tensor.detach(),
                 name,
-                grad_kernel,
+                narrow: grad.0,
+                wide: grad.1,
                 params,
             }),
         );
@@ -378,7 +428,7 @@ macro_rules! plain_unit {
             if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
                 return $name(&widened);
             }
-            unary_unit(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
+            unary_unit!(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
         }
     };
 }
@@ -449,7 +499,7 @@ pub fn logsigmoid(tensor: &Tensor) -> Result<Tensor> {
             )));
         }
     };
-    unary_unit_from_data(tensor, "logsigmoid", output_data, LOGSIGMOID_D, [0.0; 2])
+    unary_unit_from_data!(tensor, "logsigmoid", output_data, LOGSIGMOID_D, [0.0; 2])
 }
 
 /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
@@ -475,7 +525,7 @@ pub fn hardtanh(tensor: &Tensor, min_val: f64, max_val: f64) -> Result<Tensor> {
             crate::ops::util::widen_integer_input(tensor)?.expect("an integer dtype always widens");
         return hardtanh(&widened, min_val, max_val);
     }
-    unary_unit(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
+    unary_unit!(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
 }
 
 /// `hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.
@@ -500,7 +550,7 @@ pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> 
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return self::threshold(&widened, threshold, value);
     }
-    unary_unit(
+    unary_unit!(
         tensor,
         "threshold",
         THRESHOLD,
@@ -521,7 +571,7 @@ pub fn softshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
             "softshrink requires lambd to be non-negative, got {lambd}"
         )));
     }
-    unary_unit(tensor, "softshrink", SOFTSHRINK, SOFTSHRINK_D, [lambd, 0.0])
+    unary_unit!(tensor, "softshrink", SOFTSHRINK, SOFTSHRINK_D, [lambd, 0.0])
 }
 
 /// `max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`: `elu` rescaled so the
@@ -539,7 +589,7 @@ pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
             "celu requires a finite, non-zero alpha, got {alpha}"
         )));
     }
-    unary_unit(tensor, "celu", CELU, CELU_D, [alpha, 0.0])
+    unary_unit!(tensor, "celu", CELU, CELU_D, [alpha, 0.0])
 }
 
 /// `softmax` of the negated input: the distribution that favours the smallest

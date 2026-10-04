@@ -11,7 +11,7 @@ use super::shape::{mask_select_into, zip_mask_into};
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::activation::units::{UnitGradKernel, UnitParams},
+    ops::activation::units::UnitParams,
     ops::map::{binary_map, par_out_chunks_gated},
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
@@ -315,25 +315,35 @@ impl GradientFunction for SiluBackward {
 /// Those units differ only in their chain rule, so this holds it as a kernel
 /// rather than there being one struct per unit. The saved input is what every
 /// one of them needs -- none is cheaper to differentiate from its output.
-pub struct ActivationUnitBackward {
+///
+/// The kernel is a type parameter rather than a function pointer. Stored as a
+/// pointer it was loaded and called indirectly once per element inside the
+/// pool's workers, which kept the loop from being inlined or vectorized: the
+/// chain rule of a clamp cost ten times the clamp.
+pub struct ActivationUnitBackward<N, W> {
     pub input_id: TensorId,
     pub input: Tensor,
     pub name: &'static str,
-    pub grad_kernel: UnitGradKernel,
+    pub narrow: N,
+    pub wide: W,
     pub params: UnitParams<f64>,
 }
 
-impl GradientFunction for ActivationUnitBackward {
+impl<N, W> GradientFunction for ActivationUnitBackward<N, W>
+where
+    N: Fn(f32, f32, UnitParams<f32>) -> f32 + Copy + Send + Sync,
+    W: Fn(f64, f64, UnitParams<f64>) -> f64 + Copy + Send + Sync,
+{
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let narrow = [self.params[0] as f32, self.params[1] as f32];
-        let wide = self.params;
-        let (f32_op, f64_op) = self.grad_kernel;
+        let narrow_params = [self.params[0] as f32, self.params[1] as f32];
+        let wide_params = self.params;
+        let (narrow, wide) = (self.narrow, self.wide);
         let grad = unary_chain_grad(
             &self.input,
             grad_output,
             self.name,
-            move |x: f32, gout: f32| f32_op(x, gout, narrow),
-            move |x: f64, gout: f64| f64_op(x, gout, wide),
+            move |x: f32, gout: f32| narrow(x, gout, narrow_params),
+            move |x: f64, gout: f64| wide(x, gout, wide_params),
         )?;
         Ok(single(self.input_id, grad))
     }

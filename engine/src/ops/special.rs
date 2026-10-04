@@ -122,13 +122,13 @@ pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
         return cbrt(&widened);
     }
     if let Some(values) = offered(tensor, Ufunc::Cbrt) {
-        return unary_unit_from_data(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
+        return unary_unit_from_data!(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
     }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::cbrt_f32(tensor)?;
-        return unary_unit_from_data(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
+        return unary_unit_from_data!(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
     }
-    unary_unit(tensor, "cbrt", CBRT, CBRT_D, [0.0; 2])
+    unary_unit!(tensor, "cbrt", CBRT, CBRT_D, [0.0; 2])
 }
 
 /// A float64 tensor's values under `op` from the installed provider, or
@@ -185,12 +185,12 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::exp2_f32(tensor)?;
-        return unary_unit_from_data(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
+        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
     }
     if let Some(values) = offered(tensor, Ufunc::Exp2) {
-        return unary_unit_from_data(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
+        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
     }
-    unary_unit(tensor, "exp2", EXP2, EXP2_D, [LN_2, 0.0])
+    unary_unit!(tensor, "exp2", EXP2, EXP2_D, [LN_2, 0.0])
 }
 
 // --- logit -----------------------------------------------------------------
@@ -266,7 +266,7 @@ pub fn logit(tensor: &Tensor, eps: Option<f64>) -> Result<Tensor> {
         }
         Some(eps) => eps,
     };
-    unary_unit(tensor, "logit", LOGIT, LOGIT_D, [clamp, 0.0])
+    unary_unit!(tensor, "logit", LOGIT, LOGIT_D, [clamp, 0.0])
 }
 
 // --- sinc ------------------------------------------------------------------
@@ -315,7 +315,7 @@ pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return sinc(&widened);
     }
-    unary_unit(tensor, "sinc", SINC, SINC_D, [PI, 0.0])
+    unary_unit!(tensor, "sinc", SINC, SINC_D, [PI, 0.0])
 }
 
 // --- lgamma and digamma ----------------------------------------------------
@@ -649,7 +649,7 @@ pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return lgamma(&widened);
     }
-    unary_unit(tensor, "lgamma", LGAMMA, LGAMMA_D, [0.0; 2])
+    unary_unit!(tensor, "lgamma", LGAMMA, LGAMMA_D, [0.0; 2])
 }
 
 /// `digamma(input)`, the derivative of `lgamma`.
@@ -659,7 +659,7 @@ pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return digamma(&widened);
     }
-    unary_unit(tensor, "digamma", DIGAMMA, DIGAMMA_D, [0.0; 2])
+    unary_unit!(tensor, "digamma", DIGAMMA, DIGAMMA_D, [0.0; 2])
 }
 
 wide_kernel!(
@@ -691,7 +691,7 @@ pub fn polygamma(order: i64, tensor: &Tensor) -> Result<Tensor> {
              double, got {order}"
         )));
     }
-    unary_unit(
+    unary_unit!(
         tensor,
         "polygamma",
         POLYGAMMA,
@@ -852,7 +852,7 @@ pub fn i0(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i0(&widened);
     }
-    unary_unit(tensor, "i0", I0, I0_D, [0.0; 2])
+    unary_unit!(tensor, "i0", I0, I0_D, [0.0; 2])
 }
 
 /// `i1(input)`, the modified Bessel function of the first kind, order one.
@@ -862,7 +862,7 @@ pub fn i1(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i1(&widened);
     }
-    unary_unit(tensor, "i1", I1, I1_D, [0.0; 2])
+    unary_unit!(tensor, "i1", I1, I1_D, [0.0; 2])
 }
 
 /// `i0e(input)`, `exp(-|x|) i0(x)`.
@@ -872,7 +872,7 @@ pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i0e(&widened);
     }
-    unary_unit(tensor, "i0e", I0E, I0E_D, [0.0; 2])
+    unary_unit!(tensor, "i0e", I0E, I0E_D, [0.0; 2])
 }
 
 /// `i1e(input)`, `exp(-|x|) i1(x)`.
@@ -882,7 +882,7 @@ pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return i1e(&widened);
     }
-    unary_unit(tensor, "i1e", I1E, I1E_D, [0.0; 2])
+    unary_unit!(tensor, "i1e", I1E, I1E_D, [0.0; 2])
 }
 
 // --- erfcx ------------------------------------------------------------------
@@ -950,7 +950,7 @@ pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erfcx(&widened);
     }
-    unary_unit(tensor, "erfcx", ERFCX, ERFCX_D, [0.0; 2])
+    unary_unit!(tensor, "erfcx", ERFCX, ERFCX_D, [0.0; 2])
 }
 
 // --- erfinv ----------------------------------------------------------------
@@ -989,7 +989,7 @@ pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return erfinv(&widened);
     }
-    unary_unit(tensor, "erfinv", ERFINV, ERFINV_D, [0.0; 2])
+    unary_unit!(tensor, "erfinv", ERFINV, ERFINV_D, [0.0; 2])
 }
 
 #[cfg(test)]
