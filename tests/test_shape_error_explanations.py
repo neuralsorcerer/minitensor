@@ -56,20 +56,3 @@ def test_the_error_names_the_rule(name):
 def test_a_shape_error_is_still_one():
     with pytest.raises(ValueError, match="Shape mismatch"):
         mt.zeros(2) + mt.zeros(3)
-
-
-def test_matmul_promotes_mixed_dtypes_like_the_elementwise_ops():
-    a = mt.randn(2, 3, requires_grad=True)
-    b = mt.randn(3, 2).astype("float64").requires_grad_(True)
-    product = a @ b
-    assert product.dtype == "float64"
-    reference = a.detach().astype("float64") @ b.detach()
-    assert product.tolist() == reference.tolist()
-    product.sum().backward()
-    # The gradient returns to each operand in its own dtype.
-    assert a.grad.dtype == "float32" and b.grad.dtype == "float64"
-    ints = mt.tensor([[1, 2], [3, 4]], dtype="int64")
-    assert (mt.ones(2, 2) @ ints).dtype == "float32"
-    assert (
-        mt.bmm(mt.ones(1, 2, 2), mt.ones(1, 2, 2).astype("float64")).dtype == "float64"
-    )

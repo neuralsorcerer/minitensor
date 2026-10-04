@@ -631,13 +631,11 @@ def test_matmul_shape_mismatch():
         a.matmul(b)
 
 
-def test_matmul_promotes_mixed_dtypes():
-    # As `*` and `dot` do: float32 against float64 is a float64 product.
+def test_matmul_dtype_mismatch():
     a = mt.Tensor([[1.0, 2.0]], dtype="float32")
     b = mt.Tensor([[3.0], [4.0]], dtype="float64")
-    product = a.matmul(b)
-    assert product.dtype == "float64"
-    assert product.tolist() == [[11.0]]
+    with pytest.raises(TypeError):
+        a.matmul(b)
 
 
 def test_matmul_bool_error():

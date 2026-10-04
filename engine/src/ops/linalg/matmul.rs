@@ -1039,14 +1039,15 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Mixed dtypes promote as `*` promotes them -- as `dot` and every
-    // element-wise op already did -- so a float32 activation times a float64
-    // weight is a float64 product rather than a refusal. The casts are
-    // recorded, so a gradient returns to each operand in its own dtype.
+    // Mixed dtypes are refused rather than promoted, the one exception to the
+    // promotion rule: a float32 activation against a float64 weight would
+    // silently become a float64 product at twice the cost, which is a
+    // performance cliff rather than a convenience. The error names the cast.
     if lhs.dtype() != rhs.dtype() {
-        validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;
-        let (lhs, rhs, _) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
-        return matmul(&lhs, &rhs);
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", lhs.dtype()),
+            format!("{:?}", rhs.dtype()),
+        ));
     }
 
     validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;
