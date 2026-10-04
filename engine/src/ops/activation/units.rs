@@ -97,17 +97,6 @@ macro_rules! stable_sigmoid {
     }};
 }
 
-/// `log(1 + exp(x))`, likewise. Past the cutoff `exp(x)` overflows while
-/// `log1p(exp(x))` has already converged on `x` to the last bit -- at x = 20
-/// the difference is 2e-9, which is below the float32 epsilon at that
-/// magnitude and 12 orders below float64's answer.
-macro_rules! stable_softplus {
-    ($x:expr) => {{
-        let x = $x;
-        if x > 20.0 { x } else { x.exp().ln_1p() }
-    }};
-}
-
 // --- hardtanh, and relu6 on top of it --------------------------------------
 
 unit_kernel!(
@@ -221,24 +210,41 @@ unit_grad_kernel!(
 unit_kernel!(
     /// `x * tanh(softplus(x))`. Smooth, non-monotonic, and self-regularising:
     /// it keeps a small negative tail instead of clipping it to zero.
-    MISH, |x, _p| if x.is_infinite() {
-        // `-inf * tanh(0)` at the bottom; the limit is 0.
-        if x > 0.0 { x } else { -0.0 }
+    ///
+    /// `tanh(log(1 + e))` is `n / (n + 2)` with `n = e * (e + 2)` and
+    /// `e = exp(x)`, so the whole unit is one exponential rather than an
+    /// exponential, a `ln_1p` and a `tanh` -- the three of them cost over ten
+    /// times what the rest of a pass does. The ratio has no cancellation:
+    /// both terms are positive. Past `x = 20` the factor is 1 to within
+    /// float64 rounding, and `n` would be on its way to overflowing.
+    MISH, |x, _p| if x > 20.0 {
+        x
+    } else if x.is_infinite() {
+        // `-inf * 0` at the bottom; the limit is 0.
+        -0.0
     } else {
-        x * stable_softplus!(x).tanh()
+        let e = x.exp();
+        let n = e * (e + 2.0);
+        x * (n / (n + 2.0))
     }
 );
 unit_grad_kernel!(
     /// `tanh(sp) + x * sech^2(sp) * sigmoid(x)`, where `sp = softplus(x)` and
-    /// `d(sp)/dx = sigmoid(x)`. `sech^2` is written as `1 - tanh^2`.
-    MISH_D, |x, g, _p| {
-        // The limits, 0 below and 1 above, where the formula would form
-        // `inf * 0`.
-        if x.is_infinite() {
-            return if x > 0.0 { g } else { 0.0 * g };
-        }
-        let t = stable_softplus!(x).tanh();
-        g * (t + x * (1.0 - t * t) * stable_sigmoid!(x))
+    /// `d(sp)/dx = sigmoid(x)`. Through the same `n = e * (e + 2)` the value
+    /// uses: `tanh(sp) = n / (n + 2)`, `sech^2(sp) = 4 (n + 1) / (n + 2)^2`
+    /// and `sigmoid(x) = e / (e + 1)`, so one exponential serves all three.
+    MISH_D, |x, g, _p| if x > 20.0 {
+        // The limit, 1, where `n` would be on its way to overflowing.
+        g
+    } else if x.is_infinite() {
+        // The limit at the bottom, 0, where the formula would form `inf * 0`.
+        0.0 * g
+    } else {
+        let e = x.exp();
+        let n = e * (e + 2.0);
+        let d = n + 2.0;
+        // `4 (n + 1) / d^2` divided twice, so `d^2` cannot overflow float32.
+        g * (n / d + x * (4.0 * (n + 1.0) / d / d) * (e / (e + 1.0)))
     }
 );
 
