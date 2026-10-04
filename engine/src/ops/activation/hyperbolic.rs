@@ -807,6 +807,10 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     let out = if approximate {
         let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
+            // At `-inf` the quotient is `-inf / inf`; the limit is 0.
+            if x == f64::NEG_INFINITY {
+                return -0.0;
+            }
             let x3 = x * x * x;
             let inner = coeff * (x + 0.044715f64 * x3);
             x / (1.0f64 + (-2.0f64 * inner).exp())
@@ -814,6 +818,10 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     } else {
         let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
+            // At `-inf` the product is `-inf * 0`; the limit is 0.
+            if x == f64::NEG_INFINITY {
+                return -0.0;
+            }
             0.5f64 * x * erfc(-x * inv_sqrt_2)
         })
     };
@@ -879,16 +887,28 @@ vector_f32!(
 float_unary_kernel!(silu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     // `1/(1 + exp(-x))` overflows for large negative x and loses the tail; the
     // stable form costs a branch and keeps it.
+    // At `-inf` the product is `-inf * 0`; the limit is 0.
+    if x == f64::NEG_INFINITY {
+        return -0.0;
+    }
     let sigmoid = crate::ops::util::stable_sigmoid_f64(x);
     x * sigmoid
 });
 
 float_unary_kernel!(softsign_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
+    // `inf / inf` at either end; the limits are -1 and 1.
+    if x.is_infinite() {
+        return x.signum();
+    }
     let denom = 1.0 + x.abs();
     x / denom
 });
 
 float_unary_kernel!(softsign_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
+    // `inf / inf` at either end; the limits are -1 and 1.
+    if x.is_infinite() {
+        return x.signum();
+    }
     let denom = 1.0 + x.abs();
     x / denom
 });

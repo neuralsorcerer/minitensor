@@ -668,7 +668,14 @@ fn erfc_one<const FMA: bool>(x: f32) -> f32 {
 fn gelu_erf_one<const FMA: bool>(x: f32) -> f32 {
     let xd = x as f64;
     let cdf = one_plus_erf::<FMA>(xd * std::f64::consts::FRAC_1_SQRT_2);
-    (0.5 * xd * cdf) as f32
+    // Where the factor has reached zero the answer is a zero of `x`'s sign --
+    // which is also the limit at `x = -inf`, where the product would be
+    // `-inf * 0`. A NaN `x` fails the comparison and carries through.
+    if cdf == 0.0 {
+        0.0f64.copysign(xd) as f32
+    } else {
+        (0.5 * xd * cdf) as f32
+    }
 }
 
 /// Clamp on the tanh-GELU inner argument. It only has to be wide enough that
@@ -694,16 +701,15 @@ fn gelu_tanh_one<const FMA: bool>(x: f32) -> f32 {
     let (two_pow_n, r) = reduce_exp::<FMA>(inner.clamp(-GELU_TANH_LIMIT, GELU_TANH_LIMIT) * 2.0);
     let e = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
     // Below the clamp the factor has already underflowed the float32 result,
-    // so make it exactly zero rather than a clamped floor that an arbitrarily
-    // large `x` could scale back up. This also keeps `x = -inf` at NaN, which
-    // is what both the scalar path this replaces and the exact GELU return.
-    // NaN fails the comparison and carries through the other way.
-    let factor = if inner < -GELU_TANH_LIMIT {
-        0.0
+    // so the answer is a zero of `x`'s sign rather than a clamped floor that an
+    // arbitrarily large `x` could scale back up -- and `x = -inf` gets the
+    // limit, 0, rather than the `-inf * 0` the product would make. NaN fails
+    // the comparison and carries through the other way.
+    if inner < -GELU_TANH_LIMIT {
+        0.0f64.copysign(xd) as f32
     } else {
-        e / (e + 1.0)
-    };
-    (xd * factor) as f32
+        (xd * (e / (e + 1.0))) as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +734,15 @@ fn gelu_erf_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     let cdf = 0.5 * one_plus_erf::<FMA>(xd * std::f64::consts::FRAC_1_SQRT_2);
     let (two_pow_n, r) = reduce_exp::<FMA>(-(0.5 * xd * xd).min(GELU_PDF_LIMIT));
     let pdf = two_pow_n * (1.0 + expm1_poly::<FMA>(r)) * INV_SQRT_2PI;
-    (fma_or::<FMA>(xd, pdf, cdf) * gout as f64) as f32
+    // Past the clamp `x * pdf` has underflowed the float32 result, and with
+    // the clamped `pdf` an infinite `x` would make it infinite instead: the
+    // derivative there is the `cdf` term alone, 0 or 1.
+    let local = if 0.5 * xd * xd > GELU_PDF_LIMIT {
+        cdf
+    } else {
+        fma_or::<FMA>(xd, pdf, cdf)
+    };
+    (local * gout as f64) as f32
 }
 
 /// Derivative of the tanh-approximation GELU, times the incoming gradient.
@@ -756,7 +770,16 @@ fn gelu_tanh_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
         4.0 * e * recip * recip
     };
     let d_inner = COEFF * fma_or::<FMA>(3.0 * CUBIC, x2, 1.0);
-    let local = fma_or::<FMA>(0.5 * xd * sech2, d_inner, half_one_plus_tanh);
+    // Outside the clamp the derivative is its limit, 0 below and 1 above: the
+    // clamped `sech2` is a floor rather than the true, vanishing value, and an
+    // infinite `x` would turn `x * sech2` into `inf * 0` or `inf`.
+    let local = if saturated {
+        0.0
+    } else if inner > GELU_TANH_LIMIT {
+        1.0
+    } else {
+        fma_or::<FMA>(0.5 * xd * sech2, d_inner, half_one_plus_tanh)
+    };
     (local * gout as f64) as f32
 }
 
@@ -1161,10 +1184,14 @@ fn sigmoid_one<const FMA: bool>(x: f32) -> f32 {
 fn silu_one<const FMA: bool>(x: f32) -> f32 {
     let xd = x as f64;
     let (s, _) = logistic_parts::<FMA>(xd);
-    // Below the clamp the product has underflowed float32 anyway; zeroing keeps
-    // `x = -inf` at NaN, which is what the scalar form returned.
-    let s = if xd < -LOGISTIC_LIMIT { 0.0 } else { s };
-    (xd * s) as f32
+    // Below the clamp the product has underflowed float32 anyway, so the answer
+    // is a zero of `x`'s sign -- which is also the limit at `x = -inf`, where
+    // the product would be `-inf * 0`.
+    if xd < -LOGISTIC_LIMIT {
+        0.0f64.copysign(xd) as f32
+    } else {
+        (xd * s) as f32
+    }
 }
 
 /// `d/dx [x*sigmoid(x)] = s * (1 + x*(1 - s))`, times the incoming gradient.
@@ -1172,12 +1199,15 @@ fn silu_one<const FMA: bool>(x: f32) -> f32 {
 fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     let xd = x as f64;
     let (s, one_minus_s) = logistic_parts::<FMA>(xd);
-    let (s, one_minus_s) = if xd < -LOGISTIC_LIMIT {
-        (0.0, 1.0)
+    // Outside the clamp the derivative is its limit, 0 below and 1 above; the
+    // clamped `1 - s` is a floor an infinite `x` would scale to infinity.
+    let local = if xd < -LOGISTIC_LIMIT {
+        0.0
+    } else if xd > LOGISTIC_LIMIT {
+        1.0
     } else {
-        (s, one_minus_s)
+        s * fma_or::<FMA>(xd, one_minus_s, 1.0)
     };
-    let local = s * fma_or::<FMA>(xd, one_minus_s, 1.0);
     (local * gout as f64) as f32
 }
 
@@ -2762,6 +2792,12 @@ mod tests {
 
     /// The float64 routine each kernel is measured against, rounded once.
     fn reference(op: Op, x: f32) -> f32 {
+        // GELU and SiLU are `x` times a factor that vanishes as `x -> -inf`;
+        // the limit there is a negative zero, not the `-inf * 0` the formulas
+        // below would form.
+        if x == f32::NEG_INFINITY && matches!(op, Op::GeluErf | Op::GeluTanh | Op::Silu) {
+            return -0.0;
+        }
         let xd = x as f64;
         match op {
             Op::Tanh => xd.tanh() as f32,

@@ -221,12 +221,22 @@ unit_grad_kernel!(
 unit_kernel!(
     /// `x * tanh(softplus(x))`. Smooth, non-monotonic, and self-regularising:
     /// it keeps a small negative tail instead of clipping it to zero.
-    MISH, |x, _p| x * stable_softplus!(x).tanh()
+    MISH, |x, _p| if x.is_infinite() {
+        // `-inf * tanh(0)` at the bottom; the limit is 0.
+        if x > 0.0 { x } else { -0.0 }
+    } else {
+        x * stable_softplus!(x).tanh()
+    }
 );
 unit_grad_kernel!(
     /// `tanh(sp) + x * sech^2(sp) * sigmoid(x)`, where `sp = softplus(x)` and
     /// `d(sp)/dx = sigmoid(x)`. `sech^2` is written as `1 - tanh^2`.
     MISH_D, |x, g, _p| {
+        // The limits, 0 below and 1 above, where the formula would form
+        // `inf * 0`.
+        if x.is_infinite() {
+            return if x > 0.0 { g } else { 0.0 * g };
+        }
         let t = stable_softplus!(x).tanh();
         g * (t + x * (1.0 - t * t) * stable_sigmoid!(x))
     }

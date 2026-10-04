@@ -152,6 +152,10 @@ impl GradientFunction for GeluBackward {
         // `sech^2(v) = 1 - tanh(v)^2` is `4*s*(1 - s)`. Written the obvious way
         // this gradient was 1% wrong at x = -10 and lost every digit past that.
         let grad = unary_chain_grad_f64(&self.input, grad_output, "GELU", move |x: f64| {
+            // The limits, where either formula would form `inf * 0`.
+            if x.is_infinite() {
+                return if x > 0.0 { 1.0 } else { 0.0 };
+            }
             if approximate {
                 let x2 = x * x;
                 let inner = coeff64 * (x + GELU_CUBIC_F64 * x * x2);
@@ -292,6 +296,10 @@ impl GradientFunction for SiluBackward {
             return Ok(single(self.input_id, grad));
         }
         let grad = unary_chain_grad_f64(&self.input, grad_output, "SiLU", |x: f64| {
+            // The limits, where the formula would form `inf * 0`.
+            if x.is_infinite() {
+                return if x > 0.0 { 1.0 } else { 0.0 };
+            }
             let s = stable_sigmoid_f64(x);
             s * (1.0 + x * (1.0 - s))
         })?;

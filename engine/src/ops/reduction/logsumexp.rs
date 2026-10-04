@@ -62,12 +62,27 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     }
     let max_tensor = max_tensor.detach();
 
-    let shifted = arithmetic::sub(tensor, &max_tensor)?;
+    // A row that is `-inf` throughout has a maximum of `-inf`, and shifting by
+    // it is `-inf - -inf = NaN` -- which the value is patched past below, but
+    // which reached the gradient: `logsumexp` of a fully masked row
+    // differentiated to NaN, where `softmax`, its derivative, answers zero for
+    // that row. Such rows are computed on zeros instead, through a select, so
+    // the entries pass no gradient back; their value is restored below.
+    let (input, shift) = if let Some(empty) = negative_infinity_mask(&max_tensor) {
+        (
+            crate::ops::selection::masked_fill_scalar(tensor, &empty, 0.0)?,
+            crate::ops::selection::masked_fill_scalar(&max_tensor, &empty, 0.0)?,
+        )
+    } else {
+        (tensor.clone(), max_tensor.clone())
+    };
+
+    let shifted = arithmetic::sub(&input, &shift)?;
     let exp_shifted = activation::exp(&shifted)?;
     let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
     let sum_exp = sum(&exp_shifted, Some(dims_isize), true)?;
     let log_sum = activation::log(&sum_exp)?;
-    let mut result = arithmetic::add(&max_tensor, &log_sum)?;
+    let mut result = arithmetic::add(&shift, &log_sum)?;
 
     // A non-finite row max poisons the shifted sum with `inf - inf = NaN`.
     // The correct limit for those rows is the max itself: +inf rows reduce to
@@ -132,6 +147,35 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     }
 
     Ok(result)
+}
+
+/// A bool tensor marking the `-inf` elements of a float tensor, or `None`
+/// when there are none -- the common case, which then costs one scan.
+fn negative_infinity_mask(tensor: &Tensor) -> Option<Tensor> {
+    let flags: Vec<bool> = match tensor.dtype() {
+        DataType::Float32 => {
+            let values = tensor.data().as_f32_slice()?;
+            if !values.contains(&f32::NEG_INFINITY) {
+                return None;
+            }
+            values.iter().map(|&v| v == f32::NEG_INFINITY).collect()
+        }
+        DataType::Float64 => {
+            let values = tensor.data().as_f64_slice()?;
+            if !values.contains(&f64::NEG_INFINITY) {
+                return None;
+            }
+            values.iter().map(|&v| v == f64::NEG_INFINITY).collect()
+        }
+        _ => return None,
+    };
+    Some(Tensor::new(
+        std::sync::Arc::new(TensorData::from_vec(flags, DataType::Bool, tensor.device())),
+        tensor.shape().clone(),
+        DataType::Bool,
+        tensor.device(),
+        false,
+    ))
 }
 
 /// Fused single-axis log-sum-exp for tensors that do not require gradients.

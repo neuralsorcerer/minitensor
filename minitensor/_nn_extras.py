@@ -308,17 +308,19 @@ def prelu(input: object, weight: object) -> Tensor:
         shape[channel_axis] = slope.shape[0]
         slope = slope.reshape(shape)
 
-    # `relu(x) + w (x - relu(x))` rather than a branch. `x - relu(x)` is the
-    # negative part, exactly zero above the origin and exactly `x` below it, so
-    # the value is the same to the last bit as the branch would give -- and the
-    # gradient reaches `weight` without a kernel of its own.
+    # `relu(x) + w * min(x, 0)` rather than a branch. The negative part is a
+    # clamp -- exactly zero above the origin and exactly `x` below it, so the
+    # value is the same to the last bit as the branch would give -- and the
+    # gradient reaches `weight` without a kernel of its own. It used to be
+    # `x - relu(x)`, which is the same number everywhere but `+inf`, where it
+    # is `inf - inf` and made `prelu(inf)` NaN.
     #
-    # At exactly zero the derivative comes out as `weight`, because `relu`
-    # takes the flat side there. That is the side `leaky_relu` takes for its
+    # At exactly zero the derivative comes out as `weight`: `relu` takes the
+    # flat side there and the clamp passes its boundary through. That is the side `leaky_relu` takes for its
     # own fixed slope, so the two agree on the one input where a rectifier has
     # a choice.
     positive = _F.relu(tensor)
-    return positive + slope * (tensor - positive)
+    return positive + slope * tensor.clamp(max=0.0)
 
 
 def gumbel_softmax(
@@ -741,8 +743,8 @@ def rrelu(
     in evaluation every element gets the midpoint, so the network sees the
     average of what it was trained against rather than a fresh draw.
 
-    Written as `relu(x) + slope * (x - relu(x))`, which is bit-exact on the
-    positive side -- `x - relu(x)` is exactly zero there -- and takes the
+    Written as `relu(x) + slope * min(x, 0)`, which is bit-exact on the
+    positive side -- the clamp is exactly zero there, `+inf` included -- and takes the
     negative side's derivative at the origin, agreeing with `leaky_relu` and
     `prelu` on the one point where the two sides disagree.
     """
@@ -767,7 +769,7 @@ def rrelu(
     else:
         slope = (low + high) / 2.0
     positive = _F.relu(tensor)
-    return positive + slope * (tensor - positive)
+    return positive + slope * tensor.clamp(max=0.0)
 
 
 # --- completing the pairs ---------------------------------------------------
