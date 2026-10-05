@@ -371,51 +371,152 @@ macro_rules! layer_norm_rows {
                 &|first_row, buffers| {
                     let (out, rest) = buffers.split_first_mut().expect("out is buffer 0");
                     let (inv_std, rest) = rest.split_first_mut().expect("inv_std is buffer 1");
-                    let mut normalized = rest.first_mut();
-
-                    // Applying the affine parameters in f64 and rounding once
-                    // is deliberate: rounding `z` to `$ty` first and scaling the
-                    // rounded value costs a second rounding on every element,
-                    // in the one layer whose whole job is numerical stability.
-                    let apply = |i: usize, z: f64| -> $ty {
-                        let mut y = z;
-                        if let Some(w) = weight {
-                            y *= w[i] as f64;
-                        }
-                        if let Some(b) = bias {
-                            y += b[i] as f64;
-                        }
-                        y as $ty
-                    };
-
-                    for r in 0..inv_std.len() {
-                        let row = &input[(first_row + r) * norm..][..norm];
-                        let (mean, scale) = stats(row, recip, eps);
-                        inv_std[r] = scale as $ty;
-                        let o = &mut out[r * norm..][..norm];
-                        // The two loops differ by one store. Testing the option
-                        // per element instead would put a branch inside the
-                        // vectorizable body; it is loop-invariant, so it is
-                        // hoisted here by hand rather than left to the optimizer.
-                        match normalized.as_deref_mut() {
-                            Some(normalized) => {
-                                let n = &mut normalized[r * norm..][..norm];
-                                for i in 0..norm {
-                                    let z = (row[i] as f64 - mean) * scale;
-                                    n[i] = z as $ty;
-                                    o[i] = apply(i, z);
-                                }
-                            }
-                            None => {
-                                for i in 0..norm {
-                                    let z = (row[i] as f64 - mean) * scale;
-                                    o[i] = apply(i, z);
-                                }
-                            }
-                        }
+                    let normalized = rest.first_mut().map(|n| &mut **n);
+                    #[cfg(target_arch = "x86_64")]
+                    if crate::ops::simd::simd_capabilities().avx2_fma {
+                        // SAFETY: avx2 and fma were detected on this CPU.
+                        return unsafe {
+                            task_avx2(
+                                input, norm, recip, eps, weight, bias, first_row, out, inv_std,
+                                normalized,
+                            )
+                        };
                     }
+                    task(
+                        input, norm, recip, eps, weight, bias, first_row, out, inv_std, normalized,
+                    )
                 },
             );
+
+            /// [`task`] built with AVX2. The row works in float64, which the
+            /// baseline holds two to a register; this holds four. Rust neither
+            /// fuses nor reorders the arithmetic, so the answer is the same to
+            /// the bit; on its own it was worth about 10% on one core.
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2,fma")]
+            #[allow(clippy::too_many_arguments)]
+            fn task_avx2(
+                input: &[$ty],
+                norm: usize,
+                recip: f64,
+                eps: f64,
+                weight: Option<&[$ty]>,
+                bias: Option<&[$ty]>,
+                first_row: usize,
+                out: &mut [$ty],
+                inv_std: &mut [$ty],
+                normalized: Option<&mut [$ty]>,
+            ) {
+                task(
+                    input, norm, recip, eps, weight, bias, first_row, out, inv_std, normalized,
+                )
+            }
+
+            /// The rows from `first_row` that one task of the split writes.
+            #[inline(always)]
+            #[allow(clippy::too_many_arguments)]
+            fn task(
+                input: &[$ty],
+                norm: usize,
+                recip: f64,
+                eps: f64,
+                weight: Option<&[$ty]>,
+                bias: Option<&[$ty]>,
+                first_row: usize,
+                out: &mut [$ty],
+                inv_std: &mut [$ty],
+                mut normalized: Option<&mut [$ty]>,
+            ) {
+                for r in 0..inv_std.len() {
+                    let row = &input[(first_row + r) * norm..][..norm];
+                    let (mean, scale) = stats(row, recip, eps);
+                    inv_std[r] = scale as $ty;
+                    let o = &mut out[r * norm..][..norm];
+                    let n = normalized
+                        .as_deref_mut()
+                        .map(|n| &mut n[r * norm..][..norm]);
+                    // Every combination of parameters and saved values is its
+                    // own loop, so the body has nothing to test and nothing to
+                    // bounds-check. Indexing the parameters through options
+                    // inside one loop kept it scalar, at 4ns an element: a
+                    // `[4096, 1024]` float32 forward with trained parameters
+                    // took 19.8ms on one core and takes 11.8, and 8.2ms on four
+                    // and takes 5.8, with every output the same to the bit.
+                    match (weight, bias, n) {
+                        (Some(w), Some(b), Some(n)) => {
+                            affine_row::<true, true, true>(row, mean, scale, w, b, o, n)
+                        }
+                        (Some(w), Some(b), None) => {
+                            affine_row::<true, true, false>(row, mean, scale, w, b, o, &mut [])
+                        }
+                        (Some(w), None, Some(n)) => {
+                            affine_row::<true, false, true>(row, mean, scale, w, &[], o, n)
+                        }
+                        (Some(w), None, None) => {
+                            affine_row::<true, false, false>(row, mean, scale, w, &[], o, &mut [])
+                        }
+                        (None, Some(b), Some(n)) => {
+                            affine_row::<false, true, true>(row, mean, scale, &[], b, o, n)
+                        }
+                        (None, Some(b), None) => {
+                            affine_row::<false, true, false>(row, mean, scale, &[], b, o, &mut [])
+                        }
+                        (None, None, Some(n)) => {
+                            affine_row::<false, false, true>(row, mean, scale, &[], &[], o, n)
+                        }
+                        (None, None, None) => affine_row::<false, false, false>(
+                            row,
+                            mean,
+                            scale,
+                            &[],
+                            &[],
+                            o,
+                            &mut [],
+                        ),
+                    }
+                }
+            }
+
+            /// `out = (row - mean) * scale`, then times `weight` and plus
+            /// `bias` where they are present, and the normalized value saved
+            /// to `normalized` when that is wanted.
+            ///
+            /// The affine parameters are applied in f64 and rounded once,
+            /// deliberately: rounding `z` to the element type first and scaling
+            /// the rounded value costs a second rounding on every element, in
+            /// the one layer whose whole job is numerical stability.
+            #[inline(always)]
+            fn affine_row<const W: bool, const B: bool, const N: bool>(
+                row: &[$ty],
+                mean: f64,
+                scale: f64,
+                weight: &[$ty],
+                bias: &[$ty],
+                out: &mut [$ty],
+                normalized: &mut [$ty],
+            ) {
+                let len = row.len();
+                let (weight, bias) = (
+                    &weight[..if W { len } else { 0 }],
+                    &bias[..if B { len } else { 0 }],
+                );
+                let normalized = &mut normalized[..if N { len } else { 0 }];
+                let out = &mut out[..len];
+                for i in 0..len {
+                    let z = (row[i] as f64 - mean) * scale;
+                    if N {
+                        normalized[i] = z as $ty;
+                    }
+                    let mut y = z;
+                    if W {
+                        y *= weight[i] as f64;
+                    }
+                    if B {
+                        y += bias[i] as f64;
+                    }
+                    out[i] = y as $ty;
+                }
+            }
         }
     };
 }
@@ -704,12 +805,19 @@ macro_rules! rms_norm_rows {
                         let scale = 1.0 / (sq * recip + eps).sqrt();
                         inv_rms[r] = scale as $ty;
                         let o = &mut out[r * norm..][..norm];
-                        for i in 0..norm {
-                            let mut y = row[i] as f64 * scale;
-                            if let Some(w) = weight {
-                                y *= w[i] as f64;
+                        // A loop for each case, as in `layer_norm`: the weight
+                        // tested and indexed per element kept this scalar.
+                        match weight {
+                            Some(w) => {
+                                for ((o, &x), &w) in o.iter_mut().zip(row).zip(&w[..norm]) {
+                                    *o = (x as f64 * scale * w as f64) as $ty;
+                                }
                             }
-                            o[i] = y as $ty;
+                            None => {
+                                for (o, &x) in o.iter_mut().zip(row) {
+                                    *o = (x as f64 * scale) as $ty;
+                                }
+                            }
                         }
                     }
                 },
