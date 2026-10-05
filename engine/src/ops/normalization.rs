@@ -167,6 +167,24 @@ pub fn batch_norm(
             input.shape().dims()
         )));
     }
+    // A float input whose parameters share its dtype -- every layer -- takes
+    // the fused kernel. What remains is composed below: an integer input,
+    // which widens through the operations, mixed dtypes, which promote, and an
+    // empty batch.
+    let (running_mean, running_var) = match crate::ops::batch_norm::fused_batch_norm(
+        input,
+        running_mean,
+        running_var,
+        weight,
+        bias,
+        use_batch_stats,
+        training,
+        momentum,
+        eps,
+    ) {
+        Ok(output) => return output,
+        Err(stats) => stats,
+    };
     let (mean_used, var_used, centered) = if use_batch_stats {
         let batch_mean = input.mean(Some(axes_isize.clone()), true)?; // [1, C, ...]
         let centered = crate::ops::arithmetic::sub(input, &batch_mean)?;

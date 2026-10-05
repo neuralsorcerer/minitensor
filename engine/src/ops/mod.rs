@@ -7,6 +7,7 @@
 pub mod activation;
 pub mod arithmetic;
 pub mod attention;
+mod batch_norm;
 pub mod binary;
 pub mod binary_math;
 pub mod bitwise;
