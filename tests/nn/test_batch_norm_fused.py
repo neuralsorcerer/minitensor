@@ -47,7 +47,19 @@ def _reference(x, w, b, go, mean, var, eps, from_batch):
     return out, dx, sum_gx, sum_g
 
 
-@pytest.mark.parametrize("shape", [(37, 5), (6, 4, 9), (5, 3, 7, 6), (1, 2, 4, 4)])
+# The last two have planes past one task's worth (32768 values), which are
+# summed and written in pieces, one of them partial.
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (37, 5),
+        (6, 4, 9),
+        (5, 3, 7, 6),
+        (1, 2, 4, 4),
+        (1, 2, 200, 200),
+        (2, 3, 190, 190),
+    ],
+)
 @pytest.mark.parametrize("affine", [True, False])
 @pytest.mark.parametrize("training", [True, False])
 def test_batch_norm_matches_the_definition(shape, affine, training):

@@ -114,7 +114,12 @@ fn lane_sum2<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> 
 /// Per channel, `Σ term(c, a, b)` over every `(a, b)` pair of that channel's
 /// values -- `a` and `b` laid out alike, `[N, C, S]` with `S > 1`.
 ///
-/// Summed a band of images at a time and the bands folded in order.
+/// Summed a band of images at a time and the bands folded in order. A plane of
+/// [`TASK_ELEMENTS`] or more is a task's worth on its own, and a band of one
+/// image is then as fine as the split goes -- a `[1, 3, 1024, 1024]` batch was
+/// three planes for four threads, and the threads took turns at one plane each
+/// -- so there each plane is summed in fixed pieces instead, a task apiece,
+/// folded in order. Either way the grouping follows from the shape alone.
 fn channel_sums<T: NormFloat, F: Fn(usize, T, T) -> f64 + Sync>(
     layout: Layout,
     a: &[T],
@@ -124,6 +129,22 @@ fn channel_sums<T: NormFloat, F: Fn(usize, T, T) -> f64 + Sync>(
     let Layout {
         channels, spatial, ..
     } = layout;
+    if spatial >= TASK_ELEMENTS {
+        let pieces = spatial.div_ceil(TASK_ELEMENTS);
+        let partials = par_map_indexed(layout.images * channels * pieces, &|index| {
+            let (segment, piece) = (index / pieces, index % pieces);
+            let c = segment % channels;
+            let start = segment * spatial + piece * TASK_ELEMENTS;
+            let end = (segment + 1) * spatial;
+            let stop = (start + TASK_ELEMENTS).min(end);
+            lane_sum2(&a[start..stop], &b[start..stop], |x, y| term(c, x, y))
+        });
+        let mut total = vec![0.0f64; channels];
+        for (index, partial) in partials.into_iter().enumerate() {
+            total[(index / pieces) % channels] += partial;
+        }
+        return total;
+    }
     banded(layout, &|sums, at| {
         for (c, sum) in sums.iter_mut().enumerate() {
             let at = at + c * spatial;
@@ -132,9 +153,6 @@ fn channel_sums<T: NormFloat, F: Fn(usize, T, T) -> f64 + Sync>(
             });
         }
     })
-    .into_iter()
-    .take(channels)
-    .collect()
 }
 
 /// Per channel, the sum `add(sums, at)` builds up when called with each
@@ -176,24 +194,42 @@ fn per_row<T: NormFloat, F: Fn(&mut [T], usize) + Sync>(layout: Layout, out: &mu
     });
 }
 
-/// Write `segment(c, out, offset)` for every `[S]` segment of `out`, whose
-/// channel is `c` and which starts at element `offset` of the buffer.
+/// Write `segment(c, out, offset)` over every `[S]` segment of `out`, in
+/// runs: `out` is the run, `c` the channel of the segment it lies in, and
+/// `offset` where in the buffer it starts.
+///
+/// A task is [`TASK_ELEMENTS`] whatever the segments are, so a run is a whole
+/// segment, or part of one when a segment is longer than a task: one segment
+/// a task left a `[1, 3, 1024, 1024]` batch three tasks for four threads. Every
+/// element is written on its own, so where the runs are cut does not move an
+/// answer.
 fn per_segment<T: NormFloat, F: Fn(usize, &mut [T], usize) + Sync>(
     layout: Layout,
     out: &mut [T],
     segment: &F,
 ) {
     let spatial = layout.spatial.max(1);
-    let per_task = TASK_ELEMENTS.div_ceil(spatial).max(1) * spatial;
+    let per_task = if spatial >= TASK_ELEMENTS {
+        TASK_ELEMENTS
+    } else {
+        TASK_ELEMENTS.div_ceil(spatial) * spatial
+    };
     par_out_chunks(out, per_task, &|first, chunk| {
-        // The channel is carried along rather than recovered per segment,
-        // which with one value a segment was two divisions an element.
+        // The channel is carried along rather than recovered per run, which
+        // with short segments was two divisions every few elements.
         let mut c = (first / spatial) % layout.channels;
-        for (k, seg) in chunk.chunks_mut(spatial).enumerate() {
-            segment(c, seg, first + k * spatial);
-            c += 1;
-            if c == layout.channels {
-                c = 0;
+        let mut segment_end = (first / spatial + 1) * spatial;
+        let (mut at, end) = (first, first + chunk.len());
+        while at < end {
+            let stop = segment_end.min(end);
+            segment(c, &mut chunk[at - first..stop - first], at);
+            at = stop;
+            if at == segment_end {
+                segment_end += spatial;
+                c += 1;
+                if c == layout.channels {
+                    c = 0;
+                }
             }
         }
     });
