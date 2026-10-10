@@ -56,6 +56,12 @@ SHAPES = [
     (64, 64),  # 4096 elements: below the threshold
     (5, 600),  # 3000
     (400, 400),  # 160000: above it
+    # Above it, the output is cut into fixed pieces that ignore row ends: one
+    # long row cut many times, rows longer than a piece, and many short rows
+    # to a piece. Odd lengths, so no cut lands on a row boundary by accident.
+    (300001,),
+    (3, 70001),
+    (70001, 3),
 ]
 
 EMPTY_SHAPES = [(0,), (0, 3), (3, 0), (2, 0, 4)]

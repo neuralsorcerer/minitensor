@@ -68,6 +68,10 @@ SHAPES = [
     (400, 400),  # 160000 elements: above the threshold
     (70000,),  # a single long row, below it
     (200000,),  # a single long row, above it
+    # Above it the output is cut into fixed pieces that ignore row ends: rows
+    # longer than a piece, and many short rows to a piece.
+    (3, 70001),
+    (70001, 3),
 ]
 
 EMPTY_SHAPES = [(0,), (0, 3), (3, 0), (2, 0, 4)]
@@ -82,7 +86,8 @@ def _values(shape, dtype, seed=0):
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES, ids=[str(s) for s in SHAPES])
-@pytest.mark.parametrize("shift", [-9, -1, 0, 1, 3, 8])
+# 100003 puts the wrap point in the middle of a piece of the long rows.
+@pytest.mark.parametrize("shift", [-9, -1, 0, 1, 3, 8, 100003])
 def test_flat_roll_matches_numpy(shape, dtype, shift):
     values = _values(shape, dtype)
     got = mt.Tensor(values, dtype=dtype).roll(shift).numpy()

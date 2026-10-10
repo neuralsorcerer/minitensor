@@ -14,7 +14,6 @@ use crate::{
     ops::map::{PAR_THRESHOLD, build_vec, outputs_per_task, par_out_chunks, par_out_chunks_sized},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -1331,33 +1330,41 @@ fn flip_rows(tensor: &Tensor, flipped: &[bool]) -> Result<Tensor> {
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::internal_error("Tensor data access failed for flip")
             })?;
-            let copy_row = |r: usize, dst: &mut [std::mem::MaybeUninit<$ty>]| {
-                let base = source_row(r) * row_len;
-                let row = &src[base..base + row_len];
-                if reverse_row {
-                    for (slot, value) in dst.iter_mut().zip(row.iter().rev()) {
-                        slot.write(*value);
+            // Output elements `start..start + piece.len()`, a row segment at a
+            // time. A piece may begin or end part way through a row, which is
+            // what lets one long row -- every 1-D flip -- split across the
+            // pool; cut only between rows, a million-element `flipud` ran on
+            // one core.
+            let fill = |start: usize, piece: &mut [std::mem::MaybeUninit<$ty>]| {
+                let mut done = 0;
+                while done < piece.len() {
+                    let at = start + done;
+                    let (row, column) = (at / row_len, at % row_len);
+                    let take = (row_len - column).min(piece.len() - done);
+                    let base = source_row(row) * row_len;
+                    let dst = &mut piece[done..done + take];
+                    if reverse_row {
+                        // Output columns `column..column + take` read source
+                        // columns `row_len - 1 - column` downwards.
+                        let segment = &src[base + row_len - column - take..base + row_len - column];
+                        for (slot, value) in dst.iter_mut().zip(segment.iter().rev()) {
+                            slot.write(*value);
+                        }
+                    } else {
+                        dst.write_copy_of_slice(&src[base + column..base + column + take]);
                     }
-                } else {
-                    dst.write_copy_of_slice(row);
+                    done += take;
                 }
             };
-            // SAFETY: the row chunks tile the output and `copy_row` writes a
-            // whole row, forwards or reversed.
+            // SAFETY: `fill` writes every element of the piece it is given,
+            // and the pieces tile the output.
             let out = unsafe {
                 build_vec::<$ty, _>(src.len(), |spare| {
-                    if spare.len() < PAR_THRESHOLD || spare.len() <= row_len {
-                        spare
-                            .chunks_mut(row_len)
-                            .enumerate()
-                            .for_each(|(r, dst)| copy_row(r, dst));
+                    if spare.len() < PAR_THRESHOLD {
+                        fill(0, spare);
                     } else {
-                        crate::parallel::install(|| {
-                            spare
-                                .par_chunks_mut(row_len)
-                                .enumerate()
-                                .for_each(|(r, dst)| copy_row(r, dst))
-                        });
+                        let piece = (256 << 10) / std::mem::size_of::<$ty>().max(1);
+                        crate::parallel::for_each_chunk_mut(spare, piece, &fill);
                     }
                 })
             };
@@ -1520,27 +1527,38 @@ fn roll_rows(tensor: &Tensor, shifts: &[usize]) -> Result<Tensor> {
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for roll")
             })?;
-            let copy_row = |r: usize, dst: &mut [std::mem::MaybeUninit<$ty>]| {
-                let base = source_row(r) * row_len;
-                dst[..head].write_copy_of_slice(&src[base + split..base + row_len]);
-                dst[head..].write_copy_of_slice(&src[base..base + split]);
+            // Output elements `start..start + piece.len()`, a row segment at a
+            // time, cut like `flip_rows`' so one long row still splits. Within
+            // a row, output columns below `head` read from `split` on and the
+            // rest from the row's start, so a segment is at most two copies.
+            let fill = |start: usize, piece: &mut [std::mem::MaybeUninit<$ty>]| {
+                let mut done = 0;
+                while done < piece.len() {
+                    let at = start + done;
+                    let (row, mut column) = (at / row_len, at % row_len);
+                    let end = done + (row_len - column).min(piece.len() - done);
+                    let base = source_row(row) * row_len;
+                    while done < end {
+                        let (from, run) = if column < head {
+                            (base + split + column, (head - column).min(end - done))
+                        } else {
+                            (base + column - head, end - done)
+                        };
+                        piece[done..done + run].write_copy_of_slice(&src[from..from + run]);
+                        done += run;
+                        column += run;
+                    }
+                }
             };
-            // SAFETY: the row chunks tile the output and `copy_row` writes both
-            // halves of a whole row.
+            // SAFETY: `fill` writes every element of the piece it is given,
+            // and the pieces tile the output.
             let out = unsafe {
                 build_vec::<$ty, _>(src.len(), |spare| {
-                    if spare.len() < PAR_THRESHOLD || spare.len() <= row_len {
-                        spare
-                            .chunks_mut(row_len)
-                            .enumerate()
-                            .for_each(|(r, dst)| copy_row(r, dst));
+                    if spare.len() < PAR_THRESHOLD {
+                        fill(0, spare);
                     } else {
-                        crate::parallel::install(|| {
-                            spare
-                                .par_chunks_mut(row_len)
-                                .enumerate()
-                                .for_each(|(r, dst)| copy_row(r, dst))
-                        });
+                        let piece = (256 << 10) / std::mem::size_of::<$ty>().max(1);
+                        crate::parallel::for_each_chunk_mut(spare, piece, &fill);
                     }
                 })
             };
