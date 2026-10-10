@@ -74,21 +74,30 @@ pub(crate) fn normal_quantile(p: f64, mean: f64, std: f64) -> f64 {
 ///
 /// `erf` and the normal CDF are the same function under a change of variable,
 /// so their inverses are too: `erf(z) = 2 Phi(z sqrt 2) - 1` rearranges to
-/// `erfinv(x) = Phi^-1((1 + x) / 2) / sqrt 2`. That spelling is not the one
-/// used below, though, and the difference matters at the ends.
+/// `erfinv(x) = Phi^-1((1 + x) / 2) / sqrt 2`. Neither end can use that
+/// spelling as it stands.
 ///
 /// `(1 + x) / 2` for `x` near 1 is a number near 1, and doubles near 1 are
 /// spaced 2.2e-16 apart — so `x = 1 - 1e-17` and `x = 1` become the same
 /// argument and the quantile is asked for `Phi^-1(1)`, which is infinite. The
-/// complement `(1 - x) / 2` has no such problem: for `x` in `[0, 1]` the
+/// complement `(1 - x) / 2` has no such problem: for `x` in `[1/2, 1]` the
 /// subtraction is exact (Sterbenz), the result is small, and a small
 /// probability carries its full relative precision into AS241's lower tail.
 /// So the sign is folded out first and the lower tail is what gets evaluated,
 /// using `Phi^-1(1 - p) = -Phi^-1(p)`.
 ///
+/// The complement is the wrong spelling at the middle. For small `x` it is
+/// a number near one half that has already lost the low digits of `x`: at
+/// `x = 1e-8` half the digits were gone, and below `1.1e-16` the argument was
+/// exactly one half and the answer zero -- negative zero, at that. So for
+/// `|x|` up to `0.85`, where `Phi^-1((1 + x) / 2)` is in AS241's central body,
+/// that body is evaluated at `q = x / 2` directly. It is odd in `q` and a
+/// multiple of it, so the answer is `x` times a ratio near `sqrt(pi) / 2`, and
+/// keeps every digit down through the subnormals.
+///
 /// Outside `[-1, 1]` there is nothing to invert and the answer is NaN. At
 /// exactly `+-1` it is `+-inf`, which is the limit and what the callers of
-/// `erfinv` already expect.
+/// `erfinv` already expect. Either zero is itself.
 #[inline]
 pub(crate) fn erf_inverse(x: f64) -> f64 {
     if x.is_nan() || !(-1.0..=1.0).contains(&x) {
@@ -100,14 +109,51 @@ pub(crate) fn erf_inverse(x: f64) -> f64 {
     if x == -1.0 {
         return f64::NEG_INFINITY;
     }
-    let magnitude = -standard_normal_quantile((1.0 - x.abs()) * 0.5) / SQRT_2;
-    if x < 0.0 { -magnitude } else { magnitude }
+    let size = x.abs();
+    let magnitude = if size <= 2.0 * CENTRAL_HALF_WIDTH {
+        size * (central_quantile_ratio(0.5 * size) * (0.5 / SQRT_2))
+    } else {
+        -standard_normal_quantile((1.0 - size) * 0.5) / SQRT_2
+    };
+    magnitude.copysign(x)
 }
 
 /// Evaluate a polynomial in `x` by Horner's rule, highest coefficient first.
 #[inline]
 fn horner(coefficients: &[f64], x: f64) -> f64 {
     coefficients.iter().fold(0.0, |acc, &c| acc * x + c)
+}
+
+/// How far either side of one half AS241's central body reaches, in `q = p - 1/2`.
+const CENTRAL_HALF_WIDTH: f64 = 0.425;
+
+/// `Phi^-1(1/2 + q) / q` for `|q| <= 0.425`: AS241's central rational
+/// function in `0.180625 - q^2`, with the factor of `q` left to the caller so
+/// that a `q` too small to form exactly can be carried as a multiple instead.
+#[inline]
+fn central_quantile_ratio(q: f64) -> f64 {
+    let r = 0.180625 - q * q;
+    const A: [f64; 8] = [
+        2.5090809287301226727e+3,
+        3.3430575583588128105e+4,
+        6.7265770927008700853e+4,
+        4.5921953931549871457e+4,
+        1.3731693765509461125e+4,
+        1.9715909503065514427e+3,
+        1.3314166789178437745e+2,
+        3.3871328727963666080e+0,
+    ];
+    const B: [f64; 8] = [
+        5.2264952788528545610e+3,
+        2.8729085735721942674e+4,
+        3.9307895800092710610e+4,
+        2.1213794301586595867e+4,
+        5.3941960214247511077e+3,
+        6.8718700749205790830e+2,
+        4.2313330701600911252e+1,
+        1.0,
+    ];
+    horner(&A, r) / horner(&B, r)
 }
 
 /// AS241 `PPND16`: the standard normal quantile.
@@ -124,29 +170,8 @@ fn standard_normal_quantile(p: f64) -> f64 {
     }
 
     let q = p - 0.5;
-    if q.abs() <= 0.425 {
-        let r = 0.180625 - q * q;
-        const A: [f64; 8] = [
-            2.5090809287301226727e+3,
-            3.3430575583588128105e+4,
-            6.7265770927008700853e+4,
-            4.5921953931549871457e+4,
-            1.3731693765509461125e+4,
-            1.9715909503065514427e+3,
-            1.3314166789178437745e+2,
-            3.3871328727963666080e+0,
-        ];
-        const B: [f64; 8] = [
-            5.2264952788528545610e+3,
-            2.8729085735721942674e+4,
-            3.9307895800092710610e+4,
-            2.1213794301586595867e+4,
-            5.3941960214247511077e+3,
-            6.8718700749205790830e+2,
-            4.2313330701600911252e+1,
-            1.0,
-        ];
-        return q * horner(&A, r) / horner(&B, r);
+    if q.abs() <= CENTRAL_HALF_WIDTH {
+        return q * central_quantile_ratio(q);
     }
 
     // Work with whichever tail `p` is in, then put the sign back. `r` is the
@@ -341,6 +366,48 @@ mod tests {
                 (libm::erf(z) - x).abs() < 1e-14,
                 "erf_inverse({x}) = {z} does not invert"
             );
+        }
+    }
+
+    /// `erfinv(x) = sqrt(pi)/2 (x + pi x^3 / 12 + ...)`, so below `1e-8` the
+    /// cubic term is under a part in `1e16` and the leading one is the answer.
+    /// The complement spelling lost half the digits at `1e-8` and returned
+    /// negative zero below `1.1e-16`; the smallest subnormal rounds to itself.
+    #[test]
+    fn erf_inverse_keeps_its_digits_and_sign_near_zero() {
+        // sqrt(pi) / 2, to more digits than a double holds.
+        let lead = 0.886_226_925_452_758_013_649_083_741_671_f64;
+        for &x in &[1e-8, 3e-12, 1e-16, 1e-20, 1e-300, 2.2250738585072014e-308] {
+            for x in [x, -x] {
+                let z = erf_inverse(x);
+                let expected = lead * x;
+                assert!(
+                    ((z - expected) / expected).abs() < 3e-16,
+                    "erf_inverse({x}) = {z}, expected {expected}"
+                );
+            }
+        }
+        assert_eq!(erf_inverse(5e-324), 5e-324);
+        assert_eq!(erf_inverse(-5e-324), -5e-324);
+        assert!(erf_inverse(-0.0).is_sign_negative());
+        assert!(erf_inverse(0.0).is_sign_positive());
+        // Through the central body and either side of the seam where it hands
+        // over to the tail, against values carried to 25 digits. AS241 holds
+        // a part in `1e16` or so, which is two or three ulps here.
+        for &(x, expected) in &[
+            (0.1, 0.088_855_990_494_257_691_974_280_41),
+            (0.5, 0.476_936_276_204_469_873_381_418_4),
+            (0.849_999, 1.017_899_967_206_109_391_368_224),
+            (0.85, 1.017_902_464_832_027_588_150_153),
+            (0.850_001, 1.017_904_962_470_645_475_953_546),
+        ] {
+            for (x, expected) in [(x, expected), (-x, -expected)] {
+                let z = erf_inverse(x);
+                assert!(
+                    ((z - expected) / expected).abs() < 4.5e-16,
+                    "erf_inverse({x}) = {z}, expected {expected}"
+                );
+            }
         }
     }
 

@@ -198,8 +198,10 @@ unit_grad_kernel!(
 // --- threshold and softshrink ----------------------------------------------
 
 unit_kernel!(
-    /// `x` where it exceeds `p[0]`, the replacement `p[1]` elsewhere.
-    THRESHOLD, |x, p| if x > p[0] { x } else { p[1] }
+    /// `x` where it exceeds `p[0]`, the replacement `p[1]` elsewhere. Asked
+    /// as `x <= p[0]` so that NaN, which fails every comparison, is passed
+    /// through rather than replaced.
+    THRESHOLD, |x, p| if x <= p[0] { p[1] } else { x }
 );
 unit_grad_kernel!(
     /// The replacement does not depend on `x`, so nothing flows through it.
@@ -210,12 +212,14 @@ unit_kernel!(
     /// Shrinks towards zero by `p[0]`, and flattens the band `[-p[0], p[0]]`.
     /// Unlike `hardshrink` this is continuous: it subtracts the threshold
     /// rather than leaving the value where it was.
-    SOFTSHRINK, |x, p| if x > p[0] {
-        x - p[0]
-    } else if x < -p[0] {
-        x + p[0]
-    } else {
+    SOFTSHRINK, |x, p| if x.abs() <= p[0] {
         0.0
+    } else if x > 0.0 {
+        x - p[0]
+    } else {
+        // The band test is the one NaN fails, so NaN arrives here and stays
+        // NaN, where testing the two sides first sent it to the zero between.
+        x + p[0]
     }
 );
 unit_grad_kernel!(
@@ -299,17 +303,19 @@ unit_grad_kernel!(
     }
 );
 
-unit_kernel!(
-    /// `x * tanh(softplus(x))`. Smooth, non-monotonic, and self-regularising:
-    /// it keeps a small negative tail instead of clipping it to zero.
-    ///
-    /// `tanh(log(1 + e))` is `n / (n + 2)` with `n = e * (e + 2)` and
-    /// `e = exp(x)`, so the whole unit is one exponential rather than an
-    /// exponential, a `ln_1p` and a `tanh` -- the three of them cost over ten
-    /// times what the rest of a pass does. The ratio has no cancellation:
-    /// both terms are positive. Past `x = 20` the factor is 1 to within
-    /// float64 rounding, and `n` would be on its way to overflowing.
-    MISH, |x, _p| if x > 20.0 {
+/// `x * tanh(softplus(x))` in float64. Smooth, non-monotonic, and
+/// self-regularising: it keeps a small negative tail instead of clipping it to
+/// zero.
+///
+/// `tanh(log(1 + e))` is `n / (n + 2)` with `n = e * (e + 2)` and
+/// `e = exp(x)`, so the whole unit is one exponential rather than an
+/// exponential, a `ln_1p` and a `tanh` -- the three of them cost over ten
+/// times what the rest of a pass does. The ratio has no cancellation: both
+/// terms are positive. Past `x = 20` the factor is 1 to within float64
+/// rounding, and `n` would be on its way to overflowing.
+#[inline(always)]
+fn mish_wide(x: f64) -> f64 {
+    if x > 20.0 {
         x
     } else if x.is_infinite() {
         // `-inf * 0` at the bottom; the limit is 0.
@@ -319,26 +325,36 @@ unit_kernel!(
         let n = e * (e + 2.0);
         x * (n / (n + 2.0))
     }
-);
-unit_grad_kernel!(
-    /// `tanh(sp) + x * sech^2(sp) * sigmoid(x)`, where `sp = softplus(x)` and
-    /// `d(sp)/dx = sigmoid(x)`. Through the same `n = e * (e + 2)` the value
-    /// uses: `tanh(sp) = n / (n + 2)`, `sech^2(sp) = 4 (n + 1) / (n + 2)^2`
-    /// and `sigmoid(x) = e / (e + 1)`, so one exponential serves all three.
-    MISH_D, |x, g, _p| if x > 20.0 {
-        // The limit, 1, where `n` would be on its way to overflowing.
-        g
-    } else if x.is_infinite() {
-        // The limit at the bottom, 0, where the formula would form `inf * 0`.
-        0.0 * g
-    } else {
-        let e = x.exp();
-        let n = e * (e + 2.0);
-        let d = n + 2.0;
-        // `4 (n + 1) / d^2` divided twice, so `d^2` cannot overflow float32.
-        g * (n / d + x * (4.0 * (n + 1.0) / d / d) * (e / (e + 1.0)))
+}
+
+/// `tanh(sp) + x * sech^2(sp) * sigmoid(x)`, where `sp = softplus(x)` and
+/// `d(sp)/dx = sigmoid(x)`. Through the same `n = e * (e + 2)` the value uses:
+/// `tanh(sp) = n / (n + 2)`, `sech^2(sp) = 4 (n + 1) / (n + 2)^2` and
+/// `sigmoid(x) = e / (e + 1)`, so one exponential serves all three. float32
+/// is evaluated in float64, for the reason the value is.
+const MISH_D: UnitGradKernel = {
+    #[inline(always)]
+    fn narrow(x: f32, g: f32, _p: UnitParams<f32>) -> f32 {
+        crate::ops::simd::mish_backward_f32(x, g)
     }
-);
+    #[inline(always)]
+    fn wide(x: f64, g: f64, _p: UnitParams<f64>) -> f64 {
+        if x > 20.0 {
+            // The limit, 1, where `n` would be on its way to overflowing.
+            g
+        } else if x.is_infinite() {
+            // The limit at the bottom, 0, where the formula would form `inf * 0`.
+            0.0 * g
+        } else {
+            let e = x.exp();
+            let n = e * (e + 2.0);
+            let d = n + 2.0;
+            // `4 (n + 1) / d^2` divided twice, so `d^2` cannot overflow.
+            g * (n / d + x * (4.0 * (n + 1.0) / d / d) * (e / (e + 1.0)))
+        }
+    }
+    (narrow, wide)
+};
 
 unit_kernel!(
     /// `max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`, with `alpha` in
@@ -508,12 +524,36 @@ plain_unit!(
     TANHSHRINK_D,
     "`x - tanh(x)`, what `tanh` leaves behind."
 );
-plain_unit!(
-    mish,
-    MISH,
-    MISH_D,
-    "`x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative tail."
-);
+/// `x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative
+/// tail.
+///
+/// Written out rather than declared with `plain_unit!` so that float32 values
+/// come from the vectorized kernel, which evaluates in float64 and rounds once;
+/// the gradient is the unit one, attached the way every other unit attaches it.
+pub fn mish(tensor: &Tensor) -> Result<Tensor> {
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return mish(&widened);
+    }
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => mish_f32(tensor)?,
+        DataType::Float64 => {
+            let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+            })?;
+            TensorData::from_vec::<f64>(
+                unary_map(input, mish_wide),
+                DataType::Float64,
+                tensor.device(),
+            )
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "mish is only supported for floating point tensors, got {other}"
+            )));
+        }
+    };
+    unary_unit_from_data!(tensor, "mish", output_data, MISH_D, [0.0; 2])
+}
 /// `log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the
 /// direct form underflows.
 ///
@@ -947,6 +987,32 @@ mod tests {
         let fractional = hardtanh(&ints, -0.5, 0.5).unwrap();
         assert_eq!(fractional.dtype(), DataType::Float64);
         assert_eq!(fractional.data().as_f64_slice().unwrap(), &[-0.5, 0.5, 0.5]);
+    }
+
+    /// NaN in is NaN out, at both widths. `threshold` and `softshrink` once
+    /// asked their questions the way round that NaN fails and so answered
+    /// with the replacement or the band's zero.
+    #[test]
+    fn nan_in_is_nan_out_at_both_widths() {
+        let narrow_input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![f32::NAN, 1.0], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        for (name, op) in units() {
+            let wide_out = wide(&op(&f64_tensor(vec![f64::NAN, 1.0])).unwrap());
+            assert!(wide_out[0].is_nan(), "{name} in float64: {wide_out:?}");
+            assert!(wide_out[1].is_finite(), "{name} in float64: {wide_out:?}");
+            let narrow_out = op(&narrow_input).unwrap();
+            let narrow_out = narrow_out.data().as_f32_slice().unwrap().to_vec();
+            assert!(narrow_out[0].is_nan(), "{name} in float32: {narrow_out:?}");
+            assert!(
+                narrow_out[1].is_finite(),
+                "{name} in float32: {narrow_out:?}"
+            );
+        }
     }
 
     #[test]

@@ -229,6 +229,21 @@ def test_erfinv_is_infinite_at_the_endpoints_and_nan_past_them():
     assert np.isnan(got[2:]).all(), "erf never reaches past 1"
 
 
+def test_erfinv_keeps_its_digits_and_its_sign_near_zero():
+    # erfinv(x) = sqrt(pi)/2 (x + pi x^3 / 12 + ...), and below 1e-8 the cubic
+    # term is under a part in 1e16. The answer used to come from a probability
+    # near one half, which had lost half the digits at 1e-8 and was exactly
+    # one half -- giving -0.0 -- below 1.1e-16.
+    lead = 0.886226925452758013649083741671
+    values = np.array([1e-8, 3e-12, 1e-16, 1e-20, 1e-300, 2.2250738585072014e-308])
+    for sign in (1.0, -1.0):
+        got = mt.erfinv(_t(sign * values)).numpy()
+        np.testing.assert_allclose(got, sign * lead * values, rtol=4e-16)
+    assert mt.erfinv(_t([5e-324])).numpy()[0] == 5e-324
+    zeros = mt.erfinv(_t([0.0, -0.0])).numpy()
+    assert list(np.signbit(zeros)) == [False, True]
+
+
 def test_erfinv_gradient_matches_central_differences():
     values = [-0.9, -0.3, 0.0, 0.45, 0.88]
     np.testing.assert_allclose(

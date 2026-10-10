@@ -1111,7 +1111,14 @@ const SOFTPLUS_LIMIT: f64 = 300.0;
 fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
     let xd = x as f64;
     let v = beta * xd;
-    let (two_pow_n, r) = reduce_exp::<FMA>(v.max(-SOFTPLUS_LIMIT));
+    // A comparison rather than `max`, which returns the number when the other
+    // operand is NaN: a NaN input became softplus(-300), zero, here.
+    let clamped = if v < -SOFTPLUS_LIMIT {
+        -SOFTPLUS_LIMIT
+    } else {
+        v
+    };
+    let (two_pow_n, r) = reduce_exp::<FMA>(clamped);
     let w = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
     let u = 1.0 + w;
     let c = w - (u - 1.0);
@@ -1250,6 +1257,69 @@ fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
         s * fma_or::<FMA>(xd, one_minus_s, 1.0)
     };
     (local * gout as f64) as f32
+}
+
+/// Past this `mish(x)` is `x` and its slope 1, to within float64: the factor
+/// `tanh(softplus(x))` is short of one by `2 exp(-2x)`, 8.5e-18 here.
+const MISH_UPPER: f64 = 20.0;
+
+/// `e = exp(x)` and `n = e (e + 2)`, the two quantities both halves of `mish`
+/// are written in: `tanh(softplus(x)) = n / (n + 2)`.
+#[inline(always)]
+fn mish_parts<const FMA: bool>(xd: f64) -> (f64, f64) {
+    let (two_pow_n, r) = reduce_exp::<FMA>(xd.clamp(-LOGISTIC_LIMIT, MISH_UPPER));
+    let e = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    (e, e * (e + 2.0))
+}
+
+/// `x * tanh(softplus(x))`, evaluated in float64 and rounded once.
+///
+/// The scalar form this replaces evaluated the same ratio in float32, where
+/// `exp(x)` goes subnormal below -87 and has a bit or two left by -103: the
+/// answer there, about `x e^x`, came out a quarter low at -103 and zero at
+/// -104, where -7.1e-44 is representable. In float64 `e` keeps its digits all
+/// the way down to where the product underflows float32.
+#[inline(always)]
+fn mish_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let (_, n) = mish_parts::<FMA>(xd);
+    // Below the clamp the product has underflowed float32, so the answer is a
+    // zero of `x`'s sign -- the limit at `-inf` too, where it would be
+    // `-inf * 0`. Above it the factor is 1. NaN fails both tests and stays NaN.
+    if xd > MISH_UPPER {
+        x
+    } else if xd < -LOGISTIC_LIMIT {
+        0.0f64.copysign(xd) as f32
+    } else {
+        (xd * (n / (n + 2.0))) as f32
+    }
+}
+
+/// `d/dx mish(x) = tanh(sp) + x sech^2(sp) sigmoid(x)`, with `sp = softplus(x)`,
+/// times the incoming gradient; through the same `n` the value uses,
+/// `sech^2(sp) = 4 (n + 1) / (n + 2)^2` and `sigmoid(x) = e / (e + 1)`.
+#[inline(always)]
+fn mish_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    let xd = x as f64;
+    let (e, n) = mish_parts::<FMA>(xd);
+    let d = n + 2.0;
+    // The limits outside the clamp: 1 above, 0 below, where the formula would
+    // form `inf * 0` at an infinite `x`.
+    let local = if xd > MISH_UPPER {
+        1.0
+    } else if xd < -LOGISTIC_LIMIT {
+        0.0
+    } else {
+        n / d + xd * (4.0 * (n + 1.0) / (d * d)) * (e / (e + 1.0))
+    };
+    (local * gout as f64) as f32
+}
+
+/// [`mish_backward_one`] for one element, for a caller whose loop is not one of
+/// the dispatched blocks.
+#[inline(always)]
+pub(crate) fn mish_backward_f32(x: f32, gout: f32) -> f32 {
+    mish_backward_one::<false>(x, gout)
 }
 
 // ---------------------------------------------------------------------------
@@ -1960,6 +2030,7 @@ block_kernel!(
     sigmoid_block_avx2
 );
 block_kernel!(silu_block, silu_one, silu_block_avx512, silu_block_avx2);
+block_kernel!(mish_block, mish_one, mish_block_avx512, mish_block_avx2);
 trig_block_kernel!(
     sin_block,
     sin_one,
@@ -2209,6 +2280,19 @@ impl F32Kernel {
             silu_block,
             silu_block_avx512,
             silu_block_avx2
+        )
+    }
+
+    /// Write `x * tanh(softplus(x))` for every element into `out`.
+    #[inline]
+    pub(crate) fn mish(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            mish_block,
+            mish_block_avx512,
+            mish_block_avx2
         )
     }
 
@@ -2653,6 +2737,7 @@ mod tests {
         Log1p,
         Sigmoid,
         Silu,
+        Mish,
         Sin,
         Cos,
         Tan,
@@ -2684,6 +2769,7 @@ mod tests {
             Op::Log1p => k.log1p(input, out),
             Op::Sigmoid => k.sigmoid(input, out),
             Op::Silu => k.silu(input, out),
+            Op::Mish => k.mish(input, out),
             Op::Sin => k.sin(input, out),
             Op::Cos => k.cos(input, out),
             Op::Tan => k.tan(input, out),
@@ -2825,6 +2911,9 @@ mod tests {
             f32::MIN,
             f32::INFINITY,
             f32::NEG_INFINITY,
+            // The clamp on the exponent once swallowed this one: `max` returns
+            // the number when the other operand is NaN, so NaN came back 0.
+            f32::NAN,
         ];
 
         let mut reference_run: Option<Vec<f32>> = None;
@@ -2857,7 +2946,15 @@ mod tests {
             match &reference_run {
                 None => reference_run = Some(got),
                 Some(first) => {
-                    assert_eq!(&got, first, "backends disagree at {backend:?}")
+                    // Bit for bit, and NaN against NaN, which `==` refuses.
+                    let agree = got
+                        .iter()
+                        .zip(first)
+                        .all(|(a, b)| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()));
+                    assert!(
+                        agree,
+                        "backends disagree at {backend:?}: {got:?} against {first:?}"
+                    )
                 }
             }
         }
@@ -2899,7 +2996,8 @@ mod tests {
         // GELU and SiLU are `x` times a factor that vanishes as `x -> -inf`;
         // the limit there is a negative zero, not the `-inf * 0` the formulas
         // below would form.
-        if x == f32::NEG_INFINITY && matches!(op, Op::GeluErf | Op::GeluTanh | Op::Silu) {
+        if x == f32::NEG_INFINITY && matches!(op, Op::GeluErf | Op::GeluTanh | Op::Silu | Op::Mish)
+        {
             return -0.0;
         }
         let xd = x as f64;
@@ -2934,6 +3032,9 @@ mod tests {
             // negative x, which is the bug these kernels fix.
             Op::Sigmoid => stable_logistic(xd) as f32,
             Op::Silu => (xd * stable_logistic(xd)) as f32,
+            // `tanh(log1p(e))` straight from its definition, in float64: no
+            // shortcut the kernel takes is shared with the reference.
+            Op::Mish => (xd * xd.exp().ln_1p().tanh()) as f32,
             Op::Sin => xd.sin() as f32,
             Op::Cos => xd.cos() as f32,
             Op::Tan => xd.tan() as f32,
@@ -3057,6 +3158,7 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Mish,
             Op::Sin,
             Op::Cos,
             Op::Tan,
@@ -3097,6 +3199,7 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Mish,
             Op::Sin,
             Op::Cos,
             Op::Tan,
@@ -3218,6 +3321,7 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Mish,
             Op::Sin,
             Op::Cos,
             Op::Tan,
@@ -3733,6 +3837,64 @@ mod tests {
             // ... and zero once it is not.
             assert_eq!(got[6], 0.0, "{backend:?}: should underflow at x = -200");
         }
+    }
+
+    /// `mish`'s float32 tail, about `x e^x`, is representable down to
+    /// `x = -110`; the float32 ratio this replaced was a quarter low at -103
+    /// and zero at -104, where -7.1e-44 is a value.
+    #[test]
+    fn mish_keeps_its_subnormal_tail() {
+        let xs: Vec<f32> = vec![
+            -87.0,
+            -95.0,
+            -103.0,
+            -104.0,
+            -108.0,
+            -112.0,
+            -1e30,
+            f32::MIN,
+        ];
+        for backend in available() {
+            let got = run(Op::Mish, backend, &xs);
+            for (&x, &have) in xs.iter().zip(got.iter()) {
+                let want = reference(Op::Mish, x);
+                assert!(
+                    ulps_apart(have, want) <= 1,
+                    "{backend:?}: mish({x:e}) gave {have:e}, want {want:e}"
+                );
+            }
+            assert!(got[3] != 0.0 && got[3] < 0.0, "{backend:?}: {got:?}");
+            assert_eq!(got[6], 0.0);
+            assert!(got[6].is_sign_negative());
+        }
+    }
+
+    /// The scalar gradient the unit skeleton runs for float32 `mish`, against
+    /// the derivative written from its definition in float64.
+    #[test]
+    fn mish_backward_matches_the_analytic_derivative() {
+        let xs: Vec<f32> = sample_inputs()
+            .into_iter()
+            .filter(|v| v.is_finite() && v.abs() < 1e30)
+            .chain([-103.0, -104.0, -110.0, 19.9, 20.1])
+            .collect();
+        for &x in &xs {
+            let xd = x as f64;
+            let e = xd.exp();
+            let sp = e.ln_1p();
+            let t = sp.tanh();
+            let local = t + xd * (1.0 - t * t) * stable_logistic(xd);
+            let want = (local * 0.75) as f32;
+            let got = mish_backward_f32(x, 0.75);
+            assert!(
+                ulps_apart(got, want) <= 2,
+                "mish'({x:e}) gave {got:e}, want {want:e}"
+            );
+        }
+        assert!(mish_backward_f32(f32::NAN, 1.0).is_nan());
+        assert!(mish_backward_f32(1.0, f32::NAN).is_nan());
+        assert_eq!(mish_backward_f32(f32::NEG_INFINITY, 1.0), 0.0);
+        assert_eq!(mish_backward_f32(f32::INFINITY, 1.0), 1.0);
     }
 
     #[test]

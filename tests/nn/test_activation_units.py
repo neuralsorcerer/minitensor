@@ -110,6 +110,43 @@ def test_the_saturating_units_answer_where_the_definition_overflows():
         assert np.log(_sigmoid(-800.0)) == -np.inf
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("name", sorted(UNITS))
+def test_nan_in_is_nan_out(name, dtype):
+    call, _ = UNITS[name]
+    got = call(mt.Tensor([float("nan"), 1.0], dtype=dtype)).numpy()
+    assert np.isnan(got[0]), f"{name} gave {got[0]} for NaN"
+    assert np.isfinite(got[1])
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_softplus_and_logsigmoid_carry_nan(dtype):
+    # The float32 kernel clamped its exponent with `max`, which hands back the
+    # number when the other side is NaN: NaN came out as softplus(-300) = 0.
+    x = mt.Tensor([float("nan"), -1.0, 1.0], dtype=dtype)
+    for got in (
+        mt.functional.softplus(x),
+        mt.functional.softplus(x, 2.0, 20.0),
+        x.logsigmoid(),
+    ):
+        values = got.numpy()
+        assert np.isnan(values[0])
+        assert np.isfinite(values[1:]).all()
+
+
+def test_float32_mish_keeps_its_subnormal_tail():
+    # About x e^x down there, representable to x = -110. Evaluated in float32
+    # the exponential had a bit or two left by -103, and none by -104.
+    x = np.array([-90.0, -103.0, -104.0, -108.0, -1e30], dtype=np.float32)
+    got = mt.from_numpy(x).mish().numpy()
+    expected = (x.astype(np.float64) * np.exp(x.astype(np.float64))).astype(np.float32)
+    np.testing.assert_array_equal(got[:4], expected[:4])
+    assert got[4] == 0.0 and np.signbit(got[4])
+    np.testing.assert_array_equal(
+        got, mt.from_numpy(x.astype(np.float64)).mish().numpy().astype(np.float32)
+    )
+
+
 def test_relu6_is_hardtanh_on_zero_to_six():
     tensor = mt.from_numpy(SAMPLE.copy())
     np.testing.assert_array_equal(

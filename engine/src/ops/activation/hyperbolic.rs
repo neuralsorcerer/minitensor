@@ -904,6 +904,14 @@ vector_f32!(
     silu
 );
 
+vector_f32!(
+    /// Vectorized, and evaluated in float64: the float32 ratio this replaces
+    /// had an `exp(x)` gone subnormal below -87, and left the tail a quarter
+    /// low by -103 and zero by -104.
+    mish_f32,
+    mish
+);
+
 float_unary_kernel!(silu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     // `1/(1 + exp(-x))` overflows for large negative x and loses the tail; the
     // stable form costs a branch and keeps it.
