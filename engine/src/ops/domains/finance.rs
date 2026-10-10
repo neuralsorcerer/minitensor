@@ -93,7 +93,7 @@ struct Quote {
     /// `e^{-rT}`.
     discount: f64,
     /// `d1`; infinite in the degenerate branch, which is how
-    /// [`Quote::is_degenerate`] recognises it.
+    /// [`Quote::is_degenerate`] recognises it, and NaN when an input is.
     d1: f64,
     /// `Phi(sign * d1)`.
     nd1: f64,
@@ -111,13 +111,18 @@ impl Quote {
         } else {
             0.0
         };
-        let (d1, d2) = if spread > 0.0 && spot > 0.0 && strike > 0.0 {
+        let (d1, d2) = if [spot, strike, rate, vol, time].iter().any(|v| v.is_nan()) {
+            // NaN fails every test below, and would otherwise be taken for a
+            // zero spread or spot and priced at intrinsic value -- or at zero,
+            // once the intrinsic value is NaN too. The closed form carries it.
+            (f64::NAN, f64::NAN)
+        } else if spread > 0.0 && spot > 0.0 && strike > 0.0 {
             let d1 = ((spot / strike).ln() + (rate + 0.5 * vol * vol) * time) / spread;
             (d1, d1 - spread)
         } else {
             (f64::INFINITY, f64::INFINITY)
         };
-        let (nd1, nd2) = if d1.is_finite() {
+        let (nd1, nd2) = if !d1.is_infinite() {
             (
                 normal_cdf(sign * d1, 0.0, 1.0),
                 normal_cdf(sign * d2, 0.0, 1.0),
@@ -140,9 +145,13 @@ impl Quote {
     }
 
     /// Whether the closed form applies, or the intrinsic-value limit does.
+    ///
+    /// A NaN `d1` is not degenerate: the closed form propagates it to the
+    /// price and every Greek, where the limit's `max(0, .)` and comparisons
+    /// would turn it into a number.
     #[inline]
     fn is_degenerate(&self) -> bool {
-        !self.d1.is_finite()
+        self.d1.is_infinite()
     }
 
     fn price(&self) -> f64 {
@@ -537,7 +546,9 @@ fn solve_one(
     tolerance: f64,
     max_iterations: usize,
 ) -> f64 {
-    if !(target.is_finite() && spot > 0.0 && strike > 0.0 && time > 0.0) {
+    // `rate` too: a NaN price fails both bracket tests below, and the search
+    // would go on to return wherever its bisection had got to.
+    if !(target.is_finite() && spot > 0.0 && strike > 0.0 && time > 0.0) || rate.is_nan() {
         return f64::NAN;
     }
     // No volatility can price below intrinsic or above the spot (for a call);
@@ -719,6 +730,54 @@ mod tests {
             &scalar(100.0),
             &scalar(100.0),
             &scalar(0.0),
+            &scalar(1.0),
+            OptionKind::Call,
+            1e-10,
+            100,
+        )
+        .unwrap();
+        assert!(recovered.data().as_f64_slice().unwrap()[0].is_nan());
+    }
+
+    /// A NaN anywhere among the inputs prices to NaN, and so does every Greek.
+    /// NaN fails the `spot > 0` and `vol > 0` tests that pick the degenerate
+    /// branch, so it was priced at intrinsic value -- a finite number for a
+    /// NaN volatility, and zero once the intrinsic value was NaN too.
+    #[test]
+    fn a_nan_input_prices_to_nan() {
+        let base = [100.0, 95.0, 0.04, 0.3, 0.75];
+        for kind in [OptionKind::Call, OptionKind::Put] {
+            for slot in 0..INPUT_COUNT {
+                let mut inputs = base;
+                inputs[slot] = f64::NAN;
+                let [s, k, r, v, t] = inputs;
+                assert!(
+                    price_of(s, k, r, v, t, kind).is_nan(),
+                    "{kind:?} slot {slot}"
+                );
+                let quote = Quote::new(s, k, r, v, t, kind);
+                for (greek, value) in [
+                    ("delta", quote.delta()),
+                    ("dual_delta", quote.dual_delta()),
+                    ("rho", quote.rho()),
+                    ("vega", quote.vega()),
+                    ("d_time", quote.d_time()),
+                ] {
+                    assert!(value.is_nan(), "{kind:?} slot {slot}: {greek} = {value}");
+                }
+            }
+        }
+        // The degenerate limits themselves are untouched.
+        assert!((price_of(120.0, 100.0, 0.05, 0.2, 0.0, OptionKind::Call) - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_nan_rate_has_no_implied_volatility() {
+        let recovered = implied_volatility(
+            &scalar(10.0),
+            &scalar(100.0),
+            &scalar(100.0),
+            &scalar(f64::NAN),
             &scalar(1.0),
             OptionKind::Call,
             1e-10,

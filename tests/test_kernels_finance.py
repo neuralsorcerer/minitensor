@@ -137,6 +137,29 @@ def test_the_degenerate_corner_is_finite_rather_than_nan():
         assert np.isfinite(np.asarray(price)).all(), (vol, time)
 
 
+@pytest.mark.parametrize("kind", ["call", "put"])
+@pytest.mark.parametrize("slot", range(5))
+def test_a_nan_input_prices_to_nan_and_so_do_its_greeks(kind, slot):
+    # NaN fails the `vol > 0` and `spot > 0` tests that pick the degenerate
+    # corner, and the corner's `max(0, intrinsic)` then turned it into a
+    # number: a finite price for a NaN volatility, zero for a NaN spot.
+    case = list(_BASE)
+    case[slot] = float("nan")
+    inputs = [_t([value], requires_grad=True) for value in case]
+    price = black_scholes(*inputs, kind)
+    assert np.isnan(np.asarray(price)).all()
+    price.sum().backward()
+    for name, tensor in zip(_NAMES, inputs):
+        assert np.isnan(tensor.grad.numpy()).all(), name
+
+
+def test_a_nan_rate_has_no_implied_volatility():
+    vol = implied_volatility(
+        _t([10.0]), _t([100.0]), _t([100.0]), _t([float("nan")]), _t([1.0]), "call"
+    )
+    assert np.isnan(np.asarray(vol)).all()
+
+
 # --- the Greeks ---------------------------------------------------------------
 
 
