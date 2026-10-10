@@ -1122,7 +1122,12 @@ fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
     let w = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
     let u = 1.0 + w;
     let c = w - (u - 1.0);
-    let soft = log_core::<FMA, true>(u, c) / beta;
+    // Times the reciprocal rather than divided: `beta` is the same for the
+    // whole block, so the reciprocal is formed once and the loop multiplies,
+    // where a float64 divide per element was a quarter of the kernel's time.
+    // For `beta = 1` -- every `logsigmoid` and cross-entropy -- it is exact;
+    // otherwise it is within an ulp of float64, far below the float32 result.
+    let soft = log_core::<FMA, true>(u, c) * (1.0 / beta);
     // Above the threshold softplus is `x` to within float32; NaN fails the
     // comparison and comes through the computed side, which is NaN too.
     if v > threshold {
@@ -3836,6 +3841,36 @@ mod tests {
             assert!(got[4] != 0.0, "{backend:?}: truncated at x = -95: {got:?}");
             // ... and zero once it is not.
             assert_eq!(got[6], 0.0, "{backend:?}: should underflow at x = -200");
+        }
+    }
+
+    /// `softplus` at a `beta` other than one, where the kernel multiplies by
+    /// the reciprocal of `beta` rather than dividing by it: still within an
+    /// ulp of the float64 definition, on every backend.
+    #[test]
+    fn softplus_with_a_beta_stays_within_one_ulp() {
+        let xs: Vec<f32> = sample_inputs()
+            .into_iter()
+            .filter(|v| v.is_finite() && v.abs() < 1e6)
+            .collect();
+        for beta in [0.5f64, 2.0, 3.0, 10.0, 0.1] {
+            for backend in available() {
+                let mut out = vec![MaybeUninit::uninit(); xs.len()];
+                F32Kernel(backend).softplus(&xs, &mut out, beta, SOFTPLUS_THRESHOLD);
+                for (&x, got) in xs.iter().zip(out) {
+                    let got = unsafe { got.assume_init() };
+                    let z = beta * x as f64;
+                    let want = if z > SOFTPLUS_THRESHOLD {
+                        x
+                    } else {
+                        ((z.max(0.0) + (-z.abs()).exp().ln_1p()) / beta) as f32
+                    };
+                    assert!(
+                        ulps_apart(got, want) <= 1,
+                        "beta {beta}/{backend:?}: softplus({x:e}) gave {got:e}, want {want:e}"
+                    );
+                }
+            }
         }
     }
 
