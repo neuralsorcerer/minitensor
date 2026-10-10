@@ -2882,6 +2882,13 @@ impl Tensor {
         crate::ops::binary_math::fmin(self, other)
     }
 
+    /// `self * 2^other`; exact for an integer `other`. See
+    /// [`crate::ops::binary_math::ldexp`].
+    #[inline(always)]
+    pub fn ldexp(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::ldexp(self, other)
+    }
+
     /// `sqrt(self^2 + other^2)` without forming either square.
     #[inline(always)]
     pub fn hypot(&self, other: &Self) -> Result<Self> {

@@ -261,6 +261,73 @@ def test_ldexp_scales_by_an_exact_power_of_two():
     )
 
 
+@pytest.mark.parametrize("exponent_dtype", ["int32", "int64"])
+def test_an_integer_exponent_is_applied_to_the_exponent(exponent_dtype):
+    """Not as `input * exp2(other)`, which forms the power first: that is zero
+    or infinite past float64's range even where the scaled value is not, and
+    `0 * inf` is NaN."""
+    cases = [
+        (2.0**1000, -1100),
+        (2.0**-1000, 1100),
+        (3.0, -1075),
+        (1.0, -1074),
+        (1e-310, 60),
+        (0.0, 5000),
+        (-0.0, -5000),
+        (5e-324, 3000),
+        (1.7e308, -3000),
+        (3.0, 1023),
+        (np.inf, -5),
+        (np.nan, 3),
+    ]
+    values = np.array([c[0] for c in cases])
+    exponents = np.array([c[1] for c in cases]).astype(exponent_dtype)
+    got = mt.ldexp(
+        mt.Tensor(values, dtype="float64"), mt.Tensor(exponents, dtype=exponent_dtype)
+    ).numpy()
+    with np.errstate(over="ignore", under="ignore"):
+        want = np.ldexp(values, exponents.astype(np.int32))
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+
+
+def test_ldexp_keeps_a_float_dtype_and_reads_an_integer_as_float64():
+    rng = np.random.default_rng(3)
+    values = (rng.standard_normal(500) * 1e3).astype(np.float32)
+    exponents = rng.integers(-160, 160, 500).astype(np.int32)
+    result = mt.ldexp(
+        mt.Tensor(values, dtype="float32"), mt.Tensor(exponents, dtype="int32")
+    )
+    assert result.dtype == "float32"
+    # Some of these overflow or underflow, which is the point; the reference
+    # warns where they do.
+    with np.errstate(over="ignore", under="ignore"):
+        want = np.ldexp(values, exponents)
+    np.testing.assert_array_equal(result.numpy(), want)
+
+    integers = mt.Tensor(np.array([3, 5], dtype=np.int32), dtype="int32")
+    widened = mt.ldexp(
+        integers, mt.Tensor(np.array([-1, 2], dtype=np.int32), dtype="int32")
+    )
+    assert widened.dtype == "float64"
+    np.testing.assert_array_equal(widened.numpy(), [1.5, 20.0])
+
+
+def test_a_python_int_exponent_is_an_exponent():
+    t = mt.Tensor(np.array([2.0**-1000, 3.0]), dtype="float64")
+    with np.errstate(over="ignore"):
+        want = np.ldexp(t.numpy(), 1100)
+    np.testing.assert_array_equal(mt.ldexp(t, 1100).numpy(), want)
+    np.testing.assert_array_equal(t.ldexp(-1).numpy(), [2.0**-1001, 1.5])
+
+
+def test_ldexp_carries_its_gradient():
+    x = mt.Tensor(np.array([1.5, 3.0]), dtype="float64", requires_grad=True)
+    exponents = mt.Tensor(np.array([3, -2], dtype=np.int64), dtype="int64")
+    mt.ldexp(x, exponents).sum().backward()
+    np.testing.assert_array_equal(x.grad.numpy(), [8.0, 0.25])
+
+
 def test_fmax_and_fmin_ignore_a_nan_that_maximum_would_propagate():
     left = np.array([np.nan, 1.0, np.nan, 3.0])
     right = np.array([2.0, np.nan, np.nan, -1.0])

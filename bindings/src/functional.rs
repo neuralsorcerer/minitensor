@@ -475,6 +475,7 @@ binary_forwarders!(
     logical_xor => "Element-wise logical XOR over truth values, giving a boolean tensor.",
     heaviside => "The unit step of `input`: 0 below zero, 1 above it, and `other` at exactly zero.",
     hypot => "`sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.",
+    ldexp => "`input * 2**other`. An integer `other` is applied to the exponent, exactly: one rounding, and only where the answer is subnormal. A float `input` keeps its dtype and an integer one is read as float64. A float `other` may be fractional and is the product `input * exp2(other)`, in float64.",
     lcm => "Element-wise least common multiple, always non-negative. `lcm(x, 0)` is 0.",
     nextafter => "The next representable value after each element, in the direction of `other`.",
     lt => "Element-wise `<`, giving a boolean tensor.",
@@ -2217,6 +2218,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(atan2, parent)?)?;
     parent.add_function(wrap_pyfunction!(copysign, parent)?)?;
     parent.add_function(wrap_pyfunction!(hypot, parent)?)?;
+    parent.add_function(wrap_pyfunction!(ldexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(xlogy, parent)?)?;
     parent.add_function(wrap_pyfunction!(sinh, parent)?)?;
     parent.add_function(wrap_pyfunction!(cosh, parent)?)?;

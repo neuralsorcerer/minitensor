@@ -195,18 +195,6 @@ def logaddexp2(input: object, other: object) -> Tensor:
     return _F.logaddexp(left.astype(dtype) * scale, right.astype(dtype) * scale) / scale
 
 
-def ldexp(input: object, other: object) -> Tensor:
-    """`input * 2**other`, element-wise.
-
-    Computed as the product, so an `other` large enough to overflow `2**other`
-    gives infinity even where the product itself would have been finite. The
-    exponent is exact, which is the part that matters: no rounding enters
-    through it.
-    """
-
-    return _atleast_tensor(input) * _F.exp2(_atleast_tensor(other).astype("float64"))
-
-
 # --- predicates -----------------------------------------------------------
 
 
@@ -299,7 +287,6 @@ _ELEMENTWISE = (
     "isneginf",
     "isposinf",
     "isreal",
-    "ldexp",
     "lerp",
     "logaddexp2",
     "mul",

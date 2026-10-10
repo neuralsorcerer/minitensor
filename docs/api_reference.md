@@ -2050,9 +2050,13 @@ assert row_std.shape == (2, 3)
   the dtype's range.
 - `logaddexp2(input, other)` — the base-2 `logaddexp`, computed by rescaling it
   rather than by a second stable implementation of the same shift-and-add.
-- `ldexp(input, other)` — `input * 2**other`. Computed as the product, so an
-  `other` large enough to overflow `2**other` gives infinity even where the
-  product would have been finite; the exponent itself is exact.
+- `ldexp(input, other)` — `input * 2**other`. An integer `other`, a Python int
+  included, is applied to the exponent: one rounding, and only where the answer
+  is subnormal, so `ldexp(2**1000, -1100)` is `2**-100` and `ldexp(0, 5000)` is
+  0. A float `input` keeps its dtype and an integer one is read as float64. A
+  float `other` may be fractional, which makes it a power rather than an
+  exponent: that is the product `input * exp2(other)` in float64, differentiable
+  in both operands.
 - `frexp(input)` — the mantissa in `[0.5, 1)` and the exponent, as a pair, so
   that `ldexp(*frexp(x))` reproduces `x` *exactly*: the only arithmetic in
   either direction is by powers of two. Zero, infinity and NaN come back as

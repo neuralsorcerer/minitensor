@@ -409,6 +409,60 @@ float_pair!(
     NEXTAFTER_D_TOWARDS, |_x, _y| 0.0
 );
 
+// --- ldexp -----------------------------------------------------------------
+
+/// `x * 2^n` by exponent arithmetic: one rounding, and only where the answer
+/// is subnormal, however far the exponent reaches. Past +-400 every float32
+/// answer is already zero or infinite, so the exponent is clamped there to fit
+/// the `i32` the scaling takes.
+#[inline(always)]
+fn ldexp_f32(x: f32, n: f32) -> f32 {
+    libm::scalbnf(x, n.clamp(-400.0, 400.0) as i32)
+}
+
+/// See [`ldexp_f32`]; float64 saturates past +-2200.
+#[inline(always)]
+fn ldexp_f64(x: f64, n: f64) -> f64 {
+    libm::scalbn(x, n.clamp(-2200.0, 2200.0) as i32)
+}
+
+/// `d/dx x * 2^n = 2^n`, exact for the same reason the forward is.
+const LDEXP_D_X: FloatBinaryKernel = (|_x, n| ldexp_f32(1.0, n), |_x, n| ldexp_f64(1.0, n));
+/// `d/dn x * 2^n = x * 2^n * ln 2`. Only an integer exponent reaches the
+/// kernel, and an integer tensor never asks for a gradient; this is the slope
+/// of the same function read continuously, so the pair stays complete.
+const LDEXP_D_N: FloatBinaryKernel = (
+    |x, n| ldexp_f32(x, n) * std::f32::consts::LN_2,
+    |x, n| ldexp_f64(x, n) * std::f64::consts::LN_2,
+);
+
+/// `input * 2^other`.
+///
+/// An integer `other` is applied to the exponent directly. It was the product
+/// `input * exp2(other)`, which forms the power on its own first: `2^-1100`
+/// is zero and `2^1100` infinite in float64, so `ldexp(2^1000, -1100)` came
+/// back 0 and `ldexp(2^-1000, 1100)` infinite where both answers are ordinary
+/// numbers, `ldexp(3, -1075)` was 0 rather than the smallest subnormal but
+/// one, and `ldexp(0, 5000)` was `0 * inf`, NaN. A float `input` keeps its
+/// dtype, where the product had widened float32 to float64; an integer one
+/// is read as float64, which holds every integer it could have been scaled
+/// from exactly.
+///
+/// A float `other` may be fractional and is differentiable, which makes it a
+/// power rather than an exponent: it is still the product, in float64.
+pub fn ldexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if rhs.dtype().is_float() {
+        let power = crate::ops::special::exp2(&rhs.astype(DataType::Float64)?)?;
+        return crate::ops::arithmetic::mul(lhs, &power);
+    }
+    if lhs.dtype().is_float() {
+        float_binary_mono(lhs, rhs, ldexp_f32, ldexp_f64, [LDEXP_D_X, LDEXP_D_N])
+    } else {
+        let widened = lhs.astype(DataType::Float64)?;
+        float_binary_mono(&widened, rhs, ldexp_f32, ldexp_f64, [LDEXP_D_X, LDEXP_D_N])
+    }
+}
+
 /// Runs one element-wise binary float function and records its chain rule.
 ///
 /// The forward arrives as two concrete function items rather than as a

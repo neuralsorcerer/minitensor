@@ -279,6 +279,32 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `input * 2**other`. An integer `other` is applied to the exponent, exactly: one rounding, and only where the answer is subnormal. A float `input` keeps its dtype and an integer one is read as float64. A float `other` may be fractional and is the product `input * exp2(other)`, in float64.
+    pub fn ldexp(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        // A Python int is an exponent, so it stays an integer: converted
+        // against this tensor's dtype, as an operand of `*` would be, it
+        // would become a float and take the product's path.
+        let exponent = if other.is_instance_of::<pyo3::types::PyInt>()
+            && !other.is_instance_of::<pyo3::types::PyBool>()
+        {
+            let value: i64 = other.extract()?;
+            Tensor::new(
+                std::sync::Arc::new(engine::tensor::TensorData::from_vec_i64(
+                    vec![value],
+                    self.inner.device(),
+                )),
+                engine::tensor::Shape::new(vec![]),
+                engine::tensor::DataType::Int64,
+                self.inner.device(),
+                false,
+            )
+        } else {
+            tensor_from_py_value(&self.inner, other)?
+        };
+        let result = self.inner.ldexp(&exponent).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// `sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.
     pub fn hypot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
