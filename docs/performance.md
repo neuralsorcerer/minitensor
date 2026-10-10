@@ -140,7 +140,11 @@ this only takes effect when minitensor is imported before NumPy; a script
 that imports NumPy first gets the same by setting the variable in its
 environment. A shorter wait was faster still for training, but NumPy's own
 products a millisecond apart then had to wake the threads each time, which
-this one does not.
+this one does not. Re-taken on the task pool: a wait of 2^18 cycles cut an
+Adam step over a million parameters, run straight after a product, from
+1.65ms to 0.75, and put 250-700us on every one of NumPy's own products
+half a millisecond apart -- a 256x256 float32 product went from 181us to
+431. The 2ms wait stays.
 
 The import order matters much less since the flat loops moved to the task
 pool, whose calling thread takes tasks itself rather than waiting on workers
