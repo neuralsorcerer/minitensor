@@ -11,7 +11,6 @@ use crate::{
     memory::global_deallocate,
     tensor::dtype::DataType,
 };
-use rayon::prelude::*;
 use std::cell::UnsafeCell;
 
 /// Above this many bytes a buffer copy, fill or clear is split across the
@@ -473,30 +472,21 @@ impl TensorData {
         assert!(matches, "dtype/type mismatch in TensorData::from_vec");
     }
 
-    /// A copy of `src`, split across rayon's workers once it is large enough to
-    /// be bound by page faults rather than by bandwidth -- the typed form of
-    /// [`OwnedBytes::copy_of`], for callers that hold a slice rather than a
-    /// tensor. Handing 64MB of float32 from NumPy took 63ms copied on one core
-    /// and 25 split.
+    /// A copy of `src`, split across the pool above [`PARALLEL_COPY_THRESHOLD`]
+    /// -- the typed form of [`OwnedBytes::copy_of`], for callers that hold a
+    /// slice rather than a tensor. Handing 64MB of float32 from NumPy took
+    /// 63ms copied on one core and 25 split.
     pub fn copied_slice<T: Copy + Send + Sync>(src: &[T]) -> Vec<T> {
         if std::mem::size_of_val(src) < PARALLEL_COPY_THRESHOLD {
             return src.to_vec();
         }
-        let chunk = (src.len() / crate::parallel::current_num_threads().max(1)).max(1 << 16);
-        if chunk >= src.len() {
-            return src.to_vec();
-        }
-        // SAFETY: the chunks tile the output and each is written whole from the
-        // matching piece of `src`, so all of it is initialized.
+        let piece = (PARALLEL_PIECE / std::mem::size_of::<T>().max(1)).max(1);
+        // SAFETY: the pieces tile the output and each is written whole from
+        // the matching piece of `src`, so all of it is initialized.
         unsafe {
             crate::ops::map::build_vec::<T, _>(src.len(), |spare| {
-                crate::parallel::install(|| {
-                    spare
-                        .par_chunks_mut(chunk)
-                        .zip(src.par_chunks(chunk))
-                        .for_each(|(destination, piece)| {
-                            destination.write_copy_of_slice(piece);
-                        })
+                crate::parallel::for_each_chunk_mut(spare, piece, &|start, destination| {
+                    destination.write_copy_of_slice(&src[start..start + destination.len()]);
                 });
             })
         }

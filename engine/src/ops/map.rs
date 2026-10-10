@@ -19,7 +19,6 @@
 //! construction, and the one escape hatch for kernels with bespoke write
 //! orders ([`build_vec_with`]) is an `unsafe fn` with an explicit contract.
 
-use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::mem::MaybeUninit;
 
@@ -443,24 +442,24 @@ pub(crate) fn fill_compaction<T: Send>(
     width: usize,
     fill: &(dyn Fn(usize, &mut [T]) + Sync),
 ) {
-    let mut rest = out;
-    let mut pieces: Vec<&mut [T]> = Vec::with_capacity(starts.len() - 1);
-    for window in starts.windows(2) {
-        let (head, tail) = std::mem::take(&mut rest).split_at_mut((window[1] - window[0]) * width);
-        pieces.push(head);
-        rest = tail;
-    }
-    if pieces.len() < 2 {
-        for (band, piece) in pieces.into_iter().enumerate() {
-            fill(band, piece);
+    let bands = starts.len() - 1;
+    if bands < 2 {
+        if bands == 1 {
+            fill(0, &mut out[..(starts[1] - starts[0]) * width]);
         }
         return;
     }
-    crate::parallel::install(|| {
-        pieces
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(band, piece)| fill(band, piece))
+    assert!((starts[bands] - starts[0]) * width <= out.len());
+    let base = crate::parallel::Parts::of(out);
+    crate::parallel::for_each_task(bands, &|band| {
+        let (from, to) = (
+            (starts[band] - starts[0]) * width,
+            (starts[band + 1] - starts[0]) * width,
+        );
+        // SAFETY: the bands' ranges are disjoint, ascending and inside `out`,
+        // which stays borrowed for the whole loop.
+        let piece = unsafe { std::slice::from_raw_parts_mut(base.start().add(from), to - from) };
+        fill(band, piece);
     });
 }
 
@@ -1006,14 +1005,30 @@ pub(crate) fn try_par_out_chunks_pair<T: Send, U: Send, E: Send>(
     if per_task >= items {
         return work(0, first, second);
     }
-    crate::parallel::install(|| {
-        first
-            .par_chunks_mut(per_task * first_stride)
-            .zip(second.par_chunks_mut(per_task * second_stride))
-            .enumerate()
-            .map(|(group, (a, b))| work(group * per_task, a, b))
-            .collect()
+    let (a, b) = (
+        crate::parallel::Parts::of(first),
+        crate::parallel::Parts::of(second),
+    );
+    crate::parallel::map_tasks(items.div_ceil(per_task), &|group| {
+        let (item, count) = (group * per_task, per_task.min(items - group * per_task));
+        // SAFETY: each group's items are its own, and every buffer holds
+        // `items` items of its stride, borrowed for the whole loop.
+        let (a, b) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(
+                    a.start().add(item * first_stride),
+                    count * first_stride,
+                ),
+                std::slice::from_raw_parts_mut(
+                    b.start().add(item * second_stride),
+                    count * second_stride,
+                ),
+            )
+        };
+        work(item, a, b)
     })
+    .into_iter()
+    .collect()
 }
 
 /// [`try_par_out_chunks_pair`] over three outputs rather than two.
@@ -1043,15 +1058,34 @@ pub(crate) fn try_par_out_chunks_triple<T: Send, E: Send>(
     if per_task >= items {
         return work(0, first, second, third);
     }
-    crate::parallel::install(|| {
-        first
-            .par_chunks_mut(per_task * first_stride)
-            .zip(second.par_chunks_mut(per_task * second_stride))
-            .zip(third.par_chunks_mut(per_task * third_stride))
-            .enumerate()
-            .map(|(group, ((a, b), c))| work(group * per_task, a, b, c))
-            .collect()
+    let (a, b, c) = (
+        crate::parallel::Parts::of(first),
+        crate::parallel::Parts::of(second),
+        crate::parallel::Parts::of(third),
+    );
+    crate::parallel::map_tasks(items.div_ceil(per_task), &|group| {
+        let (item, count) = (group * per_task, per_task.min(items - group * per_task));
+        // SAFETY: as in `try_par_out_chunks_pair`.
+        let (a, b, c) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(
+                    a.start().add(item * first_stride),
+                    count * first_stride,
+                ),
+                std::slice::from_raw_parts_mut(
+                    b.start().add(item * second_stride),
+                    count * second_stride,
+                ),
+                std::slice::from_raw_parts_mut(
+                    c.start().add(item * third_stride),
+                    count * third_stride,
+                ),
+            )
+        };
+        work(item, a, b, c)
     })
+    .into_iter()
+    .collect()
 }
 
 /// Run `work(0..count)` in parallel and collect the results in index order.
@@ -1061,10 +1095,7 @@ pub(crate) fn try_par_out_chunks_triple<T: Send, E: Send>(
 /// band count, not an element count — so the indirect call is charged once per
 /// task and the buffer each call fills is thousands of elements.
 pub(crate) fn par_map_indexed<T: Send>(count: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
-    if count < 2 {
-        return (0..count).map(work).collect();
-    }
-    crate::parallel::install(|| (0..count).into_par_iter().map(work).collect())
+    crate::parallel::map_tasks(count, work)
 }
 
 /// [`par_out_chunks`] over two outputs partitioned in step. Both slices must be
@@ -1083,14 +1114,22 @@ pub(crate) fn par_out_chunks2<T: Send, U: Send>(
         work(0, values, indices);
         return;
     }
-    crate::parallel::install(|| {
-        values
-            .par_chunks_mut(chunk)
-            .zip(indices.par_chunks_mut(chunk))
-            .enumerate()
-            .for_each(|(index, (value_chunk, index_chunk))| {
-                work(index * chunk, value_chunk, index_chunk)
-            })
+    let len = values.len();
+    let (left, right) = (
+        crate::parallel::Parts::of(values),
+        crate::parallel::Parts::of(indices),
+    );
+    crate::parallel::for_each_task(len.div_ceil(chunk), &|piece| {
+        let (start, count) = (piece * chunk, chunk.min(len - piece * chunk));
+        // SAFETY: both buffers are `len` long and cut at the same offsets, so
+        // each piece's pair of windows is its own.
+        let (value_chunk, index_chunk) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(left.start().add(start), count),
+                std::slice::from_raw_parts_mut(right.start().add(start), count),
+            )
+        };
+        work(start, value_chunk, index_chunk)
     });
 }
 
@@ -1452,10 +1491,8 @@ where
     if out.len() < PAR_THRESHOLD {
         apply(out, input);
     } else {
-        crate::parallel::install(|| {
-            out.par_chunks_mut(PAR_CHUNK)
-                .zip(input.par_chunks(PAR_CHUNK))
-                .for_each(|(o, i)| apply(o, i))
+        crate::parallel::for_each_chunk_mut(out, PAR_CHUNK, &|start, o| {
+            apply(o, &input[start..start + o.len()])
         });
     }
 }
