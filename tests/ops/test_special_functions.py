@@ -497,3 +497,22 @@ def test_cbrt_gradient_matches_the_derivative():
     np.testing.assert_allclose(
         tensor.grad.numpy(), 1.0 / (3.0 * root * root), rtol=1e-12
     )
+
+
+def test_the_bessel_functions_reach_the_top_of_the_float64_range():
+    """`sqrt(2 pi x)` overflows past about 2.9e307 when formed as written, so
+    the scaled functions read 0 there and `i0`/`i1` read `inf * 0`, NaN."""
+    x = np.array([1e300, 3e307, 1e308, np.finfo(np.float64).max])
+    t = mt.Tensor(np.concatenate([x, -x]), dtype="float64")
+    scale = 1.0 / np.sqrt(2.0 * np.pi) / np.sqrt(x)
+    # Past the crossover the series is its leading term to every digit.
+    np.testing.assert_allclose(
+        mt.i0e(t).numpy(), np.concatenate([scale, scale]), rtol=1e-14
+    )
+    np.testing.assert_allclose(
+        mt.i1e(t).numpy(), np.concatenate([scale, -scale]), rtol=1e-14
+    )
+    np.testing.assert_array_equal(mt.i0(t).numpy(), np.full(8, np.inf))
+    np.testing.assert_array_equal(
+        mt.i1(t).numpy(), np.concatenate([np.full(4, np.inf), np.full(4, -np.inf)])
+    )

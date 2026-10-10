@@ -875,7 +875,20 @@ fn scaled_bessel_asymptotic(order: u32, t: f64) -> f64 {
         total += sign * coefficient / power;
         sign = -sign;
     }
-    total / (2.0 * PI * t).sqrt()
+    total / root_two_pi_t(t)
+}
+
+/// `sqrt(2 pi t)`, which past about 2.9e307 cannot be formed as written:
+/// `2 pi t` overflows, and the series then divided by infinity -- `i0e(1e308)`
+/// came back 0 rather than 4.0e-155, and `i0` and `i1` there `inf * 0`, NaN.
+/// Split, the root fits; below the split it is the expression it always was,
+/// to the bit.
+fn root_two_pi_t(t: f64) -> f64 {
+    if t > 1e300 {
+        (2.0 * PI).sqrt() * t.sqrt()
+    } else {
+        (2.0 * PI * t).sqrt()
+    }
 }
 
 /// `d/dt` of [`scaled_bessel_asymptotic`], term by term:
@@ -898,7 +911,7 @@ fn scaled_bessel_asymptotic_slope(order: u32, t: f64) -> f64 {
         total += sign * (k as f64 + 0.5) * coefficient / power;
         sign = -sign;
     }
-    -total / (t * (2.0 * PI * t).sqrt())
+    -total / (t * root_two_pi_t(t))
 }
 
 /// `exp(-|x|) I_0(x)`. Even, and bounded by one.
