@@ -19,8 +19,8 @@ use super::*;
 use crate::{
     autograd::{ActivationUnitBackward, with_grad_fn},
     error::{MinitensorError, Result},
-    ops::map::{outputs_per_task, par_out_chunks, unary_map},
-    ops::util::NegLogSigmoid,
+    ops::map::{EXPENSIVE_PAR_THRESHOLD, unary_map, unary_map_threshold},
+    ops::util::neg_log_sigmoid_f64,
     tensor::{DataType, Tensor, TensorData},
 };
 use std::sync::Arc;
@@ -567,29 +567,33 @@ pub fn logsigmoid(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return logsigmoid(&widened);
     }
-    macro_rules! values_for {
-        ($ty:ty, $slice:ident, $dtype:expr) => {{
-            let input = tensor.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from input tensor")
-            })?;
-            let mut values = vec![<$ty>::default(); input.len()];
-            par_out_chunks(&mut values, outputs_per_task(1), &|offset, out_block| {
-                let block = &input[offset..offset + out_block.len()];
-                <$ty>::neg_log_sigmoid_into(block, out_block);
-                // The kernel computes `-log(sigmoid(x))`, the form binary
-                // cross-entropy wants; this is the other sign of it. The pass
-                // is over a block still in cache and vectorizes on its own.
-                for o in out_block.iter_mut() {
-                    *o = -*o;
-                }
-            });
-            TensorData::from_vec::<$ty>(values, $dtype, tensor.device())
-        }};
-    }
-
     let output_data = match tensor.dtype() {
-        DataType::Float32 => values_for!(f32, as_f32_slice, DataType::Float32),
-        DataType::Float64 => values_for!(f64, as_f64_slice, DataType::Float64),
+        // SAFETY: `neg_log_sigmoid` writes every element of `dst`, so the
+        // negation that follows reads only what it wrote.
+        DataType::Float32 => unsafe {
+            map_f32_kernel(tensor, |kernel, src, dst| {
+                kernel.neg_log_sigmoid(src, dst);
+                // The kernel computes `-log(sigmoid(x))`, the form binary
+                // cross-entropy wants; this is the other sign of it, over a
+                // block still in cache.
+                for o in dst.iter_mut() {
+                    let value = o.assume_init();
+                    o.write(-value);
+                }
+            })?
+        },
+        DataType::Float64 => {
+            let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+            })?;
+            TensorData::from_vec::<f64>(
+                unary_map_threshold(input, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
+                    -neg_log_sigmoid_f64(x)
+                }),
+                DataType::Float64,
+                tensor.device(),
+            )
+        }
         other => {
             return Err(MinitensorError::invalid_operation(format!(
                 "logsigmoid is only supported for floating point tensors, got {other}"

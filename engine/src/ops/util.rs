@@ -64,15 +64,21 @@ impl NegLogSigmoid for f32 {
 /// overflow the threshold exists to avoid.
 const SOFTPLUS_THRESHOLD_F64: f64 = 40.0;
 
+/// `-log(sigmoid(x))` for one float64, which is `softplus(-x)`.
+#[inline]
+pub(crate) fn neg_log_sigmoid_f64(x: f64) -> f64 {
+    let z = -x;
+    if z > SOFTPLUS_THRESHOLD_F64 {
+        z
+    } else {
+        z.exp().ln_1p()
+    }
+}
+
 impl NegLogSigmoid for f64 {
     fn neg_log_sigmoid_into(input: &[f64], out: &mut [f64]) {
         for (o, &x) in out.iter_mut().zip(input.iter()) {
-            let z = -x;
-            *o = if z > SOFTPLUS_THRESHOLD_F64 {
-                z
-            } else {
-                z.exp().ln_1p()
-            };
+            *o = neg_log_sigmoid_f64(x);
         }
     }
 }
