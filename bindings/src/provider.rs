@@ -207,6 +207,9 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
     {
         return false;
     }
+    // NumPy's own threads run this product, on cores the engine's workers
+    // may still be spinning on.
+    engine::parallel::quiesce();
 
     Python::attach(|py| {
         let Some(matmul) = MATMUL
@@ -436,6 +439,8 @@ fn apply_ufunc<T: Element, const N: usize>(
         .iter()
         .position(|&known| known == op)
         .expect("every Ufunc is in UFUNC_ORDER");
+    // As for a product: the chunks run on threads of their own.
+    engine::parallel::quiesce();
     let chunks = (len / UFUNC_CHUNK_MIN).clamp(1, engine::ops::provider::pool_threads());
     if chunks == 1 {
         return Python::attach(|py| call_ufunc(py, op, slot, operands, out));

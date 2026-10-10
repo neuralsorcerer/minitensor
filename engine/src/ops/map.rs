@@ -301,11 +301,8 @@ fn par_zip_chunks<T, U>(
         }
         return;
     }
-    crate::parallel::install(|| {
-        input
-            .par_chunks(chunk)
-            .zip(out.par_chunks_mut(chunk))
-            .for_each(|(input_chunk, out_chunk)| work(input_chunk, out_chunk))
+    crate::parallel::for_each_chunk_mut(out, chunk, &|start, out_chunk| {
+        work(&input[start..start + out_chunk.len()], out_chunk)
     });
 }
 
@@ -328,11 +325,9 @@ fn par_zip_chunks2<A, B, U>(
         }
         return;
     }
-    crate::parallel::install(|| {
-        lhs.par_chunks(chunk)
-            .zip(rhs.par_chunks(chunk))
-            .zip(out.par_chunks_mut(chunk))
-            .for_each(|((lhs_chunk, rhs_chunk), out_chunk)| work(lhs_chunk, rhs_chunk, out_chunk))
+    crate::parallel::for_each_chunk_mut(out, chunk, &|start, out_chunk| {
+        let span = start..start + out_chunk.len();
+        work(&lhs[span.clone()], &rhs[span], out_chunk)
     });
 }
 
@@ -357,19 +352,16 @@ fn par_zip_chunks3<A, B, C, U>(
         }
         return;
     }
-    crate::parallel::install(|| {
-        a.par_chunks(chunk)
-            .zip(b.par_chunks(chunk))
-            .zip(c.par_chunks(chunk))
-            .zip(out.par_chunks_mut(chunk))
-            .for_each(|(((ac, bc), cc), oc)| work(ac, bc, cc, oc))
+    crate::parallel::for_each_chunk_mut(out, chunk, &|start, out_chunk| {
+        let span = start..start + out_chunk.len();
+        work(&a[span.clone()], &b[span.clone()], &c[span], out_chunk)
     });
 }
 
 /// Whether cutting `len` items into `chunk`-sized pieces makes more than one,
 /// which is when there is anything to hand the pool. Below that the helpers
-/// here run their one piece on the calling thread: rayon would do the same,
-/// but only after [`crate::parallel::install`] had crossed to the pool.
+/// here run their one piece on the calling thread, as the pool would, without
+/// the crossing.
 #[inline]
 fn splits(len: usize, chunk: usize) -> bool {
     chunk > 0 && len > chunk
@@ -577,16 +569,12 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         return;
     }
     // A single chunk is the common small-tensor case; running it here skips the
-    // rayon dispatch entirely.
+    // pool entirely.
     if out.len() <= chunk || chunk == 0 {
         work(0, out);
         return;
     }
-    crate::parallel::install(|| {
-        out.par_chunks_mut(chunk)
-            .enumerate()
-            .for_each(|(index, out_chunk)| work(index * chunk, out_chunk))
-    });
+    crate::parallel::for_each_chunk_mut(out, chunk, work);
 }
 
 /// [`par_out_chunks`] with a floor under the split: below `threshold` output
@@ -659,12 +647,7 @@ pub(crate) fn par_out_chunks_mapped<T: Send, R: Send>(
     if out.len() <= chunk || chunk == 0 {
         return vec![work(0, out)];
     }
-    crate::parallel::install(|| {
-        out.par_chunks_mut(chunk)
-            .enumerate()
-            .map(|(index, out_chunk)| work(index * chunk, out_chunk))
-            .collect()
-    })
+    crate::parallel::map_chunks_mut(out, chunk, work)
 }
 
 /// The state buffers one optimizer step writes, split to match a parameter
@@ -724,40 +707,37 @@ pub(crate) fn par_row_outputs<T: Send + Sync>(
         return;
     }
     let row_chunk = row_chunk.max(1);
-    let mut owned: StateChunks<T> = outputs.iter_mut().map(|buffer| &mut **buffer).collect();
     if rows <= row_chunk {
+        let mut owned: StateChunks<T> = outputs.iter_mut().map(|buffer| &mut **buffer).collect();
         work(0, &mut owned);
         return;
     }
-    crate::parallel::install(|| par_row_outputs_recurse(0, rows, row_chunk, owned, widths, work));
-}
-
-fn par_row_outputs_recurse<T: Send + Sync>(
-    first_row: usize,
-    rows: usize,
-    row_chunk: usize,
-    mut outputs: StateChunks<'_, T>,
-    widths: &[usize],
-    work: RowWork<T>,
-) {
-    if rows <= row_chunk {
-        work(first_row, &mut outputs);
-        return;
-    }
-    // Halve, rounded to a chunk boundary, so every leaf holds whole chunks and
-    // `work` sees the same windows the hand-written pipelines passed.
-    let mid = (rows / 2 / row_chunk).max(1) * row_chunk;
-    let mut lo: StateChunks<T> = SmallVec::with_capacity(outputs.len());
-    let mut hi: StateChunks<T> = SmallVec::with_capacity(outputs.len());
-    for (buffer, &width) in outputs.into_iter().zip(widths) {
-        let (buffer_lo, buffer_hi) = buffer.split_at_mut(mid * width);
-        lo.push(buffer_lo);
-        hi.push(buffer_hi);
-    }
-    rayon::join(
-        || par_row_outputs_recurse(first_row, mid, row_chunk, lo, widths, work),
-        || par_row_outputs_recurse(first_row + mid, rows - mid, row_chunk, hi, widths, work),
-    );
+    // One task per `row_chunk` rows, each handed the same window of every
+    // buffer: the chunks a halving split down to `row_chunk` would reach.
+    let parts: SmallVec<[crate::parallel::Parts<T>; 4]> = outputs
+        .iter_mut()
+        .map(|buffer| crate::parallel::Parts::of(buffer))
+        .collect();
+    crate::parallel::for_each_task(rows.div_ceil(row_chunk), &|task| {
+        let first_row = task * row_chunk;
+        let count = row_chunk.min(rows - first_row);
+        let mut windows: StateChunks<T> = parts
+            .iter()
+            .zip(widths)
+            .map(|(part, &width)| {
+                // SAFETY: rows `first_row..first_row + count` of each buffer
+                // belong to this task alone, and lie inside the buffer, which
+                // is `rows * width` long and borrowed for the whole loop.
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        part.start().add(first_row * width),
+                        count * width,
+                    )
+                }
+            })
+            .collect();
+        work(first_row, &mut windows);
+    });
 }
 
 /// Apply an optimizer step in parallel over a parameter, its gradient, and any
@@ -804,10 +784,10 @@ pub(crate) fn par_param_update<T: Send + Sync>(
 /// use this too — `argmax` folds `(index, value)` and needs to name the index
 /// it found.
 ///
-/// `combine` must be associative and commutative for the result to be
-/// independent of the split; rayon does not promise a grouping. Exact
-/// operations (min, max, boolean and, bitwise or) qualify. Float addition does
-/// not: `deterministic_par_sum` exists for that case.
+/// The chunk results are combined left to right, in chunk order, on every
+/// path, so the answer depends on the chunk width alone. That makes any
+/// `combine` reproducible, but a left fold of a long float sum loses accuracy
+/// with every chunk: `deterministic_par_sum` folds pairwise for that case.
 pub(crate) fn par_fold_chunks<T, A>(
     data: &[T],
     chunk: usize,
@@ -820,9 +800,8 @@ where
     A: Copy + Send + Sync,
 {
     let chunk = chunk.max(1);
-    // The serial arm folds the same chunks in the same order. `reduce` already
-    // requires the combine to be associative -- rayon picks its own tree -- so
-    // a left fold over them cannot answer differently.
+    // The serial arm folds the same chunks in the same order as the parallel
+    // one below, so the two cannot answer differently.
     if std::mem::size_of_val(data) < FOLD_PAR_BYTES {
         return data
             .chunks(chunk)
@@ -833,12 +812,13 @@ where
     if !splits(data.len(), chunk) {
         return combine(identity, fold(0, data));
     }
-    crate::parallel::install(|| {
-        data.par_chunks(chunk)
-            .enumerate()
-            .map(|(nth, block)| fold(nth * chunk, block))
-            .reduce(|| identity, combine)
+    let len = data.len();
+    crate::parallel::map_tasks(len.div_ceil(chunk), &|nth| {
+        let start = nth * chunk;
+        fold(start, &data[start..(start + chunk).min(len)])
     })
+    .into_iter()
+    .fold(identity, combine)
 }
 
 /// True when `test` holds for at least one chunk of `data`.
@@ -868,10 +848,32 @@ pub(crate) fn par_any_chunk<T: Sync>(
     let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
     probe.chunks(chunk).any(test)
         || if splits(rest.len(), chunk) {
-            crate::parallel::install(|| rest.par_chunks(chunk).any(test))
+            any_chunk_parallel(rest, chunk, test)
         } else {
             rest.chunks(chunk).any(test)
         }
+}
+
+/// Whether `test` holds for some chunk of `data`, over the pool. A chunk that
+/// finds one stops the chunks not yet started from looking.
+fn any_chunk_parallel<T: Sync>(
+    data: &[T],
+    chunk: usize,
+    test: &(dyn Fn(&[T]) -> bool + Sync),
+) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let found = AtomicBool::new(false);
+    let len = data.len();
+    crate::parallel::for_each_task(len.div_ceil(chunk), &|nth| {
+        if found.load(Ordering::Relaxed) {
+            return;
+        }
+        let start = nth * chunk;
+        if test(&data[start..(start + chunk).min(len)]) {
+            found.store(true, Ordering::Relaxed);
+        }
+    });
+    found.into_inner()
 }
 
 /// True when `test` holds for every chunk of `data`. The counterpart of
@@ -889,7 +891,7 @@ pub(crate) fn par_all_chunk<T: Sync>(
     let (probe, rest) = data.split_at((chunk * PROBE_CHUNKS).min(data.len()));
     probe.chunks(chunk).all(test)
         && if splits(rest.len(), chunk) {
-            crate::parallel::install(|| rest.par_chunks(chunk).all(test))
+            !any_chunk_parallel(rest, chunk, &|block| !test(block))
         } else {
             rest.chunks(chunk).all(test)
         }
@@ -925,18 +927,26 @@ where
     if !splits(a.len(), chunk) {
         return test(a, b);
     }
-    crate::parallel::install(|| {
-        a.par_chunks(chunk)
-            .zip(b.par_chunks(chunk))
-            .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))
-    })
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let failed = AtomicBool::new(false);
+    let len = a.len();
+    crate::parallel::for_each_task(len.div_ceil(chunk), &|nth| {
+        if failed.load(Ordering::Relaxed) {
+            return;
+        }
+        let span = nth * chunk..(nth * chunk + chunk).min(len);
+        if !test(&a[span.clone()], &b[span]) {
+            failed.store(true, Ordering::Relaxed);
+        }
+    });
+    !failed.into_inner()
 }
 
 /// Run `work(0..count)` in parallel for its effects.
 ///
 /// The erased form of `(0..count).into_par_iter().for_each(..)`, for kernels
 /// that carve their own bands out of raw pointers rather than out of slices --
-/// the blocked GEMM paths, which cannot hand rayon a `&mut [T]` because the
+/// the blocked GEMM paths, which cannot hand the pool a `&mut [T]` because the
 /// bands interleave by column.
 #[cfg(not(feature = "blas"))]
 pub(crate) fn par_for_indexed(count: usize, work: &(dyn Fn(usize) + Sync)) {
@@ -944,7 +954,7 @@ pub(crate) fn par_for_indexed(count: usize, work: &(dyn Fn(usize) + Sync)) {
         (0..count).for_each(work);
         return;
     }
-    crate::parallel::install(|| (0..count).into_par_iter().for_each(work));
+    crate::parallel::for_each_task(count, work);
 }
 
 /// [`par_out_chunks`] for work that can fail, stopping at the first error.
@@ -962,12 +972,9 @@ pub(crate) fn try_par_out_chunks<T: Send, E: Send>(
     if out.len() <= chunk || chunk == 0 {
         return work(0, out);
     }
-    crate::parallel::install(|| {
-        out.par_chunks_mut(chunk)
-            .enumerate()
-            .map(|(index, out_chunk)| work(index * chunk, out_chunk))
-            .collect()
-    })
+    crate::parallel::map_chunks_mut(out, chunk, work)
+        .into_iter()
+        .collect()
 }
 
 /// [`try_par_out_chunks`] over two outputs whose per-item sizes differ.

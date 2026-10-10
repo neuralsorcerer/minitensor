@@ -181,12 +181,14 @@ where
     U: Copy + Send + Default + std::ops::Add<Output = U>,
     F: Fn(&[T]) -> U + Send + Sync,
 {
-    use rayon::prelude::*;
     let partials: Vec<U> =
         if std::mem::size_of_val(data) < crate::ops::map::FOLD_PAR_BYTES || data.len() <= chunk {
             data.chunks(chunk).map(&sum_chunk).collect()
         } else {
-            crate::parallel::install(|| data.par_chunks(chunk).map(&sum_chunk).collect())
+            let len = data.len();
+            crate::parallel::map_tasks(len.div_ceil(chunk), &|nth| {
+                sum_chunk(&data[nth * chunk..(nth * chunk + chunk).min(len)])
+            })
         };
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
@@ -445,12 +447,10 @@ where
         return run(a, b);
     }
     let partials: Vec<U> = if a.len() >= crate::ops::map::PAR_THRESHOLD {
-        use rayon::prelude::*;
-        crate::parallel::install(|| {
-            a.par_chunks(RUN_SUM_CHUNK)
-                .zip(b.par_chunks(RUN_SUM_CHUNK))
-                .map(|(x, y)| run(x, y))
-                .collect()
+        let len = a.len();
+        crate::parallel::map_tasks(len.div_ceil(RUN_SUM_CHUNK), &|nth| {
+            let span = nth * RUN_SUM_CHUNK..(nth * RUN_SUM_CHUNK + RUN_SUM_CHUNK).min(len);
+            run(&a[span.clone()], &b[span])
         })
     } else {
         a.chunks(RUN_SUM_CHUNK)
