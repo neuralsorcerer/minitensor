@@ -143,10 +143,13 @@ products a millisecond apart then had to wake the threads each time, which
 this one does not.
 
 Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
-`log`, `sin`, `cos` and `tan` are bit-identical to the correctly-rounded
-float64 value on **all 2^32 float32 inputs**, checked exhaustively; `erf`,
-`erfc` and `log1p` carry a stated budget of at most one ulp on a bounded number
-of inputs. The tests are `#[ignore]`d because a sweep takes minutes:
+`log`, `sin`, `cos`, `tan` and `cbrt` are bit-identical to the
+correctly-rounded float64 value on **all 2^32 float32 inputs**, checked
+exhaustively; `erf`, `erfc`, `log1p`, `asinh` and `acosh` carry a stated budget
+of at most one ulp on a bounded number of inputs. For `asinh` and `acosh` that
+is a pair of magnitudes whose values lie closer to a float32 midpoint than
+float64 resolves, and which the platform's float64 routine rounds differently
+from one machine to the next. The tests are `#[ignore]`d because a sweep takes minutes:
 
 ```bash
 cargo test --release -p engine -- --ignored --nocapture transcendental

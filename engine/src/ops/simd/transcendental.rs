@@ -1426,26 +1426,49 @@ fn atan2_one<const FMA: bool>(y: f32, x: f32) -> f32 {
     folded as f32
 }
 
-/// The real cube root, as `exp(log|x| / 3)` with the sign put back.
+/// The real cube root: a guess from the bits, then two Halley steps in
+/// float64, with the sign put back.
 ///
-/// Odd, so only the magnitude goes through the logarithm -- which is also the
-/// difference between this and `x ** (1/3)`, a fractional power that is NaN
-/// for every negative input because no real branch of it exists there.
+/// This was `exp(log|x| / 3)`, a whole logarithm and a whole exponential for
+/// what is a root: 3.78ms over a million float32 on one core. Dividing the
+/// exponent field by three gives the root to about five bits, and each Halley
+/// step, `y * (y^3 + 2x) / (2y^3 + x)`, triples that -- fifteen, then
+/// forty-five, against the twenty-four a float32 needs. It is 1.70ms, and on
+/// every one of the 2^32 float32 inputs it rounds to the same float32 as
+/// `cbrt` taken in float64. What it costs is its two divisions.
 ///
-/// Accurate for the same reason [`pow_one`] is: the error is about
-/// `|log x| / 3` times float64's epsilon, at most 30 times it for any float32
-/// input, which is 3e-15 against the 6e-8 a float32 needs.
+/// A subnormal has no exponent field to divide, so it is scaled by 2^24 first,
+/// exactly, and its guess by 2^-8, the cube root of that. The guess is taken
+/// from the magnitude, and a zero, an infinity or a NaN is handed back as it
+/// came, which is its own cube root with its sign.
 ///
-/// No input needs a fallback, and each of the three that might is worth
-/// checking rather than assuming. A zero takes `log` to `-inf`, which the
-/// exponential's own clamp turns back into a zero, and `copysign` restores
-/// the sign a cube root keeps. An infinity survives both. A NaN fails every
-/// comparison in both and stays one.
+/// Inverting the root instead, `z <- z + z (1 - x z^3) / 3` towards
+/// `x^(-1/3)`, needs no division, but it converges quadratically and took four
+/// steps to be exact everywhere, which measured 3.7ns an element against these
+/// two steps' 2.2 at the AVX2 width.
 #[inline(always)]
 fn cbrt_one<const FMA: bool>(x: f32) -> f32 {
-    let xd = x as f64;
-    let root = exp_core::<FMA>(log_core::<FMA, false>(xd.abs(), 0.0) * (1.0 / 3.0));
-    root.copysign(xd) as f32
+    let magnitude = x.abs();
+    let tiny = magnitude < f32::MIN_POSITIVE;
+    let scaled = if tiny {
+        magnitude * 16_777_216.0
+    } else {
+        magnitude
+    };
+    let mut y = f32::from_bits(scaled.to_bits() / 3 + 709_958_130) as f64;
+    if tiny {
+        y *= 1.0 / 256.0;
+    }
+    let xd = magnitude as f64;
+    for _ in 0..2 {
+        let cube = y * y * y;
+        y = y * (cube + 2.0 * xd) / (2.0 * cube + xd);
+    }
+    if magnitude == 0.0 || !magnitude.is_finite() {
+        x
+    } else {
+        (y as f32).copysign(x)
+    }
 }
 
 /// `x^y` as `exp(y * log(x))`, for the operands where that is what it means.
@@ -2854,13 +2877,12 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 14] {
+    fn bit_exact_ops() -> [Op; 13] {
         [
+            Op::Cbrt,
             Op::Tanh,
             Op::Exp,
-            Op::Asinh,
             Op::Atanh,
-            Op::Acosh,
             Op::Expm1,
             Op::Sinh,
             Op::Cosh,
@@ -2960,6 +2982,8 @@ mod tests {
             Op::Atan,
             Op::Asin,
             Op::Acos,
+            Op::Asinh,
+            Op::Acosh,
         ] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
@@ -3268,7 +3292,6 @@ mod tests {
         for (op, scalar) in [
             (Op::Log10, f32::log10 as fn(f32) -> f32),
             (Op::Exp2, f32::exp2 as fn(f32) -> f32),
-            (Op::Cbrt, f32::cbrt as fn(f32) -> f32),
         ] {
             let (scalar_worst, scalar_differing) = sweep_scalar(op, scalar);
             println!(
@@ -3332,14 +3355,30 @@ mod tests {
     /// is loose enough not to be a rounding-mode tripwire and tight enough that
     /// a real regression -- `libm::erff` misrounds 127.6 million -- fails it.
     #[test]
-    #[ignore = "sweeps all 2^32 float32 inputs; takes ~1 minute"]
+    #[ignore = "sweeps all 2^32 float32 inputs per op; takes a few minutes"]
     fn erf_is_almost_always_correctly_rounded_exhaustively() {
         // Per-op bounds, each a few times the measured count: loose enough not
         // to be a rounding-mode tripwire, tight enough that a regression to the
         // routine being replaced (127.6M for `erff`, 20.0M for `erfcf`) fails.
         // `erfc` misrounds more than `erf` because below |x| = 2 it does have to
         // form `1 - erf`, which at x = 2 costs 7.7 bits.
-        for (op, bound) in [(Op::Erf, 500u64), (Op::Erfc, 500_000), (Op::Log1p, 100)] {
+        //
+        // `asinh` and `acosh` match their promoted reference everywhere but a
+        // pair of magnitudes, 4.190058e18 and 2.749153e28 and their negatives,
+        // and only on some hosts: the reference is the platform's float64
+        // routine, and it rounded these the kernel's way on one machine and
+        // the other way on another. Both values lie within 1.3e-16 of the
+        // midpoint between two float32 values -- finer than float64 resolves
+        // -- and at 200 bits the kernel is right on the first and the
+        // reference on the second. Neither side can be correctly rounded there
+        // without more than float64, so the claim is the count.
+        for (op, bound) in [
+            (Op::Erf, 500u64),
+            (Op::Erfc, 500_000),
+            (Op::Log1p, 100),
+            (Op::Asinh, 16),
+            (Op::Acosh, 16),
+        ] {
             for backend in available() {
                 let (worst, differing) = sweep(op, backend);
                 println!("  {op:?}/{backend:?}: {differing} of 2^32 misrounded, worst {worst} ulp");

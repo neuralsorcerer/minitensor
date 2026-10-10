@@ -146,9 +146,11 @@ lists them. Engine time over delegated time:
 
 and 2.5–14× at a million elements for the fourteen that crossed first. Nothing
 in float32 crosses: every float32 kernel in `ops::simd::transcendental`
-computes in float64 and rounds once, which makes it correctly rounded on every
-input, and NumPy's float32 `cbrt` and `atanh`, the two it was faster at,
-missed on a third and on 4.7% of inputs. Speed that costs the answer is not
+computes in float64 and rounds once, which makes it correctly rounded except
+where the true value lies closer to a float32 midpoint than float64 can tell
+-- a handful of the 2³² inputs, for the few functions that have any -- and
+NumPy's float32 `cbrt` and `atanh`, the two it was faster at, missed on a
+third and on 4.7% of inputs. Speed that costs the answer is not
 what delegation is for.
 
 ### Sort-family operations, from Python
@@ -384,8 +386,13 @@ kernels exist for. They went 0.48, 0.23 and 0.48 to 1.08, 1.15 and 1.52.
 down. `asinh` was the slowest routine in the crate: 8.1ms over a million
 float32 where the `log` kernel costs 0.324, twenty-five logarithms for a
 function that is one. Written as `log1p(|x| + x²/(1 + sqrt(1 + x²)))` and
-`log(x + sqrt((x-1)(x+1)))` both are bit-identical to a float64 reference on
-all 2³² float32 inputs, on every dispatch path.
+`log(x + sqrt((x-1)(x+1)))` both match a float64 reference on all 2³² float32
+inputs, on every dispatch path, but for a pair of magnitudes that a later host
+rounded the other way. 4.190058e18 and 2.749153e28 have values within 1.3e-16
+of the midpoint between two float32 numbers, which is finer than float64
+resolves; at 200 bits the kernel is right on the first and the platform's
+float64 routine on the second, so the tests now state a count rather than
+bit-identity for these two.
 
 The routines they replaced are not merely imprecise:
 
@@ -568,19 +575,26 @@ had been 0.77x with NumPy's column unmoved.
 ### What it still says is behind
 
 Five groups. Two are delegated now and the fourth is empty, so what is left
-is float32 `cbrt` and two rows that are answers rather than problems:
+is float32 `cbrt` at small sizes and two rows that are answers rather than
+problems:
 
-- **Transcendentals with no vectorised kernel at all.** `cbrt` 0.34–0.66× in
-  float32; its float64 goes to NumPy. The fix is a kernel, not an algorithm.
+- **A transcendental NumPy computes faster per core.** `cbrt` in float32; its
+  float64 goes to NumPy.
 
   `pow` was the other name here at 0.53–0.79 and is no longer behind in
   float32. Built out of the `exp` and `log` kernels rather than left on
   `powf`, it reads 1.21; its float64 goes to NumPy. `cbrt` halved the same
-  way — four passes became one kernel, 0.19 to 0.66 — without reaching
-  parity, which is the honest
-  reason it is still here: the remaining distance is a dedicated kernel worth
-  about thirty float64 operations to beat 0.67ns an element, and that lands
-  near parity rather than past it.
+  way, four passes became one kernel and 0.19 became 0.66, but that kernel was
+  still `exp(log|x| / 3)`, a whole logarithm and a whole exponential for a
+  root. It has a dedicated one now: a guess from the exponent bits and two
+  Halley steps in float64, which rounds to the float64-promoted answer on
+  every one of the 2³² inputs. 3.78ms over a million float32 on one core
+  became 1.70, and with the pool 0.80–0.91ms became 0.51–0.59 -- 0.85–1.21x
+  against NumPy at a million, level. At ten thousand it reads 0.33–0.36x
+  (0.026–0.031ms became 0.015–0.016): NumPy's float32 `cbrt` is three times
+  quicker on one core, and it misrounds a third of its inputs. What is left
+  is two float64 divisions an element; inverting the root to avoid them
+  converges too slowly to pay, at 3.7ns against 2.2.
 
   This bullet held six names two re-takings ago and called itself the cheapest
   gap in the file. It was. `log2`, `log10` and `exp2` were `log` and `exp`
