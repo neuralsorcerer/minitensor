@@ -14,30 +14,35 @@ use crate::{
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
 
-/// Above this many bytes a buffer copy is split across rayon's workers.
+/// Above this many bytes a buffer copy, fill or clear is split across the
+/// task pool.
 ///
-/// Measured rather than assumed, because the shape of the curve is not the one
-/// a copy suggests. Below 32 MiB the serial `memcpy` wins by a wide margin:
-/// entering a rayon region costs a fixed ~25us (see
-/// [`crate::ops::map::PAR_THRESHOLD`]), and the destination pages are usually
-/// already faulted in, because the allocator satisfies the request from the
-/// heap and hands back the block the previous copy freed. At 32 MiB that
-/// stops. It is glibc's largest dynamic mmap threshold, so every allocation
-/// from there up is a fresh mapping whose pages fault on first write, and the
-/// copy becomes bound by those faults rather than by memory bandwidth. Faults
-/// are per-core work, so spreading them over the workers is what recovers the
-/// difference -- the same reason the element-wise kernels, which write just as
-/// many fresh bytes, are three times quicker than a copy of the same size was.
-///
-/// Best of fifteen, release, four workers:
+/// One core moves about 30 GB/s into pages already faulted in, and four move
+/// close to four times that, so the question is only where the split's fixed
+/// cost is repaid. That cost depends on whether the pool's workers are awake:
+/// a few microseconds when a loop ran within the last hundred, and 60-70 when
+/// they have parked and have to be woken. Measured both ways, with a 5us and
+/// a 300us gap between calls, median of sixty (us):
 ///
 /// ```text
-///     bytes      serial    parallel
-///     16 MiB     1.44 ms     1.47 ms    0.98x
-///     32 MiB    22.28 ms     8.03 ms    2.78x
-///     64 MiB    45.87 ms    16.83 ms    2.73x
+///             awake                       parked
+///    MiB   clear 1/4     copy 1/4      clear 1/4     copy 1/4
+///      1    18 / 15      60 / 18        19 / 91      66 / 96
+///      2    64 / 28     126 / 38        68 / 105    135 / 122
+///      4   136 / 55     264 / 74       145 / 126    313 / 190
+///      8   280 / 79     550 / 149      286 / 213    621 / 363
+///     16   583 / 158   2437 / 356      642 / 319   2397 / 489
 /// ```
-const PARALLEL_COPY_THRESHOLD: usize = 32 << 20;
+///
+/// At 4 MiB the split wins either way, which is where this sits. It was
+/// 32 MiB against a pool whose every entry cost 25us or more; the 16 MiB row
+/// above is a copy that took 2.4ms on one core.
+const PARALLEL_COPY_THRESHOLD: usize = 4 << 20;
+
+/// Bytes per task in a split copy or clear: big enough that a task is mostly
+/// moving memory, and small enough that four threads share even the smallest
+/// split evenly.
+const PARALLEL_PIECE: usize = 256 << 10;
 
 /// A heap block this crate allocated, freed with the layout it was allocated
 /// with.
@@ -150,10 +155,37 @@ impl OwnedBytes {
         }
     }
 
-    /// `len` zero bytes (`alloc_zeroed`, so large blocks come straight from
-    /// fresh zero pages rather than a `memset`).
+    /// `len` zero bytes.
+    ///
+    /// A fresh block from the system is zero already, and `alloc_zeroed`
+    /// leaves it untouched. A block the allocator has cached is not, and
+    /// `alloc_zeroed` clears it on the calling thread -- which, for a large
+    /// one, is the slower of the two ways to clear it. So a large request
+    /// takes a cached block when there is one and clears it across the pool.
     #[inline(always)]
     fn zeroed(len: usize, align: usize) -> Self {
+        if len >= PARALLEL_COPY_THRESHOLD
+            && let Some(raw) = crate::memory::take_cached(Self::layout(len, align))
+            && let Some(ptr) = std::ptr::NonNull::new(raw)
+        {
+            // SAFETY: a cached block holds `len` bytes for this layout and is
+            // now this one's alone.
+            let block = unsafe {
+                std::slice::from_raw_parts_mut(
+                    ptr.as_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                    len,
+                )
+            };
+            crate::parallel::for_each_chunk_mut(block, PARALLEL_PIECE, &|_, piece| {
+                piece.fill(std::mem::MaybeUninit::new(0));
+            });
+            return Self {
+                ptr,
+                len,
+                capacity: len,
+                align,
+            };
+        }
         // SAFETY: the allocation is already all zeros.
         unsafe { Self::allocate(len, align, true, |_| {}) }
     }
@@ -171,20 +203,13 @@ impl OwnedBytes {
                     destination.write_copy_of_slice(src);
                     return;
                 }
-                let chunk =
-                    (src.len() / crate::parallel::current_num_threads().max(1)).max(1 << 16);
-                if chunk >= src.len() {
-                    destination.write_copy_of_slice(src);
-                    return;
-                }
-                crate::parallel::install(|| {
-                    destination
-                        .par_chunks_mut(chunk)
-                        .zip(src.par_chunks(chunk))
-                        .for_each(|(destination, piece)| {
-                            destination.write_copy_of_slice(piece);
-                        })
-                });
+                crate::parallel::for_each_chunk_mut(
+                    destination,
+                    PARALLEL_PIECE,
+                    &|start, piece| {
+                        piece.write_copy_of_slice(&src[start..start + piece.len()]);
+                    },
+                );
             })
         }
     }
@@ -556,10 +581,9 @@ impl TensorData {
     ///
     /// `vec![value; numel]` writes them on one core. Below
     /// [`PARALLEL_COPY_THRESHOLD`] that is the right thing and this matches it
-    /// -- the chunking has a fixed cost and the pages are already faulted in.
-    /// Above it every buffer is a fresh mapping, so the fill is made of page
-    /// faults rather than stores, and faults are per-core work: 40MB of ones
-    /// cost 25ms on one core and 8 spread over four.
+    /// -- the split has a fixed cost. Above it the stores go to four cores,
+    /// and so do the page faults of a fresh mapping, which are per-core work:
+    /// 40MB of ones cost 25ms on one core and 8 spread over four.
     pub(crate) fn filled_buffer<T: Copy + Send + Sync>(numel: usize, value: T) -> Vec<T> {
         if numel * std::mem::size_of::<T>() < PARALLEL_COPY_THRESHOLD {
             return vec![value; numel];
@@ -1325,6 +1349,33 @@ unsafe impl Sync for TensorData {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_zeroed_buffer_clears_a_reused_block() {
+        use std::alloc::GlobalAlloc;
+        // A size no other test asks for, so the cached block is this test's.
+        let len = PARALLEL_COPY_THRESHOLD + 3 * 4096 + 64;
+        let layout = OwnedBytes::layout(len, 64);
+        let allocator = crate::memory::BlockCachingAllocator;
+        // SAFETY: a fresh block of `layout`, dirtied and handed to the cache.
+        let dirty = unsafe {
+            let block = allocator.alloc(layout);
+            assert!(!block.is_null());
+            block.write_bytes(0xA5, len);
+            allocator.dealloc(block, layout);
+            block
+        };
+        let zeroed = OwnedBytes::zeroed(len, 64);
+        assert_eq!(
+            zeroed.as_ptr(),
+            dirty.cast_const(),
+            "the cached block was reused"
+        );
+        assert!(zeroed.as_slice().iter().all(|&byte| byte == 0));
+
+        let copied = OwnedBytes::copy_of(&vec![7u8; len], 64);
+        assert!(copied.as_slice().iter().all(|&byte| byte == 7));
+    }
 
     #[test]
     fn test_tensor_data_creation() {

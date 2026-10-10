@@ -22,6 +22,6 @@ pub use allocator::MetalAllocator;
 #[cfg(feature = "opencl")]
 pub use allocator::OpenCLAllocator;
 pub use allocator::{Allocator, CpuAllocator};
-pub use block_cache::BlockCachingAllocator;
+pub use block_cache::{BlockCachingAllocator, take_cached};
 pub use manager::{UnifiedMemoryManager, global_allocate, global_deallocate, init_memory_manager};
 pub use pool::{MemoryPool, PoolStats, PooledAllocator};

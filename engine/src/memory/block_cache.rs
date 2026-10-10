@@ -129,6 +129,23 @@ fn register_fork_handlers() {
 #[cfg(not(unix))]
 fn register_fork_handlers() {}
 
+/// A cached block of exactly `layout`, its contents unspecified, or `None`.
+///
+/// For a caller that wants a large block zeroed and can zero it faster than
+/// one `memset` can. `alloc_zeroed` has to clear a cached block on the
+/// calling thread, where a fresh one from the system is zero already and is
+/// never touched; so a caller takes a cached block here when there is one,
+/// and leaves the fresh case to `alloc_zeroed`.
+///
+/// The block came from the system allocator under `layout`, and goes back
+/// through the global allocator under the same `layout`.
+pub fn take_cached(layout: Layout) -> Option<*mut u8> {
+    if layout.size() < MIN_BYTES {
+        return None;
+    }
+    take(layout)
+}
+
 /// A cached block of exactly `layout`, if there is one.
 fn take(layout: Layout) -> Option<*mut u8> {
     CACHE.with(|blocks| {
