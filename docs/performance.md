@@ -142,6 +142,14 @@ environment. A shorter wait was faster still for training, but NumPy's own
 products a millisecond apart then had to wake the threads each time, which
 this one does not.
 
+The import order matters much less since the flat loops moved to the task
+pool, whose calling thread takes tasks itself rather than waiting on workers
+the spinning threads hold off. A three-layer MLP step (128x512 in, 1024
+wide, Adam) with NumPy imported first and the default 130ms spin averaged
+18.5-20.1ms on rayon, against 10.4-10.7 the other way round; on the task
+pool it averages 9.7-10.9 either way, and its 99th percentile fell from
+40-42ms to 17-22.
+
 Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
 `log`, `sin`, `cos`, `tan` and `cbrt` are bit-identical to the
 correctly-rounded float64 value on **all 2^32 float32 inputs**, checked
