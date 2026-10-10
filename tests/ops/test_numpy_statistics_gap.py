@@ -93,6 +93,74 @@ def test_average_rejects_weights_that_do_not_line_up(values):
         mt.average(mt.from_numpy(values), None, mt.from_numpy(np.ones(3)))
 
 
+def test_reducing_every_axis_keeps_every_axis_when_asked(values):
+    tensor = mt.from_numpy(values)
+    weights = mt.from_numpy(np.abs(values) + 0.5)
+
+    span = mt.ptp(tensor, keepdim=True)
+    assert list(span.shape) == [1, 1]
+    np.testing.assert_allclose(span.numpy(), np.ptp(values, keepdims=True))
+
+    mean = mt.average(tensor, keepdim=True)
+    assert list(mean.shape) == [1, 1]
+    np.testing.assert_allclose(mean.numpy(), [[values.mean()]])
+
+    mean, count = mt.average(tensor, keepdim=True, returned=True)
+    assert list(mean.shape) == list(count.shape) == [1, 1]
+    assert count.item() == values.size
+
+    weighted, total = mt.average(tensor, None, weights, keepdim=True, returned=True)
+    assert list(weighted.shape) == list(total.shape) == [1, 1]
+    expected, expected_total = np.average(
+        values, None, np.abs(values) + 0.5, returned=True
+    )
+    np.testing.assert_allclose(weighted.numpy(), [[expected]])
+    np.testing.assert_allclose(total.numpy(), [[expected_total]])
+
+    # Without `keepdim` every axis goes, as before.
+    assert list(mt.ptp(tensor).shape) == []
+    assert list(mt.average(tensor, None, weights).shape) == []
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_quantiles_between_an_infinity_and_a_value_are_that_infinity(dtype):
+    inf = float("inf")
+    tensor = mt.Tensor([-inf, -inf, 1.0, 2.0, inf, inf], dtype=dtype)
+    # 0.3 of the way along lies between the second -inf and 1; 0.7 between 2
+    # and the first inf. Each is the infinity it borders, at every weight.
+    for q, expected in [(0.3, -inf), (0.7, inf), (0.1, -inf), (0.9, inf)]:
+        assert mt.quantile(tensor, q).item() == expected
+        assert mt.nanquantile(tensor, q).item() == expected
+        assert mt.percentile(tensor, 100 * q).item() == expected
+
+    # Two equal infinities bracket themselves.
+    columns = mt.Tensor([[inf, -inf, 1.0], [2.0, -inf, inf]], dtype=dtype)
+    assert mt.quantile(columns, 0.5, dim=0).tolist() == [inf, -inf, inf]
+
+    # Landing exactly on a sample is that sample, whatever its neighbour.
+    assert mt.quantile(mt.Tensor([1.0, inf, inf], dtype=dtype), 0.0).item() == 1.0
+    assert mt.quantile(mt.Tensor([-inf, -inf, 1.0], dtype=dtype), 1.0).item() == 1.0
+
+    # Between opposite infinities there is no value to give.
+    assert np.isnan(mt.quantile(mt.Tensor([-inf, inf], dtype=dtype), 0.5).item())
+    assert (
+        mt.quantile(
+            mt.Tensor([-inf, 3.0], dtype=dtype), 0.5, interpolation="midpoint"
+        ).item()
+        == -inf
+    )
+
+
+def test_quantiles_between_large_finite_values_stay_finite():
+    top = float(np.finfo(np.float64).max)
+    tensor = mt.Tensor([-top, top], dtype="float64")
+    assert mt.quantile(tensor, 0.5).item() == 0.0
+    np.testing.assert_allclose(mt.quantile(tensor, 0.75).item(), top / 2, rtol=1e-15)
+    same = mt.Tensor([top, top], dtype="float64")
+    assert mt.quantile(same, 0.5, interpolation="midpoint").item() == top
+    assert mt.quantile(same, 0.5).item() == top
+
+
 def test_percentile_is_quantile_in_percent(values):
     for q in [0, 25, 50, 99.5, 100]:
         np.testing.assert_allclose(

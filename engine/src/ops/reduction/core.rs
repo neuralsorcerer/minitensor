@@ -31,10 +31,10 @@ impl QuantileInterpolation {
     #[inline(always)]
     pub(crate) fn interpolate(self, lower: f64, upper: f64, weight: f64) -> f64 {
         match self {
-            QuantileInterpolation::Linear => lower + (upper - lower) * weight,
+            QuantileInterpolation::Linear => linear_between(lower, upper, weight),
             QuantileInterpolation::Lower => lower,
             QuantileInterpolation::Higher => upper,
-            QuantileInterpolation::Midpoint => 0.5 * (lower + upper),
+            QuantileInterpolation::Midpoint => midpoint_between(lower, upper),
             QuantileInterpolation::Nearest => {
                 // Index-aware callers should route through `nearest_index_with_tie_even`
                 // for tie-to-even behavior. This fallback remains
@@ -43,6 +43,48 @@ impl QuantileInterpolation {
             }
         }
     }
+}
+
+/// The point `weight` of the way from `lower` to `upper`, for neighbouring
+/// sorted values and a weight in `[0, 1]`.
+///
+/// `lower + (upper - lower) * weight` everywhere it means that, and the limit
+/// of it where the arithmetic cannot say: an infinite endpoint against a
+/// finite one is that infinity at every weight between the two, where the
+/// expression gave `-inf + inf` -- the 0.3 quantile of `[-inf, -inf, 1, 2,
+/// inf, inf]` read NaN. Equal endpoints are themselves, which two equal
+/// infinities need, and a weight of zero or one is the endpoint it lands on,
+/// which `inf * 0` would otherwise make NaN. Only opposite infinities, whose
+/// midpoints have no value, stay NaN. Where the difference is too large to
+/// hold, each endpoint is scaled by its share before the two are added.
+#[inline(always)]
+fn linear_between(lower: f64, upper: f64, weight: f64) -> f64 {
+    if lower == upper || weight == 0.0 {
+        return lower;
+    }
+    if weight == 1.0 {
+        return upper;
+    }
+    if lower.is_infinite() != upper.is_infinite() {
+        return if lower.is_infinite() { lower } else { upper };
+    }
+    let gap = upper - lower;
+    if gap.is_infinite() && lower.is_finite() {
+        return lower * (1.0 - weight) + upper * weight;
+    }
+    lower + gap * weight
+}
+
+/// Halfway between `lower` and `upper`, rounded once, where the sum can be
+/// held, and halved before adding where it cannot: two finite values near the
+/// top of the range would otherwise meet at infinity.
+#[inline(always)]
+fn midpoint_between(lower: f64, upper: f64) -> f64 {
+    let sum = lower + upper;
+    if sum.is_infinite() && lower.is_finite() && upper.is_finite() {
+        return 0.5 * lower + 0.5 * upper;
+    }
+    0.5 * sum
 }
 
 /// Reduce several axes at once, by bringing them together and reducing the one
@@ -1270,6 +1312,37 @@ pub(crate) fn quantile_from_sorted_position<T: TotalCmp>(
 mod core_tests {
     use super::*;
     use crate::Device;
+
+    #[test]
+    fn linear_quantiles_take_the_limit_at_an_infinite_endpoint() {
+        let linear =
+            |lower, upper, weight| QuantileInterpolation::Linear.interpolate(lower, upper, weight);
+        let inf = f64::INFINITY;
+        assert_eq!(linear(-inf, 1.0, 0.5), -inf);
+        assert_eq!(linear(2.0, inf, 0.5), inf);
+        assert_eq!(linear(inf, inf, 0.5), inf);
+        assert_eq!(linear(-inf, -inf, 0.5), -inf);
+        assert_eq!(linear(1.0, inf, 0.0), 1.0);
+        assert_eq!(linear(-inf, 1.0, 1.0), 1.0);
+        assert!(linear(-inf, inf, 0.5).is_nan());
+        assert_eq!(linear(-f64::MAX, f64::MAX, 0.5), 0.0);
+        let quarter_up = linear(-f64::MAX, f64::MAX, 0.75);
+        assert!(
+            (quarter_up / (f64::MAX * 0.5) - 1.0).abs() < 1e-15,
+            "{quarter_up}"
+        );
+    }
+
+    #[test]
+    fn midpoint_quantiles_do_not_overflow_between_large_finite_values() {
+        let midpoint =
+            |lower, upper| QuantileInterpolation::Midpoint.interpolate(lower, upper, 0.5);
+        assert_eq!(midpoint(f64::MAX, f64::MAX), f64::MAX);
+        assert_eq!(midpoint(f64::MAX * 0.75, f64::MAX), f64::MAX * 0.875);
+        assert_eq!(midpoint(1.0, 2.0), 1.5);
+        assert_eq!(midpoint(-f64::INFINITY, 3.0), -f64::INFINITY);
+        assert!(midpoint(-f64::INFINITY, f64::INFINITY).is_nan());
+    }
 
     #[test]
     fn test_quantile_interpolation_modes() {

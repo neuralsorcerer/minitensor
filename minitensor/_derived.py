@@ -608,7 +608,9 @@ def ptp(input: object, dim: object = None, keepdim: bool = False) -> Tensor:
 
     tensor = _atleast_tensor(input)
     if dim is None:
-        return _F.amax(tensor) - _F.amin(tensor)
+        span = _F.amax(tensor) - _F.amin(tensor)
+        # Every axis is reduced, so `keepdim` keeps every one, at length one.
+        return span.reshape([1] * tensor.ndim()) if keepdim else span
     axes = list(_normalize_axis_tuple(dim, tensor.ndim(), "ptp"))
     return _F.amax(tensor, axes, keepdim) - _F.amin(tensor, axes, keepdim)
 
@@ -644,7 +646,13 @@ def average(
             if dim is None
             else list(_normalize_axis_tuple(dim, tensor.ndim(), "average"))
         )
-        result = _F.mean(tensor) if axes is None else _F.mean(tensor, axes, keepdim)
+        if axes is None:
+            result = _F.mean(tensor)
+            # Every axis is reduced, so `keepdim` keeps every one, at length one.
+            if keepdim:
+                result = result.reshape([1] * tensor.ndim())
+        else:
+            result = _F.mean(tensor, axes, keepdim)
         if not returned:
             return result
         count = tensor.numel()
@@ -664,11 +672,11 @@ def average(
                 f"got {tuple(weight.shape)} for {tuple(tensor.shape)}"
             )
         total = _F.sum(weight)
-        return (
-            (_F.sum(tensor * weight) / total, total)
-            if returned
-            else _F.sum(tensor * weight) / total
-        )
+        result = _F.sum(tensor * weight) / total
+        if keepdim:
+            kept = [1] * tensor.ndim()
+            result, total = result.reshape(kept), total.reshape(kept)
+        return (result, total) if returned else result
 
     axes = list(_normalize_axis_tuple(dim, tensor.ndim(), "average"))
     if weight.ndim() == 1 and tensor.ndim() != 1:
