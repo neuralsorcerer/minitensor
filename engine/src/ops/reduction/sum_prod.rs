@@ -683,7 +683,7 @@ pub(crate) fn prod_run<I: ProdFloat>(run: &[I]) -> f64 {
     if total.is_normal() {
         total
     } else {
-        exact_prod(run.iter().copied())
+        exact_prod_run(run)
     }
 }
 
@@ -752,36 +752,190 @@ fn prod_float_along_axis<I: ProdFloat>(input: &[I], out: &mut [I], len: usize, i
 /// of the negative factors. Anything else is multiplied as a mantissa and a
 /// separate exponent, so the only rounding is the last one.
 pub(crate) fn exact_prod<I: ProdFloat>(values: impl Iterator<Item = I> + Clone) -> f64 {
-    let (mut negative, mut zero, mut infinite, mut nan) = (false, false, false, false);
-    for v in values.clone() {
-        let v = v.widen();
-        negative ^= v.is_sign_negative();
-        zero |= v == 0.0;
-        infinite |= v.is_infinite();
-        nan |= v.is_nan();
+    let flags = values
+        .clone()
+        .fold(ProdFlags::default(), |flags, v| flags.with(v.widen()));
+    if let Some(decided) = flags.decided() {
+        return decided;
     }
-    let sign = if negative { -1.0 } else { 1.0 };
-    if nan || (zero && infinite) {
-        return f64::NAN;
+    let (mantissa, exponent) = mantissa_exponent(values);
+    assemble(flags.sign(), mantissa, exponent)
+}
+
+/// [`exact_prod`] of a contiguous run, across the pool once it is long.
+///
+/// A product of a million factors almost always leaves `f64`'s range -- the
+/// sweep's factors, `|x| + 0.5` for a normal `x`, overflow by the 4,300th --
+/// so for a long run this recomputation is the common path, not the rare one.
+/// Serial, it made a million float64 `prod` 4.2ms against 0.19 for factors
+/// that stay in range. The flags fold in any order; the mantissas fold a fixed
+/// chunk at a time and the chunks in order, so the answer is set by the
+/// length, not by the thread count.
+fn exact_prod_run<I: ProdFloat>(run: &[I]) -> f64 {
+    let chunks = run.len().div_ceil(RUN_SUM_CHUNK);
+    let chunk =
+        |index: usize| &run[index * RUN_SUM_CHUNK..((index + 1) * RUN_SUM_CHUNK).min(run.len())];
+    let flags = if run.len() < PROD_PAR_MIN {
+        run_flags(run)
+    } else {
+        par_map_indexed(chunks, &|index| run_flags(chunk(index)))
+            .into_iter()
+            .fold(ProdFlags::default(), ProdFlags::join)
+    };
+    if let Some(decided) = flags.decided() {
+        return decided;
     }
-    if zero {
-        return sign * 0.0;
+    let (mantissa, exponent) = if run.len() < PROD_PAR_MIN {
+        run_mantissa_exponent(run)
+    } else {
+        par_map_indexed(chunks, &|index| run_mantissa_exponent(chunk(index)))
+            .into_iter()
+            .fold((1.0f64, 0i64), |(mantissa, exponent), (m, e)| {
+                let (m, shift) = split(mantissa * m);
+                (m, exponent + e + shift)
+            })
+    };
+    assemble(flags.sign(), mantissa, exponent)
+}
+
+/// [`ProdFlags`] of a contiguous run, in eight lanes. Folded one factor at a
+/// time into the struct, the four tests stayed scalar at 5.2ns a factor --
+/// more than the multiplication they guard; across lanes they are 0.5.
+fn run_flags<I: ProdFloat>(run: &[I]) -> ProdFlags {
+    const LANES: usize = 8;
+    let mut negative = [0u64; LANES];
+    let mut zero = [false; LANES];
+    let mut infinite = [false; LANES];
+    let mut nan = [false; LANES];
+    let (blocks, rest) = run.as_chunks::<LANES>();
+    for block in blocks {
+        for lane in 0..LANES {
+            let v = block[lane].widen();
+            negative[lane] ^= v.to_bits() >> 63;
+            zero[lane] |= v == 0.0;
+            infinite[lane] |= v.is_infinite();
+            nan[lane] |= v.is_nan();
+        }
     }
-    if infinite {
-        return sign * f64::INFINITY;
+    let mut flags = ProdFlags::default();
+    for lane in 0..LANES {
+        flags = flags.join(ProdFlags {
+            negative: negative[lane] == 1,
+            zero: zero[lane],
+            infinite: infinite[lane],
+            nan: nan[lane],
+        });
     }
-    // (mantissa in [0.5, 1), exponent) of a positive, finite, nonzero value.
-    fn split(x: f64) -> (f64, i64) {
-        let (x, bias) = if x < f64::MIN_POSITIVE {
-            (x * 2f64.powi(64), -64)
+    rest.iter().fold(flags, |flags, &v| flags.with(v.widen()))
+}
+
+/// [`mantissa_exponent`] of a contiguous run of finite, nonzero factors, in
+/// eight lanes joined in order -- one running mantissa is a chain of
+/// dependent multiplications, 3.9ns a factor against 1.25 across lanes.
+fn run_mantissa_exponent<I: ProdFloat>(run: &[I]) -> (f64, i64) {
+    const LANES: usize = 8;
+    // Each lane renormalizes after as many of its own factors as the single
+    // chain did, so no lane's mantissa leaves the normal range.
+    const RENORMALIZE: usize = 256;
+    let mut mantissas = [1.0f64; LANES];
+    let mut exponents = [0i64; LANES];
+    let (blocks, rest) = run.as_chunks::<LANES>();
+    for (index, block) in blocks.iter().enumerate() {
+        for lane in 0..LANES {
+            let (m, e) = split(block[lane].widen().abs());
+            mantissas[lane] *= m;
+            exponents[lane] += e;
+        }
+        if index % RENORMALIZE == RENORMALIZE - 1 {
+            for lane in 0..LANES {
+                let (m, e) = split(mantissas[lane]);
+                mantissas[lane] = m;
+                exponents[lane] += e;
+            }
+        }
+    }
+    let (mut mantissa, mut exponent) = (1.0f64, 0i64);
+    let mut join = |m: f64, e: i64| {
+        let (m, shift) = split(m);
+        let (product, carry) = split(mantissa * m);
+        mantissa = product;
+        exponent += e + shift + carry;
+    };
+    for lane in 0..LANES {
+        join(mantissas[lane], exponents[lane]);
+    }
+    for &v in rest {
+        let (m, e) = split(v.widen().abs());
+        join(m, e);
+    }
+    (mantissa, exponent)
+}
+
+/// What a product's factors say before any is multiplied: its sign, and
+/// whether a zero, an infinity or a NaN settles it.
+#[derive(Clone, Copy, Default)]
+struct ProdFlags {
+    negative: bool,
+    zero: bool,
+    infinite: bool,
+    nan: bool,
+}
+
+impl ProdFlags {
+    fn with(self, v: f64) -> Self {
+        Self {
+            negative: self.negative ^ v.is_sign_negative(),
+            zero: self.zero | (v == 0.0),
+            infinite: self.infinite | v.is_infinite(),
+            nan: self.nan | v.is_nan(),
+        }
+    }
+
+    fn join(self, other: Self) -> Self {
+        Self {
+            negative: self.negative ^ other.negative,
+            zero: self.zero | other.zero,
+            infinite: self.infinite | other.infinite,
+            nan: self.nan | other.nan,
+        }
+    }
+
+    fn sign(self) -> f64 {
+        if self.negative { -1.0 } else { 1.0 }
+    }
+
+    /// A NaN factor, or a zero and an infinity together, is NaN; otherwise a
+    /// zero makes the product a zero and an infinity an infinity, signed by the
+    /// parity of the negative factors.
+    fn decided(self) -> Option<f64> {
+        if self.nan || (self.zero && self.infinite) {
+            Some(f64::NAN)
+        } else if self.zero {
+            Some(self.sign() * 0.0)
+        } else if self.infinite {
+            Some(self.sign() * f64::INFINITY)
         } else {
-            (x, 0)
-        };
-        let bits = x.to_bits();
-        let exponent = ((bits >> 52) & 0x7ff) as i64 - 1022;
-        let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
-        (mantissa, exponent + bias)
+            None
+        }
     }
+}
+
+/// (mantissa in [0.5, 1), exponent) of a positive, finite, nonzero value.
+fn split(x: f64) -> (f64, i64) {
+    let (x, bias) = if x < f64::MIN_POSITIVE {
+        (x * 2f64.powi(64), -64)
+    } else {
+        (x, 0)
+    };
+    let bits = x.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i64 - 1022;
+    let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+    (mantissa, exponent + bias)
+}
+
+/// The product of the magnitudes of finite, nonzero `values` as a mantissa
+/// in [0.5, 1) and a separate exponent.
+fn mantissa_exponent<I: ProdFloat>(values: impl Iterator<Item = I>) -> (f64, i64) {
     // Every factor is split, but the running mantissa only every
     // `RENORMALIZE` steps: a product of that many mantissas in [0.5, 1) is
     // still a normal `f64`, and scaling by a power of two never changes how a
@@ -801,11 +955,13 @@ pub(crate) fn exact_prod<I: ProdFloat>(values: impl Iterator<Item = I> + Clone) 
         }
     }
     let (m, e) = split(mantissa);
-    mantissa = m;
-    exponent += e;
-    // `mantissa * 2^exponent`, saturating: in three steps so no power of two
-    // taken on the way leaves the range, since the exponent can be far outside
-    // it when the true product is an overflow or an underflow.
+    (m, exponent + e)
+}
+
+/// `sign * mantissa * 2^exponent`, saturating: in three steps so no power of
+/// two taken on the way leaves the range, since the exponent can be far
+/// outside it when the true product is an overflow or an underflow.
+fn assemble(sign: f64, mantissa: f64, exponent: i64) -> f64 {
     let exponent = exponent.clamp(-3300, 3300) as i32;
     let third = exponent / 3;
     sign * mantissa * 2f64.powi(third) * 2f64.powi(third) * 2f64.powi(exponent - 2 * third)
@@ -1244,4 +1400,63 @@ pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
 
     result_slice[0] = min_val;
     Ok(())
+}
+
+#[cfg(test)]
+mod exact_prod_tests {
+    use super::*;
+
+    /// The lane-blocked, chunked path a contiguous run takes, against the
+    /// one-factor-at-a-time walk strided columns take: the same answer to
+    /// within the rounding their groupings differ by, and exactly the same
+    /// one wherever a zero, an infinity or a NaN decides it.
+    #[test]
+    fn a_long_run_agrees_with_the_serial_walk() {
+        let len = PROD_PAR_MIN * 3 + 37;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let cases: Vec<Vec<f64>> = vec![
+            // Partials that leave the range while the product does not.
+            (0..len)
+                .map(|i| if i % 4 < 2 { 1e300 } else { 1e-300 })
+                .collect(),
+            // Factors spanning a wide range, signs mixed, the product finite.
+            (0..len)
+                .map(|i| {
+                    let magnitude = (6.0 * next() - 3.0).exp();
+                    if i % 3 == 0 { -magnitude } else { magnitude }
+                })
+                .collect(),
+            // A true overflow, and a true underflow.
+            (0..len).map(|_| 1.5 + next()).collect(),
+            (0..len).map(|_| 0.1 + 0.5 * next()).collect(),
+        ];
+        for values in &cases {
+            let parallel = exact_prod_run(values);
+            let serial = exact_prod(values.iter().copied());
+            if serial.is_finite() && serial != 0.0 {
+                assert!(
+                    ((parallel - serial) / serial).abs() < 1e-11,
+                    "{parallel:e} against {serial:e}"
+                );
+            } else {
+                assert_eq!(parallel.to_bits(), serial.to_bits());
+            }
+        }
+
+        let mut decided = vec![2.0f64; len];
+        decided[len - 1] = 0.0;
+        assert_eq!(exact_prod_run(&decided), 0.0);
+        decided[len / 2] = f64::NEG_INFINITY;
+        assert!(exact_prod_run(&decided).is_nan(), "zero times infinity");
+        decided[len - 1] = 2.0;
+        assert_eq!(exact_prod_run(&decided), f64::NEG_INFINITY);
+        decided[7] = f64::NAN;
+        assert!(exact_prod_run(&decided).is_nan());
+    }
 }
