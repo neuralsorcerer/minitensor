@@ -349,6 +349,23 @@ float32: `diff` 195 µs to 7, `count_nonzero` 99 to 4, `sum(0)` 64 to 3,
 `add` at 65,536 96 to 9. The thresholds are one machine's; a host whose pool
 wakes faster would split sooner, and `ops::map` is where to look.
 
+The flat loops have since moved off rayon to a pool of their own
+(`parallel::for_each_task`), whose workers spin for 100 µs after each loop
+before they park and whose caller takes tasks itself. Back to back, a float64
+dot of 262,144 elements went from 124.8 µs at the median to 30.3, and the
+surface geomean from 2.49x to 3.39x in one session. The thresholds were
+re-taken against it and left where they are, because there are now two
+crossovers and they straddle the constants. With the workers awake the
+vectorized float32 kernels win on four threads from 8,192 elements, the
+equal-shape arithmetic from 512 KiB an operand and the folds from 512 KiB;
+once a gap between calls outlasts the spin window, a parked worker in this
+VM takes 60–70 µs to wake, and float32 `exp` at 8,192 elements reads 9 µs on
+one thread against 73 on four. Lowering the constants would buy the first
+case by charging the second, and a delegated product parks the workers on
+purpose, so a matmul-heavy loop sees them parked more often than not.
+Splitting on whether the pool is awake would take both, at the cost of
+threading that state through every threshold.
+
 The same sweep turned up the other half of the mid-size cost: the sequential
 loops under `unary_map`, `binary_map` and `ternary_map` were compiled for the
 x86-64 baseline alone, so every kernel built on them ran at SSE2 width. They
