@@ -499,12 +499,166 @@ pub fn ldexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         let power = crate::ops::special::exp2(&rhs.astype(DataType::Float64)?)?;
         return crate::ops::arithmetic::mul(lhs, &power);
     }
+    if let Some(fused) = ldexp_fused(lhs, rhs) {
+        return Ok(fused);
+    }
     if lhs.dtype().is_float() {
         float_binary_mono(lhs, rhs, ldexp_f32, ldexp_f64, [LDEXP_D_X, LDEXP_D_N])
     } else {
         let widened = lhs.astype(DataType::Float64)?;
         float_binary_mono(&widened, rhs, ldexp_f32, ldexp_f64, [LDEXP_D_X, LDEXP_D_N])
     }
+}
+
+/// `ldexp` with an integer exponent in one pass, each operand read in its own
+/// dtype, or `None` for the general path to take.
+///
+/// The general path converts first: an integer input to float64, then the
+/// exponent to the input's float dtype, then the kernel -- three passes, and
+/// over a million int32 pairs 1.9ms where one pass is half that. This takes
+/// the shapes that need no broadcast beyond a single element and an input
+/// that asks for no gradient, which is what a scaling by powers of two
+/// usually is; the answers are the general path's to the bit, since the
+/// exponent is clamped at the same bounds before it is used.
+fn ldexp_fused(lhs: &Tensor, rhs: &Tensor) -> Option<Tensor> {
+    use crate::ops::map::{BINARY_PAR_THRESHOLD, binary_map, unary_map_threshold};
+    if lhs.requires_grad() || lhs.device() != rhs.device() {
+        return None;
+    }
+    // A single element broadcasts against anything of at least its rank, and
+    // the output is then the other operand's shape.
+    let output_shape =
+        if lhs.shape() == rhs.shape() || (rhs.numel() == 1 && rhs.ndim() <= lhs.ndim()) {
+            lhs.shape().clone()
+        } else if lhs.numel() == 1 && lhs.ndim() <= rhs.ndim() {
+            rhs.shape().clone()
+        } else {
+            return None;
+        };
+
+    fn pairs<X, E, U>(xs: &[X], es: &[E], scale: impl Fn(X, E) -> U + Copy + Send + Sync) -> Vec<U>
+    where
+        X: Copy + Send + Sync,
+        E: Copy + Send + Sync,
+        U: Copy + Send + Sync,
+    {
+        if xs.len() == es.len() {
+            binary_map(xs, es, scale)
+        } else if es.len() == 1 {
+            let e = es[0];
+            unary_map_threshold(xs, BINARY_PAR_THRESHOLD, move |x| scale(x, e))
+        } else {
+            let x = xs[0];
+            unary_map_threshold(es, BINARY_PAR_THRESHOLD, move |e| scale(x, e))
+        }
+    }
+    // The bounds of `ldexp_f32` and `ldexp_f64`, past which every answer has
+    // saturated.
+    let narrow = |n: i64| n.clamp(-400, 400) as i32;
+    let wide = |n: i64| n.clamp(-2200, 2200) as i32;
+
+    macro_rules! fused {
+        ($xs:ident, $es:ident, |$x:ident, $n:ident| $body:expr) => {{
+            let (xs, es) = (lhs.data().$xs()?, rhs.data().$es()?);
+            pairs(xs, es, |$x, e| {
+                let $n = e as i64;
+                $body
+            })
+        }};
+    }
+    let device = lhs.device();
+    let (data, dtype) = match (lhs.dtype(), rhs.dtype()) {
+        (DataType::Float32, DataType::Int32) => (
+            TensorData::from_vec::<f32>(
+                fused!(as_f32_slice, as_i32_slice, |x, n| libm::scalbnf(
+                    x,
+                    narrow(n)
+                )),
+                DataType::Float32,
+                device,
+            ),
+            DataType::Float32,
+        ),
+        (DataType::Float32, DataType::Int64) => (
+            TensorData::from_vec::<f32>(
+                fused!(as_f32_slice, as_i64_slice, |x, n| libm::scalbnf(
+                    x,
+                    narrow(n)
+                )),
+                DataType::Float32,
+                device,
+            ),
+            DataType::Float32,
+        ),
+        (DataType::Float64, DataType::Int32) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_f64_slice, as_i32_slice, |x, n| libm::scalbn(x, wide(n))),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        (DataType::Float64, DataType::Int64) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_f64_slice, as_i64_slice, |x, n| libm::scalbn(x, wide(n))),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        (DataType::Int32, DataType::Int32) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_i32_slice, as_i32_slice, |x, n| libm::scalbn(
+                    x as f64,
+                    wide(n)
+                )),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        (DataType::Int32, DataType::Int64) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_i32_slice, as_i64_slice, |x, n| libm::scalbn(
+                    x as f64,
+                    wide(n)
+                )),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        (DataType::Int64, DataType::Int32) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_i64_slice, as_i32_slice, |x, n| libm::scalbn(
+                    x as f64,
+                    wide(n)
+                )),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        (DataType::Int64, DataType::Int64) => (
+            TensorData::from_vec::<f64>(
+                fused!(as_i64_slice, as_i64_slice, |x, n| libm::scalbn(
+                    x as f64,
+                    wide(n)
+                )),
+                DataType::Float64,
+                device,
+            ),
+            DataType::Float64,
+        ),
+        _ => return None,
+    };
+    Some(Tensor::new(
+        Arc::new(data),
+        output_shape,
+        dtype,
+        device,
+        false,
+    ))
 }
 
 /// Runs one element-wise binary float function and records its chain rule.

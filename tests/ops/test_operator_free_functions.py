@@ -405,6 +405,46 @@ def test_ldexp_keeps_a_float_dtype_and_reads_an_integer_as_float64():
     np.testing.assert_array_equal(widened.numpy(), [1.5, 20.0])
 
 
+@pytest.mark.parametrize("value_dtype", ["float32", "float64", "int32", "int64"])
+@pytest.mark.parametrize("exponent_dtype", ["int32", "int64"])
+@pytest.mark.parametrize("shape", ["same", "scalar exponent", "scalar value"])
+def test_the_one_pass_ldexp_answers_as_the_general_path_does(
+    value_dtype, exponent_dtype, shape
+):
+    """An input that asks for no gradient takes a fused pass over operands of
+    their own dtypes; one that does takes the general path, which converts
+    first. The two must agree to the bit, at the clamp bounds included."""
+    rng = np.random.default_rng(5)
+    count = 300_000
+    if value_dtype.startswith("float"):
+        values = (rng.standard_normal(count) * 1e3).astype(value_dtype)
+        values[:4] = [0.0, -0.0, np.inf, np.nan]
+    else:
+        values = rng.integers(-(2**20), 2**20, count).astype(value_dtype)
+    exponents = rng.integers(-3000, 3000, count).astype(exponent_dtype)
+    exponents[:3] = [401, -401, 2201]
+    if shape == "scalar exponent":
+        exponents = exponents[:1].copy()
+    elif shape == "scalar value":
+        values = values[4:5].copy()
+
+    fused = mt.ldexp(
+        mt.Tensor(values, dtype=value_dtype), mt.Tensor(exponents, dtype=exponent_dtype)
+    )
+    expected_dtype = value_dtype if value_dtype.startswith("float") else "float64"
+    assert fused.dtype == expected_dtype
+    if value_dtype.startswith("float"):
+        tracked = mt.Tensor(values, dtype=value_dtype, requires_grad=True)
+        general = mt.ldexp(tracked, mt.Tensor(exponents, dtype=exponent_dtype))
+        np.testing.assert_array_equal(fused.numpy(), general.detach().numpy())
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        want = np.ldexp(
+            values.astype(expected_dtype),
+            np.clip(exponents, -2200, 2200).astype(np.int32),
+        )
+    np.testing.assert_array_equal(fused.numpy(), want)
+
+
 def test_a_python_int_exponent_is_an_exponent():
     t = mt.Tensor(np.array([2.0**-1000, 3.0]), dtype="float64")
     with np.errstate(over="ignore"):
