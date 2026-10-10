@@ -2048,8 +2048,10 @@ assert row_std.shape == (2, 3)
 - `float_power(input, exponent)` — the power computed in float64 whatever the
   inputs are, since an integer power overflows silently once the answer leaves
   the dtype's range.
-- `logaddexp2(input, other)` — the base-2 `logaddexp`, computed by rescaling it
-  rather than by a second stable implementation of the same shift-and-add.
+- `logaddexp2(input, other)` — the base-2 `logaddexp`, on its own kernel
+  rather than as a rescaled `logaddexp`: scaling by `ln 2` rounds an error
+  proportional to the operand into the exponent. A float32 pair is computed in
+  float64 and rounded once.
 - `ldexp(input, other)` — `input * 2**other`. An integer `other`, a Python int
   included, is applied to the exponent: one rounding, and only where the answer
   is subnormal, so `ldexp(2**1000, -1100)` is `2**-100` and `ldexp(0, 5000)` is

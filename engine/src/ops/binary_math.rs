@@ -88,12 +88,6 @@ macro_rules! float_pair {
 
 // --- atan2 -----------------------------------------------------------------
 
-float_kernel!(
-    /// The angle in `(-pi, pi]` from the positive x-axis to `(x, y)`, which
-    /// `(y / x).atan()` cannot give: it loses the quadrant, and divides by
-    /// zero on the y-axis.
-    atan2_f32, atan2_f64, |y, x| y.atan2(x)
-);
 float_pair!(
     /// `d/dy atan2(y, x) = x / (x^2 + y^2)`, grouped through `hypot` so the
     /// sum of squares cannot overflow for operands past the square root of
@@ -152,6 +146,56 @@ float_pair!(
             }
         }
     }
+);
+
+// --- logaddexp2 ------------------------------------------------------------
+
+/// `log2(2^a + 2^b)` in float64: the larger operand plus the base-2 `log1p` of
+/// the smaller's power relative to it, so neither power is formed.
+///
+/// The exponent difference goes to `exp2` as it is. Scaling the operands by
+/// `ln 2` first and reusing the natural form rounds an error of up to
+/// `|a| * eps` into the exponent, which the power then carries into the answer
+/// as a relative error: at `(0, -1000)` that was 445 ulp.
+///
+/// Equal operands are `a + 1` exactly, which is also what keeps two equal
+/// infinities from differing by NaN. Anything else at an infinity falls out of
+/// the arithmetic: a `-inf` operand's power is zero, and a `+inf` one is the
+/// larger operand.
+fn logaddexp2_f64(a: f64, b: f64) -> f64 {
+    if a == b {
+        return a + 1.0;
+    }
+    let (high, low) = if a > b { (a, b) } else { (b, a) };
+    high + (low - high).exp2().ln_1p() * std::f64::consts::LOG2_E
+}
+
+/// `d/da log2(2^a + 2^b) = 2^a / (2^a + 2^b)`, the logistic function of
+/// `(a - b) ln 2`, with [`LOGADDEXP_D_LHS`]'s limits at the infinities. Formed
+/// in float64 at either width, so a float32 difference does not round its
+/// error into the power the way the forward's used to.
+fn logaddexp2_d_lhs(a: f64, b: f64) -> f64 {
+    if a == b {
+        return if a.is_infinite() && a < 0.0 { 0.0 } else { 0.5 };
+    }
+    let d = a - b;
+    if d >= 0.0 {
+        1.0 / (1.0 + (-d).exp2())
+    } else {
+        let e = d.exp2();
+        e / (1.0 + e)
+    }
+}
+
+/// See [`logaddexp2_d_lhs`].
+const LOGADDEXP2_D_LHS: FloatBinaryKernel = (
+    |a, b| logaddexp2_d_lhs(a as f64, b as f64) as f32,
+    logaddexp2_d_lhs,
+);
+/// `d/db`, which is [`LOGADDEXP2_D_LHS`] with the operands swapped.
+const LOGADDEXP2_D_RHS: FloatBinaryKernel = (
+    |a, b| logaddexp2_d_lhs(b as f64, a as f64) as f32,
+    |a, b| logaddexp2_d_lhs(b, a),
 );
 
 // --- fmax and fmin ---------------------------------------------------------
@@ -553,27 +597,26 @@ where
 /// `libm` call: `atan2` costs 5.5ms over a million float32 where the `atan`
 /// kernel beside it costs 0.32, and no amount of monomorphizing a call to
 /// `atan2f` changes that. Those need the vectorized kernel, which works on
-/// slices rather than elements, so this takes one -- used when both operands
-/// are float32 and already the output shape, which is where a block exists to
-/// hand it. Float64 is offered whole to the installed provider as `wide_op`
-/// (see `ops::provider`) when neither operand needs repeating beyond a single
-/// element. Everything else falls through to the element-wise path.
+/// slices rather than elements, so this takes one -- used whenever the operands
+/// are float32, broadcast or not (see
+/// [`crate::ops::kernels::broadcast_binary_blocks`]). Float64 is offered whole
+/// to the installed provider as `wide_op` (see `ops::provider`), if the op
+/// names one, when neither operand needs repeating beyond a single element,
+/// and otherwise runs `wide` element-wise.
 ///
 /// # Safety
 ///
 /// `blocks` must initialize every element of the output block it is handed;
 /// a call to one [`crate::ops::simd::F32Kernel`] method does.
-unsafe fn float_binary_blocked<N, W, B>(
+unsafe fn float_binary_blocked<W, B>(
     lhs: &Tensor,
     rhs: &Tensor,
-    narrow: N,
     wide: W,
-    wide_op: crate::ops::provider::Ufunc,
+    wide_op: Option<crate::ops::provider::Ufunc>,
     blocks: B,
     partials: [FloatBinaryKernel; 2],
 ) -> Result<Tensor>
 where
-    N: Fn(f32, f32) -> f32 + Send + Sync,
     W: Fn(f64, f64) -> f64 + Send + Sync,
     B: Fn(&[f32], &[f32], &mut [std::mem::MaybeUninit<f32>]) + Send + Sync,
 {
@@ -582,39 +625,47 @@ where
     let lhs_tensor = lhs_cast.into_owned();
     let rhs_tensor = rhs_cast.into_owned();
 
-    let blocked = dtype == DataType::Float32
-        && lhs_tensor.shape().dims() == output_shape.dims()
-        && rhs_tensor.shape().dims() == output_shape.dims();
-    let output_data = match (
-        blocked,
-        lhs_tensor.data().as_f32_slice(),
-        rhs_tensor.data().as_f32_slice(),
-    ) {
-        (true, Some(left), Some(right)) => {
-            // SAFETY: `blocks` writes every element of each block it is given,
-            // by this function's contract, and the blocks tile the output.
-            let out = unsafe {
-                crate::ops::map::binary_map_blocks_threshold(
-                    left,
-                    right,
-                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
-                    crate::ops::map::PAR_CHUNK,
-                    blocks,
-                )
-            };
-            TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device())
-        }
-        _ => match offer_wide(&lhs_tensor, &rhs_tensor, &output_shape, wide_op) {
+    // A broadcast takes the kernel too, each task gathering its stretch of
+    // the operands into runs that match its block. That is a copy at a
+    // fraction of a nanosecond an element against the several a scalar
+    // `libm` call costs: `atan2` of a million float32 against one row went
+    // from 7.8ms to 0.63.
+    let output_data = if dtype == DataType::Float32 {
+        let (Some(left), Some(right)) = (
+            lhs_tensor.data().as_f32_slice(),
+            rhs_tensor.data().as_f32_slice(),
+        ) else {
+            return Err(MinitensorError::internal_error(
+                "float32 operands without float32 storage",
+            ));
+        };
+        // SAFETY: `blocks` writes every element of each block it is given,
+        // by this function's contract.
+        let out = unsafe {
+            crate::ops::kernels::broadcast_binary_blocks(
+                left,
+                right,
+                lhs_tensor.shape(),
+                rhs_tensor.shape(),
+                &output_shape,
+                crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                blocks,
+            )
+        };
+        TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device())
+    } else {
+        // Promotion by `/` leaves float64 as the only other dtype.
+        match wide_op.and_then(|op| offer_wide(&lhs_tensor, &rhs_tensor, &output_shape, op)) {
             Some(out) => TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()),
-            None => float_binary_data_with(
+            None => broadcast_binary_arm!(
                 &lhs_tensor,
                 &rhs_tensor,
-                dtype,
                 &output_shape,
-                narrow,
-                wide,
-            )?,
-        },
+                as_f64_slice,
+                "f64",
+                wide
+            ),
+        }
     };
     attach_float_binary_grad(
         lhs,
@@ -773,14 +824,33 @@ pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         float_binary_blocked(
             lhs,
             rhs,
-            atan2_f32,
-            atan2_f64,
-            crate::ops::provider::Ufunc::Atan2,
+            f64::atan2,
+            Some(crate::ops::provider::Ufunc::Atan2),
             move |y, x, out| kernel.atan2(y, x, out),
             [ATAN2_D_Y, ATAN2_D_X],
         )
     }
 }
+
+/// `log2(2**lhs + 2**rhs)`, without forming either power.
+///
+/// Float32 goes through `ops::simd::transcendental`, which computes it in
+/// float64 and rounds once; float64 is [`logaddexp2_f64`].
+pub fn logaddexp2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: the block closure is one `F32Kernel` method call.
+    unsafe {
+        float_binary_blocked(
+            lhs,
+            rhs,
+            logaddexp2_f64,
+            None,
+            move |a, b, out| kernel.logaddexp2(a, b, out),
+            [LOGADDEXP2_D_LHS, LOGADDEXP2_D_RHS],
+        )
+    }
+}
+
 /// Element-wise larger of two tensors, ignoring a NaN in either operand. NaN
 /// only where both are.
 ///

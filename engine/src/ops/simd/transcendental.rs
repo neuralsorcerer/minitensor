@@ -1145,6 +1145,47 @@ fn neg_log_sigmoid_one<const FMA: bool>(x: f32) -> f32 {
 /// The threshold above which `softplus(z)` is `z` to within float32.
 pub(crate) const SOFTPLUS_THRESHOLD: f64 = 20.0;
 
+/// `log_b(b^a + b^c)` in float64, for a base given by its natural log and that
+/// log's reciprocal.
+///
+/// The larger operand plus `log1p` of the smaller's power relative to it, so
+/// no power is formed that could overflow. The difference is at most zero,
+/// which leaves `exp`'s only work its underflowing side: past the clamp the
+/// term is below `exp(-110)`, under half an ulp of anything float32 holds.
+///
+/// Equal operands are the one case the difference cannot carry, since two
+/// equal infinities differ by NaN. Their answer is the operand plus `log_b 2`,
+/// which a zero difference gives for every one of them. A NaN in either
+/// operand survives the subtraction, so nothing here needs a second pass.
+///
+/// Float64 is what the base-2 form needs. Scaling `a` by `ln 2` in float32
+/// rounds an error of up to `|a| * 2^-24` into the exponent, which `exp` turns
+/// into the same relative error in the answer: `logaddexp2(1e-45, -103)` was
+/// 18 ulp off that way. Here the scaling rounds at `2^-53`, and the one
+/// rounding that reaches float32 is the last.
+#[inline(always)]
+fn log_add_exp_core<const FMA: bool>(a: f64, b: f64, ln_base: f64, log_base_e: f64) -> f64 {
+    let (high, low) = if a > b { (a, b) } else { (b, a) };
+    let d = if a == b { 0.0 } else { low - high };
+    let w = exp_core::<FMA>(d * ln_base);
+    let u = 1.0 + w;
+    // Exact by Sterbenz, as in `log1p_one`: `w` is at most one.
+    let c = w - (u - 1.0);
+    high + log_core::<FMA, true>(u, c) * log_base_e
+}
+
+/// `log(e^a + e^b)` for one float32 pair. See [`log_add_exp_core`].
+#[inline(always)]
+fn logaddexp_one<const FMA: bool>(a: f32, b: f32) -> f32 {
+    log_add_exp_core::<FMA>(a as f64, b as f64, 1.0, 1.0) as f32
+}
+
+/// `log2(2^a + 2^b)` for one float32 pair. See [`log_add_exp_core`].
+#[inline(always)]
+fn logaddexp2_one<const FMA: bool>(a: f32, b: f32) -> f32 {
+    log_add_exp_core::<FMA>(a as f64, b as f64, std::f64::consts::LN_2, LOG2E) as f32
+}
+
 // ---------------------------------------------------------------------------
 // logistic family: sigmoid, silu
 // ---------------------------------------------------------------------------
@@ -1899,6 +1940,18 @@ block_kernel2_fallback!(
     atan2_block_avx512,
     atan2_block_avx2
 );
+block_kernel2!(
+    logaddexp_block,
+    logaddexp_one,
+    logaddexp_block_avx512,
+    logaddexp_block_avx2
+);
+block_kernel2!(
+    logaddexp2_block,
+    logaddexp2_one,
+    logaddexp2_block_avx512,
+    logaddexp2_block_avx2
+);
 block_kernel!(acosh_block, acosh_one, acosh_block_avx512, acosh_block_avx2);
 block_kernel!(
     sigmoid_block,
@@ -2337,6 +2390,34 @@ impl F32Kernel {
             atan2_block,
             atan2_block_avx512,
             atan2_block_avx2
+        )
+    }
+
+    /// Write `log(exp(a[i]) + exp(b[i]))` into every element of `out`.
+    #[inline]
+    pub(crate) fn logaddexp(self, a: &[f32], b: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            a,
+            b,
+            out,
+            logaddexp_block,
+            logaddexp_block_avx512,
+            logaddexp_block_avx2
+        )
+    }
+
+    /// Write `log2(2^a[i] + 2^b[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn logaddexp2(self, a: &[f32], b: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            a,
+            b,
+            out,
+            logaddexp2_block,
+            logaddexp2_block_avx512,
+            logaddexp2_block_avx2
         )
     }
 
@@ -3281,6 +3362,138 @@ mod tests {
                         worst <= 1,
                         "{backend:?} {label} against {fixed:e}: worst {worst} ulp"
                     );
+                }
+            }
+        }
+    }
+
+    /// `log_b(b^a + b^c)` in float64 from `libm`, narrowed once: the answer
+    /// the two `logaddexp` kernels are held to.
+    fn log_add_exp_reference(a: f32, b: f32, base2: bool) -> f32 {
+        let (a, b) = (a as f64, b as f64);
+        if a.is_nan() || b.is_nan() {
+            return f32::NAN;
+        }
+        if a == b {
+            return (a + if base2 { 1.0 } else { std::f64::consts::LN_2 }) as f32;
+        }
+        let (high, low) = if a > b { (a, b) } else { (b, a) };
+        let tail = if base2 {
+            (low - high).exp2().ln_1p() * std::f64::consts::LOG2_E
+        } else {
+            (low - high).exp().ln_1p()
+        };
+        (high + tail) as f32
+    }
+
+    /// The worst distance from [`log_add_exp_reference`] over `pairs`, and
+    /// how many differ at all. Every non-finite answer has to match exactly.
+    fn log_add_exp_errors(backend: Backend, pairs: &[(f32, f32)], base2: bool) -> (i64, usize) {
+        let (a, b): (Vec<f32>, Vec<f32>) = pairs.iter().copied().unzip();
+        let mut out = vec![MaybeUninit::uninit(); a.len()];
+        if base2 {
+            F32Kernel(backend).logaddexp2(&a, &b, &mut out);
+        } else {
+            F32Kernel(backend).logaddexp(&a, &b, &mut out);
+        }
+        let mut worst = 0;
+        let mut differing = 0;
+        for ((&x, &y), o) in a.iter().zip(&b).zip(out) {
+            // SAFETY: the kernel initialized every element.
+            let got = unsafe { o.assume_init() };
+            let want = log_add_exp_reference(x, y, base2);
+            if got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()) {
+                continue;
+            }
+            assert!(
+                got.is_finite() && want.is_finite(),
+                "{backend:?} base2={base2} ({x:e}, {y:e}): got {got:e}, want {want:e}"
+            );
+            worst = worst.max(ulps_apart(got, want));
+            differing += 1;
+        }
+        (worst, differing)
+    }
+
+    /// Both orders of every pair from a spread that covers the regimes: the
+    /// infinities and NaN, equal operands, differences on either side of the
+    /// point where the smaller term underflows, and operands near the top of
+    /// the range where the sum's last ulp is all the tail can move.
+    #[test]
+    fn logaddexp_kernels_round_once_from_float64() {
+        let mut values = vec![
+            0.0f32,
+            -0.0,
+            1.0e-45,
+            -1.0e-45,
+            f32::MIN_POSITIVE,
+            1.0,
+            -1.0,
+            f32::MAX,
+            -f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        for i in -1600..=1600 {
+            values.push(i as f32 * 0.125);
+            values.push(i as f32 * 0.137);
+        }
+        for e in -40..=38 {
+            values.push(10f32.powi(e));
+            values.push(-(10f32.powi(e)) * 1.37);
+        }
+        let mut pairs = Vec::with_capacity(values.len() * 64);
+        for (i, &a) in values.iter().enumerate() {
+            for j in (0..values.len()).step_by(97) {
+                let b = values[(i + j) % values.len()];
+                pairs.push((a, b));
+                pairs.push((b, a));
+            }
+        }
+        for backend in available() {
+            for base2 in [false, true] {
+                let (worst, differing) = log_add_exp_errors(backend, &pairs, base2);
+                assert!(
+                    worst <= 1,
+                    "{backend:?} base2={base2}: {differing} differ, worst {worst} ulp"
+                );
+            }
+        }
+    }
+
+    /// One operand swept over all 2^32 float32 values against each fixed one.
+    #[test]
+    #[ignore = "sweeps all 2^32 float32 values against each fixed operand; takes a while"]
+    fn logaddexp_kernels_round_once_exhaustively() {
+        use rayon::prelude::*;
+        const FIXED: [f32; 9] = [
+            0.0,
+            -1.0,
+            100.0,
+            -103.0,
+            1.0e-45,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        for backend in available() {
+            for base2 in [false, true] {
+                for fixed in FIXED {
+                    let (worst, differing) = (0..(1u64 << 32) / 8192)
+                        .into_par_iter()
+                        .map(|block| {
+                            let pairs: Vec<(f32, f32)> = (0..8192)
+                                .map(|k| (f32::from_bits((block * 8192 + k) as u32), fixed))
+                                .collect();
+                            log_add_exp_errors(backend, &pairs, base2)
+                        })
+                        .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1));
+                    println!(
+                        "  {backend:?} base2={base2} against {fixed:e}: {differing} of 2^32 differ, worst {worst} ulp"
+                    );
+                    assert!(worst <= 1, "{backend:?} base2={base2} against {fixed:e}");
                 }
             }
         }

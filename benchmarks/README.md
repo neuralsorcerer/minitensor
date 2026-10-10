@@ -613,6 +613,17 @@ problems:
   reads 11.32. `atan2` was the last and the most stubborn -- monomorphizing
   its call did nothing, because the call was to `atan2f` -- and it took a
   kernel of its own to go 5.555ms to 0.574, 0.15× to 1.41.
+
+  `logaddexp` and `logaddexp2` have one now too, the larger operand plus
+  `log1p` of the smaller's power, in float64 and rounded once: 5.1 and 6.2ms
+  over a million float32 pairs became 1.15 and 1.17. `logaddexp2` had been a
+  rescaled `logaddexp`, and multiplying by `ln 2` in float32 put an error
+  proportional to the operand into the exponent -- 18 ulp at `(1e-45, -103)`;
+  both now round to the float64 answer. A broadcast used to leave these
+  kernels for scalar `libm`, so `atan2` against one row of a million float32
+  took 7.8ms where the same pair laid out at full shape took 0.58. Each task
+  now gathers its stretch of the operands into blocks for the same kernel,
+  and the row reads 0.63.
 - **Transcendentals in float64** and **sorting and selection** are
   delegated now -- see *What is delegated* -- and read as NumPy plus the
   crossing.

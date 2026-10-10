@@ -197,6 +197,98 @@ def test_logaddexp2_survives_exponents_that_would_overflow():
     np.testing.assert_allclose(got, np.logaddexp2(big, other), rtol=1e-14)
 
 
+def _float32_reference(reference, left, right):
+    """`reference` taken in float64 and rounded once to float32."""
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        wide = reference(left.astype(np.float64), right.astype(np.float64))
+    return wide.astype(np.float32)
+
+
+def _ulps_apart(got, want):
+    def key(values):
+        bits = values.view(np.int32).astype(np.int64)
+        return np.where(bits < 0, np.int64(-(2**31)) - bits, bits)
+
+    return np.abs(key(got) - key(want))
+
+
+@pytest.mark.parametrize("name", ["logaddexp", "logaddexp2"])
+def test_float32_logaddexp_rounds_once_from_float64(name):
+    # Scaling by `ln 2` in float32 put an error proportional to the operand
+    # into the exponent, which the power carried into the answer: 18 ulp at
+    # `(1e-45, -103)`. Both are now formed in float64 and rounded once.
+    rng = np.random.default_rng(0)
+    left = (rng.standard_normal(1 << 14) * 60).astype(np.float32)
+    right = (rng.standard_normal(1 << 14) * 60).astype(np.float32)
+    left[:4] = [1e-45, -1e-45, 3.0e38, 0.0]
+    right[:4] = [-103.0, -149.0, 3.0e38, -0.0]
+    got = getattr(mt, name)(mt.Tensor(left), mt.Tensor(right))
+    assert got.dtype == "float32"
+    want = _float32_reference(getattr(np, name), left, right)
+    assert _ulps_apart(got.numpy(), want).max() <= 1
+
+
+@pytest.mark.parametrize("name", ["logaddexp", "logaddexp2", "atan2"])
+@pytest.mark.parametrize(
+    "shapes",
+    [((64, 33), (33,)), ((64, 33), (64, 1)), ((5, 1, 7), (1, 9, 1)), ((300,), ())],
+    ids=["row", "column", "outer", "scalar"],
+)
+def test_a_float32_broadcast_answers_as_the_same_shape_pair_does(name, shapes):
+    # A broadcast gathers its operands into blocks for the same kernel the
+    # same-shape pair runs, so the two agree bit for bit.
+    left_shape, right_shape = shapes
+    rng = np.random.default_rng(1)
+    left = (rng.standard_normal(left_shape) * 30).astype(np.float32)
+    right = (rng.standard_normal(right_shape) * 30).astype(np.float32)
+    op = getattr(mt, name)
+    got = op(mt.Tensor(left), mt.Tensor(right)).numpy()
+    full = np.broadcast_shapes(left_shape, right_shape)
+    expanded = op(
+        mt.Tensor(np.ascontiguousarray(np.broadcast_to(left, full))),
+        mt.Tensor(np.ascontiguousarray(np.broadcast_to(right, full))),
+    ).numpy()
+    assert got.shape == full
+    np.testing.assert_array_equal(got, expanded)
+
+
+@pytest.mark.parametrize("name", ["logaddexp", "logaddexp2"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_logaddexp_takes_its_limits_at_the_infinities(name, dtype):
+    inf, nan = math.inf, math.nan
+    left = [inf, -inf, inf, -inf, -inf, nan, 2.0]
+    right = [inf, -inf, -inf, 3.0, 2.5, 1.0, nan]
+    got = getattr(mt, name)(_t(left, dtype), _t(right, dtype)).numpy()
+    np.testing.assert_array_equal(got[:5], [inf, -inf, inf, 3.0, 2.5])
+    assert np.isnan(got[5:]).all()
+
+
+def test_logaddexp2_takes_its_gradient_from_the_operands():
+    left = _t([0.0, 3.0, -50.0, 2.0, -math.inf], requires_grad=True)
+    right = _t([0.0, 1.0, 50.0, -math.inf, -math.inf], requires_grad=True)
+    mt.logaddexp2(left, right).sum().backward()
+    # `d/da log2(2^a + 2^b)` is the share of the sum that `2^a` makes up.
+    share = 1.0 / (1.0 + 2.0 ** (np.array([0.0, 1.0, 50.0]) - [0.0, 3.0, -50.0]))
+    np.testing.assert_allclose(left.grad.numpy()[:3], share, rtol=1e-15)
+    np.testing.assert_allclose(right.grad.numpy()[:3], 1.0 - share, rtol=1e-15)
+    # A `-inf` operand takes none of the slope, and two of them take none.
+    np.testing.assert_array_equal(left.grad.numpy()[3:], [1.0, 0.0])
+    np.testing.assert_array_equal(right.grad.numpy()[3:], [0.0, 0.0])
+
+
+def test_float64_logaddexp2_keeps_a_small_tail_exact():
+    # `log2(1 + 2^-n)`. Rescaling into the natural form rounded `n ln 2`, and
+    # the power carried that error into the answer: 445 ulp at `n = 1000`.
+    n = np.array([60.0, 500.0, 1000.0])
+    got = mt.logaddexp2(_t(np.zeros(3)), _t(-n)).numpy()
+    np.testing.assert_allclose(got, np.log1p(2.0**-n) / np.log(2.0), rtol=5e-16)
+
+
+def test_logaddexp2_takes_a_number_first():
+    got = mt.logaddexp2(3.0, _t([1.0, 3.0])).numpy()
+    np.testing.assert_allclose(got, np.logaddexp2(3.0, [1.0, 3.0]), rtol=1e-15)
+
+
 # Every one of these answers in a float whatever its operands were, so an
 # integer pair promotes the way `/` does rather than being refused. `logaddexp`
 # was promoting like `+` instead, landing two integers on an integer dtype that

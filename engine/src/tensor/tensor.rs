@@ -2889,6 +2889,12 @@ impl Tensor {
         crate::ops::binary_math::ldexp(self, other)
     }
 
+    /// `log2(2^self + 2^other)` without forming either power.
+    #[inline(always)]
+    pub fn logaddexp2(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::logaddexp2(self, other)
+    }
+
     /// `sqrt(self^2 + other^2)` without forming either square.
     #[inline(always)]
     pub fn hypot(&self, other: &Self) -> Result<Self> {

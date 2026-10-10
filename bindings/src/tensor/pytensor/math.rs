@@ -305,6 +305,14 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `log2(2**input + 2**other)`, shifted so neither power overflows, and in float64 for a float32 pair so the answer rounds once.
+    pub fn logaddexp2(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.logaddexp2(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// `sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.
     pub fn hypot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
