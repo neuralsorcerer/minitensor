@@ -1241,8 +1241,18 @@ def instance_norm(
         normalized = (tensor - mean) / _F.sqrt(variance + float(eps))
         return _affine(normalized, weight, bias, "instance_norm")
 
+    if running_var is not None and positions == 1:
+        # One position has no spread, and its unbiased variance is `0 / 0`:
+        # folded into the buffer it was NaN for good. `batch_norm` refuses the
+        # same thing for the same reason.
+        raise ValueError(
+            "instance_norm needs more than one position per channel to update "
+            f"running_var, and this input of shape {tuple(sizes)} has one"
+        )
     normalized = _normalized_groups("instance_norm", tensor, channels, eps)
-    if running_mean is not None or running_var is not None:
+    # An empty batch says nothing about the distribution, and its statistics
+    # are the NaN of an average over nothing, so the buffers keep what they had.
+    if (running_mean is not None or running_var is not None) and tensor.numel():
         _update_running(
             tensor.reshape(sizes[0], channels, positions),
             running_mean,

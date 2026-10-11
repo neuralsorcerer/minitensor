@@ -229,8 +229,14 @@ pub fn batch_norm(
     }
 
     // Update running statistics if training (mean_used/var_used hold the
-    // batch statistics whenever training is true)
-    if training && let (Some(rm), Some(rv)) = (running_mean, running_var) {
+    // batch statistics whenever training is true). Not from an empty batch:
+    // it says nothing about the distribution, and its mean and variance are
+    // the NaN of an average over nothing -- folded into the running estimates,
+    // that NaN stayed there and made every later output in eval mode NaN.
+    if training
+        && input.numel() > 0
+        && let (Some(rm), Some(rv)) = (running_mean, running_var)
+    {
         let mean_flat = mean_used.view(Shape::new(vec![num_features]))?.detach();
         let var_flat = var_used.view(Shape::new(vec![num_features]))?.detach();
 

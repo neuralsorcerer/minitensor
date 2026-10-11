@@ -12,6 +12,9 @@
 - Batch statistics over one value per channel have no spread. The output was
   exactly zero whatever the input, and the running variance was pulled toward
   zero, inflating every later output in evaluation mode. It is refused now.
+- An empty batch has no statistics at all: its mean is the NaN of an average
+  over nothing, and folded into the running estimates it made every later
+  evaluation output NaN. The estimates are left as they were.
 """
 
 from __future__ import annotations
@@ -72,6 +75,29 @@ def test_batch_statistics_over_one_value_per_channel_are_refused(build, shape):
     layer.train()
     if len(shape) == 4:
         assert tuple(layer(mt.ones(1, 2, 2, 2)).shape) == (1, 2, 2, 2)
+
+
+@pytest.mark.parametrize(
+    "build,shape,populated",
+    [
+        (lambda: nn.BatchNorm1d(3), (0, 3), (4, 3)),
+        (lambda: nn.BatchNorm1d(3), (2, 3, 0), (2, 3, 2)),
+        (lambda: nn.BatchNorm2d(3), (0, 3, 4, 4), (2, 3, 2, 2)),
+    ],
+    ids=["BatchNorm1d", "BatchNorm1d-no-positions", "BatchNorm2d"],
+)
+def test_an_empty_batch_leaves_the_running_statistics_alone(build, shape, populated):
+    layer = build()
+    layer.train()
+    before = {k: v.numpy().copy() for k, v in layer.state_dict().items()}
+    assert tuple(layer(mt.zeros(*shape)).shape) == shape
+    for name, values in before.items():
+        np.testing.assert_array_equal(layer.state_dict()[name].numpy(), values)
+    # A real batch afterwards still moves them, to finite values.
+    values = np.arange(float(np.prod(populated))).reshape(populated)
+    layer(mt.Tensor(values, dtype="float32"))
+    running_mean = layer.state_dict()["running_mean"].numpy()
+    assert np.isfinite(running_mean).all() and (running_mean != 0).any()
 
 
 def test_functional_batch_norm_refuses_it_too():

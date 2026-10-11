@@ -183,6 +183,25 @@ def test_the_running_buffers_move_towards_this_batch():
     )
 
 
+@pytest.mark.parametrize("shape", [(0, 4, 3, 3), (2, 4, 0)])
+def test_an_empty_input_leaves_the_running_buffers_alone(shape):
+    running_mean, running_var = _t(np.zeros(4)), _t(np.ones(4))
+    out = F.instance_norm(_t(np.zeros(shape)), running_mean, running_var)
+    assert tuple(out.shape) == shape
+    np.testing.assert_array_equal(running_mean.numpy(), np.zeros(4))
+    np.testing.assert_array_equal(running_var.numpy(), np.ones(4))
+
+
+def test_one_position_cannot_update_the_running_variance():
+    # Its unbiased variance is 0 / 0, which stayed in the buffer as NaN.
+    running_mean, running_var = _t(np.zeros(3)), _t(np.ones(3))
+    with pytest.raises(ValueError, match="more than one position per channel"):
+        F.instance_norm(_t(RNG.normal(size=(2, 3, 1))), running_mean, running_var)
+    np.testing.assert_array_equal(running_var.numpy(), np.ones(3))
+    # Without a buffer to update, the normalization itself is still defined.
+    assert tuple(F.instance_norm(_t(RNG.normal(size=(2, 3, 1)))).shape) == (2, 3, 1)
+
+
 def test_the_buffers_stay_out_of_the_graph():
     """A running average of past batches is not something a loss differentiates."""
 
