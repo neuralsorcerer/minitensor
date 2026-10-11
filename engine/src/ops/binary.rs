@@ -144,7 +144,7 @@ fn reject_float_operand(lhs: DataType, rhs: DataType, what: &str) -> Result<()> 
     Ok(())
 }
 
-fn promote_arithmetic_dtype(lhs: DataType, rhs: DataType) -> DataType {
+pub(crate) fn promote_arithmetic_dtype(lhs: DataType, rhs: DataType) -> DataType {
     use DataType::*;
 
     match (lhs, rhs) {

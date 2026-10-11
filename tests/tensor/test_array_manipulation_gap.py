@@ -261,6 +261,12 @@ def test_cumulative_sum_can_start_from_the_empty_total(values):
     [
         (lambda a, b: mt.append(a, b), lambda a, b: np.append(a, b)),
         (lambda a, b: mt.ediff1d(a, b), lambda a, b: np.ediff1d(a.astype(b.dtype), b)),
+        (lambda a, b: mt.cat([a, b]), lambda a, b: np.concatenate([a, b])),
+        (lambda a, b: mt.hstack([a, b]), lambda a, b: np.hstack([a, b])),
+        (
+            lambda a, b: mt.insert(a, [1, 2], b),
+            lambda a, b: np.insert(a.astype(b.dtype), [1, 2], b),
+        ),
     ],
 )
 def test_joining_values_of_another_dtype_promotes_rather_than_truncates(
@@ -268,11 +274,8 @@ def test_joining_values_of_another_dtype_promotes_rather_than_truncates(
 ):
     """`append([1, 2, 3], [2.5])` answered `[1, 2, 3, 2]`: the appended value
     was cast onto the tensor's integer dtype, so what came back was a value
-    the caller never passed. Concatenation promotes everywhere else in the
-    library, and these are concatenations.
-
-    `insert` is deliberately not in this list -- NumPy casts the inserted
-    values to the array's dtype there, and this follows it.
+    the caller never passed. `insert` did the same, and `cat` refused the pair
+    outright. Every join now promotes.
     """
     integers = mt.from_numpy(np.array([1, 2, 3]))
     halves = mt.from_numpy(np.array([2.5, 3.5]))
@@ -292,13 +295,39 @@ def test_appending_a_wide_float_to_a_narrow_one_keeps_the_width():
     assert joined.numpy()[-1] == 2.0**40 + 0.5
 
 
-def test_insert_casts_what_it_inserts():
-    """The one in this family that does truncate: the inserted values take the
-    array's dtype, because they become part of that array."""
+def test_insert_keeps_the_value_it_inserts():
+    """Inserting a float into integers widens the result rather than storing
+    a truncated value; a value of the tensor's own dtype leaves it alone."""
     integers = mt.from_numpy(np.array([1, 2, 3]))
-    got = mt.insert(integers, 1, mt.from_numpy(np.array([2.5]))).numpy()
-    np.testing.assert_array_equal(got, np.insert(np.array([1, 2, 3]), 1, 2.5))
-    assert str(got.dtype) == "int64"
+    got = mt.insert(integers, 1, mt.from_numpy(np.array([2.5])))
+    assert str(got.dtype) == "float64"
+    np.testing.assert_array_equal(got.numpy(), [1.0, 2.5, 2.0, 3.0])
+    same = mt.insert(integers, 1, mt.from_numpy(np.array([7])))
+    assert str(same.dtype) == "int64"
+    np.testing.assert_array_equal(same.numpy(), [1, 7, 2, 3])
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_stacking_mixed_dtypes_promotes_and_returns_each_its_gradient(dtype):
+    weights = mt.Tensor([1.5, -2.0], dtype=dtype, requires_grad=True)
+    wide = mt.Tensor([0.25, 4.0], dtype="float64", requires_grad=True)
+    counts = mt.Tensor([3, 4], dtype="int64")
+    flags = mt.Tensor([True, False], dtype="bool")
+
+    stacked = mt.stack([weights, wide, counts, flags])
+    assert str(stacked.dtype) == "float64"
+    np.testing.assert_array_equal(
+        stacked.numpy(), [[1.5, -2.0], [0.25, 4.0], [3.0, 4.0], [1.0, 0.0]]
+    )
+    (stacked * mt.Tensor(np.arange(8.0).reshape(4, 2))).sum().backward()
+    assert str(weights.grad.dtype) == dtype
+    np.testing.assert_array_equal(weights.grad.numpy(), [0.0, 1.0])
+    np.testing.assert_array_equal(wide.grad.numpy(), [2.0, 3.0])
+
+    # Integers and booleans together stay integers.
+    assert str(mt.cat([counts, flags]).dtype) == "int64"
+    np.testing.assert_array_equal(mt.cat([counts, flags]).numpy(), [3, 4, 1, 0])
+    mt.clear_autograd_graph()
 
 
 def test_a_long_list_of_positions_is_resolved_as_a_short_one_is():

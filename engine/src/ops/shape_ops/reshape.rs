@@ -414,6 +414,33 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
         ));
     }
 
+    // Mixed dtypes join at their common dtype -- the one arithmetic between
+    // them gives -- as `append` and the other joins already did: an index
+    // tensor next to a float one is an ordinary thing to concatenate, and
+    // refusing it made `cat` and every `stack` the odd ones out. `astype` is a
+    // recorded operation, so each operand still gets its gradient back in its
+    // own dtype.
+    let common = tensors
+        .iter()
+        .skip(1)
+        .fold(tensors[0].dtype(), |acc, tensor| {
+            crate::ops::binary::promote_arithmetic_dtype(acc, tensor.dtype())
+        });
+    if tensors.iter().any(|tensor| tensor.dtype() != common) {
+        let promoted = tensors
+            .iter()
+            .map(|tensor| {
+                if tensor.dtype() == common {
+                    Ok((*tensor).clone())
+                } else {
+                    tensor.astype(common)
+                }
+            })
+            .collect::<Result<Vec<Tensor>>>()?;
+        let refs: Vec<&Tensor> = promoted.iter().collect();
+        return concatenate(&refs, dim);
+    }
+
     let first_tensor = tensors[0];
 
     // Validate that all tensors have the same number of dimensions
@@ -436,14 +463,6 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             return Err(MinitensorError::device_mismatch(
                 format!("{:?}", first_tensor.device()),
                 format!("{:?}", tensor.device()),
-            ));
-        }
-
-        // Check data type compatibility
-        if tensor.dtype() != first_tensor.dtype() {
-            return Err(MinitensorError::type_mismatch(
-                format!("{:?}", first_tensor.dtype()),
-                format!("{:?}", tensor.dtype()),
             ));
         }
     }

@@ -438,6 +438,25 @@ mod tests {
         assert_eq!(data, &[1.0, 2.0, 3.0, 4.0]);
     }
 
+    /// Mixed dtypes join at the dtype arithmetic gives the pair, rather than
+    /// being refused, and nothing is truncated on the way.
+    #[test]
+    fn concatenate_promotes_mixed_dtypes() {
+        let narrow = tensor_of::<f32>(vec![1.5, 2.5], vec![2], false);
+        let wide = tensor_of::<f64>(vec![2.0f64.powi(40) + 0.5], vec![1], false);
+        let counts = tensor_of::<i64>(vec![7], vec![1], false);
+
+        let joined = concatenate(&[&narrow, &wide, &counts], 0).unwrap();
+        assert_eq!(joined.dtype(), DataType::Float64);
+        assert_eq!(
+            joined.data().as_f64_slice().unwrap(),
+            &[1.5, 2.5, 2.0f64.powi(40) + 0.5, 7.0]
+        );
+
+        let integers = concatenate(&[&counts, &counts], 0).unwrap();
+        assert_eq!(integers.dtype(), DataType::Int64);
+    }
+
     #[test]
     fn test_index_select_validation() {
         let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);

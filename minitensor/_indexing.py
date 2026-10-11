@@ -523,6 +523,16 @@ def _write_contiguous(
     values = _region_values(
         op, source, tensor, region[:axis] + (width,) + region[axis + 1 :]
     )
+    # `cat` promotes, as every join does, so the refusal a write owes a typed
+    # source of another dtype is made here: the result of a write keeps the
+    # dtype of the tensor written into, which a promoted join would not.
+    if str(values.dtype) != str(tensor.dtype):
+        expected, got = str(tensor.dtype), str(values.dtype)
+        raise TypeError(
+            f"Data type mismatch: expected {expected.capitalize()}, got "
+            f"{got.capitalize()}\n💡 Suggestion: Convert the {got} tensor with "
+            f".astype('{expected}')"
+        )
 
     if width == length:
         head = _write_contiguous(

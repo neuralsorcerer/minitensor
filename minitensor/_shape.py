@@ -1275,9 +1275,11 @@ def insert(
     if at.size == 0:
         return tensor
 
-    extra = _atleast_tensor(values)
-    if str(extra.dtype) != str(tensor.dtype):
-        extra = extra.astype(str(tensor.dtype))
+    # At the dtype the pair promotes to, as every other join here does. Cast
+    # onto the tensor's dtype instead, `insert([1, 2, 3], 1, 2.5)` answered
+    # `[1, 2, 2, 3]` -- a value the caller never passed -- and the result is a
+    # new tensor, so nothing holds it to the input's dtype.
+    tensor, extra = _promote_pair(tensor, _atleast_tensor(values))
     # One value per position, shaped like a slice of the axis: a single value
     # fills every position's slice, anything else is spread along the axis.
     single = extra.ndim() == 0 or extra.numel() == 1

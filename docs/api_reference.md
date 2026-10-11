@@ -944,12 +944,12 @@ real answer does -- `int32 / int32` is `float32` and `int64 / int64` is
 A `bool` operand promotes to whatever it is paired with.
 
 The same promotion applies to the operations that *join* values rather than
-combine them arithmetically -- `append`, `ediff1d`, `union1d`, `setxor1d`,
-`convolve` and `correlate` all take both operands to their common dtype. Two
-exceptions, each for its own reason:
+combine them arithmetically -- `cat`, `stack`, `hstack`, `vstack`, `dstack`,
+`column_stack`, `append`, `insert`, `ediff1d`, `union1d`, `setxor1d`,
+`convolve` and `correlate` all take their operands to the common dtype, so
+joining integers with floats never truncates a value the caller passed. One
+exception, for its own reason:
 
-- `insert` casts the inserted values to the tensor's dtype, because they
-  become part of that tensor.
 - `intersect1d` and `setdiff1d` keep the *left* operand's dtype, because every
   value they report comes from it. Promoting could lose one (an `int64`
   against a `float32` would land in `float32`), where keeping it cannot. The
