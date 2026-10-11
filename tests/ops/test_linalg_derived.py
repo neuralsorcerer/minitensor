@@ -300,6 +300,33 @@ def test_lstsq_batched():
         )
 
 
+@pytest.mark.parametrize("shape", [(0, 0), (0, 3), (3, 0), (2, 0, 3), (2, 3, 0)])
+def test_an_empty_matrix_has_rank_zero_and_an_empty_pseudo_inverse(shape):
+    # No rows or no columns means no singular values and a 2-norm of zero, so
+    # every relative cutoff is zero and nothing survives it. All three asked
+    # `max` for the largest singular value and were refused instead.
+    a = np.zeros(shape)
+    pinv = mt.pinv(_t(a)).numpy()
+    assert pinv.shape == np.linalg.pinv(a).shape
+    np.testing.assert_array_equal(pinv, 0.0)
+    rank = mt.matrix_rank(_t(a)).numpy()
+    np.testing.assert_array_equal(rank, np.zeros(shape[:-2], dtype=np.int64))
+    with pytest.raises(ValueError, match="cond.*empty matrix"):
+        mt.cond(_t(a))
+
+
+@pytest.mark.parametrize(
+    "a_shape,b_shape",
+    [((0, 3), (0, 2)), ((3, 0), (3, 2)), ((0, 0), (0, 2)), ((3, 0), (3,))],
+)
+def test_lstsq_of_an_empty_system_is_the_zero_solution(a_shape, b_shape):
+    a, b = np.zeros(a_shape), np.ones(b_shape)
+    got = mt.lstsq(_t(a), _t(b)).numpy()
+    expected = np.linalg.lstsq(a, b, rcond=None)[0]
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
 # --------------------------------------------------------------------------
 # matrix_power
 # --------------------------------------------------------------------------

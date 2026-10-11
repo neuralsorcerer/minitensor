@@ -84,8 +84,25 @@ fn default_tolerance(dtype: DataType, m: usize, n: usize) -> f64 {
 
 /// The largest singular value of each matrix, shaped to broadcast against the
 /// whole stack of them.
+///
+/// A matrix with no rows or no columns has no singular values and a 2-norm of
+/// zero, and zero is what comes back: every cutoff relative to it is then zero
+/// and nothing is kept, which makes the pseudo-inverse the empty matrix of the
+/// transposed shape, the rank zero, and the least-squares solution the zero
+/// one. Asked of `max`, the empty axis was an error in all three.
 fn largest(values: &Tensor) -> Result<Tensor> {
-    values.max(Some(values.ndim() as isize - 1), true)
+    let axis = values.ndim() - 1;
+    if values.shape().dims()[axis] == 0 {
+        let mut dims = values.shape().dims().to_vec();
+        dims[axis] = 1;
+        return Ok(Tensor::zeros(
+            Shape::new(dims),
+            values.dtype(),
+            values.device(),
+            false,
+        ));
+    }
+    values.max(Some(axis as isize), true)
 }
 
 /// `1 / s` where `s` counts, and zero where it does not.
@@ -185,6 +202,14 @@ pub fn matrix_rank(tensor: &Tensor, tol: Option<f64>) -> Result<Tensor> {
 /// as infinity rather than as an error, because that is the true answer and a
 /// caller comparing against a threshold should not have to catch it.
 pub fn cond(tensor: &Tensor) -> Result<Tensor> {
+    let (_, m, n) = layout(tensor, "cond")?;
+    if m == 0 || n == 0 {
+        // No singular values, so no ratio of them -- refused by name rather
+        // than as the `max` of nothing it would otherwise reach.
+        return Err(MinitensorError::invalid_argument(format!(
+            "cond() is not defined for an empty matrix, got {m} by {n}"
+        )));
+    }
     let values = linalg::svdvals(&tensor.detach())?;
     let axis = Some(values.ndim() as isize - 1);
     let biggest = values.max(axis, false)?;
