@@ -421,6 +421,23 @@ pub(crate) fn ensure_non_empty(numel: usize, op: &str) -> Result<()> {
     }
 }
 
+/// [`ensure_non_empty`] for what a reduction along `dim` actually reduces: the
+/// whole tensor when `dim` is `None`, and the one axis otherwise.
+///
+/// The axis is what has to have something in it. A `(3, 0, 2)` tensor's
+/// median along its first axis has nothing to choose between in no slice --
+/// each of its zero slices has three elements -- and the answer is simply an
+/// empty `(0, 2)`; it was refused because the tensor as a whole was empty.
+pub(crate) fn ensure_reducible(tensor: &Tensor, dim: Option<isize>, op: &str) -> Result<()> {
+    match dim {
+        Some(dim) if tensor.ndim() > 0 => {
+            let axis = normalize_dim(dim, tensor.ndim())?;
+            ensure_non_empty(tensor.shape().dims()[axis], op)
+        }
+        _ => ensure_non_empty(tensor.numel(), op),
+    }
+}
+
 /// Median of the tensor, optionally along one dimension.
 ///
 /// For an even number of elements this returns the **lower** of the two middle
@@ -438,7 +455,7 @@ pub fn median(
     dim: Option<isize>,
     keepdim: bool,
 ) -> Result<(Tensor, Option<Tensor>)> {
-    ensure_non_empty(tensor.numel(), "median")?;
+    ensure_reducible(tensor, dim, "median")?;
 
     if tensor.ndim() == 0 {
         return Ok((tensor.clone(), None));
@@ -651,7 +668,7 @@ fn quantile_axis(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    ensure_non_empty(tensor.numel(), "quantile")?;
+    ensure_reducible(tensor, dim, "quantile")?;
 
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
@@ -708,7 +725,7 @@ fn quantiles_axis(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    ensure_non_empty(tensor.numel(), "quantile")?;
+    ensure_reducible(tensor, dim, "quantile")?;
 
     if qs.is_empty() {
         return Err(MinitensorError::invalid_argument(
@@ -745,7 +762,7 @@ fn nanquantile_axis(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    ensure_non_empty(tensor.numel(), "nanquantile")?;
+    ensure_reducible(tensor, dim, "nanquantile")?;
 
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
@@ -810,7 +827,7 @@ fn nanquantiles_axis(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    ensure_non_empty(tensor.numel(), "nanquantile")?;
+    ensure_reducible(tensor, dim, "nanquantile")?;
 
     if qs.is_empty() {
         return Err(MinitensorError::invalid_argument(
@@ -1499,6 +1516,25 @@ mod core_tests {
     fn test_ensure_non_empty_guard() {
         assert!(ensure_non_empty(0, "median").is_err());
         assert!(ensure_non_empty(1, "median").is_ok());
+    }
+
+    /// Only the reduced axis has to have something in it: reducing the
+    /// populated axis of a tensor that is empty elsewhere is an empty answer,
+    /// not an error.
+    #[test]
+    fn ensure_reducible_looks_at_the_reduced_axis() {
+        let empty = Tensor::zeros(
+            Shape::new(vec![3, 0, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert!(ensure_reducible(&empty, None, "median").is_err());
+        assert!(ensure_reducible(&empty, Some(1), "median").is_err());
+        assert!(ensure_reducible(&empty, Some(-2), "median").is_err());
+        assert!(ensure_reducible(&empty, Some(0), "median").is_ok());
+        assert!(ensure_reducible(&empty, Some(2), "median").is_ok());
+        assert!(ensure_reducible(&empty, Some(3), "median").is_err());
     }
 }
 

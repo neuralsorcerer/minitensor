@@ -256,6 +256,41 @@ def test_median_empty_tensor_raises():
         x.max()
 
 
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_median_and_quantile_of_an_empty_result_are_empty(keepdim):
+    # Along an axis that has elements, a tensor that is empty elsewhere has no
+    # slice to reduce and an empty answer. Both used to be refused, because the
+    # check looked at the whole tensor rather than the axis being reduced.
+    a = np.zeros((3, 0, 2))
+    x = mt.Tensor(a)
+    for dim in (0, 2):
+        values, indices = x.median(dim=dim, keepdim=keepdim)
+        expected = np.median(a, dim, keepdims=keepdim).shape
+        assert values.shape == expected and indices.shape == expected
+        assert mt.quantile(x, 0.3, dim=dim, keepdim=keepdim).shape == expected
+        assert mt.nanquantile(x, 0.3, dim=dim, keepdim=keepdim).shape == expected
+        assert mt.percentile(x, 30, dim=dim, keepdim=keepdim).shape == expected
+        several = mt.quantile(x, [0.3, 0.6], dim=dim, keepdim=keepdim)
+        assert (
+            several.shape
+            == np.quantile(a, [0.3, 0.6], axis=dim, keepdims=keepdim).shape
+        )
+        several = mt.nanquantile(x, [0.3, 0.6], dim=dim, keepdim=keepdim)
+        assert several.shape == (2, *expected)
+    # The empty axis itself still has nothing to choose a median from.
+    with pytest.raises(ValueError, match="empty"):
+        x.median(dim=1, keepdim=keepdim)
+    with pytest.raises(ValueError, match="empty"):
+        mt.quantile(x, 0.3, dim=1, keepdim=keepdim)
+
+
+def test_an_empty_median_still_carries_a_gradient():
+    x = mt.Tensor(np.zeros((0, 3)), requires_grad=True)
+    values, _ = x.median(dim=1)
+    values.sum().backward()
+    assert x.grad.shape == (0, 3)
+
+
 def test_median_nan_propagates_global():
     x = mt.Tensor([1.0, float("nan"), 2.0], dtype="float32")
     median = x.median()
