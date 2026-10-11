@@ -329,6 +329,17 @@ pub(crate) fn ensure_backward_gradient_compatible(
 }
 
 pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {
+    tensor_from_py_value_in(reference.dtype(), reference.device(), value)
+}
+
+/// [`tensor_from_py_value`] with the context given as a dtype and a device
+/// rather than read off a tensor: an untyped Python value takes its width from
+/// `context`, a typed one keeps its own, and the result lives on `device`.
+pub(crate) fn tensor_from_py_value_in(
+    context: DataType,
+    device: Device,
+    value: &Bound<PyAny>,
+) -> PyResult<Tensor> {
     if let Some(py_tensor) = borrow_wrapped_tensor(value) {
         // One clone, from a borrow. Extracting the class by value would have
         // cloned it first and made this a clone of a clone, and a `Tensor`
@@ -345,9 +356,8 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
         // The array's own width, read off its dtype descriptor. A dtype NumPy
         // has and the engine does not falls back to the tensor's, which is
         // what the conversion would have to narrow to anyway.
-        let array_dtype = crate::share::dtype_from_type_num(array.dtype().num())
-            .unwrap_or_else(|| reference.dtype());
-        return convert_python_data_to_tensor(value, array_dtype, reference.device(), false);
+        let array_dtype = crate::share::dtype_from_type_num(array.dtype().num()).unwrap_or(context);
+        return convert_python_data_to_tensor(value, array_dtype, device, false);
     }
 
     // The dtype is resolved *before* the tensor is built. Building first and
@@ -356,7 +366,7 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
     // 0.10000000149011612, because widening a float32 back to float64 cannot
     // recover the digits that dropped on the way in. The same applied to a list
     // of floats, and to a Python int past 2^24.
-    let target_dtype = dtype::resolve_scalar_dtype(value, reference.dtype())
+    let target_dtype = dtype::resolve_scalar_dtype(value, context)
         .ok()
         .or_else(|| {
             // Not a scalar -- a list or tuple. Its inferred dtype is the one it
@@ -364,17 +374,17 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
             // operand, so it takes the context's width by the same rule a lone
             // float does.
             infer_python_value_dtype(value)
-                .map(|inferred| dtype::dtype_for_context(inferred, reference.dtype()))
+                .map(|inferred| dtype::dtype_for_context(inferred, context))
         })
-        .unwrap_or(reference.dtype());
+        .unwrap_or(context);
 
     // Built at the resolved dtype, so only the device can still differ. A
     // wrapped tensor returned above, and asking again would repeat the
     // wrapper lookup on every scalar operand.
     if let Ok(mut tensor) = convert_python_data_to_tensor(value, target_dtype, Device::cpu(), false)
     {
-        if tensor.device() != reference.device() {
-            tensor = tensor.to(reference.device()).map_err(_convert_error)?;
+        if tensor.device() != device {
+            tensor = tensor.to(device).map_err(_convert_error)?;
         }
         return Ok(tensor);
     }
@@ -385,25 +395,20 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
         if method.is_callable() {
             let result = method.call0()?;
             if result.is_instance_of::<PyInt>() {
-                let dtype = match dtype::resolve_scalar_dtype(value, reference.dtype()) {
+                let dtype = match dtype::resolve_scalar_dtype(value, context) {
                     Ok(dt) => dt,
-                    Err(_) => reference.dtype(),
+                    Err(_) => context,
                 };
-                return convert_python_data_to_tensor(
-                    result.as_any(),
-                    dtype,
-                    reference.device(),
-                    false,
-                );
+                return convert_python_data_to_tensor(result.as_any(), dtype, device, false);
             }
         }
     }
 
-    let dtype = match dtype::resolve_scalar_dtype(value, reference.dtype()) {
+    let dtype = match dtype::resolve_scalar_dtype(value, context) {
         Ok(dt) => dt,
-        Err(_) => infer_python_value_dtype(value).unwrap_or(reference.dtype()),
+        Err(_) => infer_python_value_dtype(value).unwrap_or(context),
     };
-    convert_python_data_to_tensor(value, dtype, reference.device(), false)
+    convert_python_data_to_tensor(value, dtype, device, false)
 }
 
 pub(crate) fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor> {
@@ -584,6 +589,40 @@ where
         });
     }
     dtype
+}
+
+/// The two operands of a comparison, uncoerced.
+///
+/// A comparison answers in booleans, so nothing is gained by rounding its
+/// operands to a common dtype first -- and it was the rounding that answered
+/// wrongly: an int32 `20_000_001` and the float `20_000_000.0` met in float32
+/// as the same number and compared equal. The engine compares an integer
+/// against a float exactly, so the operands are handed over as they are, and
+/// an untyped Python number beside an integer tensor is read at full width
+/// (an int as int64, a float as float64) so that its value is the one written.
+pub(crate) fn comparison_operands_from_py(
+    reference: &Tensor,
+    other: &Bound<PyAny>,
+    reverse: bool,
+) -> PyResult<(Tensor, Tensor)> {
+    // A Python int is an exact integer whatever it stands beside: read as the
+    // float tensor's width, `16777217` became `16777216.0` and a float32
+    // holding that compared equal to it. As an int64 it reaches the exact
+    // integer-against-float comparison instead. A Python float beside a float
+    // tensor keeps that tensor's width, so `x == 0.1` still asks about the
+    // float nearest 0.1 at the precision `x` is held in.
+    let int_literal = other.is_exact_instance_of::<PyInt>() && other.extract::<i64>().is_ok();
+    let context = match reference.dtype() {
+        DataType::Int32 | DataType::Int64 => DataType::Int64,
+        DataType::Float32 | DataType::Float64 if int_literal => DataType::Int64,
+        dtype => dtype,
+    };
+    let other = tensor_from_py_value_in(context, reference.device(), other)?;
+    Ok(if reverse {
+        (other, reference.clone())
+    } else {
+        (reference.clone(), other)
+    })
 }
 
 pub(crate) fn prepare_binary_operands_from_py(

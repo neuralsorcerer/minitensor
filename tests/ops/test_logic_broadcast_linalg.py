@@ -246,10 +246,12 @@ def test_where_promotes_to_common_dtype():
         method_result.numpy(), np.array([1.0, 1.5, 3.0], dtype=np.float32)
     )
 
+    # A Python list has no width of its own, so beside an int64 tensor it
+    # takes float64 -- the width that holds every value the int64 side has.
     functional_result = mt.functional.where(condition, int_input, [0.5, 1.5, 2.5])
-    assert functional_result.dtype == "float32"
+    assert functional_result.dtype == "float64"
     np.testing.assert_allclose(
-        functional_result.numpy(), np.array([1.0, 1.5, 3.0], dtype=np.float32)
+        functional_result.numpy(), np.array([1.0, 1.5, 3.0], dtype=np.float64)
     )
 
 

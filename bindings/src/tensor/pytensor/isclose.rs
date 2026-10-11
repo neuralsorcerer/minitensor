@@ -17,8 +17,9 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let rtol = rtol.unwrap_or(1e-5);
         let atol = atol.unwrap_or(1e-8);
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
+        // Uncoerced, as the comparisons are: the engine measures an integer
+        // against a float in float64 rather than at their common dtype.
+        let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = engine::ops::comparison::isclose(&lhs, &rhs, rtol, atol, equal_nan)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

@@ -809,18 +809,19 @@ where
 /// Generic broadcasting binary map: applies `op` element-wise over broadcast
 /// operands, producing a fresh, fully-initialized output buffer (no zeroing
 /// pass — every element is written exactly once).
-pub(crate) fn broadcast_binary_map<T, U, F>(
-    lhs_data: &[T],
-    rhs_data: &[T],
+pub(crate) fn broadcast_binary_map<A, B, U, F>(
+    lhs_data: &[A],
+    rhs_data: &[B],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     output_shape: &Shape,
     op: F,
 ) -> Result<Vec<U>>
 where
-    T: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    B: Copy + Send + Sync,
     U: Copy + Send + Sync,
-    F: Fn(T, T) -> U + Send + Sync,
+    F: Fn(A, B) -> U + Send + Sync,
 {
     let output_dims = output_shape.dims();
     let lhs_dims = lhs_shape.dims();
@@ -945,18 +946,19 @@ where
 /// operator -- comparison, bitwise -- all need the same five lines, and a
 /// dtype argument they could get wrong. `U: TensorElement` makes the tag and
 /// the buffer impossible to disagree.
-pub(crate) fn broadcast_binary_data<T, U, F>(
+pub(crate) fn broadcast_binary_data<A, B, U, F>(
     lhs: &Tensor,
     rhs: &Tensor,
-    lhs_data: &[T],
-    rhs_data: &[T],
+    lhs_data: &[A],
+    rhs_data: &[B],
     output_shape: &Shape,
     op: F,
 ) -> Result<TensorData>
 where
-    T: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    B: Copy + Send + Sync,
     U: TensorElement,
-    F: Fn(T, T) -> U + Send + Sync,
+    F: Fn(A, B) -> U + Send + Sync,
 {
     let out = broadcast_binary_map(
         lhs_data,

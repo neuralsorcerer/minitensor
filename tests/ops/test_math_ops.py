@@ -181,22 +181,26 @@ def test_boolean_numeric_interactions():
     np.testing.assert_allclose(divided.numpy(), np.array([1.0, 0.0], dtype=np.float32))
 
 
-def test_int64_tensor_with_python_float_promotes_to_float32():
-    t = mt.Tensor([1, 2, 3], dtype="int64")
+def test_int64_tensor_with_python_float_promotes_to_float64():
+    # A Python float has no width, so the integer's decides, as it does for
+    # `/`: float32 would round every int64 past 2^24 before the add.
+    t = mt.Tensor([1, 2, 20_000_001], dtype="int64")
     result = t + 1.5
-    assert result.dtype == "float32"
-    np.testing.assert_allclose(
-        result.numpy(), np.array([2.5, 3.5, 4.5], dtype=np.float32)
-    )
+    assert result.dtype == "float64"
+    np.testing.assert_array_equal(result.numpy(), [2.5, 3.5, 20_000_002.5])
 
 
 def test_reverse_int64_tensor_with_python_float():
-    t = mt.Tensor([1, 2, 3], dtype="int64")
+    t = mt.Tensor([1, 2, 20_000_001], dtype="int64")
     result = 1.5 + t
-    assert result.dtype == "float32"
-    np.testing.assert_allclose(
-        result.numpy(), np.array([2.5, 3.5, 4.5], dtype=np.float32)
-    )
+    assert result.dtype == "float64"
+    np.testing.assert_array_equal(result.numpy(), [2.5, 3.5, 20_000_002.5])
+
+
+def test_int32_tensor_with_python_float_keeps_the_default_width():
+    t = mt.Tensor([1, 2, 3], dtype="int32")
+    assert (t + 1.5).dtype == "float32"
+    assert (t / 2).dtype == "float32"
 
 
 def test_maximum_dtype_promotion():
@@ -405,7 +409,7 @@ def test_a_scalar_exponent_promotes_the_way_a_scalar_factor_does():
     # a float -- which is what `*` has always done, and what `**` did not.
     integer = mt.Tensor(np.array([2, 3], dtype=np.int64), dtype="int64")
     assert (integer**2).dtype == (integer * 2).dtype == "int64"
-    assert (integer**2.0).dtype == (integer * 2.0).dtype == "float32"
+    assert (integer**2.0).dtype == (integer * 2.0).dtype == "float64"
     np.testing.assert_array_equal((integer**2).numpy(), np.array([4, 9]))
     np.testing.assert_array_equal((2**integer).numpy(), np.array([4, 8]))
     np.testing.assert_array_equal(integer.pow(3).numpy(), np.array([8, 27]))

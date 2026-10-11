@@ -170,11 +170,22 @@ pub fn dtype_for_context(inferred: DataType, context: DataType) -> DataType {
     }
 }
 
+/// The float a dtype-less Python float becomes beside a tensor of `context`.
+///
+/// Beside a float tensor, that tensor's width. Beside an integer one there is
+/// no float width to defer to, so the integer's decides, as it does for `/`
+/// and `mean`: an int64 tensor takes float64, because float32 holds its
+/// integers only up to 2^24 -- `int64 + 0.5` rounded `20_000_001` to
+/// `20_000_000` before the half was even added. An int32 or a boolean takes
+/// the default float, keeping the width an int32's `/` and `mean` keep; past
+/// 2^24 that rounds, as they do, and `set_default_dtype` can widen it. A
+/// comparison has no result width to keep, so it reads the value at full
+/// width instead -- see `comparison_operands_from_py`.
 fn float_like_dtype_for_context(context: DataType) -> DataType {
     match context {
         DataType::Float32 => DataType::Float32,
-        DataType::Float64 => DataType::Float64,
-        _ => default_float_dtype(),
+        DataType::Float64 | DataType::Int64 => DataType::Float64,
+        DataType::Int32 | DataType::Bool => default_float_dtype(),
     }
 }
 

@@ -936,12 +936,25 @@ back-propagates to both sides.
 
 An integer operand takes the float operand's width (`int64 + float32` is
 `float32`, not `float64`): widening would double the memory and halve the speed
-of any expression that mixes an index tensor into an activation. `/` always
+of any expression that mixes an index tensor into an activation. A Python float
+has no width of its own, so beside an integer tensor the integer's decides, the
+way it does for `/`: `int64_tensor + 0.5` is `float64`, where float32 would
+round every value past 2^24 before the add, and `int32_tensor + 0.5` is the
+default float. A list of Python floats follows the same rule. `/` always
 produces a float. Between two integers it widens the way every operation with a
 real answer does -- `int32 / int32` is `float32` and `int64 / int64` is
 `float64`, the width `mean` gives -- so `x.sum() / len(x)` and `x.mean()` agree.
 `hypot`, `atan2` and the other binary maths that answer in reals follow `/`.
 A `bool` operand promotes to whatever it is paired with.
+
+Comparisons do not promote. They answer in booleans, so there is no result
+width to keep narrow, and an integer against a float is compared exactly: an
+int32 `20_000_001` is not equal to `20_000_000.0`, though the two are the same
+float32, and an int64 above 2^53 is not equal to the float64 below it. The
+operators, the functional forms, `isclose`, `allclose`, `array_equal`, `isin`
+and the membership tests behind `intersect1d` and `setdiff1d` all follow this.
+A Python number beside an integer tensor is read at full width for a
+comparison -- `int32_tensor < 2**40` is `True` rather than refused.
 
 The same promotion applies to the operations that *join* values rather than
 combine them arithmetically -- `cat`, `stack`, `hstack`, `vstack`, `dstack`,
@@ -953,8 +966,8 @@ exception, for its own reason:
 - `intersect1d` and `setdiff1d` keep the *left* operand's dtype, because every
   value they report comes from it. Promoting could lose one (an `int64`
   against a `float32` would land in `float32`), where keeping it cannot. The
-  membership test behind them still promotes, so which values are reported
-  does not depend on the dtype they are reported in.
+  membership test behind them is exact, as every comparison is, so which
+  values are reported does not depend on the dtype they are reported in.
 
 `convolve` and `correlate` answer in `float64` for an integer input: the
 sliding product is `conv1d`, which is a float kernel. That is exact for any result below 2^53.

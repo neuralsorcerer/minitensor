@@ -271,6 +271,30 @@ def argwhere(input: object) -> Tensor:
     return _F.nonzero(_atleast_tensor(input))
 
 
+def _membership_dtype(left: Tensor, right: Tensor) -> str:
+    """The dtype a membership test compares `left` and `right` in.
+
+    Their promoted dtype, except for an integer against a float, which is
+    compared in float64. At the promoted dtype -- the float's -- an int32
+    `20_000_001` and the float32 `20_000_000.0` were the same number, so the
+    one was "in" a set holding only the other. Float64 holds every int32 and
+    every float32 exactly, and a membership test answers in booleans, so there
+    is no result width to keep narrow.
+    """
+
+    pair = {str(left.dtype), str(right.dtype)}
+    if pair & {"int32", "int64"} and pair & set(_FLOAT_DTYPES):
+        return "float64"
+    return _promoted_dtype(left, right)
+
+
+def _membership_pair(left: Tensor, right: Tensor) -> tuple[Tensor, Tensor]:
+    """Both operands at [`_membership_dtype`]."""
+
+    dtype = _membership_dtype(left, right)
+    return left.astype(dtype), right.astype(dtype)
+
+
 def _present_in_sorted(values: Tensor, ordered: Tensor) -> Tensor:
     """Whether each of `values` appears in the already-sorted `ordered`.
 
@@ -320,7 +344,7 @@ def isin(
     tests = _atleast_tensor(test_elements).reshape(-1)
 
     shape = list(values.shape)
-    dtype = _promoted_dtype(values, tests)
+    dtype = _membership_dtype(values, tests)
     if dtype not in _FLOAT_DTYPES or values.numel() + tests.numel() < _ISIN_NUMPY_BELOW:
         # NumPy's `isin` counts integers in a lookup table where the value
         # range allows it and a sort cannot compete: 0.11-0.22x of it at every
@@ -1156,7 +1180,7 @@ def intersect1d(
         left_values, left_first = unique(left, return_index=True)
         right_values, right_first = unique(right, return_index=True)
         # Both came back sorted, so the membership test needs no sort of its own.
-        keep = _present_in_sorted(*_promote_pair(left_values, right_values))
+        keep = _present_in_sorted(*_membership_pair(left_values, right_values))
         common = _F.masked_select(left_values, keep)
         # Where the common values sit in each side's distinct list, which is
         # sorted -- so a search finds them without comparing every pair.
@@ -1177,7 +1201,7 @@ def intersect1d(
         # an unstable sort puts first is only visible in the sign of a zero,
         # so the zero is pinned back to the left side's own.
         ours, _, wide_ours, wide_theirs = _distinct_pair(
-            left, right, _promoted_dtype(left, right)
+            left, right, _membership_dtype(left, right)
         )
         merged = _np.sort(_np.concatenate([wide_ours, wide_theirs]))
         common = merged[:-1][merged[1:] == merged[:-1]].astype(ours.dtype)
@@ -1187,7 +1211,7 @@ def intersect1d(
         return _from_numpy(common)
     left_values = unique(left)
     right_values = unique(right)
-    keep = _present_in_sorted(*_promote_pair(left_values, right_values))
+    keep = _present_in_sorted(*_membership_pair(left_values, right_values))
     return _F.masked_select(left_values, keep)
 
 
@@ -1199,7 +1223,7 @@ def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tens
     right = _atleast_tensor(other).reshape(-1)
     if str(left.dtype) in _FLOAT_DTYPES:
         ours, _, wide_ours, wide_theirs = _distinct_pair(
-            left, right, _promoted_dtype(left, right)
+            left, right, _membership_dtype(left, right)
         )
         keep = _np.isin(wide_ours, wide_theirs, assume_unique=True, invert=True)
         return _from_numpy(ours[keep])
