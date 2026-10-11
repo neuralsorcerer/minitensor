@@ -51,14 +51,23 @@ pub struct Lion {
     gradient_clipping: GradientClipping,
 }
 
+/// The direction of the update: `1`, `-1`, `0` for a zero, and NaN for NaN.
+///
+/// NaN has no direction, and answering zero for it hid a diverged gradient
+/// for good: the NaN stays in the momentum, so every later update direction
+/// is NaN too, and a zero there froze the parameter where it stood while every
+/// other optimizer here would have shown the NaN. Carried through, the
+/// parameter reports it.
 #[inline(always)]
 fn sign_f32(x: f32) -> f32 {
     if x > 0.0 {
         1.0
     } else if x < 0.0 {
         -1.0
-    } else {
+    } else if x == 0.0 {
         0.0
+    } else {
+        x
     }
 }
 
@@ -68,8 +77,10 @@ fn sign_f64(x: f64) -> f64 {
         1.0
     } else if x < 0.0 {
         -1.0
-    } else {
+    } else if x == 0.0 {
         0.0
+    } else {
+        x
     }
 }
 

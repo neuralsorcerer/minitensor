@@ -179,11 +179,16 @@ impl Rprop {
                 };
                 // Only the sign moves the parameter. `signum` would answer 1
                 // for a zero gradient and 1 for a NaN, so the comparison is
-                // written out: a zero gradient must not move anything.
+                // written out: a zero gradient must not move anything, and a
+                // NaN one has no direction to move in. It is carried into the
+                // parameter, as every other optimizer here carries it, rather
+                // than skipped as though the gradient had been zero.
                 if gradient > 0.0 {
                     p[i] -= size[i];
                 } else if gradient < 0.0 {
                     p[i] += size[i];
+                } else if gradient.is_nan() {
+                    p[i] = gradient;
                 }
                 previous[i] = gradient;
             }
