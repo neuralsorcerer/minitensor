@@ -45,7 +45,8 @@
 // against the paper, digit for digit.
 #![allow(clippy::excessive_precision)]
 
-use std::f64::consts::SQRT_2;
+use crate::ops::simd::product_error;
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_2_SQRT_PI, SQRT_2};
 
 /// `Phi((x - mean) / std)`: the probability a normal draw falls at or below `x`.
 ///
@@ -56,8 +57,95 @@ use std::f64::consts::SQRT_2;
 /// with full precision. Inverse-CDF sampling in the tail depends on that.
 #[inline]
 pub(crate) fn normal_cdf(x: f64, mean: f64, std: f64) -> f64 {
-    let z = (x - mean) / std;
-    0.5 * libm::erfc(-z / SQRT_2)
+    standard_normal_cdf((x - mean) / std)
+}
+
+/// What `FRAC_1_SQRT_2` leaves out of `1/sqrt(2)`.
+const FRAC_1_SQRT_2_LOW: f64 = -4.833_646_656_726_457e-17;
+
+/// `Phi(z)`, the standard normal CDF: `erfc(-z/sqrt(2))/2`, with the rounding
+/// of `-z/sqrt(2)` put back.
+///
+/// Relative to itself `erfc(t)` falls about `2t` per unit of `t`, so the
+/// rounding of `t` -- 2^-53 of it -- came out as `2t^2` ulps of the answer: 32
+/// at `z = -6` and 1250 at `z = -36`, exactly the tail the `erfc` form exists
+/// to keep. The rounding is recovered exactly and taken back out through the
+/// slope, `-2/sqrt(pi) e^(-t^2)`, which needs only a few digits of its own,
+/// leaving the error `erfc`'s.
+#[inline]
+pub(crate) fn standard_normal_cdf(z: f64) -> f64 {
+    let t = -z * FRAC_1_SQRT_2;
+    let mut tail = libm::erfc(t);
+    // Past 27 the slope underflows, and the correction with it.
+    if t.abs() < 27.0 {
+        let rounding = product_error::<false>(-z, FRAC_1_SQRT_2, t) - z * FRAC_1_SQRT_2_LOW;
+        tail -= rounding * FRAC_2_SQRT_PI * (-t * t).exp();
+    }
+    0.5 * tail
+}
+
+/// `phi(z)`, the standard normal density, with the rounding of `z^2` put
+/// back: `e^(-z^2/2)` turns it into `z^2/2` ulps of the answer, 450 at
+/// `z = 30`.
+#[inline]
+pub(crate) fn standard_normal_pdf(z: f64) -> f64 {
+    const FRAC_1_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+    let square = z * z;
+    let density = (-0.5 * square).exp() * FRAC_1_SQRT_2PI;
+    // Zero past `|z| = 38.6`, where the square is too large to split, and at
+    // an infinity, where its error is NaN.
+    if density == 0.0 {
+        return density;
+    }
+    density * (1.0 - 0.5 * product_error::<false>(z, z, square))
+}
+
+/// `1 / (1 + e^(-2u))` for `u = sqrt(2/pi) (x + 0.044715 x^3)`, the tanh
+/// form's stand-in for `Phi(x)`.
+///
+/// `u` is carried to twice a double's precision -- the cube, both products
+/// and their sum, and the two constants -- because the exponential turns an
+/// error in `u` into a relative one in its answer, and the plain sum's
+/// rounding came out as 294 ulps at `x = -20`. The low part goes in as
+/// `e^(u + low) = e^u (1 + low)`, true while it is tiny.
+///
+/// Below zero the logistic is written `r / (1 + r)` with `r = e^(2u)`, which
+/// keeps its digits where `e^(-2u)` overflows: at `x = -21` the answer is a
+/// normal float near 1e-307 and the other spelling gave zero. The form is
+/// odd-symmetric, so `1 - tanh_cdf(x)` is `tanh_cdf(-x)` exactly, with no
+/// cancellation.
+#[inline]
+pub(crate) fn tanh_cdf(x: f64) -> f64 {
+    // `sqrt(2/pi)` and `sqrt(2/pi) * 0.044715`, each as a double and what it
+    // leaves out.
+    const LINEAR: (f64, f64) = (0.797_884_560_802_865_4, -4.984_654_404_555_46e-17);
+    const CUBIC: (f64, f64) = (0.035_677_408_136_300_125, -3.087_574_959_077_657_5e-19);
+    let (u, low) = if x.abs() < 1e100 {
+        let square = x * x;
+        let cube = square * x;
+        let cube_low =
+            product_error::<false>(square, x, cube) + product_error::<false>(x, x, square) * x;
+        let linear = LINEAR.0 * x;
+        let linear_low = product_error::<false>(LINEAR.0, x, linear) + LINEAR.1 * x;
+        let cubic = CUBIC.0 * cube;
+        let cubic_low =
+            product_error::<false>(CUBIC.0, cube, cubic) + CUBIC.0 * cube_low + CUBIC.1 * cube;
+        let sum = linear + cubic;
+        // The rounding of the sum, exactly: Knuth's branch-free two-sum.
+        let back = sum - cubic;
+        let sum_low = (linear - back) + (cubic - (sum - back));
+        (sum, sum_low + linear_low + cubic_low)
+    } else {
+        // Past this the cube cannot be split, and the answer is 0 or 1
+        // whatever its last digits.
+        (LINEAR.0 * x + CUBIC.0 * (x * x * x), 0.0)
+    };
+    if u >= 0.0 {
+        1.0 / (1.0 + (-2.0 * u).exp() * (1.0 - 2.0 * low))
+    } else {
+        let r = (2.0 * u).exp() * (1.0 + 2.0 * low);
+        r / (1.0 + r)
+    }
 }
 
 /// The value `x` with `normal_cdf(x, mean, std) == p`, for `p` in `(0, 1)`.

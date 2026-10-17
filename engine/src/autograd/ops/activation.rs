@@ -16,7 +16,6 @@ use crate::{
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
-use libm::erfc;
 use num_traits::Float;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -129,13 +128,8 @@ impl GradientFunction for GeluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         // Exact:  d/dx x*Phi(x) = Phi(x) + x*phi(x).
         // Tanh approximation: differentiate 0.5*x*(1 + tanh(c*(x + a*x^3))).
-        //
-        // The two irrational coefficients are derived once here rather than
-        // written as decimal literals, so each dtype keeps the exact rounding
-        // of its own `sqrt`.
         let approximate = self.approximate;
         let coeff64 = (2.0f64 / std::f64::consts::PI).sqrt();
-        let inv_sqrt_2pi64 = 1.0f64 / (2.0f64 * std::f64::consts::PI).sqrt();
 
         // float32 takes the vectorized kernels (`ops::simd::transcendental`),
         // which is a 7.5x saving on what was the most expensive gradient in the
@@ -156,16 +150,17 @@ impl GradientFunction for GeluBackward {
             if x.is_infinite() {
                 return if x > 0.0 { 1.0 } else { 0.0 };
             }
+            // Each factor with the rounding of its argument taken back, as in
+            // the forward pass; see `ops::gaussian`.
             if approximate {
-                let x2 = x * x;
-                let inner = coeff64 * (x + GELU_CUBIC_F64 * x * x2);
-                let s = 1.0 / (1.0 + (-2.0 * inner).exp());
-                let sech2 = 4.0 * s * (1.0 - s);
-                s + 0.5 * x * sech2 * coeff64 * (1.0 + 3.0 * GELU_CUBIC_F64 * x2)
+                // `1 - s` is the form at `-x`, which keeps its digits where
+                // the subtraction would cancel them.
+                let s = crate::ops::gaussian::tanh_cdf(x);
+                let sech2 = 4.0 * s * crate::ops::gaussian::tanh_cdf(-x);
+                s + 0.5 * x * sech2 * coeff64 * (1.0 + 3.0 * GELU_CUBIC_F64 * x * x)
             } else {
-                let cdf = 0.5 * erfc(-x * std::f64::consts::FRAC_1_SQRT_2);
-                let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi64;
-                cdf + x * pdf
+                crate::ops::gaussian::standard_normal_cdf(x)
+                    + x * crate::ops::gaussian::standard_normal_pdf(x)
             }
         })?;
         Ok(single(self.input_id, grad))

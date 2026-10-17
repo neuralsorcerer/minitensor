@@ -804,25 +804,26 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     // factor as `1 + erf` or `1 + tanh` destroys it just where `x` is largest.
     // `1 + erf(v)` is `erfc(-v)`, and `0.5*(1 + tanh(v))` is the logistic
     // `1/(1 + exp(-2v))`; both are exact expressions, not approximations.
+    //
+    // Both factors also take back the rounding of their own argument, which
+    // the exponential in each turns into a relative error growing with `x^2`:
+    // 1250 ulps at `x = -36` in the `erf` form, 294 at `-20` in the tanh one.
+    // See `ops::gaussian`.
     let out = if approximate {
-        let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
             // At `-inf` the quotient is `-inf / inf`; the limit is 0.
             if x == f64::NEG_INFINITY {
                 return -0.0;
             }
-            let x3 = x * x * x;
-            let inner = coeff * (x + 0.044715f64 * x3);
-            x / (1.0f64 + (-2.0f64 * inner).exp())
+            x * crate::ops::gaussian::tanh_cdf(x)
         })
     } else {
-        let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
             // At `-inf` the product is `-inf * 0`; the limit is 0.
             if x == f64::NEG_INFINITY {
                 return -0.0;
             }
-            0.5f64 * x * erfc(-x * inv_sqrt_2)
+            x * crate::ops::gaussian::standard_normal_cdf(x)
         })
     };
     Ok(TensorData::from_vec(

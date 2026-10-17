@@ -2132,7 +2132,7 @@ block_kernel2!(
 /// factor is split into two halves of 26 bits, whose products with each other
 /// are exact, and the error is assembled from those.
 #[inline(always)]
-fn product_error<const FMA: bool>(a: f64, b: f64, product: f64) -> f64 {
+pub(crate) fn product_error<const FMA: bool>(a: f64, b: f64, product: f64) -> f64 {
     if FMA {
         return a.mul_add(b, -product);
     }

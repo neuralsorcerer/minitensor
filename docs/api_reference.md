@@ -2318,7 +2318,13 @@ assert row_std.shape == (2, 3)
   between them along `dim`. Each norm is floored at `eps` on its own rather
   than their product being floored once, which is what keeps a zero vector
   paired with a long one inside `[-1, 1]`.
-- `softplus`, `gelu`, `elu`, `selu`, `silu`
+- `softplus`, `gelu`, `elu`, `selu`, `silu`. `gelu` keeps its digits in the
+  negative tail, where it is a small number: the exact form is
+  `x * erfc(-x / sqrt(2)) / 2` with the rounding of `-x / sqrt(2)` taken back
+  out, since `erfc` would otherwise turn it into `x^2` ulps of the answer, and
+  the tanh form's exponent is carried to twice a double's precision for the
+  same reason. Both are within a few ulps in float64 down to where the answer
+  leaves the normal floats, and so are their gradients.
 - `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
   leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
   band but subtracts `lambd` from the rest, so it stays continuous
