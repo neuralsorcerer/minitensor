@@ -127,9 +127,17 @@ pub(crate) fn scatter_layout(
             "scatter index and source must have the same number of dimensions as input",
         ));
     }
+    // Int32 positions widen, as they do for `gather`, the adjoint this mirrors.
+    let widened;
+    let index = if index.dtype() == DataType::Int32 {
+        widened = index.astype(DataType::Int64)?;
+        &widened
+    } else {
+        index
+    };
     if index.dtype() != DataType::Int64 {
         return Err(MinitensorError::invalid_operation(
-            "scatter indices must be int64",
+            "scatter indices must be integers",
         ));
     }
     if src.dtype() != tensor.dtype() {

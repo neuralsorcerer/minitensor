@@ -39,3 +39,22 @@ def test_an_integer_array_of_any_width_reads_and_writes_positions(dtype):
 def test_an_index_past_every_axis_is_out_of_bounds(key):
     with pytest.raises(IndexError, match="out of bounds"):
         mt.Tensor(np.zeros((3, 4)))[key]
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint8", "int16"])
+def test_gather_and_scatter_take_narrower_positions(dtype):
+    values = np.arange(12.0).reshape(3, 4)
+    positions = np.array([[0, 3]] * 3, dtype=dtype)
+    gathered = mt.gather(mt.Tensor(values), 1, mt.as_tensor(positions))
+    np.testing.assert_array_equal(
+        gathered.numpy(), np.take_along_axis(values, positions.astype(np.int64), 1)
+    )
+    added = mt.scatter_add(
+        mt.zeros(3), 0, mt.as_tensor(np.array([2, 0, 2], dtype=dtype)), mt.ones(3)
+    )
+    assert added.tolist() == [1.0, 0.0, 2.0]
+    source = mt.Tensor(values, requires_grad=True)
+    mt.gather(source, 1, mt.as_tensor(positions)).sum().backward()
+    want = np.zeros_like(values)
+    want[:, [0, 3]] = 1.0
+    np.testing.assert_array_equal(source.grad.numpy(), want)

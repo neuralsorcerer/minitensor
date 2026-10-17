@@ -950,9 +950,20 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
         ));
     }
 
+    // An int32 position is as good as an int64 one, and every other op that
+    // takes positions -- `index_select`, `take`, `take_along_dim`, `embedding`
+    // -- already took it; refusing it here meant an index array of any
+    // narrower width, which widens to int32, could not gather.
+    let widened;
+    let index = if index.dtype() == DataType::Int32 {
+        widened = index.astype(DataType::Int64)?;
+        &widened
+    } else {
+        index
+    };
     if index.dtype() != DataType::Int64 {
         return Err(MinitensorError::invalid_operation(
-            "gather indices must be int64",
+            "gather indices must be integers",
         ));
     }
 
