@@ -2065,7 +2065,7 @@ pub fn isclose(
 #[pyfunction]
 pub fn array_equal(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<bool> {
     let (lhs, rhs) = comparison_pair_from_py(input, other)?;
-    PyTensor::from_tensor(lhs).array_equal(&PyTensor::from_tensor(rhs))
+    PyTensor::array_equal_tensors(&lhs, &rhs)
 }
 
 /// Whether every pair of elements is within `rtol`/`atol`.
@@ -2079,7 +2079,7 @@ pub fn allclose(
     equal_nan: bool,
 ) -> PyResult<bool> {
     let (lhs, rhs) = comparison_pair_from_py(input, other)?;
-    PyTensor::from_tensor(lhs).allclose(&PyTensor::from_tensor(rhs), rtol, atol, equal_nan)
+    PyTensor::allclose_tensors(&lhs, &rhs, rtol, atol, equal_nan)
 }
 
 pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyResult<()> {

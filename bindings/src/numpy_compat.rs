@@ -420,19 +420,14 @@ fn allclose(
     equal_nan: bool,
 ) -> PyResult<bool> {
     let (a_tensor, b_tensor) = comparison_pair_from_py(a, b)?;
-    PyTensor::from_tensor(a_tensor).allclose(
-        &PyTensor::from_tensor(b_tensor),
-        Some(rtol),
-        Some(atol),
-        equal_nan,
-    )
+    PyTensor::allclose_tensors(&a_tensor, &b_tensor, Some(rtol), Some(atol), equal_nan)
 }
 
 /// Check if arrays are exactly equal
 #[pyfunction]
 fn array_equal(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<bool> {
     let (a_tensor, b_tensor) = comparison_pair_from_py(a, b)?;
-    PyTensor::from_tensor(a_tensor).array_equal(&PyTensor::from_tensor(b_tensor))
+    PyTensor::array_equal_tensors(&a_tensor, &b_tensor)
 }
 
 /// Compute mean along axis

@@ -39,30 +39,55 @@ impl PyTensor {
     }
 
     /// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
-    pub fn array_equal(&self, other: &PyTensor) -> PyResult<bool> {
-        if self.inner.shape() != other.inner.shape() {
+    ///
+    /// `other` may be a Python number or list, read as a comparison reads it;
+    /// taking only a tensor, the method refused the list its functional form
+    /// accepted.
+    pub fn array_equal(&self, other: &Bound<PyAny>) -> PyResult<bool> {
+        let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
+        Self::array_equal_tensors(&lhs, &rhs)
+    }
+
+    /// Whether every pair of elements is within `rtol`/`atol`. `other` is read
+    /// as `array_equal` reads it.
+    #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
+    pub fn allclose(
+        &self,
+        other: &Bound<PyAny>,
+        rtol: Option<f64>,
+        atol: Option<f64>,
+        equal_nan: bool,
+    ) -> PyResult<bool> {
+        let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
+        Self::allclose_tensors(&lhs, &rhs, rtol, atol, equal_nan)
+    }
+}
+
+impl PyTensor {
+    /// [`PyTensor::array_equal`] on two operands already converted.
+    pub(crate) fn array_equal_tensors(lhs: &Tensor, rhs: &Tensor) -> PyResult<bool> {
+        if lhs.shape() != rhs.shape() {
             return Ok(false);
         }
         // An integer against a float goes through the exact comparison: at
         // their common dtype an int32 `20_000_001` and `20_000_000.0` were the
         // same float32, and two different arrays compared equal.
-        if mixes_integer_and_float(&self.inner, &other.inner) {
-            let equal = self.inner.eq(&other.inner).map_err(_convert_error)?;
+        if mixes_integer_and_float(lhs, rhs) {
+            let equal = lhs.eq(rhs).map_err(_convert_error)?;
             return Ok(equal
                 .data()
                 .as_bool_slice()
                 .is_some_and(|values| values.iter().all(|&v| v)));
         }
-        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-            .map_err(_convert_error)?;
+        let (lhs, rhs, _) =
+            coerce_binary_operands(lhs, rhs, BinaryOpKind::Add).map_err(_convert_error)?;
         Ok(lhs.array_equal(&rhs))
     }
 
-    /// Whether every pair of elements is within `rtol`/`atol`.
-    #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
-    pub fn allclose(
-        &self,
-        other: &PyTensor,
+    /// [`PyTensor::allclose`] on two operands already converted.
+    pub(crate) fn allclose_tensors(
+        lhs: &Tensor,
+        rhs: &Tensor,
         rtol: Option<f64>,
         atol: Option<f64>,
         equal_nan: bool,
@@ -76,19 +101,13 @@ impl PyTensor {
         }
         // An integer against a float is measured in float64, which holds every
         // int32 and float32 exactly, rather than at their common dtype.
-        if mixes_integer_and_float(&self.inner, &other.inner) {
-            let lhs = self
-                .inner
-                .astype(DataType::Float64)
-                .map_err(_convert_error)?;
-            let rhs = other
-                .inner
-                .astype(DataType::Float64)
-                .map_err(_convert_error)?;
+        if mixes_integer_and_float(lhs, rhs) {
+            let lhs = lhs.astype(DataType::Float64).map_err(_convert_error)?;
+            let rhs = rhs.astype(DataType::Float64).map_err(_convert_error)?;
             return Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan));
         }
-        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-            .map_err(_convert_error)?;
+        let (lhs, rhs, _) =
+            coerce_binary_operands(lhs, rhs, BinaryOpKind::Add).map_err(_convert_error)?;
         Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
     }
 }

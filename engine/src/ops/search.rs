@@ -146,19 +146,46 @@ fn dtype_mismatch() -> MinitensorError {
 /// The result is `int64` positions in `0..=width`, so a value past the end of
 /// the sequence answers with the length rather than being clamped into it.
 pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<Tensor> {
+    // A search is a comparison, and a comparison is answered exactly whatever
+    // the two dtypes: refusing the pair turned away float32 values against a
+    // float64 sequence, and `1.5` against integers, where every answer is
+    // plain. Two floats or two integers meet at the wider, which holds both
+    // exactly, as does a bool beside anything; an integer against a float has
+    // no dtype that holds both and is searched across the two.
+    let (from, to) = (sequence.dtype(), values.dtype());
+    if from != to
+        && from != DataType::Bool
+        && to != DataType::Bool
+        && from.is_float() != to.is_float()
+    {
+        return mixed_search(sequence, values, right);
+    }
+    if from != to {
+        let common = crate::ops::binary::promote_arithmetic_dtype(from, to);
+        return searchsorted(&sequence.astype(common)?, &values.astype(common)?, right);
+    }
+    search_rows(sequence, values, |layout, out, ordered, queried| {
+        with_pair!(ordered, queried, haystack, needles, {
+            layout.fill(out, haystack, needles, &|row, value| {
+                locate(row, value, right)
+            });
+        });
+        Ok(())
+    })
+}
+
+/// The shape checks and the output of a search, with `body` filling the
+/// positions from the contiguous sequence and values.
+fn search_rows(
+    sequence: &Tensor,
+    values: &Tensor,
+    body: impl FnOnce(&SearchLayout, &mut [i64], &Tensor, &Tensor) -> Result<()>,
+) -> Result<Tensor> {
     if sequence.ndim() == 0 {
         return Err(MinitensorError::invalid_operation(
             "searchsorted: the sequence must have at least one dimension",
         ));
     }
-    if sequence.dtype() != values.dtype() {
-        return Err(MinitensorError::invalid_operation(format!(
-            "searchsorted: the sequence is {:?} and the values are {:?}; they must match",
-            sequence.dtype(),
-            values.dtype()
-        )));
-    }
-
     let (sequence_rows, width) = rows_and_width(sequence);
     // A one-dimensional sequence serves every value; anything else is matched
     // row for row, and the rows have to line up.
@@ -188,6 +215,47 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
         let out = data
             .as_i64_slice_mut()
             .ok_or_else(|| MinitensorError::internal_error("searchsorted: output is not int64"))?;
+        body(
+            &SearchLayout::of(sequence, width, per_row),
+            out,
+            &ordered,
+            &queried,
+        )?;
+    }
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        values.shape().clone(),
+        DataType::Int64,
+        values.device(),
+        false,
+    ))
+}
+
+/// How the values of a search line up with the rows of its sequence.
+struct SearchLayout {
+    batch: bool,
+    width: usize,
+    per_row: usize,
+}
+
+impl SearchLayout {
+    fn of(sequence: &Tensor, width: usize, per_row: usize) -> Self {
+        Self {
+            batch: sequence.ndim() > 1,
+            width,
+            per_row,
+        }
+    }
+
+    /// `out[i]` set to `find` of the value's row and the value.
+    fn fill<H: Sync, N: Sync>(
+        &self,
+        out: &mut [i64],
+        haystack: &[H],
+        needles: &[N],
+        find: &(dyn Fn(&[H], &N) -> usize + Sync),
+    ) {
         // Every value's search is independent of every other's, which is what
         // makes this parallel at all -- and it was not, which cost more than
         // the search: a million values against a million-element sequence took
@@ -198,28 +266,125 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
         // pays, so the chunk is that budget divided by the depth of one search:
         // a short sequence gets wide chunks because each search in it is cheap,
         // a long one gets narrow chunks because each is not.
-        let batch = sequence.ndim() > 1;
-        let depth = (usize::BITS - width.leading_zeros()).max(1) as usize;
+        let depth = (usize::BITS - self.width.leading_zeros()).max(1) as usize;
         let chunk = ((1 << 12) / depth).max(1);
-        with_pair!(ordered, queried, haystack, needles, {
-            par_out_chunks(out, chunk, &|start, block| {
-                for (offset, slot) in block.iter_mut().enumerate() {
-                    let index = start + offset;
-                    let row = if batch { index / per_row.max(1) } else { 0 };
-                    let begin = row * width;
-                    *slot = locate(&haystack[begin..begin + width], &needles[index], right) as i64;
-                }
-            });
+        par_out_chunks(out, chunk, &|start, block| {
+            for (offset, slot) in block.iter_mut().enumerate() {
+                let index = start + offset;
+                let row = if self.batch {
+                    index / self.per_row.max(1)
+                } else {
+                    0
+                };
+                let begin = row * self.width;
+                *slot = find(&haystack[begin..begin + self.width], &needles[index]) as i64;
+            }
         });
     }
+}
 
-    Ok(Tensor::new(
-        Arc::new(data),
-        values.shape().clone(),
-        DataType::Int64,
-        values.device(),
-        false,
-    ))
+/// Where a float belongs among sorted integers.
+enum AmongIntegers {
+    /// Where this integer does, searched on the same side.
+    At(i64),
+    /// Before every integer.
+    Start,
+    /// After every integer.
+    End,
+}
+
+/// The integer search that places a float `value` where it belongs among
+/// sorted integers, or the end it belongs at when no integer can name it.
+///
+/// An integer is below `value` exactly when it is below `ceil(value)`, and at
+/// most `value` exactly when it is at most `floor(value)`, so the float's
+/// place is an integer's. NaN sorts after every number.
+fn float_among_integers(value: f64, right: bool) -> AmongIntegers {
+    // 2^63, the first float past every int64.
+    const BOUND: f64 = 9_223_372_036_854_775_808.0;
+    if value.is_nan() {
+        return AmongIntegers::End;
+    }
+    let key = if right { value.floor() } else { value.ceil() };
+    if key >= BOUND {
+        AmongIntegers::End
+    } else if key < -BOUND {
+        AmongIntegers::Start
+    } else {
+        AmongIntegers::At(key as i64)
+    }
+}
+
+/// The float search that places an integer `value` where it belongs among
+/// sorted floats: the largest float at most `value`, and the side to search
+/// it on.
+///
+/// When that float is `value` itself the search is the ordinary one. When it
+/// is not, `value` lies strictly between it and the next float, so the
+/// elements below `value` are exactly those at most the float below it, and a
+/// left search becomes a right one.
+fn integer_among_floats(value: i64, right: bool) -> (f64, bool) {
+    let mut below = value as f64;
+    // Rounded to nearest, which may be above. One step down is then below, as
+    // the gap between two floats this large is far wider than one.
+    if below as i128 > i128::from(value) {
+        below = if below > 0.0 {
+            f64::from_bits(below.to_bits() - 1)
+        } else {
+            f64::from_bits(below.to_bits() + 1)
+        };
+    }
+    let exact = below as i128 == i128::from(value);
+    (below, right || !exact)
+}
+
+/// [`searchsorted`] for an integer sequence searched by floats, or a float
+/// sequence searched by integers. No dtype holds both exactly -- int64 is not
+/// a subset of float64 past 2^53 -- so each value is turned into the search,
+/// on the sequence's own dtype, that gives its exact place.
+fn mixed_search(sequence: &Tensor, values: &Tensor, right: bool) -> Result<Tensor> {
+    let integers = !sequence.dtype().is_float();
+    // Widened within their own kind, which is exact: the sequence to int64 or
+    // float64, the values to float64 or int64.
+    let (wide_sequence, wide_values) = if integers {
+        (
+            sequence.astype(DataType::Int64)?,
+            values.astype(DataType::Float64)?,
+        )
+    } else {
+        (
+            sequence.astype(DataType::Float64)?,
+            values.astype(DataType::Int64)?,
+        )
+    };
+    search_rows(
+        &wide_sequence,
+        &wide_values,
+        |layout, out, ordered, queried| {
+            if integers {
+                let haystack = ordered.data().as_i64_slice().ok_or_else(dtype_mismatch)?;
+                let needles = queried.data().as_f64_slice().ok_or_else(dtype_mismatch)?;
+                layout.fill(
+                    out,
+                    haystack,
+                    needles,
+                    &|row, &value| match float_among_integers(value, right) {
+                        AmongIntegers::At(key) => locate(row, &key, right),
+                        AmongIntegers::Start => 0,
+                        AmongIntegers::End => row.len(),
+                    },
+                );
+            } else {
+                let haystack = ordered.data().as_f64_slice().ok_or_else(dtype_mismatch)?;
+                let needles = queried.data().as_i64_slice().ok_or_else(dtype_mismatch)?;
+                layout.fill(out, haystack, needles, &|row, &value| {
+                    let (key, side) = integer_among_floats(value, right);
+                    locate(row, &key, side)
+                });
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Which bucket each element of `input` falls in, given the bucket
@@ -1031,4 +1196,94 @@ pub fn histogram(
 pub fn histc(input: &Tensor, bins: usize, min: f64, max: f64) -> Result<Tensor> {
     let range = if min == max { None } else { Some((min, max)) };
     Ok(histogram(input, Bins::Count(bins), range, None, false)?.0)
+}
+
+#[cfg(test)]
+mod mixed_search_tests {
+    use super::*;
+    use crate::Device;
+
+    fn place(sequence: &[i64], value: f64, right: bool) -> usize {
+        match float_among_integers(value, right) {
+            AmongIntegers::At(key) => locate(sequence, &key, right),
+            AmongIntegers::Start => 0,
+            AmongIntegers::End => sequence.len(),
+        }
+    }
+
+    #[test]
+    fn a_float_among_integers_lands_where_exact_arithmetic_puts_it() {
+        let sequence = [-3_i64, 1, 2, 2, 5];
+        for (value, left, right) in [
+            (1.5, 2, 2),
+            (2.0, 2, 4),
+            (-3.5, 0, 0),
+            (-3.0, 0, 1),
+            (5.0, 4, 5),
+            (5.5, 5, 5),
+            (f64::INFINITY, 5, 5),
+            (f64::NEG_INFINITY, 0, 0),
+            (f64::NAN, 5, 5),
+            (1e300, 5, 5),
+            (-1e300, 0, 0),
+        ] {
+            assert_eq!(place(&sequence, value, false), left, "{value} left");
+            assert_eq!(place(&sequence, value, true), right, "{value} right");
+        }
+        // The int64 extremes, which no float past them can name.
+        let extremes = [i64::MIN, 0, i64::MAX];
+        assert_eq!(place(&extremes, -(2.0_f64.powi(63)), false), 0);
+        assert_eq!(place(&extremes, -(2.0_f64.powi(63)), true), 1);
+        assert_eq!(place(&extremes, 2.0_f64.powi(63), false), 3);
+    }
+
+    #[test]
+    fn an_integer_among_floats_lands_where_exact_arithmetic_puts_it() {
+        let place = |sequence: &[f64], value: i64, right: bool| {
+            let (key, side) = integer_among_floats(value, right);
+            locate(sequence, &key, side)
+        };
+        let big = 2_f64.powi(53);
+        // 2^53 + 1 is not a float64: it sits strictly between 2^53 and 2^53 + 2.
+        let sequence = [0.5, big, big + 2.0, f64::NAN];
+        let odd = (1_i64 << 53) + 1;
+        assert_eq!(place(&sequence, odd, false), 2);
+        assert_eq!(place(&sequence, odd, true), 2);
+        assert_eq!(place(&sequence, 1 << 53, false), 1);
+        assert_eq!(place(&sequence, 1 << 53, true), 2);
+        assert_eq!(place(&sequence, 0, false), 0);
+        assert_eq!(place(&sequence, 1, false), 1);
+        // i64::MAX rounds up to 2^63, which is above it.
+        assert_eq!(place(&[2_f64.powi(63)], i64::MAX, false), 0);
+        assert_eq!(place(&[2_f64.powi(63)], i64::MAX, true), 0);
+        assert_eq!(place(&[-(2_f64.powi(63))], i64::MIN, false), 0);
+        assert_eq!(place(&[-(2_f64.powi(63))], i64::MIN, true), 1);
+        // Below zero the step is toward more negative, still below.
+        let negative = -((1_i64 << 53) + 1);
+        assert_eq!(place(&[-big - 2.0, -big], negative, false), 1);
+    }
+
+    #[test]
+    fn mixed_and_widened_pairs_search_rather_than_refuse() {
+        let device = Device::cpu();
+        let integers = Tensor::new(
+            Arc::new(TensorData::from_vec_i32(vec![1, 2, 3], device)),
+            Shape::new(vec![3]),
+            DataType::Int32,
+            device,
+            false,
+        );
+        let halves = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.5, 3.0], device)),
+            Shape::new(vec![2]),
+            DataType::Float32,
+            device,
+            false,
+        );
+        let found = searchsorted(&integers, &halves, false).unwrap();
+        assert_eq!(found.data().as_i64_slice().unwrap(), &[1, 2]);
+        let doubles = halves.astype(DataType::Float64).unwrap();
+        let widened = searchsorted(&doubles, &halves, true).unwrap();
+        assert_eq!(widened.data().as_i64_slice().unwrap(), &[1, 2]);
+    }
 }

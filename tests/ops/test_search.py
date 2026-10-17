@@ -175,9 +175,14 @@ def test_no_values_gives_no_answers():
     assert mt.searchsorted(_t(SORTED), _t(np.zeros(0)), False).numpy().shape == (0,)
 
 
-def test_rejects_mismatched_dtypes():
-    with pytest.raises(Exception, match="they must match"):
-        mt.searchsorted(_t(SORTED), _t(np.array([1, 2], dtype=np.int64)), False)
+def test_values_of_another_dtype_are_searched_rather_than_refused():
+    # A search is a comparison, which answers exactly across dtypes; see
+    # test_search_across_dtypes.py for the exactness at the edges.
+    probes = np.array([1, 2], dtype=np.int64)
+    for right in (False, True):
+        got = mt.searchsorted(_t(SORTED), _t(probes), right).numpy()
+        side = "right" if right else "left"
+        assert np.array_equal(got, np.searchsorted(SORTED, probes, side=side))
 
 
 def test_rejects_a_batched_sequence_that_does_not_line_up():

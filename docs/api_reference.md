@@ -1445,7 +1445,10 @@ the library: comparing every value against every boundary is
   last axis. The sequence is *assumed* sorted and never checked, since checking
   costs the linear scan the search exists to avoid. NaN sits where `sort` puts
   it, after every number: a NaN value lands at the first NaN of the sequence,
-  or past the last one with `right=True`.
+  or past the last one with `right=True`. The sequence and the values may be of
+  different dtypes, and the answer is exact, as every comparison is: `1.5`
+  among the integers `[1, 2, 3]` lands at 1, and an int64 past 2^53 among
+  float64s lands by its own value rather than the float nearest it.
 - `bucketize(input, boundaries, right=False)` — the same call with the arguments
   the other way round, which is the reading that fits when the sequence is a
   fixed set of bucket boundaries.
