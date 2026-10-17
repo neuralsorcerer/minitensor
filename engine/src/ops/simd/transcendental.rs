@@ -2158,54 +2158,65 @@ pub(crate) fn product_error<const FMA: bool>(a: f64, b: f64, product: f64) -> f6
 /// The recovery is exact only while each error is a float, which fails for a
 /// cube below about 2^-970. Such an `x` is scaled up by 2^200 first, exactly,
 /// and its cube down by 2^-600, which is exact while the cube is a normal
-/// float. A subnormal one is not, and [`cube_f64_block`] hands those to
-/// `powf`. An infinite or NaN cube is already exact, and so is a zero one,
-/// whose sign the compensating sum would lose.
+/// float. A subnormal one is not: scaled down after its own rounding it rounds
+/// again, onto a grid nearly as fine, and 25 in 4000 came back a step off.
+/// Those are rounded once, onto that grid, from the unrounded sum. An infinite
+/// or NaN cube is already exact, and so is a zero one, whose sign the
+/// compensating sum would lose.
 #[inline(always)]
 fn cube_one<const FMA: bool>(x: f64) -> f64 {
     // 2^-300, 2^200 and 2^-600, by their exponent fields.
     const TINY: f64 = f64::from_bits((1023 - 300) << 52);
     const UP: f64 = f64::from_bits((1023 + 200) << 52);
     const DOWN: f64 = f64::from_bits((1023 - 600) << 52);
+    // The smallest normal float scaled up by 2^600, whose ulp is the
+    // subnormals' spacing scaled the same way, 2^-474; and half that spacing.
+    const SUBNORMAL: f64 = f64::from_bits((1023 - 422) << 52);
+    const STEP: f64 = f64::from_bits((1023 - 474) << 52);
+    const HALF_STEP: f64 = f64::from_bits((1023 - 475) << 52);
     let tiny = x.abs() < TINY;
     let x = if tiny { x * UP } else { x };
     let square = x * x;
     let cube = square * x;
-    let square_error = product_error::<FMA>(x, x, square);
-    let cube_error = product_error::<FMA>(square, x, cube);
-    let compensated = cube + fma_or::<FMA>(square_error, x, cube_error);
+    let low = fma_or::<FMA>(
+        product_error::<FMA>(x, x, square),
+        x,
+        product_error::<FMA>(square, x, cube),
+    );
     let exact = if cube.is_finite() && cube != 0.0 {
-        compensated
+        cube + low
     } else {
         cube
     };
-    if tiny { exact * DOWN } else { exact }
+    // On the subnormal grid: adding `SUBNORMAL` leaves the magnitude's
+    // rounding to that grid, and the remainder, with `low`, says whether the
+    // exact cube is nearer the next point. No cube of a float is a tie.
+    let magnitude = cube.abs();
+    let towards = if cube < 0.0 { -low } else { low };
+    let on_grid = (magnitude + SUBNORMAL) - SUBNORMAL;
+    let rest = (magnitude - on_grid) + towards;
+    let on_grid = if rest > HALF_STEP {
+        on_grid + STEP
+    } else if rest < -HALF_STEP {
+        on_grid - STEP
+    } else {
+        on_grid
+    };
+    let subnormal = (on_grid * DOWN).copysign(cube);
+    if !tiny {
+        exact
+    } else if magnitude < SUBNORMAL {
+        subnormal
+    } else {
+        exact * DOWN
+    }
 }
 
-/// [`cube_one`] over a block, then `powf` for the cubes in the subnormals.
-///
-/// Scaled back down into the subnormals, the cube rounds a second time onto a
-/// grid nearly as fine as its own, and 25 in 4000 of them came back an ulp
-/// off. `powf` rounds them once. They are redone in a second pass, flagged
-/// without a branch in the first, so the main loop stays vectorized for
-/// inputs that almost never need it.
 #[inline(always)]
 fn cube_f64_block<const FMA: bool>(input: &[f64], out: &mut [MaybeUninit<f64>]) {
-    // 2^-340, a little above the cube root of the smallest normal float.
-    const SUBNORMAL_CUBE: f64 = f64::from_bits((1023 - 340) << 52);
-    let subnormal = |x: f64| (x.abs() < SUBNORMAL_CUBE) & (x != 0.0);
     debug_assert_eq!(input.len(), out.len());
-    let mut rare = 0u32;
     for (o, &x) in out.iter_mut().zip(input.iter()) {
         o.write(cube_one::<FMA>(x));
-        rare |= subnormal(x) as u32;
-    }
-    if rare != 0 {
-        for (o, &x) in out.iter_mut().zip(input.iter()) {
-            if subnormal(x) {
-                o.write(x.powf(3.0));
-            }
-        }
     }
 }
 
