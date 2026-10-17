@@ -166,7 +166,7 @@ pub(crate) fn promote_arithmetic_dtype(lhs: DataType, rhs: DataType) -> DataType
 /// width `mean` gives -- so `x.sum() / n` and `x.mean()` land in the same dtype.
 /// Dividing two `int64` tensors into `float32` lost every integer above 2^24
 /// that `mean` of the same values kept.
-fn promote_division_dtype(lhs: DataType, rhs: DataType) -> DataType {
+pub(crate) fn promote_division_dtype(lhs: DataType, rhs: DataType) -> DataType {
     use DataType::*;
     match (lhs, rhs) {
         (Float64, _) | (_, Float64) => Float64,

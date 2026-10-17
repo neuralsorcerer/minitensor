@@ -80,6 +80,24 @@ fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTe
     Ok(inner.extract::<PyRef<PyTensor>>()?)
 }
 
+/// The operands of a loss as tensors: a tensor as it stands, and a Python
+/// number or list read beside the tensors among them, as an operator reads it
+/// -- `mse_loss(x, [1, 0])` and `margin_ranking_loss(a, b, [1, -1])` are what
+/// they look like rather than refused for not being tensors.
+fn loss_operands<const N: usize>(values: [&Bound<'_, PyAny>; N]) -> PyResult<[engine::Tensor; N]> {
+    let owned: Vec<Bound<'_, PyAny>> = values.iter().map(|value| (*value).clone()).collect();
+    let tensors = crate::tensor::operands_from_py(&owned)?;
+    Ok(tensors
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one tensor per operand")))
+}
+
+/// A classification operand, typed by what it holds: class indices are
+/// integers whatever the scores beside them are.
+fn class_operand(value: &Bound<'_, PyAny>) -> PyResult<engine::Tensor> {
+    crate::tensor::operand_from_py(value)
+}
+
 fn borrow_optional_tensor<'py>(
     value: Option<&'py Bound<'py, PyAny>>,
 ) -> PyResult<Option<PyRef<'py, PyTensor>>> {
@@ -677,22 +695,17 @@ fn cross_entropy(
     reduction: &str,
     dim: isize,
 ) -> PyResult<PyTensor> {
-    let input_tensor = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let input_tensor = class_operand(input)?;
+    let target_tensor = class_operand(target)?;
 
     let axis = engine::ops::normalize_dim_named(
         dim,
-        input_tensor.tensor().ndim(),
+        input_tensor.ndim(),
         "cross_entropy: dim (the class axis)",
     )
     .map_err(_convert_error)?;
-    let result = cross_entropy_op(
-        input_tensor.tensor(),
-        target_tensor.tensor(),
-        reduction,
-        axis,
-    )
-    .map_err(_convert_error)?;
+    let result =
+        cross_entropy_op(&input_tensor, &target_tensor, reduction, axis).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -734,11 +747,10 @@ fn mse_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
     let loss = MSELoss::new(reduction);
     let result = loss
-        .forward(prediction.tensor(), target_tensor.tensor())
+        .forward(&prediction, &target_tensor)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -752,12 +764,11 @@ fn smooth_l1_loss_functional(
     reduction: &str,
     beta: f64,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
     // The op validates beta; huber and smooth-l1 differ by a factor of beta and
     // coincide only at 1.0, so this must not just forward to `huber_loss_op`.
-    let result = smooth_l1_loss_op(prediction.tensor(), target_tensor.tensor(), beta, reduction)
-        .map_err(_convert_error)?;
+    let result =
+        smooth_l1_loss_op(&prediction, &target_tensor, beta, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -770,15 +781,9 @@ fn huber_loss_functional(
     reduction: &str,
     delta: f64,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
-    let result = huber_loss_op(
-        prediction.tensor(),
-        target_tensor.tensor(),
-        delta,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let result =
+        huber_loss_op(&prediction, &target_tensor, delta, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -790,10 +795,8 @@ fn l1_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
-    let result = mae_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
-        .map_err(_convert_error)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let result = mae_loss_op(&prediction, &target_tensor, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -805,10 +808,8 @@ fn kl_div_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
-    let result = kl_div_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
-        .map_err(_convert_error)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let result = kl_div_loss_op(&prediction, &target_tensor, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -822,16 +823,10 @@ fn focal_loss_functional(
     gamma: f64,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
-    let result = focal_loss_op(
-        prediction.tensor(),
-        target_tensor.tensor(),
-        alpha,
-        gamma,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let prediction = class_operand(input)?;
+    let target_tensor = class_operand(target)?;
+    let result = focal_loss_op(&prediction, &target_tensor, alpha, gamma, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -845,17 +840,9 @@ fn margin_ranking_loss_functional(
     margin: f64,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let left = borrow_tensor(input1)?;
-    let right = borrow_tensor(input2)?;
-    let labels = borrow_tensor(target)?;
-    let result = margin_ranking_loss_op(
-        left.tensor(),
-        right.tensor(),
-        labels.tensor(),
-        margin,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let [left, right, labels] = loss_operands([input1, input2, target])?;
+    let result = margin_ranking_loss_op(&left, &right, &labels, margin, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -868,10 +855,9 @@ fn hinge_embedding_loss_functional(
     margin: f64,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let distances = borrow_tensor(input)?;
-    let labels = borrow_tensor(target)?;
-    let result = hinge_embedding_loss_op(distances.tensor(), labels.tensor(), margin, reduction)
-        .map_err(_convert_error)?;
+    let [distances, labels] = loss_operands([input, target])?;
+    let result =
+        hinge_embedding_loss_op(&distances, &labels, margin, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -885,17 +871,9 @@ fn cosine_embedding_loss_functional(
     margin: f64,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let left = borrow_tensor(input1)?;
-    let right = borrow_tensor(input2)?;
-    let labels = borrow_tensor(target)?;
-    let result = cosine_embedding_loss_op(
-        left.tensor(),
-        right.tensor(),
-        labels.tensor(),
-        margin,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let [left, right, labels] = loss_operands([input1, input2, target])?;
+    let result = cosine_embedding_loss_op(&left, &right, &labels, margin, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -913,20 +891,9 @@ fn triplet_margin_loss_functional(
     swap: bool,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let a = borrow_tensor(anchor)?;
-    let positive = borrow_tensor(positive)?;
-    let negative = borrow_tensor(negative)?;
-    let result = triplet_margin_loss_op(
-        a.tensor(),
-        positive.tensor(),
-        negative.tensor(),
-        margin,
-        p,
-        eps,
-        swap,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let [a, positive, negative] = loss_operands([anchor, positive, negative])?;
+    let result = triplet_margin_loss_op(&a, &positive, &negative, margin, p, eps, swap, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -938,10 +905,8 @@ fn soft_margin_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let scores = borrow_tensor(input)?;
-    let labels = borrow_tensor(target)?;
-    let result =
-        soft_margin_loss_op(scores.tensor(), labels.tensor(), reduction).map_err(_convert_error)?;
+    let [scores, labels] = loss_operands([input, target])?;
+    let result = soft_margin_loss_op(&scores, &labels, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -956,17 +921,9 @@ fn poisson_nll_loss_functional(
     eps: f64,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let rate = borrow_tensor(input)?;
-    let counts = borrow_tensor(target)?;
-    let result = poisson_nll_loss_op(
-        rate.tensor(),
-        counts.tensor(),
-        log_input,
-        full,
-        eps,
-        reduction,
-    )
-    .map_err(_convert_error)?;
+    let [rate, counts] = loss_operands([input, target])?;
+    let result = poisson_nll_loss_op(&rate, &counts, log_input, full, eps, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -1032,11 +989,10 @@ fn log_cosh_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
     let loss = LogCoshLoss::new(reduction);
     let result = loss
-        .forward(prediction.tensor(), target_tensor.tensor())
+        .forward(&prediction, &target_tensor)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -1049,11 +1005,10 @@ fn binary_cross_entropy_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let prediction = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let [prediction, target_tensor] = loss_operands([input, target])?;
     let loss = BCELoss::new(reduction);
     let result = loss
-        .forward(prediction.tensor(), target_tensor.tensor())
+        .forward(&prediction, &target_tensor)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -1067,17 +1022,16 @@ fn binary_cross_entropy_with_logits_functional(
     pos_weight: Option<&Bound<PyAny>>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let logits = borrow_tensor(input)?;
-    let target_tensor = borrow_tensor(target)?;
+    let [logits, target_tensor] = loss_operands([input, target])?;
     let loss = match pos_weight {
         Some(w) => {
-            let w = borrow_tensor(w)?;
-            BCEWithLogitsLoss::with_pos_weight(reduction, w.tensor().clone())
+            let w = crate::tensor::tensor_from_py_value(&logits, w)?;
+            BCEWithLogitsLoss::with_pos_weight(reduction, w)
         }
         None => BCEWithLogitsLoss::new(reduction),
     };
     let result = loss
-        .forward(logits.tensor(), target_tensor.tensor())
+        .forward(&logits, &target_tensor)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }

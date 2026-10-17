@@ -32,7 +32,18 @@ fn scalar(value: f64, like: &Tensor) -> Result<Tensor> {
 }
 
 /// Rejects the dtypes and device pairings none of these losses can work on.
-fn check_operands(name: &str, operands: &[&Tensor]) -> Result<()> {
+/// The operands of one of these, on one device and at the float dtype they
+/// promote to. The first `inputs` are a model's activations and must be
+/// floats, as they must for every layer-shaped op; the rest are labels or
+/// counts of any dtype. They meet as arithmetic meets them -- the wider float
+/// decides, and an integer label takes its width -- where an integer label of
+/// `1` or `-1` used to fail further in, and a float32 input against a float64
+/// target kept the narrower width or was refused.
+fn float_operands<const N: usize>(
+    name: &str,
+    inputs: usize,
+    operands: [&Tensor; N],
+) -> Result<[Tensor; N]> {
     let first = operands[0];
     for other in &operands[1..] {
         if other.device() != first.device() {
@@ -42,13 +53,30 @@ fn check_operands(name: &str, operands: &[&Tensor]) -> Result<()> {
             ));
         }
     }
-    if !first.dtype().is_float() {
+    if let Some(integer) = operands[..inputs].iter().find(|t| !t.dtype().is_float()) {
         return Err(MinitensorError::invalid_operation(format!(
             "{name} requires floating point tensors, got {}",
-            first.dtype()
+            integer.dtype()
         )));
     }
-    Ok(())
+    // Promoted as arithmetic first and made a float last: widening the first
+    // operand on its own would take an int64 to float64 before it met the
+    // float32 that decides the width.
+    let joint = operands[1..].iter().fold(first.dtype(), |dtype, other| {
+        crate::ops::binary::promote_arithmetic_dtype(dtype, other.dtype())
+    });
+    let common = crate::ops::binary::promote_division_dtype(joint, joint);
+    let mut converted = Vec::with_capacity(N);
+    for operand in operands {
+        converted.push(if operand.dtype() == common {
+            operand.clone()
+        } else {
+            operand.astype(common)?
+        });
+    }
+    Ok(converted
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one tensor per operand")))
 }
 
 /// Rejects operands of a loss whose shapes differ.
@@ -88,7 +116,8 @@ fn align(lhs: &Tensor, rhs: &Tensor) -> Result<(Tensor, Tensor, Shape)> {
 /// floored once: that is what keeps a zero vector paired with a long one from
 /// reporting a similarity far outside `[-1, 1]`.
 pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Result<Tensor> {
-    check_operands("cosine_similarity", &[x1, x2])?;
+    let [x1, x2] = float_operands("cosine_similarity", 2, [x1, x2])?;
+    let (x1, x2) = (&x1, &x2);
     // Spelled out rather than as `!(eps > 0.0)`: NaN compares false either way
     // round, and it is no more a floor than a negative is.
     if !(eps.is_finite() && eps > 0.0) {
@@ -132,7 +161,8 @@ pub fn margin_ranking_loss(
     margin: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    check_operands("margin_ranking_loss", &[x1, x2, target])?;
+    let [x1, x2, target] = float_operands("margin_ranking_loss", 2, [x1, x2, target])?;
+    let (x1, x2, target) = (&x1, &x2, &target);
     check_finite_parameter("margin_ranking_loss", "margin", margin)?;
     check_same_shape(
         "margin_ranking_loss",
@@ -153,7 +183,8 @@ pub fn hinge_embedding_loss(
     margin: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    check_operands("hinge_embedding_loss", &[input, target])?;
+    let [input, target] = float_operands("hinge_embedding_loss", 1, [input, target])?;
+    let (input, target) = (&input, &target);
     check_finite_parameter("hinge_embedding_loss", "margin", margin)?;
     check_same_shape(
         "hinge_embedding_loss",
@@ -173,7 +204,8 @@ pub fn cosine_embedding_loss(
     margin: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    check_operands("cosine_embedding_loss", &[x1, x2, target])?;
+    let [x1, x2, target] = float_operands("cosine_embedding_loss", 2, [x1, x2, target])?;
+    let (x1, x2, target) = (&x1, &x2, &target);
     if !(-1.0..=1.0).contains(&margin) {
         return Err(MinitensorError::invalid_argument(format!(
             "cosine_embedding_loss requires margin in [-1, 1], got {margin}"
@@ -221,7 +253,9 @@ pub fn triplet_margin_loss(
     swap: bool,
     reduction: &str,
 ) -> Result<Tensor> {
-    check_operands("triplet_margin_loss", &[anchor, positive, negative])?;
+    let [anchor, positive, negative] =
+        float_operands("triplet_margin_loss", 3, [anchor, positive, negative])?;
+    let (anchor, positive, negative) = (&anchor, &positive, &negative);
     check_same_shape(
         "triplet_margin_loss",
         &[
@@ -259,7 +293,8 @@ pub fn triplet_margin_loss(
 
 /// `log(1 + exp(-target * input))`, for a `target` of `+1` or `-1`.
 pub fn soft_margin_loss(input: &Tensor, target: &Tensor, reduction: &str) -> Result<Tensor> {
-    check_operands("soft_margin_loss", &[input, target])?;
+    let [input, target] = float_operands("soft_margin_loss", 1, [input, target])?;
+    let (input, target) = (&input, &target);
     check_same_shape("soft_margin_loss", &[("input", input), ("target", target)])?;
     // `softplus` rather than `log1p(exp(...))`: it takes the linear tail above
     // its threshold, where the exponential would overflow to infinity and the
@@ -283,7 +318,8 @@ pub fn poisson_nll_loss(
     eps: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    check_operands("poisson_nll_loss", &[input, target])?;
+    let [input, target] = float_operands("poisson_nll_loss", 1, [input, target])?;
+    let (input, target) = (&input, &target);
     check_same_shape("poisson_nll_loss", &[("input", input), ("target", target)])?;
     if !(eps.is_finite() && eps >= 0.0) {
         return Err(MinitensorError::invalid_argument(format!(

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::autograd::with_grad_fn;
+use std::borrow::Cow;
 
 use crate::{
     autograd::{
@@ -55,7 +56,8 @@ pub(crate) fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
 /// * `Result<Tensor>` - The computed MSE loss
 pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
 
@@ -110,7 +112,8 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
 /// * `Result<Tensor>` - The computed MAE loss
 pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     // The forward is computed on detached data (the exact gradient is provided
     // by MAELossBackward from the stored sign), so gate on the inputs and
@@ -522,7 +525,8 @@ pub fn binary_cross_entropy_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     // Validate inputs
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
     ensure_probabilities(predictions, "prediction")?;
     ensure_probabilities(targets, "target")?;
 
@@ -662,7 +666,8 @@ pub fn binary_cross_entropy_with_logits_loss(
     pos_weight: Option<&Tensor>,
     reduction: &str,
 ) -> Result<Tensor> {
-    validate_loss_inputs(logits, targets)?;
+    let (logits, targets) = loss_operands(logits, targets)?;
+    let (logits, targets) = (logits.as_ref(), targets.as_ref());
 
     // Broadcast pos_weight up front so both the forward kernel and the backward
     // see one flat, aligned buffer rather than re-deriving the mapping.
@@ -676,15 +681,13 @@ pub fn binary_cross_entropy_with_logits_loss(
                     format!("{:?}", w.device()),
                 ));
             }
-            if w.dtype() != logits.dtype() {
-                return Err(MinitensorError::type_mismatch(
-                    format!("{:?}", logits.dtype()),
-                    format!("{:?}", w.dtype()),
-                ));
-            }
+            // A coefficient of the loss, as `delta` and `beta` are elsewhere,
+            // so it is read at the dtype the loss is computed in rather than
+            // refused for having another.
+            let w = &w.detach().astype(logits.dtype())?;
             let target_dims: Vec<isize> =
                 logits.shape().dims().iter().map(|&d| d as isize).collect();
-            let expanded = w.detach().expand(target_dims).map_err(|_| {
+            let expanded = w.expand(target_dims).map_err(|_| {
                 MinitensorError::shape_mismatch(
                     w.shape().dims().to_vec(),
                     logits.shape().dims().to_vec(),
@@ -741,7 +744,8 @@ pub(crate) fn kl_div_batch_size(predictions: &Tensor) -> f64 {
 
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
     ensure_non_negative_probabilities(predictions, "input")?;
     ensure_non_negative_probabilities(targets, "target")?;
 
@@ -951,7 +955,8 @@ pub fn huber_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     // Validate inputs
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     check_huber_delta(delta)?;
 
@@ -1049,7 +1054,8 @@ pub fn smooth_l1_loss(
 /// * `targets` - Ground truth targets tensor
 /// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
 pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
-    validate_loss_inputs(predictions, targets)?;
+    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     let diff = sub(predictions, targets)?;
     let diff_abs = activation_abs(&diff)?;
@@ -1204,21 +1210,25 @@ pub(crate) fn invalid_reduction(reduction: &str, batchmean: bool) -> MinitensorE
     ))
 }
 
-/// Validate that loss function inputs are compatible
-fn validate_loss_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {
+/// The two operands of a loss, checked and at the float dtype they promote to.
+///
+/// The predictions are a model's activations and must be floats, as they must
+/// for every layer-shaped op. The targets may be of any dtype and meet the
+/// predictions as arithmetic meets them: the wider float decides, and an
+/// integer or bool target takes the predictions' width. Requiring the two
+/// dtypes to match refused a float32 prediction against float64 targets, and
+/// every integer target -- `binary_cross_entropy(p, [1, 0])` included --
+/// though each is plain arithmetic. The casts are differentiable, so the
+/// gradient reaches each operand at its own dtype.
+fn loss_operands<'a>(
+    predictions: &'a Tensor,
+    targets: &'a Tensor,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>)> {
     // Check device compatibility
     if predictions.device() != targets.device() {
         return Err(MinitensorError::device_mismatch(
             format!("{:?}", predictions.device()),
             format!("{:?}", targets.device()),
-        ));
-    }
-
-    // Check data type compatibility
-    if predictions.dtype() != targets.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", predictions.dtype()),
-            format!("{:?}", targets.dtype()),
         ));
     }
 
@@ -1230,17 +1240,21 @@ fn validate_loss_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {
         ));
     }
 
-    // Check that tensors contain floating point data (required for loss computation)
-    match predictions.dtype() {
-        DataType::Float32 | DataType::Float64 => {}
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Loss functions require floating point tensors",
-            ));
-        }
+    if !predictions.dtype().is_float() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "Loss functions require floating point predictions, got {}",
+            predictions.dtype()
+        )));
     }
-
-    Ok(())
+    let common = crate::ops::binary::promote_division_dtype(predictions.dtype(), targets.dtype());
+    let cast = |tensor: &'a Tensor| -> Result<Cow<'a, Tensor>> {
+        Ok(if tensor.dtype() == common {
+            Cow::Borrowed(tensor)
+        } else {
+            Cow::Owned(tensor.astype(common)?)
+        })
+    };
+    Ok((cast(predictions)?, cast(targets)?))
 }
 
 /// Validate that classification loss function inputs are compatible

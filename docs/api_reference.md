@@ -1925,7 +1925,11 @@ answer is an integer:
   poolings, `layer_norm`, `batch_norm`, `group_norm`, `rms_norm`, the losses
   and `scaled_dot_product_attention` take model activations, which are float
   by construction. `matmul` is not one of them: an integer matrix product is
-  exact, and it stays integer.
+  exact, and it stays integer. A loss's *targets* are not activations: they
+  may be integers, bools or a float of another width, and meet the
+  predictions as arithmetic meets them -- `binary_cross_entropy(p, [1, 0])`
+  is computed at `p`'s width, and float32 predictions against float64
+  targets give a float64 loss whose gradient comes back as float32.
 - **A `bool` is refused either way.** It has no width to widen to, and
   answering for a mask here while `mean` declines to would be worse than not
   answering at all.
