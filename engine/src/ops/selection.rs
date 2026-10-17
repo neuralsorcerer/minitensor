@@ -301,6 +301,10 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
 /// each block, and a `[n_true, ...]` tensor assigns block-by-block. This is
 /// an in-place data mutation and does not participate in autograd, mirroring
 /// `index_assign`.
+/// Elements per worker in a masked fill: a select is a few cycles an element,
+/// so a block wants to be large before a worker is worth waking for it.
+const MASKED_FILL_CHUNK: usize = 1 << 15;
+
 pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -> Result<()> {
     if mask.dtype() != DataType::Bool {
         return Err(MinitensorError::invalid_operation(
@@ -329,13 +333,14 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
         .data()
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from mask"))?;
-    let selected: Vec<usize> = mask_slice
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| m.then_some(i))
-        .collect();
+    // Each band's tally, counted in parallel; the running totals tell a band
+    // where in the values its first kept block reads from.
+    let (band, starts) = compaction_bands(mask_slice.len(), &|first, end| {
+        mask_slice[first..end].iter().map(|&m| usize::from(m)).sum()
+    });
+    let count = starts[starts.len() - 1];
 
-    let mut sel_dims = vec![selected.len()];
+    let mut sel_dims = vec![count];
     sel_dims.extend_from_slice(&in_dims[m_dims.len()..]);
     let sel_shape = Shape::new(sel_dims);
 
@@ -344,7 +349,11 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
     } else {
         values.astype(input.dtype())?
     };
-    let values_b = if values_cast.shape() == &sel_shape {
+    // A single value fills every selected block as it stands. Broadcast out
+    // to the whole selection first, `t[mask] = 0` on a million elements built
+    // and copied a half-million-element value before writing any of it.
+    let single = values_cast.numel() == 1;
+    let values_b = if single || values_cast.shape() == &sel_shape {
         values_cast.contiguous()?
     } else {
         let target = values_cast.shape().broadcast_with(&sel_shape)?;
@@ -359,27 +368,34 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
         values_cast.expand(dims)?
     };
 
-    if inner == 0 || selected.is_empty() {
+    if inner == 0 || count == 0 {
         return Ok(());
     }
 
-    /// Writes the selected trailing blocks for one dtype.
+    // With `t[mask] = t` the value shares the target's storage, and
+    // `data_mut`'s copy-on-write would race the read view, so the source is
+    // copied first -- only then: copied always, it was a second full pass
+    // over the value on every assignment.
+    let aliased = Arc::ptr_eq(input.data(), values_b.data());
+
+    /// Writes the selected trailing blocks for one dtype, walking the mask
+    /// directly rather than collecting the selected positions first.
     macro_rules! scatter_assign_arm {
         ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
-            // Read the source first: with self-aliasing assignments
-            // (`t[mask] = t`) `data_mut`'s copy-on-write would otherwise race
-            // the read view. Copying the source up front keeps it sound.
-            let src: Vec<_> = values_b
-                .data()
-                .$accessor()
-                .ok_or_else(|| {
-                    MinitensorError::internal_error(concat!(
-                        "Failed to get ",
-                        $tyname,
-                        " slice from values"
-                    ))
-                })?
-                .to_vec();
+            let view = values_b.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from values"
+                ))
+            })?;
+            let owned;
+            let src = if aliased {
+                owned = view.to_vec();
+                &owned[..]
+            } else {
+                view
+            };
             let dst = input.data_mut().$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get mutable ",
@@ -387,9 +403,53 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
                     " slice from input"
                 ))
             })?;
-            for (k, &blk) in selected.iter().enumerate() {
-                dst[blk * inner..(blk + 1) * inner]
-                    .copy_from_slice(&src[k * inner..(k + 1) * inner]);
+            match (single, inner) {
+                // One element per block and one value: a select over the
+                // whole buffer. Written as a store that always happens, of a
+                // value chosen without a branch, it has nothing to mispredict
+                // -- on a random mask the conditional store missed half the
+                // time -- and it splits across the pool.
+                (true, 1) => {
+                    let fill = src[0];
+                    par_out_chunks(dst, MASKED_FILL_CHUNK, &|start, block| {
+                        let keep = &mask_slice[start..start + block.len()];
+                        for (slot, &keep) in block.iter_mut().zip(keep) {
+                            *slot = std::hint::select_unpredictable(keep, fill, *slot);
+                        }
+                    });
+                }
+                (true, _) => {
+                    let fill = src[0];
+                    for (block, _) in mask_slice.iter().enumerate().filter(|(_, m)| **m) {
+                        dst[block * inner..(block + 1) * inner].fill(fill);
+                    }
+                }
+                // One element per block from a value of its own: the same
+                // select, reading the next value whether or not it is taken
+                // and advancing past it only when it is, band by band from
+                // where the bands before left off.
+                (false, 1) => {
+                    let last = src.len() - 1;
+                    par_out_chunks(dst, band, &|start, block| {
+                        let keep = &mask_slice[start..start + block.len()];
+                        let mut k = starts[start / band];
+                        for (slot, &keep) in block.iter_mut().zip(keep) {
+                            let candidate = src[k.min(last)];
+                            *slot = std::hint::select_unpredictable(keep, candidate, *slot);
+                            k += usize::from(keep);
+                        }
+                    });
+                }
+                (false, _) => {
+                    let mut k = 0;
+                    for (block, &keep) in mask_slice.iter().enumerate() {
+                        if keep {
+                            dst[block * inner..(block + 1) * inner]
+                                .copy_from_slice(&src[k * inner..(k + 1) * inner]);
+                            k += 1;
+                        }
+                    }
+                }
             }
         }};
     }

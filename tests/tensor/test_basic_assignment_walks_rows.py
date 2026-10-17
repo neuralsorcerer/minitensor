@@ -66,3 +66,25 @@ def test_a_whole_tensor_and_a_long_row_are_written_exactly():
     # A strided write and a broadcast fill along the same long axis.
     matrix[2, ::2] = 7.0
     assert (matrix.numpy()[2, ::2] == 7.0).all() and not matrix.numpy()[2, 1::2].any()
+
+
+@pytest.mark.parametrize("size", [5, 1000, 300_000])
+@pytest.mark.parametrize("density", [0.0, 0.01, 0.5, 0.99, 1.0])
+@pytest.mark.parametrize("mode", ["scalar", "values", "rows"])
+def test_masked_assignment_agrees_with_numpy(size, density, mode):
+    # The masked write is a branch-free select, split into bands that each
+    # start from the values the bands before them consumed.
+    rng = np.random.default_rng(size)
+    if mode == "rows":
+        base = rng.standard_normal((size // 5 + 1, 5))
+        mask = rng.random(base.shape[0]) < density
+        value = rng.standard_normal((int(mask.sum()), 5))
+    else:
+        base = rng.standard_normal(size)
+        mask = rng.random(size) < density
+        value = 7.0 if mode == "scalar" else rng.standard_normal(int(mask.sum()))
+    want = base.copy()
+    want[mask] = value
+    tensor = mt.Tensor(base, dtype="float64")
+    tensor[mt.Tensor(mask)] = value if mode == "scalar" else mt.Tensor(value)
+    np.testing.assert_array_equal(tensor.numpy(), want)
