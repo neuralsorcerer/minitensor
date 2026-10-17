@@ -1297,6 +1297,12 @@ print(y.tolist(), x.grad.tolist(), v.grad.tolist())
 `__getitem__` supports basic indexing (ints, slices with positive steps,
 `None`/`np.newaxis`, and `...`/Ellipsis) plus these advanced forms:
 
+Whatever the form, a subscript reads into a new tensor: every tensor here owns
+contiguous storage, so `t[0]` and `t[1:]` are copies rather than windows onto
+`t`. Writing into one changes the copy and leaves `t` as it was -- `t[0][1] = v`
+assigns into a temporary that is then discarded. Write through a single
+subscript instead, `t[0, 1] = v`, which assigns into `t` itself.
+
 - **Boolean masks** — `t[mask]` where the mask's shape equals `t`'s leading
   `mask.ndim` dimensions selects the trailing blocks: a full-shape mask
   yields a 1-D tensor of elements, a 1-D mask over a matrix yields rows,
