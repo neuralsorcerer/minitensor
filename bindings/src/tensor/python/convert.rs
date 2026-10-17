@@ -1084,26 +1084,40 @@ fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<u
         ($ty:ty) => {
             if let Ok(array) = item.cast::<PyArrayDyn<$ty>>() {
                 let shape = array.shape().to_vec();
+                // Every one of these widens to int64 exactly, except a uint64
+                // past it, which is no position along any axis: it is read as
+                // the largest int64 so that it is reported out of bounds,
+                // where casting it wrapped to a negative position that then
+                // counted from the end.
+                let widen = |v: $ty| i64::try_from(v).unwrap_or(i64::MAX);
                 // SAFETY: read without rust-numpy's dynamic borrow, for the
                 // reason `convert_numpy_to_tensor` gives: the bindings never
                 // release the GIL, and nothing here calls back into Python.
                 let values: Vec<i64> = if array.is_c_contiguous() {
                     unsafe { array.as_slice() }?
                         .iter()
-                        .map(|&v| v as i64)
+                        .map(|&v| widen(v))
                         .collect()
                 } else {
                     unsafe { array.as_array() }
                         .iter()
-                        .map(|&v| v as i64)
+                        .map(|&v| widen(v))
                         .collect()
                 };
                 return Ok(Some((values, shape)));
             }
         };
     }
+    // Every integer dtype an array can hold: refusing all but two, the error
+    // said an integer array could index a tensor and then refused a uint8 one.
     read!(i64);
     read!(i32);
+    read!(i16);
+    read!(i8);
+    read!(u64);
+    read!(u32);
+    read!(u16);
+    read!(u8);
     Ok(None)
 }
 
@@ -1839,6 +1853,13 @@ fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<Te
             )));
         }
         Ok(TensorIndex::Index(idx as usize))
+    } else if !basic && item.is_instance_of::<PyInt>() {
+        // An int past the platform's width is still a position, just not one
+        // on this axis: it was refused as a type that cannot index a tensor.
+        Err(PyIndexError::new_err(format!(
+            "index {} is out of bounds for dimension {axis} with size {dim_size}",
+            item.str()?
+        )))
     } else if let Ok(slice) = item.cast::<PySlice>() {
         use std::convert::TryInto;
 
