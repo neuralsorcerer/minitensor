@@ -293,7 +293,11 @@ REDUCIBLE = {
     "cross_entropy": lambda r: F.cross_entropy(_SCORES, _CLASSES, reduction=r),
     "cross_entropy soft": lambda r: F.cross_entropy(_SCORES, _DIST, reduction=r),
     "nll_loss": lambda r: F.nll_loss(_SCORES, _CLASSES, reduction=r),
-    "kl_div": lambda r: F.kl_div(_SCORES, _DIST, reduction=r),
+    # Both arguments are probabilities; the input is the target's rows rolled
+    # one class over, so it is a distribution and not the same one.
+    "kl_div": lambda r: F.kl_div(
+        _T(np.roll(_DIST.numpy(), 1, axis=1)), _DIST, reduction=r
+    ),
     "focal_loss": lambda r: F.focal_loss(_SCORES, _CLASSES, reduction=r),
     "focal_loss soft": lambda r: F.focal_loss(_SCORES, _DIST, reduction=r),
     "soft_margin_loss": lambda r: F.soft_margin_loss(_A, _SIGNS, reduction=r),

@@ -17,7 +17,7 @@ fail loudly are the cheap ones — it is the two silent rows that matter.
 | --- | --- | --- |
 | `zeros_like` and the other `*_like` forms | Inherit the source's `requires_grad`, so `zeros_like(parameter)` is trainable | [§2](#2-tensor-creation-api) — **silent**; pass `requires_grad=False` to opt out |
 | A tie in `amax` / `amin` / `nanmedian` | The gradient is divided evenly among the tied elements; `max(dim)`, which reports an index, sends it all to that index | [§4](#4-tensor-instance-methods) — **silent** |
-| `kl_div(input, target)` | Both arguments are probabilities, not log-probabilities | [§5](#5-functional-api-minitensorfunctional) — a log-probability input gives `inf`, so this one announces itself |
+| `kl_div(input, target)` | Both arguments are probabilities, not log-probabilities | [§5](#5-functional-api-minitensorfunctional) — a log-probability is negative, and a negative entry in either argument is refused, so this one announces itself |
 | `median` with an even count | The lower of the two middle values, with an index naming it | [§4](#4-tensor-instance-methods) — use `quantile(0.5)` for the interpolated value |
 | `chunk` with an uneven split | Refused | [§4](#4-tensor-instance-methods) — use `split` |
 | `resize(input, shape)` | A free function returning a new tensor; *repeats* the elements to fill | [§1](#1-top-level-module-minitensor) |

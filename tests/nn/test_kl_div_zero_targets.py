@@ -96,6 +96,22 @@ def test_nan_in_the_target_still_propagates():
     assert np.isnan(_kl([[0.5, 0.5]], [[np.nan, 1.0]], "sum").item())
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_negative_probability_is_refused_in_either_argument(dtype):
+    """A probability is never below zero, and a log-probability always is. A
+    negative entry was read as a probability of zero and reported an infinite
+    divergence -- a plausible number for an input that was not one at all."""
+    with pytest.raises(ValueError, match="never negative"):
+        _kl([[-0.5, 1.5]], [[0.5, 0.5]], "sum", dtype)
+    with pytest.raises(ValueError, match="never negative"):
+        _kl([[0.5, 0.5]], [[1.2, -0.2]], "sum", dtype)
+    # Log-probabilities, the mistake this most often is, are refused too.
+    with pytest.raises(ValueError, match="never negative"):
+        _kl(np.log([[0.25, 0.75]]), [[0.5, 0.5]], "sum", dtype)
+    # A NaN is no claim to be negative, and still propagates.
+    assert np.isnan(_kl([[np.nan, 0.5]], [[0.5, 0.5]], "sum", dtype).item())
+
+
 @pytest.mark.parametrize("reduction", ["sum", "mean", "batchmean", "none"])
 def test_the_convention_is_probabilities_not_log_probabilities(reduction):
     """Both arguments are probabilities. If this ever moves to a

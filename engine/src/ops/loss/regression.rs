@@ -474,6 +474,36 @@ fn ensure_probabilities(tensor: &Tensor, what: &str) -> Result<()> {
     }
 }
 
+/// Reject a negative entry in a tensor of probabilities for `kl_div`.
+///
+/// A probability is never below zero, and the logarithm the divergence takes
+/// has no value there. It used to be read as a probability of exactly zero --
+/// the log of a non-positive value was taken to be `-inf` -- so a negative
+/// prediction reported an infinite divergence: a plausible-looking answer to
+/// a question that had none. NaN is let through, and reaches the loss as NaN.
+fn ensure_non_negative_probabilities(tensor: &Tensor, what: &str) -> Result<()> {
+    let tensor = tensor.contiguous()?;
+    let negative = match tensor.dtype() {
+        DataType::Float32 => tensor
+            .data()
+            .as_f32_slice()
+            .and_then(|values| values.iter().copied().find(|&v| v < 0.0))
+            .map(f64::from),
+        DataType::Float64 => tensor
+            .data()
+            .as_f64_slice()
+            .and_then(|values| values.iter().copied().find(|&v| v < 0.0)),
+        _ => None,
+    };
+    match negative {
+        Some(value) => Err(MinitensorError::invalid_argument(format!(
+            "kl_div takes probabilities, and the {what} holds {value}; a \
+             probability is never negative"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Binary Cross Entropy loss function
 ///
 /// Computes the binary cross entropy loss between predictions and targets:
@@ -712,6 +742,8 @@ pub(crate) fn kl_div_batch_size(predictions: &Tensor) -> f64 {
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
+    ensure_non_negative_probabilities(predictions, "input")?;
+    ensure_non_negative_probabilities(targets, "target")?;
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
 
