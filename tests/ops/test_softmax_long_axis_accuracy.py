@@ -219,6 +219,96 @@ def test_softmax_still_handles_an_all_negative_infinity_slice():
     np.testing.assert_allclose(got_col[:, 1], [0.5, 0.5])
 
 
+_INF = np.inf
+# One `+inf`, two of them, one beside a NaN, an ordinary row, and `+inf` among
+# `-inf`s -- with what each comes to.
+_INFINITE_ROWS = np.array(
+    [
+        [_INF, 1.0, 2.0],
+        [_INF, _INF, 0.0],
+        [_INF, np.nan, 1.0],
+        [1.0, 2.0, 3.0],
+        [-_INF, _INF, -_INF],
+    ]
+)
+_INFINITE_SOFTMAX = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [np.nan, np.nan, np.nan],
+        np.exp([1.0, 2.0, 3.0]) / np.exp([1.0, 2.0, 3.0]).sum(),
+        [0.0, 1.0, 0.0],
+    ]
+)
+
+
+def _layouts(rows):
+    """The same slices along the last axis, down the first, and down a middle
+    axis of a stack -- the row, column and block walks."""
+    yield "last", rows, 1, lambda out: out
+    yield "first", np.ascontiguousarray(rows.T), 0, lambda out: out.T
+    stack = np.stack([rows.T, rows.T])
+    yield "middle", stack, 1, lambda out: out[1].T
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("log", [False, True], ids=["softmax", "log_softmax"])
+def test_a_slice_with_an_infinite_maximum_takes_its_limit(dtype, log):
+    """`softmax([inf, 1, 2])` was NaN everywhere: no shift makes `inf - inf`
+    finite. As those entries grow without bound they take all the mass, so
+    the answer is `[1, 0, 0]`; equal infinities share it, and a NaN in the
+    slice still makes all of it NaN."""
+    with np.errstate(divide="ignore"):
+        expected = np.log(_INFINITE_SOFTMAX) if log else _INFINITE_SOFTMAX
+    for name, values, dim, back in _layouts(_INFINITE_ROWS):
+        tensor = mt.Tensor(values, dtype=dtype)
+        got = back((tensor.log_softmax(dim) if log else tensor.softmax(dim)).numpy())
+        np.testing.assert_allclose(got, expected, rtol=1e-6, err_msg=name)
+        assert (np.isinf(got) == np.isinf(expected)).all(), name
+    if log:
+        # The single infinity is log(1), a plain zero.
+        got = mt.Tensor([[_INF, 1.0]], dtype=dtype).log_softmax(1).numpy()
+        assert got[0, 0] == 0.0 and not np.signbit(got[0, 0])
+
+
+@pytest.mark.parametrize("log", [False, True], ids=["softmax", "log_softmax"])
+def test_the_banded_walk_takes_the_limit_too(log):
+    """One block down the first axis is cut into row bands; an infinity in
+    one band still settles its whole column."""
+    values = np.random.default_rng(3).standard_normal((200_000, 3))
+    values[123_456, 1] = _INF
+    tensor = mt.Tensor(values, dtype="float64")
+    got = (tensor.log_softmax(0) if log else tensor.softmax(0)).numpy()
+    column = got[:, 1]
+    if log:
+        assert column[123_456] == 0.0 and np.isneginf(np.delete(column, 123_456)).all()
+    else:
+        assert column[123_456] == 1.0 and (np.delete(column, 123_456) == 0).all()
+    # The other columns are ordinary softmaxes.
+    sums = np.exp(got[:, [0, 2]]).sum(0) if log else got[:, [0, 2]].sum(0)
+    np.testing.assert_allclose(sums, [1.0, 1.0], rtol=1e-10)
+
+
+def test_masked_softmax_takes_the_limit_over_what_is_unmasked():
+    values = mt.Tensor([[_INF, 1.0, 2.0], [1.0, _INF, 2.0]], dtype="float64")
+    mask = mt.Tensor([[False, False, False], [False, True, False]], dtype="bool")
+    got = mt.masked_softmax(values, mask, 1).numpy()
+    np.testing.assert_array_equal(got[0], [1.0, 0.0, 0.0])
+    # A masked infinity is out of the slice, which is an ordinary one.
+    np.testing.assert_allclose(
+        got[1], [np.exp(-1) / (1 + np.exp(-1)), 0.0, 1 / (1 + np.exp(-1))]
+    )
+
+
+def test_the_gradient_through_an_infinite_row_is_zero():
+    """With all the mass on one entry the output no longer moves with the
+    inputs, and the gradient says so rather than being NaN."""
+    logits = mt.Tensor([[_INF, 1.0, 2.0]], dtype="float64", requires_grad=True)
+    (logits.softmax(1) * mt.Tensor([[1.0, 2.0, 3.0]], dtype="float64")).sum().backward()
+    np.testing.assert_array_equal(logits.grad.numpy(), [[0.0, 0.0, 0.0]])
+    mt.clear_autograd_graph()
+
+
 @pytest.mark.parametrize("shape,dim", [((3, 5), 1), ((5, 3), 0), ((2, 3, 4), 1)])
 @pytest.mark.parametrize("op", ["softmax", "log_softmax"])
 def test_small_shapes_are_unchanged(shape, dim, op):

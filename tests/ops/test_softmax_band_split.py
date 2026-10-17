@@ -95,7 +95,7 @@ def test_the_band_boundary_is_not_special(rows):
 
 
 def test_a_column_with_no_answer_says_so_rather_than_returning_one():
-    """A column holding a NaN or a `+inf` has no softmax.
+    """A column holding a NaN has no softmax.
 
     The column-wise kernel used to divide only where the total was positive,
     which left a poisoned column holding its raw exponentials -- and those look
@@ -103,14 +103,24 @@ def test_a_column_with_no_answer_says_so_rather_than_returning_one():
     the first column: a column that sums to one and means nothing. This
     library's own contiguous kernel answers NaN there, which is what the
     column-wise one now agrees with.
+
+    A `+inf` is different: it has an answer, the limit, which puts all the
+    mass on it -- and the column-wise kernel gives that, as the contiguous one
+    does.
     """
-    for poison in (np.nan, np.inf):
-        values = np.array([[1.0, 1.0], [poison, 2.0]], dtype=np.float32)
-        got = mt.from_numpy(values).softmax(0).numpy()
-        assert np.isnan(got[:, 0]).all(), got
-        np.testing.assert_allclose(
-            got[:, 1], _softmax_reference(values[:, 1], 0), rtol=1e-6
-        )
+    values = np.array([[1.0, 1.0], [np.nan, 2.0]], dtype=np.float32)
+    got = mt.from_numpy(values).softmax(0).numpy()
+    assert np.isnan(got[:, 0]).all(), got
+    np.testing.assert_allclose(
+        got[:, 1], _softmax_reference(values[:, 1], 0), rtol=1e-6
+    )
+
+    values = np.array([[1.0, 1.0], [np.inf, 2.0]], dtype=np.float32)
+    got = mt.from_numpy(values).softmax(0).numpy()
+    np.testing.assert_array_equal(got[:, 0], [0.0, 1.0])
+    np.testing.assert_allclose(
+        got[:, 1], _softmax_reference(values[:, 1], 0), rtol=1e-6
+    )
 
 
 def test_an_all_negative_infinity_column_is_still_zeros():

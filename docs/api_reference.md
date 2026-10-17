@@ -2719,6 +2719,12 @@ A row that ends up with nothing to attend to has no defined softmax (`0/0`).
 and `masked_log_softmax` returns `-inf`. Zeros propagate quietly, so a
 fully-masked row is still a bug worth catching upstream.
 
+A slice whose largest entry is `+inf` takes the limit, in every softmax form:
+the infinite entries take all the mass and the rest none, so
+`softmax([inf, 1, 2])` is `[1, 0, 0]` and its `log_softmax` is
+`[0, -inf, -inf]`. Several equal infinities share the mass evenly, `1/k` each;
+a NaN anywhere in the slice still makes all of it NaN.
+
 ```python
 import minitensor as mt
 import numpy as np

@@ -513,6 +513,79 @@ impl<'a> MaskWalk<'a> {
 /// on every element. The result is the strided version's exactly: a maximum
 /// does not care what order it sees its values in, NaNs included -- they fail
 /// every comparison either way and so take no part.
+/// How many entries of a slice are `+inf`, and whether it holds a NaN.
+///
+/// A slice whose maximum is `+inf` has no shift that makes its exponentials
+/// finite: `inf - inf` is NaN, and the whole slice came back NaN. Its softmax
+/// is the limit instead -- see [`infinite_slice_value`].
+#[inline]
+fn infinite_slice_parts<T: Float>(values: impl Iterator<Item = T>) -> (usize, bool) {
+    let mut infinities = 0;
+    let mut nan = false;
+    for v in values {
+        if v == T::infinity() {
+            infinities += 1;
+        } else if v.is_nan() {
+            nan = true;
+        }
+    }
+    (infinities, nan)
+}
+
+/// One entry of the softmax (or, with `LOG`, the `log_softmax`) of a slice
+/// whose maximum is `+inf`, from [`infinite_slice_parts`].
+///
+/// As those entries grow without bound they take all of the mass, and every
+/// other entry none: `softmax([inf, 1, 2])` is `[1, 0, 0]`. Several equal
+/// infinities share it evenly, as entries that compare equal do everywhere
+/// else, so each of `k` gets `1/k` -- `-log k` in the log form. A NaN in the
+/// slice still makes all of it NaN.
+#[inline]
+fn infinite_slice_value<T: Float, const LOG: bool>(v: T, infinities: usize, nan: bool) -> T {
+    if nan {
+        return T::nan();
+    }
+    if v == T::infinity() {
+        let share = T::from(infinities).unwrap_or_else(T::nan);
+        // `0 - log k` rather than `-log k`, which is `-0.0` for one infinity.
+        if LOG {
+            T::zero() - share.ln()
+        } else {
+            share.recip()
+        }
+    } else if LOG {
+        T::neg_infinity()
+    } else {
+        T::zero()
+    }
+}
+
+/// Rewrite every column of a `[rows, after]` block whose maximum is `+inf`
+/// with its limit; see [`infinite_slice_value`]. Nothing to do, and one pass
+/// over `col_max` to find that out, when no column has one.
+fn settle_infinite_columns<T: Float, const LOG: bool>(
+    in_block: &[T],
+    out_block: &mut [T],
+    col_max: &[T],
+    after: usize,
+) {
+    for (a, &max) in col_max.iter().enumerate() {
+        if max != T::infinity() {
+            continue;
+        }
+        let (infinities, nan) =
+            infinite_slice_parts(in_block.iter().skip(a).step_by(after).copied());
+        for (o, &v) in out_block
+            .iter_mut()
+            .skip(a)
+            .step_by(after)
+            .zip(in_block.iter().skip(a).step_by(after))
+        {
+            *o = infinite_slice_value::<T, LOG>(v, infinities, nan);
+        }
+    }
+}
+
 fn block_col_max<T: Float>(in_block: &[T], after: usize) -> Vec<T> {
     let mut col_max = vec![T::neg_infinity(); after];
     for row in in_block.chunks_exact(after) {
@@ -625,6 +698,7 @@ fn softmax_block_columnwise<T: ShiftedExp>(in_block: &[T], out_block: &mut [T], 
     let col_max = block_col_max(in_block, after);
     let col_sum = exp_columns_into(in_block, Some(out_block), &col_max, after);
     divide_columns(out_block, &col_sum, after);
+    settle_infinite_columns::<T, false>(in_block, out_block, &col_max, after);
 }
 
 /// Divide every row of a `[dim_size, after]` block by the column totals.
@@ -796,10 +870,11 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
     // and the bands cost a set of column accumulators each.
     let band_rows = dim_size.div_ceil(softmax_bands(dim_size, after));
     if output_slice.len() == group && band_rows < dim_size {
-        let (_, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
+        let (col_max, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
         par_out_chunks(output_slice, band_rows * after, &|_, out_band| {
             divide_columns(out_band, &col_sum, after);
         });
+        settle_infinite_columns::<T, false>(input_data, output_slice, &col_max, after);
         return Ok(());
     }
 
@@ -862,6 +937,13 @@ fn last_axis_rows<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], le
             let max_val = slice_max(in_row);
             if max_val == T::neg_infinity() {
                 out_row.fill(if LOG { T::neg_infinity() } else { T::zero() });
+                continue;
+            }
+            if max_val == T::infinity() {
+                let (infinities, nan) = infinite_slice_parts(in_row.iter().copied());
+                for (o, &v) in out_row.iter_mut().zip(in_row) {
+                    *o = infinite_slice_value::<T, LOG>(v, infinities, nan);
+                }
                 continue;
             }
             // The exponentials are formed into the output row and summed from
@@ -945,6 +1027,22 @@ fn masked_softmax_core<T: Float + Send + Sync>(
                 if !has_unmasked || max_val == neg_inf {
                     for k in 0..dim_size {
                         out_block[base + k * after] = T::zero();
+                    }
+                    continue;
+                }
+                if max_val == T::infinity() {
+                    let (infinities, nan) = infinite_slice_parts(
+                        (0..dim_size)
+                            .filter(|&k| !walk.masked(row, k))
+                            .map(|k| in_block[base + k * after]),
+                    );
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = if walk.masked(row, k) {
+                            T::zero()
+                        } else {
+                            infinite_slice_value::<T, false>(in_block[idx], infinities, nan)
+                        };
                     }
                     continue;
                 }
@@ -1054,11 +1152,13 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         // final pass overwrites them from the input, so lending the buffer out
         // costs nothing.
         let (mut col_logsum, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
+        let col_max = col_logsum.clone();
         log_totals(&mut col_logsum, &col_sum);
         par_out_chunks(output_slice, band_rows * after, &|start, out_band| {
             let in_band = &input_data[start..start + out_band.len()];
             subtract_columns(in_band, out_band, &col_logsum, after);
         });
+        settle_infinite_columns::<T, true>(input_data, output_slice, &col_max, after);
         return Ok(());
     }
 
@@ -1095,6 +1195,7 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
                 }
             }
             let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
+            let col_max = col_logsum.clone();
             // Fold each column's max into log(sum) + max; -inf columns stay
             // -inf so their outputs are all -inf.
             for a in 0..after {
@@ -1114,6 +1215,7 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
                     };
                 }
             }
+            settle_infinite_columns::<T, true>(in_block, out_block, &col_max, after);
         },
     );
 
@@ -1167,6 +1269,22 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
                 if !has_unmasked || max_val == neg_inf {
                     for k in 0..dim_size {
                         out_block[base + k * after] = neg_inf;
+                    }
+                    continue;
+                }
+                if max_val == T::infinity() {
+                    let (infinities, nan) = infinite_slice_parts(
+                        (0..dim_size)
+                            .filter(|&k| !walk.masked(row, k))
+                            .map(|k| in_block[base + k * after]),
+                    );
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = if walk.masked(row, k) {
+                            neg_inf
+                        } else {
+                            infinite_slice_value::<T, true>(in_block[idx], infinities, nan)
+                        };
                     }
                     continue;
                 }
