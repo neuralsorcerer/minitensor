@@ -486,7 +486,11 @@ fn rsqrt_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
-    let out = unary_map(input_data, |v: f32| v.sqrt().recip());
+    // In float64, then rounded once. In float32 the root and the reciprocal
+    // each rounded, and the two roundings left results up to 1.43 ulp out;
+    // float64 holds both steps far more finely than float32 can show, so the
+    // one rounding at the end is the only one that matters.
+    let out = unary_map(input_data, |v: f32| (f64::from(v).sqrt().recip()) as f32);
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
@@ -1009,6 +1013,65 @@ mod rounding_and_clip_tests {
             Device::cpu(),
             false,
         )
+    }
+
+    /// A positive finite float64 as an odd integer times a power of two.
+    fn exact_parts(value: f64) -> (u128, i32) {
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = bits & ((1 << 52) - 1);
+        let (mut mantissa, mut power) = if exponent == 0 {
+            (u128::from(fraction), -1074)
+        } else {
+            (u128::from(fraction | (1 << 52)), exponent - 1075)
+        };
+        let zeros = mantissa.trailing_zeros();
+        mantissa >>= zeros;
+        power += zeros as i32;
+        (mantissa, power)
+    }
+
+    /// `bound^2 * x` against 1, decided exactly: `bound` a midpoint of two
+    /// float32s and `x` a float32, so the product has at most 74 bits.
+    fn squared_times_against_one(bound: f64, x: f32) -> std::cmp::Ordering {
+        let (m, e) = exact_parts(bound);
+        let (n, f) = exact_parts(f64::from(x));
+        let product = m * m * n;
+        let power = 2 * e + f;
+        if power >= 0 {
+            // An odd product times a non-negative power of two.
+            (product, power).cmp(&(1, 0))
+        } else if -power >= 127 {
+            std::cmp::Ordering::Less
+        } else {
+            product.cmp(&(1u128 << (-power)))
+        }
+    }
+
+    #[test]
+    fn float32_rsqrt_is_correctly_rounded() {
+        // Every 4099th positive float32 bit pattern, subnormals included:
+        // the exact `1 / sqrt(x)` must lie within half an ulp of the answer,
+        // which is to say between the midpoints either side of it.
+        let inputs: Vec<f32> = (1..0x7f80_0000_u32)
+            .step_by(4099)
+            .map(f32::from_bits)
+            .collect();
+        let output = rsqrt(&f32_tensor(inputs.clone())).unwrap();
+        let answers = output.data().as_f32_slice().unwrap();
+        for (&x, &r) in inputs.iter().zip(answers) {
+            assert!(r.is_finite() && r > 0.0, "rsqrt({x:e}) = {r:e}");
+            let below = f64::from(f32::from_bits(r.to_bits() - 1));
+            let above = f64::from(f32::from_bits(r.to_bits() + 1));
+            let (low, high) = ((below + f64::from(r)) / 2.0, (f64::from(r) + above) / 2.0);
+            // `1 / sqrt(x)` is at least `low` when `low^2 * x <= 1`, and at
+            // most `high` when `high^2 * x >= 1`.
+            assert!(
+                squared_times_against_one(low, x).is_le()
+                    && squared_times_against_one(high, x).is_ge(),
+                "rsqrt({x:e}) = {r:e} is not the nearest float32"
+            );
+        }
     }
 
     /// The rounding family runs a different compilation of its loop depending
