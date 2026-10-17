@@ -405,6 +405,23 @@ impl SelectionPlan {
                     return;
                 }
 
+                // One strided run -- `x[::2]` of a vector -- is split the same
+                // way: the bands below are whole runs, so a single run went to
+                // one core however long it was, and took seven times the
+                // contiguous `x[1:]` of the same length.
+                if self.runs == 1 {
+                    let step = self.inner_step;
+                    let chunk =
+                        (self.contig / crate::parallel::current_num_threads().max(1)).max(1 << 16);
+                    par_out_chunks(output, chunk, &|start, dst| {
+                        let column = input[self.base + start * step..].iter().step_by(step);
+                        for (slot, &value) in dst.iter_mut().zip(column) {
+                            slot.write(value);
+                        }
+                    });
+                    return;
+                }
+
                 // Hand each task a band of whole runs. Seeding its odometer
                 // costs one decomposition; every run after that is reached by
                 // addition.
