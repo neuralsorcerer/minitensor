@@ -37,7 +37,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::{
         map::par_out_chunks2,
-        reduction::scan_along_dim,
+        reduction::{scan_along_dim, scan_wide_f32},
         util::{log_add_exp, normalize_dim},
     },
     tensor::{DataType, Tensor, TensorData},
@@ -278,7 +278,17 @@ pub fn logcumsumexp(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     }
 
     match tensor.dtype() {
-        DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut, f32),
+        // Carried in float64, as the running sum is: over a million float32
+        // values the float32 running value ended 0.0125 off.
+        DataType::Float32 => {
+            let source = contiguous.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("logcumsumexp: dtype does not match the input")
+            })?;
+            let out = data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("logcumsumexp: dtype does not match the output")
+            })?;
+            scan_wide_f32(out, source, dim_size, inner, false, log_add_exp::<f64>);
+        }
         _ => run!(as_f64_slice, as_f64_slice_mut, f64),
     }
 

@@ -106,21 +106,24 @@ pub(crate) fn scan_along_dim<I, A, W, F>(
     });
 }
 
-/// A float32 running sum, carried in float64 and rounded once per element.
+/// A float32 scan, its running value carried in float64 and rounded once per
+/// element: `combine` folds each next element into the running value.
 ///
-/// Carried in float32, every partial sum rounded the running total, and the
-/// error grew with the length: over a million values the last element was
-/// 7e-6 from the exact total, eighty times what `sum` makes of the same values,
-/// so `cumsum(x)[-1]` and `x.sum()` disagreed in the fifth digit. In float64
-/// the drift stays far below anything float32 can show, so each element is the
-/// float32 nearest its partial sum. A partial sum past float32's range is
-/// infinite where it is, and the ones after it come back when the total does.
-pub(crate) fn scan_sum_f32(
+/// Carried in float32, every step rounded the running value, and the error
+/// grew with the length: over a million values the last element of `cumsum`
+/// was 7e-6 from the exact total, eighty times what `sum` makes of the same
+/// values, and `logcumsumexp`'s ended 0.0125 off -- a sum wrong by more than
+/// one percent, carried in its logarithm. In float64 the drift stays far
+/// below anything float32 can show, so each element is the float32 nearest
+/// its running value. One past float32's range is infinite where it is, and
+/// the ones after it come back when the running value does.
+pub(crate) fn scan_wide_f32(
     output: &mut [f32],
     input: &[f32],
     dim_size: usize,
     inner: usize,
     reverse: bool,
+    combine: impl Fn(f64, f64) -> f64 + Sync,
 ) {
     let slab = dim_size * inner;
     if slab == 0 {
@@ -136,7 +139,7 @@ pub(crate) fn scan_sum_f32(
             out[order(0)] = inp[order(0)];
             for d in 1..dim_size {
                 let at = order(d);
-                acc += f64::from(inp[at]);
+                acc = combine(acc, f64::from(inp[at]));
                 out[at] = acc as f32;
             }
             return;
@@ -150,7 +153,7 @@ pub(crate) fn scan_sum_f32(
         for d in 1..dim_size {
             let row = order(d) * inner;
             for (i, total) in acc.iter_mut().enumerate() {
-                *total += f64::from(inp[row + i]);
+                *total = combine(*total, f64::from(inp[row + i]));
                 out[row + i] = *total as f32;
             }
         }
@@ -522,7 +525,22 @@ macro_rules! cumsum_backward {
     };
 }
 
-cumprod_forward!(cumprod_f32, as_f32_slice, as_f32_slice_mut, f32, f32);
+/// The float32 running product, carried in float64 as the running sum is:
+/// over 100,000 factors near one, float32 drifted 9e-6 from the exact product.
+pub(crate) fn cumprod_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+    let output = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+    check_dim(dim, tensor.ndim())?;
+    let shape = tensor.shape().dims();
+    let inner = shape[dim + 1..].iter().product::<usize>();
+    scan_wide_f32(output, input_data, shape[dim], inner, false, |a, b| a * b);
+    Ok(())
+}
 cumprod_forward!(cumprod_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
 cumprod_forward!(cumprod_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
 cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
@@ -534,8 +552,8 @@ cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
 cumsum_forward!(cumsum_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
 cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 
-/// [`scan_sum_f32`] over `tensor` along `dim`, forwards for the running sum
-/// and backwards for its gradient.
+/// [`scan_wide_f32`] adding along `dim` of `tensor`, forwards for the running
+/// sum and backwards for its gradient.
 fn cumsum_f32_along(
     tensor: &Tensor,
     result_data: &mut TensorData,
@@ -552,7 +570,7 @@ fn cumsum_f32_along(
     check_dim(dim, tensor.ndim())?;
     let shape = tensor.shape().dims();
     let inner = shape[dim + 1..].iter().product::<usize>();
-    scan_sum_f32(output, input_data, shape[dim], inner, reverse);
+    scan_wide_f32(output, input_data, shape[dim], inner, reverse, |a, b| a + b);
     Ok(())
 }
 

@@ -1815,6 +1815,11 @@ accumulate with something else:
   positions, and a value that wins several prefixes collects all of them.
 - `logcumsumexp(input, dim=-1)` is the running `log(sum(exp(x)))`.
 
+A `float32` scan -- `cumsum`, `cumprod` and `logcumsumexp` -- carries its running
+value in `float64` and rounds it once per element, so every element is the
+`float32` nearest its exact prefix and the error does not grow with the length.
+The result is still `float32`.
+
 `logcumsumexp` is not `cumsum` of `exp`, and the difference is the reason it
 exists. `exp` of a log-probability underflows to zero long before a real
 sequence ends, so the naive reading stops accumulating and reports `-inf` for
