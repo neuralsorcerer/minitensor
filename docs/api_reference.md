@@ -848,7 +848,13 @@ Conversion helpers:
 - `numpy.asarray(tensor)` → NumPy array (**no copy**, read-only — see below)
 - `tensor.item()` → Python scalar (for 0-d tensors)
 - `tensor.tolist()` → Python list
-- `tensor.astype(dtype)` → dtype conversion
+- `tensor.astype(dtype)` → dtype conversion. It is a cast, and narrows as one:
+  a float becoming an integer truncates towards zero and saturates at the
+  dtype's limits, NaN becoming 0, so `inf` gives the largest int and `3e9`
+  as int32 gives `2147483647`; a wider integer becoming a narrower one keeps
+  its low bits, so `2**40` as int32 is `0`; and anything becoming `bool` is
+  `True` wherever it is non-zero, NaN included. Where a value that does not
+  fit should be an error, check the range before casting.
 - `float(tensor)` / `int(tensor)` → Python scalar (one-element tensors only;
   `int` truncates, bool converts to 1/0)
 
