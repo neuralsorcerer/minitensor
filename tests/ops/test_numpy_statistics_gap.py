@@ -483,8 +483,14 @@ def test_bin_edges_over_integers_wider_than_float64_can_hold():
     so two int64 that round to the same float64 are still ordered correctly.
     Folding in float64 -- which is what this used to do, one conversion per
     element -- compared them after rounding and could return either.
+
+    The answer widens outward, to the floats enclosing the data: the float
+    nearest `2**62 + 3` is `2**62`, below it, and a value is counted by its
+    own value, so a top edge there would leave the maximum out.
     """
     data = np.array([2**62 + 1, 2**62 + 3, -(2**62)], dtype=np.int64)
     edges = mt.histogram_bin_edges(mt.from_numpy(data), 2).numpy()
     assert edges[0] == float(-(2**62))
-    assert edges[-1] == float(2**62 + 3)
+    assert edges[-1] == np.nextafter(float(2**62), np.inf)
+    counts, _ = mt.histogram(mt.from_numpy(data), 2)
+    assert counts.tolist() == [1.0, 2.0]

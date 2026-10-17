@@ -1496,6 +1496,14 @@ the library: comparing every value against every boundary is
 - `histc(input, bins=100, min=0.0, max=0.0)` — counts alone,
   and equal bounds mean "span the data" rather than "an empty range".
 
+A value's bin is the last edge at or below it, decided exactly: an int64 past
+2^53 is placed by its own value rather than the float nearest it, and a range
+taken from int64 data is widened outward to the floats that enclose it, so
+the largest value is never left out. A range whose ends are finite but whose
+span is not, such as `(-1e308, 1e308)`, still gives finite, evenly spaced
+edges. Equal-width bins are found by arithmetic and checked against the edges,
+so their cost does not grow with the number of bins.
+
 Two conventions worth stating because they are easy to get backwards. Values
 outside the outermost edges are **dropped, not clamped** — clamping would pile
 everything below the range into the first bin, which is a different answer. And

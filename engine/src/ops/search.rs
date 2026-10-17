@@ -34,6 +34,7 @@ use crate::{
     ops::util::pairwise_fold_vectors,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use std::hint::select_unpredictable;
 use std::sync::Arc;
 
 /// Where `value` belongs in an already-sorted `sequence`.
@@ -338,6 +339,21 @@ fn integer_among_floats(value: i64, right: bool) -> (f64, bool) {
     (below, right || !exact)
 }
 
+/// The largest float at or below `value`.
+fn float_at_or_below(value: i64) -> f64 {
+    integer_among_floats(value, false).0
+}
+
+/// The smallest float at or above `value`.
+fn float_at_or_above(value: i64) -> f64 {
+    let nearest = value as f64;
+    if (nearest as i128) < i128::from(value) {
+        nearest.next_up()
+    } else {
+        nearest
+    }
+}
+
 /// [`searchsorted`] for an integer sequence searched by floats, or a float
 /// sequence searched by integers. No dtype holds both exactly -- int64 is not
 /// a subset of float64 past 2^53 -- so each value is turned into the search,
@@ -552,36 +568,92 @@ where
 }
 
 /// Count each of `labels` into `slots`, every label below `slots.len()`.
+fn count_labels<L: Copy>(labels: &[L], slots: &mut [i64], slot: impl Fn(L) -> usize) {
+    let mut counters = Counters::new(slots.len());
+    counters.add(labels, slots, slot);
+    counters.finish(slots);
+}
+
+/// A count of labels into slots, kept so that an increment need not wait.
 ///
 /// With few bins the same counter comes round again before its last
 /// increment has landed, and each increment waits for the one before it:
 /// sixteen thousand labels over seven bins took 37us. So a
 /// short tally is kept four times over, label `i` going to copy `i % 4`, and
 /// the copies added at the end -- exact, since the counts are integers.
-fn count_labels<L: Copy>(labels: &[L], slots: &mut [i64], slot: impl Fn(L) -> usize) {
+struct Counters {
+    /// Empty when there are enough bins to count into `slots` directly.
+    copies: Vec<i64>,
+}
+
+impl Counters {
     const SPLIT_BELOW: usize = 1 << 12;
-    let bins = slots.len();
-    if bins > SPLIT_BELOW {
-        for &label in labels {
-            slots[slot(label)] += 1;
+
+    fn new(bins: usize) -> Self {
+        let copies = if bins > Self::SPLIT_BELOW {
+            Vec::new()
+        } else {
+            vec![0; 4 * bins]
+        };
+        Self { copies }
+    }
+
+    /// Count `labels`, each naming a slot below `slots.len()`.
+    fn add<L: Copy>(&mut self, labels: &[L], slots: &mut [i64], slot: impl Fn(L) -> usize) {
+        let bins = slots.len();
+        let copies = &mut self.copies;
+        if copies.is_empty() {
+            for &label in labels {
+                slots[slot(label)] += 1;
+            }
+            return;
         }
-        return;
+        let (quads, rest) = labels.as_chunks::<4>();
+        for quad in quads {
+            copies[slot(quad[0])] += 1;
+            copies[bins + slot(quad[1])] += 1;
+            copies[2 * bins + slot(quad[2])] += 1;
+            copies[3 * bins + slot(quad[3])] += 1;
+        }
+        for &label in rest {
+            copies[slot(label)] += 1;
+        }
     }
-    let mut copies = vec![0i64; 4 * bins];
-    let (quads, rest) = labels.as_chunks::<4>();
-    for quad in quads {
-        copies[slot(quad[0])] += 1;
-        copies[bins + slot(quad[1])] += 1;
-        copies[2 * bins + slot(quad[2])] += 1;
-        copies[3 * bins + slot(quad[3])] += 1;
+
+    fn finish(self, slots: &mut [i64]) {
+        let copies = self.copies;
+        if copies.is_empty() {
+            return;
+        }
+        let bins = slots.len();
+        for (bin, total) in slots.iter_mut().enumerate() {
+            *total +=
+                copies[bin] + copies[bins + bin] + copies[2 * bins + bin] + copies[3 * bins + bin];
+        }
     }
-    for &label in rest {
-        copies[slot(label)] += 1;
+}
+
+/// Count `values` into `slots` by the slot `slot` names for each, a block at
+/// a time: every slot in the block first, then every increment.
+///
+/// One pass doing both made each increment's address wait on the arithmetic
+/// that names it, and the loads of the counters ran ahead of it on a guess.
+/// With few bins the guess is often wrong -- the next value is in the same
+/// bin -- and each wrong one is replayed: four million values in a mixed
+/// range cost 6-9ns each. Named first, the increments run as fast as counting
+/// labels does, 4ns each whatever the data.
+fn count_binned<T: Copy>(values: &[T], slots: &mut [i64], slot: impl Fn(T) -> usize) {
+    const BLOCK: usize = 1024;
+    let mut counters = Counters::new(slots.len());
+    let mut named = [0usize; BLOCK];
+    for block in values.chunks(BLOCK) {
+        let named = &mut named[..block.len()];
+        for (bin, &value) in named.iter_mut().zip(block) {
+            *bin = slot(value);
+        }
+        counters.add(named, slots, |bin| bin);
     }
-    for (bin, total) in slots.iter_mut().enumerate() {
-        *total +=
-            copies[bin] + copies[bins + bin] + copies[2 * bins + bin] + copies[3 * bins + bin];
-    }
+    counters.finish(slots);
 }
 
 /// The labels of a [`bincount`], borrowed rather than copied.
@@ -837,7 +909,11 @@ trait Extremes: Copy + Send + Sync {
     /// that is what lets the cheap pass ignore the question entirely.
     fn below(self, other: Self) -> bool;
     fn above(self, other: Self) -> bool;
-    fn widen(self) -> f64;
+    /// The largest float at or below the value, which is the value itself for
+    /// every type a float holds exactly.
+    fn widen_down(self) -> f64;
+    /// The smallest float at or above the value.
+    fn widen_up(self) -> f64;
 }
 
 /// Declares [`Extremes`] for a type that is always finite, so `keep` is a
@@ -862,8 +938,14 @@ macro_rules! exact_extremes {
             fn above(self, other: Self) -> bool {
                 self > other
             }
-            fn widen(self) -> f64 {
-                self as f64
+            // Rounded outward, so a range taken from the data spans all of
+            // it: past 2^53 the nearest float to the maximum can be below it,
+            // and the exact count would then leave the maximum out.
+            fn widen_down(self) -> f64 {
+                float_at_or_below(self as i64)
+            }
+            fn widen_up(self) -> f64 {
+                float_at_or_above(self as i64)
             }
         }
     };
@@ -891,7 +973,10 @@ macro_rules! float_extremes {
             fn above(self, other: Self) -> bool {
                 self > other
             }
-            fn widen(self) -> f64 {
+            fn widen_down(self) -> f64 {
+                self as f64
+            }
+            fn widen_up(self) -> f64 {
                 self as f64
             }
         }
@@ -1031,14 +1116,14 @@ fn finite_extremes(tensor: &Tensor) -> Result<(f64, f64)> {
     fn fold<T: Extremes>(values: &[T]) -> (f64, f64) {
         let (low, high) = pass::<T, false>(values);
         if low.keep() && high.keep() {
-            return (low.widen(), high.widen());
+            return (low.widen_down(), high.widen_up());
         }
         // An infinity got through, or there was no value to find at all. The
         // second pass settles which: it returns the identities for an input
         // with nothing finite in it, and those widen to an empty range that
         // `bin_edges` reads as `low > high` and substitutes.
         let (low, high) = pass::<T, true>(values);
-        (low.widen(), high.widen())
+        (low.widen_down(), high.widen_up())
     }
 
     let contiguous = tensor.contiguous()?;
@@ -1121,15 +1206,187 @@ fn bin_edges(input: &Tensor, bins: Bins<'_>, range: Option<(f64, f64)>) -> Resul
                 ));
             }
             let width = (high - low) / count as f64;
-            let mut edges: Vec<f64> = (0..=count)
-                .map(|index| low + index as f64 * width)
-                .collect();
+            let mut edges: Vec<f64> = if width.is_finite() {
+                (0..=count)
+                    .map(|index| low + index as f64 * width)
+                    .collect()
+            } else {
+                // Both ends finite and the span between them not: halved, the
+                // span fits, and doubling an edge back is exact. Spaced the
+                // ordinary way the step was infinite and the first edge
+                // `low + 0 * inf`, a NaN.
+                let half_width = (high / 2.0 - low / 2.0) / count as f64;
+                (0..=count)
+                    .map(|index| 2.0 * (low / 2.0 + index as f64 * half_width))
+                    .collect()
+            };
             // The arithmetic above can miss the top edge by a rounding, and the
             // top edge is the one the closed last bin depends on.
             edges[count] = high;
             Ok(edges)
         }
     }
+}
+
+/// Which of a histogram's bins a value falls in.
+///
+/// A value's bin is the last edge at or below it, so finding it is a search,
+/// and written with a branch on each comparison it cost 46ms for four million
+/// values into a hundred bins: on unsorted data each branch goes either way,
+/// and every wrong guess flushes the pipeline. Evenly spaced edges need no
+/// search -- the scaled offset names the bin to within a rounding, and a step
+/// to a neighbour settles it against the edges themselves, so the answer is
+/// the one the search gives. Edges of any other spacing are still searched,
+/// but without branching: the comparison picks the next probe rather than a
+/// jump, and the loop runs the same length for every value.
+struct BinFinder<'a> {
+    edges: &'a [f64],
+    /// Half the first edge, and the bins per half unit, when the edges are
+    /// evenly spaced. Halved because the span between two finite edges can
+    /// exceed the float range, and half of it cannot.
+    spacing: Option<(f64, f64)>,
+}
+
+impl<'a> BinFinder<'a> {
+    fn new(edges: &'a [f64], evenly_spaced: bool) -> Self {
+        let bins = (edges.len() - 1) as f64;
+        let first = edges[0] / 2.0;
+        let spacing = evenly_spaced.then(|| (first, bins / (edges[edges.len() - 1] / 2.0 - first)));
+        Self { edges, spacing }
+    }
+
+    /// The bin holding `value`, or one past the last bin outside the edges
+    /// and for a NaN. The last bin is closed, so the top edge itself is in it.
+    ///
+    /// Branch-free but for a step that is almost never taken, so a mix of
+    /// values inside and outside the edges costs what either does alone.
+    #[inline]
+    fn slot(&self, value: f64) -> usize {
+        let edges = self.edges;
+        let last = edges.len() - 2;
+        // False for a NaN, and for an infinity, since the edges are finite.
+        let inside = (value >= edges[0]) & (value <= edges[last + 1]);
+        let slot = match self.spacing {
+            Some((first, scale)) => {
+                // Truncation saturates, and takes a NaN to zero. A branch for
+                // the clamp mispredicted on every value in the top bin.
+                let guess = ((value / 2.0 - first) * scale) as usize;
+                let mut slot = select_unpredictable(guess > last, last, guess);
+                // Within a rounding of an edge the guess can be a bin off. The
+                // test does not short-circuit, so it is one branch, and that
+                // one almost never taken.
+                if inside & ((value < edges[slot]) | ((value >= edges[slot + 1]) & (slot < last))) {
+                    while slot > 0 && value < edges[slot] {
+                        slot -= 1;
+                    }
+                    while slot < last && value >= edges[slot + 1] {
+                        slot += 1;
+                    }
+                }
+                slot
+            }
+            None => {
+                // The last edge at or below `value`, which the first is.
+                let (mut base, mut size) = (0, edges.len());
+                while size > 1 {
+                    let half = size / 2;
+                    let probe = base + half;
+                    base = select_unpredictable(edges[probe] <= value, probe, base);
+                    size -= half;
+                }
+                select_unpredictable(base > last, last, base)
+            }
+        };
+        select_unpredictable(inside, slot, last + 1)
+    }
+
+    /// [`slot`](Self::slot) for an int64, which a float holds exactly only up
+    /// to 2^53. Past it the nearest float can be an edge the integer is not
+    /// at, so which side of each edge it is on is asked exactly: rounded,
+    /// `2^60 - 1` counted in the bin that starts at `2^60`.
+    #[inline]
+    fn integer_slot(&self, value: i64) -> usize {
+        if value.unsigned_abs() <= 1 << 53 {
+            return self.slot(value as f64);
+        }
+        let count = |right| {
+            let (key, side) = integer_among_floats(value, right);
+            locate(self.edges, &key, side)
+        };
+        let (at_or_below, below) = (count(true), count(false));
+        let bins = self.edges.len() - 1;
+        if at_or_below == 0 || below == self.edges.len() {
+            return bins;
+        }
+        (at_or_below - 1).min(bins - 1)
+    }
+}
+
+/// The weight falling in each bin, read from the tensor in its own dtype.
+///
+/// Read in place rather than from a float64 copy, which for four million
+/// float32 values was 32MB written and read again to feed a loop that only
+/// compares. An unweighted count is kept in integers, by [`count_binned`]:
+/// added one at a time into a float, a run of values in one bin made each
+/// increment wait for the last, and a single bin took 4.5ms for four million.
+fn bin_counts(input: &Tensor, finder: &BinFinder<'_>, weights: Option<&[f64]>) -> Result<Vec<f64>> {
+    fn count<T: Copy + Sync>(
+        values: &[T],
+        bins: usize,
+        weights: Option<&[f64]>,
+        slot: impl Fn(T) -> usize + Sync,
+    ) -> Vec<f64> {
+        match weights {
+            Some(weights) => tally(values.len(), bins, 0.0, |index| {
+                let bin = slot(values[index]);
+                (bin < bins).then(|| (bin, weights[index]))
+            }),
+            // One slot more than there are bins, for the values that fall in
+            // none, and dropped once they are counted.
+            None => {
+                let mut counts = tally_bands(values.len(), bins + 1, 0i64, |first, last, slots| {
+                    count_binned(&values[first..last], slots, &slot)
+                });
+                counts.pop();
+                counts.into_iter().map(|count| count as f64).collect()
+            }
+        }
+    }
+    let bins = finder.edges.len() - 1;
+    let contiguous = input.contiguous()?;
+    let data = contiguous.data();
+    Ok(match input.dtype() {
+        DataType::Float32 => count(
+            data.as_f32_slice().ok_or_else(dtype_mismatch)?,
+            bins,
+            weights,
+            |v| finder.slot(f64::from(v)),
+        ),
+        DataType::Float64 => count(
+            data.as_f64_slice().ok_or_else(dtype_mismatch)?,
+            bins,
+            weights,
+            |v| finder.slot(v),
+        ),
+        DataType::Int32 => count(
+            data.as_i32_slice().ok_or_else(dtype_mismatch)?,
+            bins,
+            weights,
+            |v| finder.slot(f64::from(v)),
+        ),
+        DataType::Int64 => count(
+            data.as_i64_slice().ok_or_else(dtype_mismatch)?,
+            bins,
+            weights,
+            |v| finder.integer_slot(v),
+        ),
+        DataType::Bool => count(
+            data.as_bool_slice().ok_or_else(dtype_mismatch)?,
+            bins,
+            weights,
+            |v| finder.slot(if v { 1.0 } else { 0.0 }),
+        ),
+    })
 }
 
 pub fn histogram(
@@ -1139,8 +1396,8 @@ pub fn histogram(
     weights: Option<&Tensor>,
     density: bool,
 ) -> Result<(Tensor, Tensor)> {
+    let evenly_spaced = matches!(bins, Bins::Count(_));
     let edges = bin_edges(input, bins, range)?;
-    let values = as_doubles(input)?;
     let weights = match weights {
         Some(tensor) => {
             if tensor.numel() != input.numel() {
@@ -1155,23 +1412,11 @@ pub fn histogram(
         None => None,
     };
 
-    let bin_count = edges.len() - 1;
-    let mut counts = tally(values.len(), bin_count, 0.0f64, |index| {
-        let value = values[index];
-        if !value.is_finite() || value < edges[0] || value > edges[bin_count] {
-            return None;
-        }
-        let slot = locate(&edges, &value, true)
-            .saturating_sub(1)
-            .min(bin_count - 1);
-        Some((
-            slot,
-            match &weights {
-                Some(weights) => weights[index],
-                None => 1.0,
-            },
-        ))
-    });
+    let mut counts = bin_counts(
+        input,
+        &BinFinder::new(&edges, evenly_spaced),
+        weights.as_deref(),
+    )?;
 
     if density {
         let total: f64 = counts.iter().sum();
