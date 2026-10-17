@@ -548,7 +548,13 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
+        // Typed by the fill value unless `dtype` names one, as a constructor
+        // is typed by its data: `full(shape, 7)` is int64 and `full(shape,
+        // True)` a mask, where both used to come back as the default float.
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => infer_python_value_dtype(fill_value).unwrap_or_else(dtype::default_dtype),
+        };
         let device = resolve_device(device)?;
         let asked = requires_grad.unwrap_or(false);
         let requires_grad = asked;

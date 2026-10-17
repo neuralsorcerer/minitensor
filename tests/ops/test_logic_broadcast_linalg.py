@@ -971,11 +971,13 @@ def test_cross_product_high_dimensional_broadcasting():
     np.testing.assert_allclose(c.numpy(), expected)
 
 
-def test_cross_product_dtype_mismatch():
+def test_cross_product_promotes_a_dtype_mismatch():
+    # The components meet in products and differences, which promote.
     a = mt.Tensor([1.0, 2.0, 3.0], dtype="float32")
     b = mt.Tensor([4.0, 5.0, 6.0], dtype="float64")
-    with pytest.raises(ValueError):
-        mt.cross(a, b)
+    got = mt.cross(a, b)
+    assert got.dtype == "float64"
+    np.testing.assert_allclose(got.numpy(), np.cross([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))
 
 
 def test_cross_product_negative_axis_out_of_range():

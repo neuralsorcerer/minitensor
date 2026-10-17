@@ -693,7 +693,7 @@ pub(crate) fn create_arange_tensor(
         )));
     }
 
-    let num_elements = ((end - start) / step).ceil() as usize;
+    let num_elements = arange_count(start, end, step)?;
     // One parallel fill with the dtype conversion written once, rather than
     // five serial loops -- see `TensorData::from_index`.
     Ok(Tensor::new(
@@ -708,6 +708,47 @@ pub(crate) fn create_arange_tensor(
         device,
         requires_grad,
     ))
+}
+
+/// How many values `start + i * step` lie strictly before `end`, for finite
+/// arguments and a non-zero `step`.
+///
+/// `ceil((end - start) / step)` is the count in exact arithmetic, and the
+/// division rounds: `arange(1, 1.3, 0.1)` divided out to 3.0000000000000004,
+/// counted four values, and the fourth, `1 + 3 * 0.1`, is `1.3` itself -- the
+/// stop of a range that excludes its stop. The count is settled against the
+/// values as they are computed instead: the last one taken must be before
+/// `end`, and the first one left out must not be.
+///
+/// A span that divides out past every count, which finite arguments can do,
+/// is refused: saturated to `usize::MAX` it was handed on as a length to
+/// allocate.
+pub(crate) fn arange_count(start: f64, end: f64, step: f64) -> PyResult<usize> {
+    let before = |index: usize| {
+        let value = start + index as f64 * step;
+        if step > 0.0 { value < end } else { value > end }
+    };
+    let estimate = ((end - start) / step).ceil();
+    if estimate.is_nan() || estimate <= 0.0 {
+        return Ok(0);
+    }
+    if estimate >= usize::MAX as f64 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "arange from {start:?} to {end:?} by {step:?} has too many values to hold"
+        )));
+    }
+    // The division is off by at most a rounding, so a step or two settles it.
+    let mut count = estimate as usize;
+    for _ in 0..4 {
+        if count > 0 && !before(count - 1) {
+            count -= 1;
+        } else if before(count) {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(count)
 }
 
 /// The `i`-th of `steps` values evenly spaced from `start` to `end`.

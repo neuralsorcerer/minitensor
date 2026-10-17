@@ -58,7 +58,10 @@ def test_integer_arange_matches_its_definition(args, dtype):
 
 
 def test_float_arguments_and_dtypes_keep_their_path():
-    assert mt.arange(3).dtype == "float32"
+    # Integer bounds count in int64, as a constructor types its data; a float
+    # bound, or a float dtype, takes the float path.
+    assert mt.arange(3).dtype == "int64"
+    assert mt.arange(3.0).dtype == "float32"
     np.testing.assert_allclose(mt.arange(0, 1, 0.25).numpy(), [0.0, 0.25, 0.5, 0.75])
     assert mt.arange(0, 3, 0.5, dtype="int64").tolist() == [0, 0, 1, 1, 2, 2]
     assert mt.zeros(2, dtype="int64").fill_(2.7).tolist() == [2, 2]

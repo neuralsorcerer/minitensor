@@ -691,6 +691,15 @@ its values, so nothing flows back to the source through it.
 `linspace`, `logspace` and `geomspace` with `steps=0` give an empty tensor, as
 `arange(1, 0)` does; with no `dtype` they give the default one.
 
+`arange` and `full` are typed by what they are given unless `dtype=` names
+one, as the constructors are: `arange(5)` counts in `int64`, and only a float
+bound or step gives the default float; `full(shape, 7)` is `int64`,
+`full(shape, True)` is `bool` and `full(shape, 0.5)` the default float. At the
+default float `arange(2**24 + 1)` could not hold its own last value. The stop
+is never part of an `arange`, however the step rounds: `arange(1, 1.3, 0.1)`
+is `[1.0, 1.1, 1.2]`, and integer bounds are counted exactly, so
+`arange(2**62, 2**62 + 2)` has its two values at any dtype.
+
 ### NumPy interop
 
 - `from_numpy(array)` — copies the array's data
@@ -1020,10 +1029,14 @@ raises exactly when the mask has a `False` in it.
 
 `**` raises integers to integer powers, and the answer is the true power taken
 modulo the dtype's width — a chain of wrapping multiplications. A *negative* integer exponent has no integer answer at all and is
-refused rather than rounded; cast the base to a float for that. `matmul` is the
-exception to the promotion rule: it requires both operands to already share a
-dtype, because a matrix product silently widened is a
-performance cliff rather than a convenience.
+refused rather than rounded; cast the base to a float for that. `matmul` and
+the products built on it (`mm`, `mv`, `bmm`, `inner`, `tensordot`, `einsum`)
+and `solve` make one exception to the promotion rule: two floats of different
+widths are refused rather than met at the wider, because a float32 activation
+against a float64 weight silently widened is a performance cliff rather than a
+convenience, and the error names the cast. An integer or bool operand has no
+float width to protect, so it takes the other's dtype as it does in
+arithmetic: `arange(6).reshape(2, 3) @ weights` is a float product.
 
 Casting to `int32`, `int64` or `bool` returns a tensor with
 `requires_grad=False`. Those dtypes cannot carry a gradient, and reporting

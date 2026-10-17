@@ -331,11 +331,9 @@ pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyRes
     }
     let axis_out = axis_i32 as isize;
 
-    if a.tensor().dtype() != b.tensor().dtype() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Cross product requires tensors of the same dtype",
-        ));
-    }
+    // No dtype check: the components meet in products and differences, which
+    // promote as arithmetic does, so an integer vector against a float one is
+    // the float cross product rather than refused.
     if a.tensor().device() != b.tensor().device() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Cross product requires tensors on the same device",

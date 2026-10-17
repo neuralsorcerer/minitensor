@@ -18,13 +18,22 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
+        // Typed by the bounds unless `dtype` names one, as a constructor is
+        // typed by its data: integers count in int64. At the default float,
+        // `arange(2**24 + 1)` could not hold its own last value -- float32
+        // ends its run of consecutive integers at 2^24 -- and repeated the
+        // one before it.
+        let integers = [Some(start), end, step].into_iter().flatten().all(|value| {
+            !value.is_instance_of::<pyo3::types::PyBool>() && exact_python_int(value).is_some()
+        });
+        let dtype = match dtype {
+            None if integers => DataType::Int64,
+            other => dtype::resolve_dtype_arg(other)?,
+        };
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
-        if !dtype.is_float()
-            && let Some(tensor) = arange_exact_int(start, end, step, dtype, device)?
-        {
+        if let Some(tensor) = arange_exact_int(start, end, step, dtype, device, requires_grad)? {
             return Self::created(tensor, requires_grad);
         }
         let real = |value: &Bound<PyAny>, name: &str| extract_real_scalar(value, name);
@@ -132,18 +141,21 @@ impl PyTensor {
     }
 }
 
-/// `arange` over an integer dtype with Python-int bounds, counted exactly.
+/// `arange` with Python-int bounds, counted exactly.
 ///
 /// The bounds otherwise pass through an f64, where integers past 2^53 are
 /// spaced more than one apart: `arange(2**60 + 1, 2**60 + 3)` rounded both
-/// ends to the same value and came back empty. `None` when a bound is not a
-/// Python int, leaving the general path to answer.
+/// ends to the same value and came back empty -- at a float dtype as at an
+/// integer one, though the range has two values either way. Counted here,
+/// a float dtype then holds each value as near as it can. `None` when a bound
+/// is not a Python int, leaving the general path to answer.
 fn arange_exact_int(
     start: &Bound<PyAny>,
     end: Option<&Bound<PyAny>>,
     step: Option<&Bound<PyAny>>,
     dtype: DataType,
     device: Device,
+    requires_grad: bool,
 ) -> PyResult<Option<Tensor>> {
     // A Python int past int64 has no integer-dtype answer; through a float it
     // saturated to the dtype's bound.
@@ -202,14 +214,23 @@ fn arange_exact_int(
             }
         }
     }
-    let data = TensorData::from_index_i64(count, dtype, device, |index| {
-        start.wrapping_add((index as i64).wrapping_mul(step))
-    });
+    let data = if dtype.is_float() {
+        // Each value exactly, then rounded once to the dtype.
+        TensorData::from_index(count, dtype, device, |index| {
+            (start as i128 + index as i128 * step_wide) as f64
+        })
+    } else {
+        TensorData::from_index_i64(count, dtype, device, |index| {
+            start.wrapping_add((index as i64).wrapping_mul(step))
+        })
+    };
+    // Only a float can carry a gradient; asking it of an integer range is
+    // refused by the caller, which reads the request rather than this flag.
     Ok(Some(Tensor::new(
         Arc::new(data),
         Shape::new(vec![count]),
         dtype,
         device,
-        false,
+        requires_grad && dtype.is_float(),
     )))
 }

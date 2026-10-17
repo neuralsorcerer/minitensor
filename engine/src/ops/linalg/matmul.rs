@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::autograd::with_grad_fn;
+use std::borrow::Cow;
 
 use crate::{
     autograd::{DotBackward, MatMulBackward, SolveBackward, VecdotBackward},
@@ -1029,6 +1030,40 @@ fn matmul_transpose_hint(lhs: &[usize], rhs: &[usize]) -> String {
         .to_string()
 }
 
+/// The two operands of a product at one dtype.
+///
+/// Two floats of different widths are refused rather than promoted, the one
+/// exception to the promotion rule: a float32 activation against a float64
+/// weight would silently become a float64 product at twice the cost, which is
+/// a performance cliff rather than a convenience, and the error names the
+/// cast. An integer or bool operand carries no float width to protect, so it
+/// takes the other's dtype as it does in arithmetic -- `arange(6).reshape(2,
+/// 3) @ weights` is a float product, where it was refused -- and two integer
+/// widths meet at the wider.
+pub(crate) fn product_operands<'a>(
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>)> {
+    if lhs.dtype() == rhs.dtype() {
+        return Ok((Cow::Borrowed(lhs), Cow::Borrowed(rhs)));
+    }
+    if lhs.dtype().is_float() && rhs.dtype().is_float() {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", lhs.dtype()),
+            format!("{:?}", rhs.dtype()),
+        ));
+    }
+    let common = crate::ops::binary::promote_arithmetic_dtype(lhs.dtype(), rhs.dtype());
+    let cast = |tensor: &'a Tensor| -> Result<Cow<'a, Tensor>> {
+        Ok(if tensor.dtype() == common {
+            Cow::Borrowed(tensor)
+        } else {
+            Cow::Owned(tensor.astype(common)?)
+        })
+    };
+    Ok((cast(lhs)?, cast(rhs)?))
+}
+
 /// Matrix multiplication with gradient support
 pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Check device compatibility
@@ -1039,16 +1074,8 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Mixed dtypes are refused rather than promoted, the one exception to the
-    // promotion rule: a float32 activation against a float64 weight would
-    // silently become a float64 product at twice the cost, which is a
-    // performance cliff rather than a convenience. The error names the cast.
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    let (lhs, rhs) = product_operands(lhs, rhs)?;
+    let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
 
     validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;
 
@@ -1232,12 +1259,9 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    // Met at one dtype as a product's operands are.
+    let (lhs, rhs) = product_operands(lhs, rhs)?;
+    let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
 
     let lhs_ndim = lhs.ndim();
     if lhs_ndim < 2 {

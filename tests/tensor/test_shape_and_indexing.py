@@ -651,7 +651,7 @@ def test_assignment_through_an_inverted_slice_is_a_no_op():
 
 
 def test_slice_assignment_with_step():
-    t = mt.arange(6)
+    t = mt.arange(6, dtype="float32")
     t[1::2] = mt.Tensor([10.0, 20.0, 30.0])
     np.testing.assert_allclose(
         t.numpy(), np.array([0.0, 10.0, 2.0, 20.0, 4.0, 30.0], dtype=np.float32)
