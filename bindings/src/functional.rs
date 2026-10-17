@@ -369,8 +369,11 @@ macro_rules! unary_forwarders {
             #[doc = $doc]
             #[pyfunction]
             pub fn $name(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-                let tensor = borrow_tensor(input)?;
-                tensor.$name()
+                match borrow_tensor(input) {
+                    Ok(tensor) => tensor.$name(),
+                    // A Python number or list, typed by what it holds.
+                    Err(_) => PyTensor::from_python_value(input)?.$name(),
+                }
             }
         )*
     };
@@ -389,10 +392,36 @@ macro_rules! binary_forwarders {
         #[doc = $doc]
         #[pyfunction]
         pub fn $name(input: &Bound<PyAny>, $operand: &Bound<PyAny>) -> PyResult<PyTensor> {
-            let tensor = borrow_tensor(input)?;
-            tensor.$name($operand)
+            match borrow_tensor(input) {
+                Ok(tensor) => tensor.$name($operand),
+                Err(_) => first_operand_beside(input, $operand)?.$name($operand),
+            }
         }
     };
+}
+
+/// The comparisons, whose operands are read as a comparison reads them: a
+/// Python number or list on either side at the full width beside the other
+/// operand, so `lt([16777217], float32_x)` asks about the integer written.
+macro_rules! comparison_forwarders {
+    ($($name:ident => $doc:literal),* $(,)?) => {
+        $(
+            #[doc = $doc]
+            #[pyfunction]
+            pub fn $name(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+                let (lhs, rhs) = comparison_pair_from_py(input, other)?;
+                Ok(PyTensor::from_tensor(lhs.$name(&rhs).map_err(_convert_error)?))
+            }
+        )*
+    };
+}
+
+/// A first operand that is not a tensor, read beside the second as it would be
+/// beside it in arithmetic. Refused outright, `pow(2, x)` and `atan2(1.0, x)`
+/// raised where `x ** 2` and the method forms did not.
+fn first_operand_beside(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let mut operands = operands_from_py(&[input.clone(), other.clone()])?;
+    Ok(PyTensor::from_tensor(operands.swap_remove(0)))
 }
 unary_forwarders!(
     abs => "Element-wise absolute value.",
@@ -463,13 +492,9 @@ binary_forwarders!(
     bmm => "Batched matrix product of two 3-D tensors with matching batch sizes.",
     copysign => "The magnitude of `input` with the sign of `other`, signed zeros included.",
     dot => "Inner product of two 1-D tensors.",
-    eq => "Element-wise equality, giving a boolean tensor.",
     floor_divide => "Element-wise division rounded towards negative infinity, matching Python's `//`.",
     fmax => "Element-wise larger of two tensors, ignoring a NaN in either operand. NaN only where both are.",
     fmin => "Element-wise smaller of two tensors, ignoring a NaN in either operand. NaN only where both are.",
-    ge => "Element-wise `>=`, giving a boolean tensor.",
-    gt => "Element-wise `>`, giving a boolean tensor.",
-    le => "Element-wise `<=`, giving a boolean tensor.",
     logaddexp => "`log(exp(a) + exp(b))`, shifted so neither term overflows.",
     logical_and => "Element-wise logical AND over truth values, giving a boolean tensor.",
     logical_or => "Element-wise logical OR over truth values, giving a boolean tensor.",
@@ -479,16 +504,23 @@ binary_forwarders!(
     ldexp => "`input * 2**other`. An integer `other` is applied to the exponent, exactly: one rounding, and only where the answer is subnormal. A float `input` keeps its dtype and an integer one is read as float64. A float `other` may be fractional and is the product `input * exp2(other)`, in float64.",
     lcm => "Element-wise least common multiple, always non-negative. `lcm(x, 0)` is 0.",
     nextafter => "The next representable value after each element, in the direction of `other`.",
-    lt => "Element-wise `<`, giving a boolean tensor.",
     matmul => "Matrix product, broadcasting over leading batch dimensions.",
     maximum => "Element-wise larger of two tensors.",
     minimum => "Element-wise smaller of two tensors.",
-    ne => "Element-wise inequality, giving a boolean tensor.",
     pow as exponent => "Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.",
     fmod => "Element-wise modulo taking the sign of the dividend, matching C's `fmod`.",
     gcd => "Element-wise greatest common divisor, always non-negative. `gcd(x, 0)` is the magnitude of `x`.",
     remainder => "Element-wise modulo taking the sign of the divisor, matching Python's `%`.",
     xlogy => "`input * log(other)`, taken as `0` wherever `input` is zero rather than as the `0 * -inf` the plain product would give.",
+);
+
+comparison_forwarders!(
+    eq => "Element-wise equality, giving a boolean tensor.",
+    ge => "Element-wise `>=`, giving a boolean tensor.",
+    gt => "Element-wise `>`, giving a boolean tensor.",
+    le => "Element-wise `<=`, giving a boolean tensor.",
+    lt => "Element-wise `<`, giving a boolean tensor.",
+    ne => "Element-wise inequality, giving a boolean tensor.",
 );
 
 /// Raise every element below `min` up to it.

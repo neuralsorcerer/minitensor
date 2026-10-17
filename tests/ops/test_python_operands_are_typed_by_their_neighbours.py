@@ -213,3 +213,81 @@ def test_a_list_the_width_cannot_hold_is_refused_as_a_number_is():
     with pytest.raises(OverflowError):
         tensor + [2**40, 1]
     assert str((tensor + [7, 8]).dtype) == "int32"
+
+
+BINARY = [
+    "add", "sub", "mul", "div", "pow", "atan2", "hypot", "fmod", "remainder",
+    "maximum", "minimum", "fmax", "fmin", "copysign", "logaddexp", "logaddexp2",
+    "xlogy", "nextafter", "float_power", "floor_divide", "heaviside", "dist",
+    "dot", "inner", "outer", "kron", "matmul", "vdot", "eq", "ne", "lt", "le",
+    "gt", "ge",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", BINARY)
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_a_binary_function_reads_a_literal_on_either_side_as_its_typed_twin(name, side):
+    # Built on its own, a literal first operand was the float32 `0.1` -- or,
+    # for the functions written in the bindings, refused outright.
+    fn = getattr(mt, name)
+    tensor, typed = _f64([0.5]), _f64([DIGITS])
+    pair = ([DIGITS], tensor) if side == "left" else (tensor, [DIGITS])
+    twin = (typed, tensor) if side == "left" else (tensor, typed)
+    got, want = fn(*pair), fn(*twin)
+    assert str(got.dtype) == str(want.dtype)
+    assert got.tolist() == want.tolist()
+
+
+@pytest.mark.parametrize("name", ["add", "sub", "mul", "maximum", "minimum", "fmod"])
+def test_an_int_literal_first_stays_at_the_int32_beside_it(name):
+    fn = getattr(mt, name)
+    got = fn([7], _i32([3]))
+    assert str(got.dtype) == "int32"
+    assert got.tolist() == fn(_i32([7]), _i32([3])).tolist()
+
+
+def test_three_operand_forms_read_every_literal_beside_the_typed_ones():
+    start, end = _f64([0.0]), _f64([1.0])
+    assert mt.lerp(start, end, DIGITS).tolist() == [DIGITS]
+    assert mt.lerp([0.0], end, DIGITS).tolist() == [DIGITS]
+    assert mt.addcmul(_f64([0.0]), [DIGITS], [1.0]).tolist() == [DIGITS]
+    assert mt.addcdiv([0.0], _f64([DIGITS]), [1.0]).tolist() == [DIGITS]
+    assert mt.float_power([DIGITS], 1).tolist() == [DIGITS]
+
+
+def test_a_scalar_base_and_a_plain_number_are_accepted():
+    assert mt.pow(2, mt.Tensor([3.0])).tolist() == [8.0]
+    assert mt.atan2(0.0, mt.Tensor([1.0])).tolist() == [0.0]
+    assert mt.exp(0.0).item() == 1.0
+    assert str(mt.sqrt([4, 9]).dtype) == "float64"  # int64 widens to float64
+    assert mt.sqrt([4, 9]).tolist() == [2.0, 3.0]
+    # A comparison reads an int literal exactly, on the left as on the right.
+    single = mt.Tensor([16_777_216.0], dtype="float32")
+    assert mt.lt([16_777_217], single).tolist() == [False]
+    assert mt.gt([16_777_217], single).tolist() == [True]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["mm", "mv", "tensordot", "vecdot", "matvec", "vecmat", "cdist"],
+)
+def test_matrix_forms_read_a_literal_beside_the_tensor(name):
+    fn = getattr(mt, name)
+    matrix = _f64([[DIGITS, 0.2], [0.3, 0.4]])
+    vector = [DIGITS, 0.2]
+    if name in ("mm", "cdist"):
+        literal, typed = [[DIGITS, 0.2], [0.3, 0.4]], matrix
+    else:
+        literal, typed = vector, _f64(vector)
+    if name in ("mv", "matvec"):
+        got, want = fn(matrix, literal), fn(matrix, typed)
+    elif name == "vecmat":
+        got, want = fn(literal, matrix), fn(typed, matrix)
+    elif name == "tensordot":
+        got, want = fn(literal, matrix, 1), fn(typed, matrix, 1)
+    elif name == "vecdot":
+        got, want = fn(literal, _f64(vector)), fn(typed, _f64(vector))
+    else:
+        got, want = fn(literal, matrix), fn(typed, matrix)
+    assert str(got.dtype) == "float64"
+    assert got.tolist() == want.tolist()

@@ -29,7 +29,7 @@ import operator as _operator
 
 from . import _core as _C
 from ._elementwise import signbit as _signbit
-from ._shape import _atleast_tensor, _element_count, _normalize_axis
+from ._shape import _atleast_tensor, _element_count, _normalize_axis, _operand_pair
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -108,16 +108,18 @@ def mm(input: object, mat2: object) -> Tensor:
     this name.
     """
 
-    left = _require_rank(_atleast_tensor(input), 2, "mm", "first operand")
-    right = _require_rank(_atleast_tensor(mat2), 2, "mm", "second operand")
+    left, right = _operand_pair(input, mat2)
+    left = _require_rank(left, 2, "mm", "first operand")
+    right = _require_rank(right, 2, "mm", "second operand")
     return _F.matmul(left, right)
 
 
 def mv(input: object, vec: object) -> Tensor:
     """A matrix times a vector."""
 
-    matrix = _require_rank(_atleast_tensor(input), 2, "mv", "matrix")
-    vector = _require_rank(_atleast_tensor(vec), 1, "mv", "vector")
+    matrix, vector = _operand_pair(input, vec)
+    matrix = _require_rank(matrix, 2, "mv", "matrix")
+    vector = _require_rank(vector, 1, "mv", "vector")
     return _F.matmul(matrix, vector)
 
 
@@ -128,7 +130,7 @@ def inner(input: object, other: object) -> Tensor:
     trailing rows is contracted, leaving the leading axes of both side by side.
     """
 
-    left, right = _atleast_tensor(input), _atleast_tensor(other)
+    left, right = _operand_pair(input, other)
     if left.ndim() == 1 and right.ndim() == 1:
         # The dot product itself, rather than `tensordot`'s axis bookkeeping,
         # reshapes and matrix product around it: 9.4us to 3.4 at 16384.
@@ -196,8 +198,7 @@ def tensordot(input: object, other: object, dims: object = 2) -> Tensor:
     blocked matmul rather than writing a loop over indices.
     """
 
-    left = _atleast_tensor(input)
-    right = _atleast_tensor(other)
+    left, right = _operand_pair(input, other)
     left_axes, right_axes = _contraction_axes(dims, left.ndim(), right.ndim())
 
     left_kept = [i for i in range(left.ndim()) if i not in left_axes]
@@ -657,8 +658,7 @@ def tensorsolve(a: object, b: object, dims: object = None) -> Tensor:
     operation, and the gradient is `solve`'s.
     """
 
-    tensor = _atleast_tensor(a)
-    rhs = _atleast_tensor(b)
+    tensor, rhs = _operand_pair(a, b)
     if dims is not None:
         moved = [
             _normalize_axis(axis, tensor.ndim(), "tensorsolve")
@@ -741,8 +741,7 @@ def vecdot(input: object, other: object, dim: int = -1) -> Tensor:
     read back to produce eight bytes.
     """
 
-    left = _atleast_tensor(input)
-    right = _atleast_tensor(other)
+    left, right = _operand_pair(input, other)
     return _contract(left, right, dim)
 
 
@@ -754,8 +753,7 @@ def matvec(input: object, other: object) -> Tensor:
     meant.
     """
 
-    matrix = _atleast_tensor(input)
-    vector = _atleast_tensor(other)
+    matrix, vector = _operand_pair(input, other)
     if matrix.ndim() < 2 or vector.ndim() < 1:
         raise ValueError(
             f"matvec needs a matrix and a vector, got {matrix.ndim()} and "
@@ -767,8 +765,7 @@ def matvec(input: object, other: object) -> Tensor:
 def vecmat(input: object, other: object) -> Tensor:
     """A batch of vectors times a batch of matrices: `(..., m) @ (..., m, n)`."""
 
-    vector = _atleast_tensor(input)
-    matrix = _atleast_tensor(other)
+    vector, matrix = _operand_pair(input, other)
     if vector.ndim() < 1 or matrix.ndim() < 2:
         raise ValueError(
             f"vecmat needs a vector and a matrix, got {vector.ndim()} and "

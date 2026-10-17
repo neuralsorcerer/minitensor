@@ -28,6 +28,7 @@ from ._shape import (
     _flat,
     _normalize_axis,
     _normalize_axis_tuple,
+    _operand_pair,
     _promote_pair,
 )
 
@@ -57,9 +58,8 @@ def _require_float(tensor: Tensor, name: str) -> Tensor:
 def outer(input: object, other: object) -> Tensor:
     """The outer product of two flattened tensors: `out[i, j] = a[i] * b[j]`."""
 
-    a = _atleast_tensor(input).reshape(-1, 1)
-    b = _atleast_tensor(other).reshape(1, -1)
-    return a * b
+    a, b = _operand_pair(input, other)
+    return a.reshape(-1, 1) * b.reshape(1, -1)
 
 
 def vdot(input: object, other: object) -> Tensor:
@@ -69,7 +69,7 @@ def vdot(input: object, other: object) -> Tensor:
     difference between them for real tensors.
     """
 
-    a, b = _atleast_tensor(input), _atleast_tensor(other)
+    a, b = _operand_pair(input, other)
     if a.numel() != b.numel():
         raise ValueError(
             f"vdot needs the same number of elements in each operand, "
@@ -87,8 +87,7 @@ def kron(input: object, other: object) -> Tensor:
     back into single axes.
     """
 
-    a = _atleast_tensor(input)
-    b = _atleast_tensor(other)
+    a, b = _operand_pair(input, other)
 
     rank = max(a.ndim(), b.ndim())
     a_dims = (1,) * (rank - a.ndim()) + tuple(a.shape)
@@ -113,8 +112,8 @@ def dist(input: object, other: object, p: float = 2.0) -> Tensor:
     the same distance, taken pairwise -- answered.
     """
 
-    a = _require_float(_atleast_tensor(input), "dist")
-    b = _require_float(_atleast_tensor(other), "dist")
+    a, b = _operand_pair(input, other)
+    a, b = _require_float(a, "dist"), _require_float(b, "dist")
     return _F.norm(a - b, p)
 
 
@@ -127,8 +126,8 @@ def cdist(input: object, other: object, p: float = 2.0) -> Tensor:
     wanted at, and the reason to reach for `matmul` instead when it is not.
     """
 
-    a = _require_float(_atleast_tensor(input), "cdist")
-    b = _require_float(_atleast_tensor(other), "cdist")
+    a, b = _operand_pair(input, other)
+    a, b = _require_float(a, "cdist"), _require_float(b, "cdist")
     if a.ndim() < 2 or b.ndim() < 2:
         raise ValueError("cdist requires tensors with at least two dimensions")
     if a.shape[-1] != b.shape[-1]:
@@ -181,8 +180,10 @@ def pairwise_distance(
     `eps=0.0` is safe and gives the true distance.
     """
 
-    a = _require_float(_atleast_tensor(input), "pairwise_distance")
-    b = _require_float(_atleast_tensor(other), "pairwise_distance")
+    a, b = _operand_pair(input, other)
+    a, b = _require_float(a, "pairwise_distance"), _require_float(
+        b, "pairwise_distance"
+    )
     return _F.norm(a - b + float(eps), p, [-1], keepdim)
 
 

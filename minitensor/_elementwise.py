@@ -31,7 +31,7 @@ from __future__ import annotations
 import math as _math
 
 from . import _core as _C
-from ._shape import _atleast_tensor
+from ._shape import _atleast_tensor, _beside, _is_typed, _operands, as_tensor
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -53,25 +53,39 @@ def _scaled(other: object, alpha: float) -> object:
     return _atleast_tensor(other) * alpha
 
 
+def _lead(input: object, other: object) -> Tensor:
+    """`input` as the first operand of a binary function with `other`.
+
+    A Python number or list there takes its width from `other` when `other`
+    has one, as it would beside it in the operator: built on its own it was
+    typed by the default dtype, so `add([0.1], float64_x)` added the float32
+    `0.1` and `add([7], int32_x)` came back int64.
+    """
+
+    if not _is_typed(input) and _is_typed(other):
+        return _beside(input, _atleast_tensor(other))
+    return _atleast_tensor(input)
+
+
 # --- the operators, as functions ------------------------------------------
 
 
 def add(input: object, other: object, alpha: float = 1) -> Tensor:
     """`input + alpha * other`, element-wise with broadcasting."""
 
-    return _atleast_tensor(input) + _scaled(other, alpha)
+    return _lead(input, other) + _scaled(other, alpha)
 
 
 def sub(input: object, other: object, alpha: float = 1) -> Tensor:
     """`input - alpha * other`, element-wise with broadcasting."""
 
-    return _atleast_tensor(input) - _scaled(other, alpha)
+    return _lead(input, other) - _scaled(other, alpha)
 
 
 def mul(input: object, other: object) -> Tensor:
     """`input * other`, element-wise with broadcasting."""
 
-    return _atleast_tensor(input) * other
+    return _lead(input, other) * other
 
 
 def div(input: object, other: object, rounding_mode: str | None = None) -> Tensor:
@@ -83,7 +97,7 @@ def div(input: object, other: object, rounding_mode: str | None = None) -> Tenso
     convention parts company too.
     """
 
-    tensor = _atleast_tensor(input)
+    tensor = _lead(input, other)
     if rounding_mode is None:
         return tensor / other
     if rounding_mode == "floor":
@@ -140,8 +154,10 @@ def lerp(input: object, end: object, weight: object) -> Tensor:
     no rounding in between them to make either endpoint approximate.
     """
 
-    start = _atleast_tensor(input)
-    return start + _atleast_tensor(weight) * (_atleast_tensor(end) - start)
+    # A Python value in any of the three places takes the width of the typed
+    # ones, so a float64 `lerp` with `weight=0.1` steps by the float64 `0.1`.
+    start, end, weight = _operands([input, end, weight])
+    return start + weight * (end - start)
 
 
 def addcmul(
@@ -149,9 +165,8 @@ def addcmul(
 ) -> Tensor:
     """`input + value * tensor1 * tensor2`, element-wise."""
 
-    return _atleast_tensor(input) + _scaled(
-        _atleast_tensor(tensor1) * _atleast_tensor(tensor2), value
-    )
+    input, tensor1, tensor2 = _operands([input, tensor1, tensor2])
+    return input + _scaled(tensor1 * tensor2, value)
 
 
 def addcdiv(
@@ -159,9 +174,8 @@ def addcdiv(
 ) -> Tensor:
     """`input + value * tensor1 / tensor2`, element-wise."""
 
-    return _atleast_tensor(input) + _scaled(
-        _atleast_tensor(tensor1) / _atleast_tensor(tensor2), value
-    )
+    input, tensor1, tensor2 = _operands([input, tensor1, tensor2])
+    return input + _scaled(tensor1 / tensor2, value)
 
 
 # --- powers and exponentials ----------------------------------------------
@@ -174,7 +188,12 @@ def float_power(input: object, exponent: object) -> Tensor:
     range; promoting first is the point of the name.
     """
 
-    return _F.pow(_atleast_tensor(input).astype("float64"), exponent)
+    # A Python value is built at float64 directly: built at the default
+    # float and widened after, `float_power([0.1], 0.5)` took the root of the
+    # float32 `0.1`.
+    if _is_typed(input):
+        return _F.pow(_atleast_tensor(input).astype("float64"), exponent)
+    return _F.pow(as_tensor(input, dtype="float64"), exponent)
 
 
 def logaddexp2(input: object, other: object) -> Tensor:
@@ -186,7 +205,7 @@ def logaddexp2(input: object, other: object) -> Tensor:
     off. This form takes a non-tensor first operand as well.
     """
 
-    return _atleast_tensor(input).logaddexp2(other)
+    return _lead(input, other).logaddexp2(other)
 
 
 # --- predicates -----------------------------------------------------------

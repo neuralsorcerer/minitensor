@@ -982,9 +982,11 @@ exception, for its own reason:
 `convolve` and `correlate` answer in `float64` for an integer input: the
 sliding product is `conv1d`, which is a float kernel. That is exact for any result below 2^53.
 
-A Python number or list handed to any operation -- an operator, a join, a
-search, a membership test, `einsum`, `where`, a value written with `copy_` --
-carries no dtype, so it is typed by what it stands beside. Beside a tensor or
+A Python number or list handed to any operation -- an operator, a function
+of two or three operands on any side of it (`pow(2, x)`, `atan2([0.1], x)`,
+`lerp(x, y, 0.1)`), a join, a search, a membership test, `einsum`, `where`, a
+value written with `copy_` -- carries no dtype, so it is typed by what it
+stands beside. Beside a tensor or
 an array it takes that operand's width by the rules above: `append(float64_x,
 0.1)` joins the float64 `0.1`, `insert(int32_x, 1, 7)` stays `int32` as
 `int32_x + 7` does, and `searchsorted(float64_x, [0.1])` looks for the float64
