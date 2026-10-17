@@ -2125,6 +2125,102 @@ block_kernel2!(
     gelu_tanh_backward_block_avx2
 );
 
+/// `a * b - product`, exactly, for the rounded `product = a * b` of two
+/// floats whose product's error is itself a float.
+///
+/// With a fused multiply the error is one instruction. Without one, each
+/// factor is split into two halves of 26 bits, whose products with each other
+/// are exact, and the error is assembled from those.
+#[inline(always)]
+fn product_error<const FMA: bool>(a: f64, b: f64, product: f64) -> f64 {
+    if FMA {
+        return a.mul_add(b, -product);
+    }
+    #[inline(always)]
+    fn split(a: f64) -> (f64, f64) {
+        let scaled = 134_217_729.0 * a;
+        let high = scaled - (scaled - a);
+        (high, a - high)
+    }
+    let (a_high, a_low) = split(a);
+    let (b_high, b_low) = split(b);
+    ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low
+}
+
+/// `x^3` in float64, as near correctly rounded as no input can tell apart.
+///
+/// `x * x * x` rounds twice, and a quarter of all inputs came back an ulp from
+/// the float nearest their cube. The error of each product is recovered
+/// exactly and added back before the last rounding, which leaves the sum
+/// within about 2^-104 of the exact cube, against the 2^-53 a correctly
+/// rounded one may be off by.
+///
+/// The recovery is exact only while each error is a float, which fails for a
+/// cube below about 2^-970. Such an `x` is scaled up by 2^200 first, exactly,
+/// and its cube down by 2^-600, which is exact while the cube is a normal
+/// float. A subnormal one is not, and [`cube_f64_block`] hands those to
+/// `powf`. An infinite or NaN cube is already exact, and so is a zero one,
+/// whose sign the compensating sum would lose.
+#[inline(always)]
+fn cube_one<const FMA: bool>(x: f64) -> f64 {
+    // 2^-300, 2^200 and 2^-600, by their exponent fields.
+    const TINY: f64 = f64::from_bits((1023 - 300) << 52);
+    const UP: f64 = f64::from_bits((1023 + 200) << 52);
+    const DOWN: f64 = f64::from_bits((1023 - 600) << 52);
+    let tiny = x.abs() < TINY;
+    let x = if tiny { x * UP } else { x };
+    let square = x * x;
+    let cube = square * x;
+    let square_error = product_error::<FMA>(x, x, square);
+    let cube_error = product_error::<FMA>(square, x, cube);
+    let compensated = cube + fma_or::<FMA>(square_error, x, cube_error);
+    let exact = if cube.is_finite() && cube != 0.0 {
+        compensated
+    } else {
+        cube
+    };
+    if tiny { exact * DOWN } else { exact }
+}
+
+/// [`cube_one`] over a block, then `powf` for the cubes in the subnormals.
+///
+/// Scaled back down into the subnormals, the cube rounds a second time onto a
+/// grid nearly as fine as its own, and 25 in 4000 of them came back an ulp
+/// off. `powf` rounds them once. They are redone in a second pass, flagged
+/// without a branch in the first, so the main loop stays vectorized for
+/// inputs that almost never need it.
+#[inline(always)]
+fn cube_f64_block<const FMA: bool>(input: &[f64], out: &mut [MaybeUninit<f64>]) {
+    // 2^-340, a little above the cube root of the smallest normal float.
+    const SUBNORMAL_CUBE: f64 = f64::from_bits((1023 - 340) << 52);
+    let subnormal = |x: f64| (x.abs() < SUBNORMAL_CUBE) & (x != 0.0);
+    debug_assert_eq!(input.len(), out.len());
+    let mut rare = 0u32;
+    for (o, &x) in out.iter_mut().zip(input.iter()) {
+        o.write(cube_one::<FMA>(x));
+        rare |= subnormal(x) as u32;
+    }
+    if rare != 0 {
+        for (o, &x) in out.iter_mut().zip(input.iter()) {
+            if subnormal(x) {
+                o.write(x.powf(3.0));
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+fn cube_f64_block_avx512(input: &[f64], out: &mut [MaybeUninit<f64>]) {
+    cube_f64_block::<true>(input, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn cube_f64_block_avx2(input: &[f64], out: &mut [MaybeUninit<f64>]) {
+    cube_f64_block::<true>(input, out)
+}
+
 /// Dispatch one selected backend to the right compilation of a kernel.
 macro_rules! dispatch {
     ($self:expr, $input:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {{
@@ -2440,6 +2536,21 @@ impl F32Kernel {
             log_scaled_block,
             log_scaled_block_avx512,
             log_scaled_block_avx2
+        )
+    }
+
+    /// Write `input[i]^3` into every element of `out`, for float64 input --
+    /// the one kernel here that is not float32, because what it needs from
+    /// the backend is the fused multiply rather than the lane count.
+    #[inline]
+    pub(crate) fn cube_f64(self, input: &[f64], out: &mut [MaybeUninit<f64>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            cube_f64_block,
+            cube_f64_block_avx512,
+            cube_f64_block_avx2
         )
     }
 
@@ -2808,6 +2919,82 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         v.push(Backend::NativeFma);
         v
+    }
+
+    /// The float64 cube on every backend: the portable one recovers each
+    /// product's error by splitting the factors, the others by a fused
+    /// multiply, and the two are independent enough that agreeing bit for bit
+    /// over every exponent range says something. The pinned inputs are ones
+    /// where `x * x * x` is an ulp off, beside their exact cubes -- in the
+    /// unit range, near the scaled range's edges, and with a subnormal cube.
+    #[test]
+    fn the_float64_cube_is_rounded_once_on_every_backend() {
+        let pinned: [(u64, u64); 6] = [
+            (0x3fe3b4a07ee8237d, 0x3fcde3dd4c2284c0),
+            (0x3ffeb715f40b2ccd, 0x401c4c586c99dc47),
+            (0x3fffa2a1eeeb2dc0, 0x401eeb13f56eb81b),
+            (0x2af742edb26d4a46, 0x01089551ba40a2f2),
+            (0x2c03148d656a660b, 0x042b22505aa52764),
+            (0x2a981b6ea1ef884e, 0x00036b9febb61f55),
+        ];
+        let mut inputs: Vec<f64> = pinned.iter().map(|&(x, _)| f64::from_bits(x)).collect();
+        inputs.extend([
+            0.0,
+            -0.0,
+            1.0,
+            -3.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            -5e-324,
+            2.0f64.powi(341),
+            -(2.0f64.powi(-300)),
+        ]);
+        // Every exponent from the subnormals to past overflow, both signs.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            inputs.push(f64::from_bits(state));
+        }
+        let mut first: Option<Vec<u64>> = None;
+        for backend in available() {
+            let mut out = vec![MaybeUninit::uninit(); inputs.len()];
+            F32Kernel(backend).cube_f64(&inputs, &mut out);
+            let got: Vec<f64> = out
+                .into_iter()
+                .map(|v| unsafe { v.assume_init() })
+                .collect();
+            for (&(_, cube), have) in pinned.iter().zip(&got) {
+                assert_eq!(have.to_bits(), cube, "{backend:?}");
+            }
+            for (&x, &have) in inputs.iter().zip(&got) {
+                let plain = x * x * x;
+                if plain.is_nan() {
+                    assert!(have.is_nan(), "{x:e} on {backend:?}");
+                } else if !plain.is_finite() || plain == 0.0 {
+                    assert_eq!(have.to_bits(), plain.to_bits(), "{x:e} on {backend:?}");
+                } else {
+                    // Within the ulp the plain product can be off by.
+                    let gap = (have - plain).abs();
+                    assert!(
+                        gap <= 2.0 * (plain.abs() * f64::EPSILON).max(5e-324),
+                        "{x:e}"
+                    );
+                }
+            }
+            let bits: Vec<u64> = got
+                .iter()
+                .map(|v| if v.is_nan() { u64::MAX } else { v.to_bits() })
+                .collect();
+            match &first {
+                None => first = Some(bits),
+                Some(first) => assert_eq!(&bits, first, "backends disagree at {backend:?}"),
+            }
+        }
     }
 
     /// `exp_shifted` is the one kernel that takes its argument in two

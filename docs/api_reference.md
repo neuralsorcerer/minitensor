@@ -2133,6 +2133,12 @@ assert row_std.shape == (2, 3)
 - `square(input)` — a product, not `pow(input, 2)`: the general power goes
   through `exp(2 log x)` for a non-integral exponent and is both slower and less
   exact than a multiplication, which is exact for every input.
+- A few constant exponents have an exact form, and `x ** c` takes it: `2` is a
+  product and `-1` a division, each rounded once. `3` is rounded once too --
+  computed in float64 for a float32 base, and for a float64 one with the error
+  of each product recovered and added back -- where `x * x * x` rounds twice.
+  `0.5` is the square root, except at `-0` and `-inf`, where the power is `+0`
+  and `+inf`.
 - `lerp(input, end, weight)` — `input + weight * (end - input)`, written as a
   step from `input` so `weight = 0` and `weight = 1` return the endpoints
   exactly rather than approximately.

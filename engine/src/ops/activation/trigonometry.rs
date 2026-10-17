@@ -98,6 +98,19 @@ impl PowKernels for f32 {
     }
 
     fn pow_by_scalar(base: &[f32], exponent: f32) -> Vec<f32> {
+        // Carried in float64, where the square of a float32 is exact and the
+        // cube rounds once more before the float32 it lands on. Multiplied out
+        // in float32 the cube rounded twice, and a quarter of all inputs came
+        // back an ulp from the nearest float32 to their cube.
+        if exponent == 3.0 {
+            return unary_map(base, |x: f32| {
+                let wide = f64::from(x);
+                (wide * wide * wide) as f32
+            });
+        }
+        if exponent == 0.5 {
+            return unary_map(base, square_root_power::<f32>);
+        }
         if !exponent.is_finite() {
             // An infinite or NaN exponent has a table of answers rather than
             // a formula, and one that does not vary down the slice -- so it
@@ -153,6 +166,21 @@ impl PowKernels for f64 {
     }
 
     fn pow_by_scalar(base: &[f64], exponent: f64) -> Vec<f64> {
+        // Rounded once rather than twice; see `cube_one` in the kernels.
+        if exponent == 3.0 {
+            let kernel = crate::ops::simd::F32Kernel::select();
+            // SAFETY: `cube_f64` writes every element of each block.
+            return unsafe {
+                crate::ops::map::unary_map_blocks_threshold(
+                    base,
+                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                    |src, dst| kernel.cube_f64(src, dst),
+                )
+            };
+        }
+        if exponent == 0.5 {
+            return unary_map(base, square_root_power::<f64>);
+        }
         offer_binary_f64(Ufunc::Pow, base, &[exponent], base.len()).unwrap_or_else(|| {
             unary_map_threshold(base, EXPENSIVE_PAR_THRESHOLD, move |x: f64| {
                 x.powf(exponent)
@@ -166,6 +194,22 @@ impl PowKernels for f64 {
                 base.powf(y)
             })
         })
+    }
+}
+
+/// `x ** 0.5`, which is the square root but at two IEEE answers: the root of
+/// `-0` is `-0` where the power is `+0`, and the root of `-inf` is NaN where
+/// the power is `+inf`. The square root is rounded once, which the composition
+/// from `exp` and `log` is not, and costs a seventh as much.
+///
+/// Adding zero is what turns `-0` into `+0`; it leaves every other root as it
+/// is, the NaN of a negative base included, which is the one `powf` gives.
+#[inline]
+fn square_root_power<T: num_traits::Float>(x: T) -> T {
+    if x == T::neg_infinity() {
+        T::infinity()
+    } else {
+        x.sqrt() + T::zero()
     }
 }
 
@@ -252,14 +296,14 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                 PowBroadcast::BaseScalar => <$ty as PowKernels>::scalar_pow(b[0], e),
                 PowBroadcast::ExponentScalar => {
                     let exp_val = e[0];
-                    // Fast paths for the small integer exponents, which avoid
-                    // the transcendental `powf` entirely. Repeated
-                    // multiplication is the standard lowering for `x**2`/`x**3`
-                    // and a division for `x**-1`, and each agrees with `powf`
-                    // on every input including the IEEE special values -- an
-                    // exponent that is an exact integer leaves `powf` with a
-                    // single correctly-rounded operation to perform, and these
-                    // are that operation. (Checked for `-1` over a million
+                    // Fast paths for the exponents that are one operation,
+                    // which avoid the transcendental `powf` entirely: `x * x`
+                    // for `x**2` and a division for `x**-1`. Each agrees with
+                    // `powf` on every input including the IEEE special values
+                    // -- each is a single correctly-rounded operation, which
+                    // is all `powf` has to perform for them. `x**3` is two,
+                    // and rounded twice; it is in `pow_by_scalar`, with the
+                    // other exponents that have a cheaper exact form. (Checked for `-1` over a million
                     // values spanning both signs: bit-identical throughout,
                     // including `1/±0 = ±inf` and `1/±inf = ±0`.) The gradient
                     // is produced separately by `PowBackward`, so it is
@@ -278,8 +322,6 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                         unary_map(b, |x: $ty| x * x)
                     } else if exp_val == 1.0 {
                         unary_map(b, |x: $ty| x)
-                    } else if exp_val == 3.0 {
-                        unary_map(b, |x: $ty| x * x * x)
                     } else if exp_val == -1.0 {
                         unary_map(b, |x: $ty| 1.0 / x)
                     } else {
