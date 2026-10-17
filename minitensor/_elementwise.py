@@ -402,3 +402,95 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
         _F.where(ordinary, mantissa, tensor),
         _F.where(ordinary, exponent, zeros).astype("int64"),
     )
+
+
+# --- the in-place operators -------------------------------------------------
+
+
+def _in_place(symbol: str, operation):
+    """`x op= y` as a write into `x`, rather than a new tensor bound to `x`.
+
+    Without these Python fell back to `x = x op y`: the name moved to a new
+    tensor and nothing else saw the change. A parameter handle shares its
+    layer's storage, so `for p in model.parameters(): p -= lr * p.grad` read as
+    an update and left the model exactly as it was; `y = x; y += 1` left `x`
+    alone; and the "in-place" result could change dtype or grow by broadcasting.
+
+    The result is written through whole-tensor assignment, so it follows the
+    rules every write here follows: a parameter leaf is updated in place, a
+    tensor computed from others records the write for autograd, and a leaf a
+    pending backward still needs is refused. The write keeps the target's dtype
+    and shape, and a result that would change either is refused by name -- an
+    int64 tensor cannot hold `x / 2`, and `x += row` cannot turn a row into a
+    matrix -- where the out-of-place form gives the new tensor it describes.
+    """
+
+    def method(self: Tensor, other: object) -> Tensor:
+        if self.requires_grad and self.is_leaf:
+            # A leaf that requires a gradient is written and not recorded,
+            # which is how a parameter is set -- so its new value is computed
+            # untracked too. Tracked, `p -= lr * p.grad` built a graph holding
+            # `p` and then refused to write into it as a tensor "a pending
+            # backward still needs". A backward really pending from before
+            # still holds `p`, and is still protected by the write.
+            with _C.no_grad():
+                result = operation(self, other)
+        else:
+            result = operation(self, other)
+        if str(result.dtype) != str(self.dtype):
+            raise TypeError(
+                f"`{symbol}=` writes into the {self.dtype} tensor, and the result "
+                f"is {result.dtype}, which it cannot hold; write `x = x {symbol} y` "
+                f"for a new tensor, or cast the operands first"
+            )
+        if list(result.shape) != list(self.shape):
+            raise ValueError(
+                f"`{symbol}=` writes into a tensor of shape {tuple(self.shape)}, "
+                f"and the result has shape {tuple(result.shape)}; write "
+                f"`x = x {symbol} y` for a new tensor"
+            )
+        self[...] = result
+        return self
+
+    method.__name__ = method.__qualname__ = _IN_PLACE[symbol]
+    method.__doc__ = f"`self {symbol}= other`, written into `self`."
+    return method
+
+
+#: Each in-place dunder and the operator it applies.
+_IN_PLACE = {
+    "+": "__iadd__",
+    "-": "__isub__",
+    "*": "__imul__",
+    "/": "__itruediv__",
+    "//": "__ifloordiv__",
+    "%": "__imod__",
+    "**": "__ipow__",
+    "@": "__imatmul__",
+    "&": "__iand__",
+    "|": "__ior__",
+    "^": "__ixor__",
+    "<<": "__ilshift__",
+    ">>": "__irshift__",
+}
+
+_OPERATORS = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+    "/": lambda a, b: a / b,
+    "//": lambda a, b: a // b,
+    "%": lambda a, b: a % b,
+    "**": lambda a, b: a**b,
+    "@": lambda a, b: a @ b,
+    "&": lambda a, b: a & b,
+    "|": lambda a, b: a | b,
+    "^": lambda a, b: a ^ b,
+    "<<": lambda a, b: a << b,
+    ">>": lambda a, b: a >> b,
+}
+
+IN_PLACE_OPERATORS = {
+    dunder: _in_place(symbol, _OPERATORS[symbol])
+    for symbol, dunder in _IN_PLACE.items()
+}

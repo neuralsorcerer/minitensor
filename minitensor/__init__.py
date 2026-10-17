@@ -305,6 +305,10 @@ for _alias, _target in _elementwise._ALIASES.items():
     if hasattr(Tensor, _target):
         setattr(Tensor, _alias, getattr(Tensor, _target))
 
+# `x += y` and the rest as writes into `x`; see `_elementwise._in_place`.
+for _dunder, _method in _elementwise.IN_PLACE_OPERATORS.items():
+    setattr(Tensor, _dunder, _method)
+
 # The Python-level pieces of `nn`. They are attached before the mirror below
 # copies `nn` into `functional`, so both namespaces carry them and neither has
 # to name them twice.

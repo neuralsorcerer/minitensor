@@ -1048,6 +1048,16 @@ Python numeric protocol: tensors support `+`, `-`, `*`, `/`, `//`, `%`, `@`,
 and the in-place forms (`+=`, `-=`, …), with scalars accepted on either side.
 `divmod`, `round(t)` and `round(t, n)` work elementwise.
 
+The in-place forms write into the tensor rather than binding the name to a new
+one, so every handle on it sees the change: `y = x; y += 1` updates `x`, and
+`for p in model.parameters(): p -= lr * p.grad` updates the model. The write
+keeps the tensor's dtype and shape, and a result that would change either is
+refused by name -- an int64 tensor cannot hold `x / 2` and `x += row` cannot
+turn a row into a matrix -- where `x = x / 2` gives the new tensor it
+describes. A leaf that requires a gradient is updated untracked, as any write
+into a parameter is, inside `no_grad()` or out of it; a write into a tensor a
+pending backward pass still needs is refused, as assignment is.
+
 A one-element tensor also stands in for its value: `float(t)`, `int(t)` (exact
 for an integer tensor, truncating for a float one), `bool(t)`, and a format
 spec such as `f"{loss:.4f}"`. An integer or bool one is an index, so it can
