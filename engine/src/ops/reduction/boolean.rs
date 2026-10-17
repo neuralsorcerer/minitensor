@@ -376,6 +376,38 @@ pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
 /// over a large tensor leaves the range of the thing being counted, and `Bool`
 /// has no room for a count at all.
 pub fn count_nonzero(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // A boolean tensor is its own mask. Copying it into a fresh one cost
+    // seven times what the sum did: 0.57ms for four million, against 0.08.
+    if tensor.dtype() == DataType::Bool {
+        return crate::ops::reduction::sum(tensor, dim, keepdim);
+    }
+    // Over the whole tensor nothing needs a dimension kept or reduced, so the
+    // elements are counted where they lie rather than through a mask.
+    if dim.is_none() {
+        let contiguous = tensor.contiguous()?;
+        let count = with_truthy_slice!(&contiguous, |input, truthy| {
+            crate::ops::map::par_fold_chunks(
+                input,
+                PAR_CHUNK,
+                0u64,
+                &|_, chunk| chunk.iter().map(|&v| u64::from(truthy(v))).sum(),
+                &|a, b| a + b,
+            )
+        });
+        let shape = if keepdim {
+            Shape::new(vec![1; tensor.ndim()])
+        } else {
+            Shape::scalar()
+        };
+        let device = tensor.device();
+        return Ok(Tensor::new(
+            Arc::new(TensorData::from_vec_i64(vec![count as i64], device)),
+            shape,
+            DataType::Int64,
+            device,
+            false,
+        ));
+    }
     // Written as a sum of the mask rather than a fresh reduction: `sum` already
     // knows how to reduce one dimension, how to keep it, and how to widen the
     // accumulator, and a second implementation of any of that is a second thing
