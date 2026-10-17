@@ -486,11 +486,27 @@ fn rsqrt_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
-    // In float64, then rounded once. In float32 the root and the reciprocal
-    // each rounded, and the two roundings left results up to 1.43 ulp out;
-    // float64 holds both steps far more finely than float32 can show, so the
-    // one rounding at the end is the only one that matters.
-    let out = unary_map(input_data, |v: f32| (f64::from(v).sqrt().recip()) as f32);
+    // The float32 root and reciprocal each round, and the two roundings left
+    // results up to 1.43 ulp out. One Newton step in float64 corrects them:
+    // with `e = 1 - x r^2`, the exact answer is `r (1 + e/2 + 3e^2/8 + ...)`,
+    // and at this `e` (below 2^-21) the terms kept leave an error near 2^-53,
+    // far finer than float32 can show -- so the one rounding at the end is
+    // the only one that matters. Taking the root and the reciprocal in
+    // float64 instead does the same, at twice the cost of this.
+    let out = unary_map(input_data, |v: f32| {
+        let estimate = v.sqrt().recip();
+        let (x, r) = (f64::from(v), f64::from(estimate));
+        // `r * r` is exact in float64; the one rounding is in `x * r^2`.
+        let e = 1.0 - x * (r * r);
+        let refined = r + r * e * (0.5 + 0.375 * e);
+        // Zero, infinity and NaN are exact already, and the step would turn
+        // `0 * inf` into NaN.
+        if estimate.is_finite() && estimate > 0.0 {
+            refined as f32
+        } else {
+            estimate
+        }
+    });
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
