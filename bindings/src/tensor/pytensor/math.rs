@@ -626,12 +626,17 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
-    #[pyo3(signature = (beta=1.0, threshold=20.0))]
-    pub fn softplus(&self, beta: f64, threshold: f64) -> PyResult<Self> {
+    /// Element-wise `log(1 + exp(beta * x)) / beta`. With a `threshold`, the linear `x` above it.
+    ///
+    /// Without one the formula is used everywhere, which costs nothing: it is
+    /// evaluated so that it cannot overflow, and where it equals `x` it
+    /// returns `x`. A fixed default of 20 took the linear tail where float64
+    /// still tells the two apart, 2e-9 off at 20.06.
+    #[pyo3(signature = (beta=1.0, threshold=None))]
+    pub fn softplus(&self, beta: f64, threshold: Option<f64>) -> PyResult<Self> {
         let result = self
             .inner
-            .softplus(beta, threshold)
+            .softplus(beta, threshold.unwrap_or(f64::INFINITY))
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

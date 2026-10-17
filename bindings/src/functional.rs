@@ -1373,10 +1373,10 @@ pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
     tensor.hardshrink(lambd)
 }
 
-/// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
+/// Element-wise `log(1 + exp(beta * x)) / beta`. With a `threshold`, the linear `x` above it.
 #[pyfunction]
-#[pyo3(signature = (input, beta=1.0, threshold=20.0))]
-pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: f64) -> PyResult<PyTensor> {
+#[pyo3(signature = (input, beta=1.0, threshold=None))]
+pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: Option<f64>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.softplus(beta, threshold)
 }

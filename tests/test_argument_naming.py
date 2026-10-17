@@ -412,8 +412,16 @@ def test_no_signature_hides_a_default_behind_none():
     )
     # `logit`'s `eps` is the exception that proves the rule: `None` there means
     # "do not clamp", which is a value of the argument, so it has no hidden
-    # default to reveal.
-    allowed = {"minitensor.logit", "Tensor.logit", "functional.logit"}
+    # default to reveal. `softplus`'s `threshold` is the same: `None` is "take
+    # no linear tail", not a number standing in for one.
+    allowed = {
+        "minitensor.logit",
+        "Tensor.logit",
+        "functional.logit",
+        "minitensor.softplus",
+        "Tensor.softplus",
+        "functional.softplus",
+    }
     offenders = []
     for label, function in _every_public_callable():
         if label in allowed:

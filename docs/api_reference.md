@@ -2318,7 +2318,13 @@ assert row_std.shape == (2, 3)
   between them along `dim`. Each norm is floored at `eps` on its own rather
   than their product being floored once, which is what keeps a zero vector
   paired with a long one inside `[-1, 1]`.
-- `softplus`, `gelu`, `elu`, `selu`, `silu`. `gelu` keeps its digits in the
+- `softplus(input, beta=1.0, threshold=None)` is `log1p(exp(beta * x)) / beta`,
+  evaluated as `max(beta * x, 0) + log1p(exp(-|beta * x|))` so that it cannot
+  overflow and returns `x` itself where that is the answer. A `threshold` takes
+  the linear `x` wherever `beta * x` exceeds it, and its gradient of one;
+  without one there is no cut-over, because none is needed. A fixed 20 took
+  the tail where float64 still tells the two apart, 2e-9 off just above it.
+- `gelu`, `elu`, `selu`, `silu`. `gelu` keeps its digits in the
   negative tail, where it is a small number: the exact form is
   `x * erfc(-x / sqrt(2)) / 2` with the rounding of `-x / sqrt(2)` taken back
   out, since `erfc` would otherwise turn it into `x^2` ulps of the answer, and

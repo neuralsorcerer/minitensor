@@ -769,7 +769,26 @@ float_unary_kernel_param!(
         if scaled > threshold {
             val
         } else {
-            scaled.exp().ln_1p() / beta
+            // `max(v, 0) + log1p(exp(-|v|))`, whose exponential cannot
+            // overflow; as `log1p(exp(v))` it was infinite past 709.
+            let rising = if scaled > 0.0 { scaled } else { 0.0 };
+            let decay = (-scaled.abs()).exp();
+            let soft = rising + decay.ln_1p();
+            // The rounding of `beta * x`, which the exponential turns into
+            // `|beta * x|` ulps of the tail -- 29 at `beta = 0.7` -- taken
+            // back out through softplus's slope, the logistic. Zero for a
+            // `beta` of one, or of any power of two.
+            let rounding = if scaled.abs() < 1e300 {
+                crate::ops::simd::product_error::<false>(beta, val, scaled)
+            } else {
+                0.0
+            };
+            let slope = if scaled > 0.0 {
+                1.0 / (1.0 + decay)
+            } else {
+                decay / (1.0 + decay)
+            };
+            (soft + rounding * slope) / beta
         }
     }
 );

@@ -1107,27 +1107,35 @@ const SOFTPLUS_LIMIT: f64 = 300.0;
 /// equivalent and is not: for very negative `v` it forms `2 + (-1 + tiny)`,
 /// which rounds the tiny part away and leaves the tail 0.2% wrong. `exp(v)` as
 /// `2^n(1 + p)` never cancels, and `log1p` then keeps it.
+///
+/// Written as `max(v, 0) + log1p(exp(-|v|))`, which is the same number and
+/// whose exponential cannot overflow. As `log1p(exp(v))` it did past
+/// `v = 88`, and without a threshold to take the linear tail first --
+/// an infinite one is a setting, and the default -- 800 came back as -0
+/// and 1e30 as infinity.
 #[inline(always)]
 fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
     let xd = x as f64;
     let v = beta * xd;
+    let decay = -v.abs();
     // A comparison rather than `max`, which returns the number when the other
     // operand is NaN: a NaN input became softplus(-300), zero, here.
-    let clamped = if v < -SOFTPLUS_LIMIT {
+    let clamped = if decay < -SOFTPLUS_LIMIT {
         -SOFTPLUS_LIMIT
     } else {
-        v
+        decay
     };
     let (two_pow_n, r) = reduce_exp::<FMA>(clamped);
     let w = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
     let u = 1.0 + w;
     let c = w - (u - 1.0);
+    let rising = if v > 0.0 { v } else { 0.0 };
     // Times the reciprocal rather than divided: `beta` is the same for the
     // whole block, so the reciprocal is formed once and the loop multiplies,
     // where a float64 divide per element was a quarter of the kernel's time.
     // For `beta = 1` -- every `logsigmoid` and cross-entropy -- it is exact;
     // otherwise it is within an ulp of float64, far below the float32 result.
-    let soft = log_core::<FMA, true>(u, c) * (1.0 / beta);
+    let soft = (rising + log_core::<FMA, true>(u, c)) * (1.0 / beta);
     // Above the threshold softplus is `x` to within float32; NaN fails the
     // comparison and comes through the computed side, which is NaN too.
     if v > threshold {

@@ -17,14 +17,13 @@ it cannot overflow. The references below are computed to sixty digits.
 
 from __future__ import annotations
 
-from decimal import Decimal, getcontext
+from decimal import Decimal, localcontext
 
 import numpy as np
 import pytest
 
 import minitensor as mt
 
-getcontext().prec = 60
 PI = Decimal("3.14159265358979323846264338327950288419716939937510582097494")
 TINY = 2.2250738585072014e-308  # The smallest normal float64.
 
@@ -51,20 +50,26 @@ def _erfc(t: Decimal) -> Decimal:
 
 
 def _gelu(x: float) -> float:
-    d = Decimal(x)
-    return float(d * _erfc(-d / Decimal(2).sqrt()) / 2)
+    with localcontext() as context:
+        context.prec = 60
+        d = Decimal(x)
+        return float(d * _erfc(-d / Decimal(2).sqrt()) / 2)
 
 
 def _gelu_slope(x: float) -> float:
-    d = Decimal(x)
-    density = (-d * d / 2).exp() / (2 * PI).sqrt()
-    return float(_erfc(-d / Decimal(2).sqrt()) / 2 + d * density)
+    with localcontext() as context:
+        context.prec = 60
+        d = Decimal(x)
+        density = (-d * d / 2).exp() / (2 * PI).sqrt()
+        return float(_erfc(-d / Decimal(2).sqrt()) / 2 + d * density)
 
 
 def _tanh_gelu(x: float) -> float:
-    d = Decimal(x)
-    u = (2 / PI).sqrt() * (d + Decimal("0.044715") * d**3)
-    return float(d / (1 + (-2 * u).exp()))
+    with localcontext() as context:
+        context.prec = 60
+        d = Decimal(x)
+        u = (2 / PI).sqrt() * (d + Decimal("0.044715") * d**3)
+        return float(d / (1 + (-2 * u).exp()))
 
 
 def _ulps(got: float, want: float) -> float:
