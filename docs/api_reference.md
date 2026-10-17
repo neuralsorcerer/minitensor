@@ -698,20 +698,25 @@ its values, so nothing flows back to the source through it.
   are visible through the other
 - `as_tensor(data, dtype=None, device=None, requires_grad=None, copy=False)`
 
-#### Which constructor keeps the source dtype
+#### What dtype a constructor gives
 
-The two families differ, and the difference is easy to trip over:
+Every constructor types the tensor by the data it is given, unless `dtype=`
+names one:
 
-| Constructor | dtype when `dtype=` is omitted |
+| Data | dtype when `dtype=` is omitted |
 | --- | --- |
-| `Tensor(obj)`, `tensor(obj)` | always `float32` |
-| `from_numpy(array)`, `as_tensor(data)` | taken from the source |
+| a tensor or a NumPy array | its own; an array dtype the engine does not carry widens to the nearest one that holds it exactly (`uint8` and `int16` to `int32`, `uint32` to `int64`, `float16` to `float32`) |
+| Python ints | `int64` |
+| Python bools | `bool` |
+| Python floats, or floats mixed with ints | the default float (`float32` unless changed with `set_default_dtype`) |
 
-So `Tensor(np.arange(3))` is `float32` while `from_numpy(np.arange(3))` is
-`int64`, and a float64 array loses precision through `Tensor` but not through
-`from_numpy`. `Tensor` and `tensor` both ignore the source dtype and use the
-default. Pass `dtype=` explicitly, or use `from_numpy` / `as_tensor`, whenever
-the source dtype is the one you want.
+`Tensor`, `tensor`, `as_tensor` and `from_numpy` all follow it, so
+`Tensor(np.arange(3))` is `int64` and a float64 array keeps every digit
+whichever of them it goes through. A tensor handed to `Tensor` or `tensor` is
+copied whole -- shape, values, and dtype unless one is named -- into a new tensor
+outside the source's autograd graph. Only floating point tensors can require a
+gradient, so `Tensor([1, 2, 3], requires_grad=True)` is refused with a message
+saying so; write the values as floats or pass `dtype="float32"`.
 
 ```python
 import numpy as np

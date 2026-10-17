@@ -13,6 +13,13 @@ impl PyTensor {
     }
 
     /// Create a new tensor from Python data
+    ///
+    /// Typed by the data unless `dtype` names one: a tensor or an array keeps
+    /// its own dtype, and a Python number or list is typed by what it holds --
+    /// integers as int64, booleans as bool, floats at the default float. Built
+    /// at the default float whatever it was given, a float64 array lost its
+    /// digits on the way in, and a mask of booleans became a float that no
+    /// operation taking a mask would accept.
     #[new]
     #[pyo3(signature = (data=DataArg::Missing, dtype=None, device=None, requires_grad=false))]
     fn new(
@@ -21,7 +28,7 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
+        let dtype = dtype.map(dtype::parse_dtype).transpose()?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -31,9 +38,20 @@ impl PyTensor {
                     "tensor data cannot be None; pass a number, a sequence or an array",
                 ));
             }
-            let tensor = convert_python_data_to_tensor(&value, dtype, device, requires_grad)?;
+            // A tensor is copied, shape and all. Read as data, it went through
+            // its own `__float__`: one of a single element came back a 0-d
+            // scalar, and any longer one was refused as "not a scalar".
+            if let Some(py_tensor) = borrow_wrapped_tensor(&value) {
+                let source = py_tensor.tensor();
+                let dtype = dtype.unwrap_or(source.dtype());
+                let tensor =
+                    adapt_tensor_for_as_tensor(source, dtype, device, requires_grad, true)?;
+                return Self::created(tensor, requires_grad);
+            }
+            let tensor = convert_python_data_inferring(&value, dtype, device, requires_grad)?;
             Self::created(tensor, requires_grad)
         } else {
+            let dtype = dtype.unwrap_or_else(dtype::default_dtype);
             let tensor = Tensor::empty(Shape::new(Vec::new()), dtype, device, requires_grad);
             Self::created(tensor, requires_grad)
         }

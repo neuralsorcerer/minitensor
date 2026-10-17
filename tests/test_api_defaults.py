@@ -144,35 +144,86 @@ def test_module_load_state_dict_default_device(tmp_path):
     np.testing.assert_allclose(model(x).numpy(), other(x).numpy(), rtol=1e-6)
 
 
-# The two constructor families disagree on dtype, which is easy to trip over and
-# was previously undocumented. Pin the rule so it cannot drift silently.
+# Every constructor types a tensor by the data it is given, unless a dtype is
+# named. `Tensor` and `tensor` used to build the default float whatever they
+# were handed, so a float64 array lost its digits through them and a boolean
+# mask became a float -- a trap the other constructors did not set.
 @pytest.mark.parametrize(
     "numpy_dtype", ["float64", "float32", "int64", "int32", "bool"]
 )
-def test_tensor_constructors_default_to_float32_regardless_of_source_dtype(numpy_dtype):
+def test_every_constructor_keeps_the_source_dtype(numpy_dtype):
     array = np.ones(3, dtype=numpy_dtype)
-    assert mt.Tensor(array).dtype == "float32"
-    assert mt.tensor(array).dtype == "float32"
-    # ...but an explicit dtype is always honoured.
+    for make in (mt.Tensor, mt.tensor, mt.from_numpy, mt.as_tensor):
+        assert make(array).dtype == numpy_dtype, make
+    # ...and an explicit dtype is always honoured.
     assert mt.Tensor(array, dtype="float64").dtype == "float64"
+    assert mt.tensor(array, dtype="int32").dtype == "int32"
 
 
 @pytest.mark.parametrize(
-    "numpy_dtype", ["float64", "float32", "int64", "int32", "bool"]
+    "data,dtype",
+    [
+        ([1, 2, 3], "int64"),
+        ([[True, False]], "bool"),
+        ([1.0, 2.0], "float32"),
+        ([1, 2.5], "float32"),
+        (7, "int64"),
+        (0.5, "float32"),
+        (True, "bool"),
+    ],
 )
-def test_from_numpy_and_as_tensor_keep_the_source_dtype(numpy_dtype):
-    array = np.ones(3, dtype=numpy_dtype)
-    assert mt.from_numpy(array).dtype == numpy_dtype
-    assert mt.as_tensor(array).dtype == numpy_dtype
+def test_python_data_is_typed_by_what_it_holds(data, dtype):
+    assert mt.Tensor(data).dtype == dtype
+    assert mt.tensor(data).dtype == mt.as_tensor(data).dtype == dtype
 
 
-def test_float64_survives_from_numpy_but_not_tensor():
-    # The practical consequence: full precision only reaches the engine through
-    # the preserving constructors. `float()` forces the comparison to happen in
-    # double -- comparing a float32 scalar against a Python float directly would
-    # round the literal down to float32 first and call them equal.
+def test_a_float_list_follows_the_default_float():
+    with mt.default_dtype("float64"):
+        assert mt.Tensor([0.1]).dtype == "float64"
+        assert mt.Tensor([0.1]).tolist() == [0.1]
+        assert mt.Tensor([1, 2]).dtype == "int64"
+
+
+def test_a_tensor_handed_to_the_constructor_is_copied_whole():
+    # It went through its own `__float__`: a one-element tensor came back a
+    # 0-d scalar and a longer one was refused.
+    for values in ([0.1], [0.1, 0.2], [[1.0, 2.0], [3.0, 4.0]]):
+        wide = mt.Tensor(values, dtype="float64")
+        copied = mt.Tensor(wide)
+        assert copied.dtype == "float64"
+        assert copied.shape == wide.shape
+        assert copied.tolist() == values
+    source = mt.Tensor([1.0, 2.0], dtype="float64")
+    copied = mt.tensor(source, dtype="float32")
+    assert copied.dtype == "float32" and copied.tolist() == [1.0, 2.0]
+    # A copy, not a view: writing into it leaves the source alone.
+    copied[0] = 9.0
+    assert source.tolist() == [1.0, 2.0]
+    # A new leaf, apart from the graph the source belongs to.
+    tracked = mt.Tensor([1.0, 2.0], requires_grad=True)
+    leaf = mt.Tensor(tracked * 2)
+    assert not leaf.requires_grad and leaf.tolist() == [2.0, 4.0]
+    assert mt.Tensor(tracked, requires_grad=True).requires_grad
+
+
+def test_float64_survives_every_constructor():
+    # `float()` forces the comparison to happen in double -- comparing a
+    # float32 scalar against a Python float directly would round the literal
+    # down to float32 first and call them equal.
     value = 0.1234567890123456789
     array = np.array([value], dtype=np.float64)
-    assert float(mt.from_numpy(array).numpy()[0]) == value
-    assert float(mt.Tensor(array).numpy()[0]) != value  # rounded to float32
-    assert float(mt.Tensor(array, dtype="float64").numpy()[0]) == value
+    for make in (mt.Tensor, mt.tensor, mt.from_numpy, mt.as_tensor):
+        assert float(make(array).numpy()[0]) == value, make
+
+
+def test_a_mask_built_by_the_constructor_is_a_mask():
+    mask = mt.Tensor([True, False, True])
+    got = mt.where(mask, mt.Tensor([1.0, 2.0, 3.0]), 0.0)
+    assert got.tolist() == [1.0, 0.0, 3.0]
+
+
+def test_integer_data_asked_for_a_gradient_says_to_name_a_float():
+    with pytest.raises(ValueError, match="floating point"):
+        mt.Tensor([1, 2, 3], requires_grad=True)
+    weight = mt.Tensor([1, 2, 3], dtype="float32", requires_grad=True)
+    assert weight.requires_grad and weight.dtype == "float32"
