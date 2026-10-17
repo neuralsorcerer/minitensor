@@ -106,6 +106,60 @@ pub(crate) fn scan_along_dim<I, A, W, F>(
     });
 }
 
+/// A float32 running sum, carried in float64 and rounded once per element.
+///
+/// Carried in float32, every partial sum rounded the running total, and the
+/// error grew with the length: over a million values the last element was
+/// 7e-6 from the exact total, eighty times what `sum` makes of the same values,
+/// so `cumsum(x)[-1]` and `x.sum()` disagreed in the fifth digit. In float64
+/// the drift stays far below anything float32 can show, so each element is the
+/// float32 nearest its partial sum. A partial sum past float32's range is
+/// infinite where it is, and the ones after it come back when the total does.
+pub(crate) fn scan_sum_f32(
+    output: &mut [f32],
+    input: &[f32],
+    dim_size: usize,
+    inner: usize,
+    reverse: bool,
+) {
+    let slab = dim_size * inner;
+    if slab == 0 {
+        return;
+    }
+    debug_assert_eq!(output.len(), input.len());
+    let run = |out: &mut [f32], inp: &[f32]| {
+        // The first element starts the total, rather than a zero it is added
+        // to: `0.0 + -0.0` is `0.0`, and the running sum of `[-0.0]` is `-0.0`.
+        let order = |d: usize| if reverse { dim_size - 1 - d } else { d };
+        if inner == 1 {
+            let mut acc = f64::from(inp[order(0)]);
+            out[order(0)] = inp[order(0)];
+            for d in 1..dim_size {
+                let at = order(d);
+                acc += f64::from(inp[at]);
+                out[at] = acc as f32;
+            }
+            return;
+        }
+        let first = order(0) * inner;
+        let mut acc: Vec<f64> = inp[first..first + inner]
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect();
+        out[first..first + inner].copy_from_slice(&inp[first..first + inner]);
+        for d in 1..dim_size {
+            let row = order(d) * inner;
+            for (i, total) in acc.iter_mut().enumerate() {
+                *total += f64::from(inp[row + i]);
+                out[row + i] = *total as f32;
+            }
+        }
+    };
+    par_out_chunks(output, slab, &|start, out_slab| {
+        run(out_slab, &input[start..start + out_slab.len()])
+    });
+}
+
 macro_rules! cumprod_forward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty, $acc:ty) => {
         pub(crate) fn $name(
@@ -476,12 +530,43 @@ cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 cumprod_backward!(cumprod_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
 cumprod_backward!(cumprod_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
 
-cumsum_forward!(cumsum_f32, as_f32_slice, as_f32_slice_mut, f32, f32);
 cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
 cumsum_forward!(cumsum_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
 cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 
-cumsum_backward!(cumsum_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
+/// [`scan_sum_f32`] over `tensor` along `dim`, forwards for the running sum
+/// and backwards for its gradient.
+fn cumsum_f32_along(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+    reverse: bool,
+) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+    let output = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+    check_dim(dim, tensor.ndim())?;
+    let shape = tensor.shape().dims();
+    let inner = shape[dim + 1..].iter().product::<usize>();
+    scan_sum_f32(output, input_data, shape[dim], inner, reverse);
+    Ok(())
+}
+
+pub(crate) fn cumsum_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    cumsum_f32_along(tensor, result_data, dim, false)
+}
+
+pub(crate) fn cumsum_backward_f32(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    cumsum_f32_along(tensor, result_data, dim, true)
+}
 cumsum_backward!(cumsum_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
 cumsum_backward!(cumsum_backward_i32, as_i32_slice, as_i32_slice_mut, i32);
 cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
