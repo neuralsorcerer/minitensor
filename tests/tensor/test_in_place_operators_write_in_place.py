@@ -124,3 +124,23 @@ def test_a_write_into_a_computed_tensor_routes_the_gradient():
     computed.sum().backward()
     assert computed.tolist() == [4.0, 7.0]
     assert source.grad.tolist() == [3.0, 3.0]
+
+
+def test_a_live_array_view_keeps_the_values_it_was_taken_with():
+    # The documented rule for every in-place write: a view holds the buffer,
+    # so the write lands in fresh storage and the view keeps what it saw.
+    import numpy as np
+
+    tensor = mt.Tensor([1.0, 2.0])
+    view = np.asarray(tensor)
+    tensor += 1.0
+    assert view.tolist() == [1.0, 2.0]
+    assert tensor.tolist() == [2.0, 3.0]
+
+
+def test_two_handles_on_one_tensor_both_see_the_write():
+    first = mt.Tensor([1.0, 2.0, 3.0])
+    second = first
+    second *= 2.0
+    second -= mt.Tensor([1.0, 1.0, 1.0])
+    assert first.tolist() == [1.0, 3.0, 5.0]

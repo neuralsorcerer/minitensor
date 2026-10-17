@@ -3221,6 +3221,38 @@ impl Tensor {
         Ok(())
     }
 
+    /// [`Self::copy_`] of a tensor the caller owns outright, adopting its
+    /// storage instead of copying from it when nothing could tell the two
+    /// apart.
+    ///
+    /// That is when this tensor's storage is held by nothing else, so no other
+    /// tensor, view or array would see a write into it, and `source`'s is held
+    /// only by `source`, so no other handle would come to share it; when the
+    /// two agree in dtype, shape and device; and when the write is not one
+    /// autograd records. An in-place operator's result is such a source, and
+    /// copying it cost a serial pass over memory the parallel kernel had just
+    /// filled -- `x += 1` on a million floats took four times `x + 1`.
+    /// Anything else is written by `copy_`, which reaches shared storage.
+    pub fn adopt_or_copy_(&mut self, source: Tensor) -> Result<()> {
+        self.ensure_not_consumed_by_graph("an in-place operation")?;
+        let recorded = source.requires_grad() && autograd::records_assignment(self, true);
+        let adoptable = !recorded
+            && source.dtype == self.dtype
+            && source.shape == self.shape
+            && source.device == self.device
+            && Arc::strong_count(&source.data) == 1
+            && Arc::get_mut(&mut self.data).is_some();
+        if !adoptable {
+            return self.copy_(&source);
+        }
+        self.data = source.data.clone();
+        self.refresh_autograd_metadata();
+        if self.requires_grad {
+            autograd::add_to_graph(self, None)?;
+        }
+        Ok(())
+    }
+
     /// `copy_`'s write, without the new identity `copy_` gives its target.
     ///
     /// Loading a state dict writes values into a layer's parameters and must

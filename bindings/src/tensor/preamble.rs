@@ -25,6 +25,8 @@ mod creation_like;
 mod creation_range;
 #[path = "pytensor/grad.rs"]
 mod grad;
+#[path = "pytensor/in_place.rs"]
+mod in_place;
 #[path = "pytensor/isclose.rs"]
 mod isclose;
 #[path = "pytensor/math.rs"]
