@@ -2149,7 +2149,10 @@ assert row_std.shape == (2, 3)
 - `lgamma(input)`, `digamma(input)` — `log |gamma(x)|` and its derivative.
   `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
   float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,
-  which the library computes itself.
+  which the library computes itself. At zero, `digamma` is `-inf` and `+inf`
+  for `0.0` and `-0.0`, the side the signed zero was reached from; at a
+  negative integer its two sides go to opposite infinities and nothing names
+  one, so the answer is NaN.
 - `polygamma(order, input)` — the `order`-th derivative of `digamma`, so order
   0 is `digamma` and order 1 is `trigamma`; both are computed by their own
   routes and the general one agrees with them. Its own derivative is the next

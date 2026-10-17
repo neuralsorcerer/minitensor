@@ -193,6 +193,20 @@ def test_digamma_satisfies_its_own_recurrence():
     np.testing.assert_allclose(step, 1.0 / values, rtol=1e-12)
 
 
+def test_digamma_at_its_poles_takes_the_side_only_a_signed_zero_can_name():
+    got = mt.digamma(_t([0.0, -0.0, -1.0, -2.0, -1e300])).numpy()
+    assert got[0] == -np.inf and got[1] == np.inf
+    # A negative integer names no side, and the two sides disagree.
+    assert np.isnan(got[2:]).all()
+    # Next to a negative pole the values are finite and of opposite sign.
+    near = mt.digamma(_t([-1.0 - 1e-9, -1.0 + 1e-9])).numpy()
+    assert near[0] > 1e8 and near[1] < -1e8
+    # The even orders are odd powers of x at zero, so they take its sign too.
+    second = mt.polygamma(2, _t([0.0, -0.0])).numpy()
+    assert second[0] == -np.inf and second[1] == np.inf
+    assert (mt.polygamma(1, _t([0.0, -0.0])).numpy() == np.inf).all()
+
+
 def test_lgamma_differentiates_to_digamma():
     values = [0.4, 1.0, 2.5, 8.0]
     np.testing.assert_allclose(

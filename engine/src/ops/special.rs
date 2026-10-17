@@ -660,11 +660,21 @@ fn digamma_scalar(x: f64) -> f64 {
         // through as one.
         return f64::NAN;
     }
-    if x <= 0.0 && x.floor() == x {
-        // Simple poles at the non-positive integers. The two sides disagree,
-        // so there is no two-sided value; `-inf` is the limit from the right
-        // and the answer this library has always given.
-        return f64::NEG_INFINITY;
+    if x == 0.0 {
+        // `-1/x` near zero, and a signed zero says which side it was reached
+        // from: `-inf` above, `+inf` below.
+        return if x.is_sign_negative() {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        };
+    }
+    if x < 0.0 && x.floor() == x {
+        // A negative integer is a simple pole whose two sides go to opposite
+        // infinities, and an integer carries no sign to choose between them --
+        // so there is no value, and NaN says so. Answering `-inf`, the limit
+        // from the right only, claimed a side the argument never named.
+        return f64::NAN;
     }
     if x < 0.0 {
         // `digamma(1 - x) - digamma(x) = pi * cot(pi * x)`, and `1 - x` is
@@ -739,7 +749,15 @@ fn polygamma_scalar(order: u32, x: f64) -> f64 {
     // `digamma` and `trigamma` already answer at their own poles.
     let sign = if order.is_multiple_of(2) { -1.0 } else { 1.0 };
     if x == 0.0 {
-        return sign * f64::INFINITY;
+        // Locally `(-1)^(n+1) n! / x^(n+1)`: an even order is an odd power of
+        // `x`, whose sign the signed zero carries; an odd order is an even
+        // power, the same infinity from either side.
+        let side = if order.is_multiple_of(2) && x.is_sign_negative() {
+            -1.0
+        } else {
+            1.0
+        };
+        return side * sign * f64::INFINITY;
     }
     if x < 0.0 {
         // Above order one the negative half is not computed, and NaN says so
@@ -1620,9 +1638,16 @@ mod tests {
     /// have to answer before they divide by anything.
     #[test]
     fn digamma_answers_at_the_poles_and_beyond_them() {
-        for pole in [0.0, -1.0, -2.0, -50.0] {
-            assert_eq!(digamma_scalar(pole), f64::NEG_INFINITY, "at {pole}");
+        // Zero is reached from the side its sign names.
+        assert_eq!(digamma_scalar(0.0), f64::NEG_INFINITY);
+        assert_eq!(digamma_scalar(-0.0), f64::INFINITY);
+        // A negative integer names no side, and the two disagree.
+        for pole in [-1.0, -2.0, -50.0, -1e300] {
+            assert!(digamma_scalar(pole).is_nan(), "at {pole}");
         }
+        // Either side of a negative pole is still finite and of opposite sign.
+        assert!(digamma_scalar(-1.0 - 1e-9) > 1e8);
+        assert!(digamma_scalar(-1.0 + 1e-9) < -1e8);
         assert!(digamma_scalar(f64::NAN).is_nan());
         assert!(digamma_scalar(f64::NEG_INFINITY).is_nan());
         assert_eq!(digamma_scalar(f64::INFINITY), f64::INFINITY);

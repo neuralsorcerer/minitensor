@@ -449,15 +449,19 @@ pub fn cross_entropy(
 /// unit interval.
 fn ensure_probabilities(tensor: &Tensor, what: &str) -> Result<()> {
     let tensor = tensor.contiguous()?;
+    // NaN is let through on purpose: it is no claim about the unit interval,
+    // and it reaches the loss as NaN, as a NaN does everywhere else.
     let inside = match tensor.dtype() {
-        DataType::Float32 => tensor
-            .data()
-            .as_f32_slice()
-            .is_none_or(|values| !values.iter().any(|&v| v < 0.0 || v > 1.0)),
-        DataType::Float64 => tensor
-            .data()
-            .as_f64_slice()
-            .is_none_or(|values| !values.iter().any(|&v| v < 0.0 || v > 1.0)),
+        DataType::Float32 => tensor.data().as_f32_slice().is_none_or(|values| {
+            values
+                .iter()
+                .all(|&v| v.is_nan() || (0.0..=1.0).contains(&v))
+        }),
+        DataType::Float64 => tensor.data().as_f64_slice().is_none_or(|values| {
+            values
+                .iter()
+                .all(|&v| v.is_nan() || (0.0..=1.0).contains(&v))
+        }),
         _ => true,
     };
     if inside {
