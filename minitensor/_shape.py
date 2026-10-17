@@ -1252,6 +1252,14 @@ def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
     )
 
 
+def _is_one_position(obj: object) -> bool:
+    """Whether `obj` names a single position rather than a sequence of them."""
+
+    if isinstance(obj, (Tensor, _np.ndarray)):
+        return len(obj.shape) == 0
+    return isinstance(obj, (int, _np.integer))
+
+
 def insert(
     input: object, obj: object, values: object, dim: int | None = None
 ) -> Tensor:
@@ -1261,6 +1269,10 @@ def insert(
     puts both before the element that was at 1, in that order. Several
     positions are filled in position order, with each value following the
     position it was paired with.
+
+    One position takes a block: `values` is laid out along the tensor's axes,
+    as it is for several positions, and as many slices go in as it has along
+    `dim`. So `insert(x, 1, [a, b])` is `insert(x, [1, 1], [a, b])`.
     """
 
     tensor = _atleast_tensor(input)
@@ -1280,6 +1292,13 @@ def insert(
     # `[1, 2, 2, 3]` -- a value the caller never passed -- and the result is a
     # new tensor, so nothing holds it to the input's dtype.
     tensor, extra = _promote_pair(tensor, _atleast_tensor(values))
+    if _is_one_position(obj) and extra.ndim() <= tensor.ndim():
+        # The block's extent along the axis, its missing leading axes counting
+        # as one, is how many slices go in at that one position. Read as one
+        # slice whatever its extent, `insert([1, 2, 3], 1, [7, 8])` refused a
+        # block that has an obvious place to go.
+        count = ([1] * (tensor.ndim() - extra.ndim()) + list(extra.shape))[axis]
+        at = _np.repeat(at, count)
     # One value per position, shaped like a slice of the axis: a single value
     # fills every position's slice, anything else is spread along the axis.
     single = extra.ndim() == 0 or extra.numel() == 1

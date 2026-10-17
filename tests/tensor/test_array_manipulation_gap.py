@@ -196,6 +196,50 @@ def test_insert_gives_the_same_answer_with_and_without_a_gradient(obj, fill, dim
 
 
 @pytest.mark.parametrize("tracked", [False, True], ids=["plain", "tracked"])
+@pytest.mark.parametrize(
+    "fill,dim,count",
+    [
+        ([10.0, 20.0], None, 2),
+        ([10.0, 20.0, 30.0, 40.0, 50.0], 0, 1),
+        (np.arange(10.0).reshape(2, 5), 0, 2),
+        (np.arange(8.0).reshape(4, 2), 1, 2),
+        ([[1.0, 2.0, 3.0]], 1, 3),
+        (np.arange(4.0).reshape(4, 1), 1, 1),
+        (np.zeros((0, 5)), 0, 0),
+    ],
+    ids=["flat-pair", "row", "two-rows", "two-columns", "broadcast", "column", "none"],
+)
+def test_one_position_takes_a_block_of_slices(values, fill, dim, count, tracked):
+    """At one position the values are a block, laid out along the tensor's
+    axes as they are for several positions, and as many slices go in as the
+    block has along the axis. `insert(x, 1, [a, b])` was refused."""
+
+    tensor = mt.from_numpy(values)
+    tensor.requires_grad_(tracked)
+    got = mt.insert(tensor, 1, fill, dim)
+    want = mt.insert(mt.from_numpy(values), [1] * count, fill, dim)
+    np.testing.assert_array_equal(got.detach().numpy(), want.numpy())
+    flat = values.reshape(-1) if dim is None else values
+    axis = 0 if dim is None else dim
+    assert got.shape[axis] == flat.shape[axis] + count
+    # The block sits where it was put, as written.
+    block = np.take(got.detach().numpy(), range(1, 1 + count), axis=axis)
+    np.testing.assert_array_equal(block, np.broadcast_to(np.asarray(fill), block.shape))
+    if tracked:
+        got.sum().backward()
+        np.testing.assert_array_equal(tensor.grad.numpy(), np.ones_like(values))
+
+
+def test_one_position_may_be_spelled_as_a_zero_dimensional_index():
+    line = mt.Tensor([1.0, 2.0, 3.0])
+    for at in (2, np.int64(2), mt.Tensor(2, dtype="int64"), np.array(2)):
+        assert mt.insert(line, at, [7.0, 8.0]).tolist() == [1.0, 2.0, 7.0, 8.0, 3.0]
+    # A list of one position is still one position per value.
+    with pytest.raises(ValueError, match="broadcast"):
+        mt.insert(line, [2], [7.0, 8.0])
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["plain", "tracked"])
 def test_insert_refuses_values_that_do_not_fit_the_positions(values, tracked):
     tensor = mt.from_numpy(values)
     tensor.requires_grad_(tracked)
