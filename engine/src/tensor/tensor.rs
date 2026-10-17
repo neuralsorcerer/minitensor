@@ -2277,7 +2277,6 @@ impl Tensor {
             acc *= value_dims[j];
         }
 
-        let out_strides = Strides::from_shape(&out_shape);
         // Use the same rule every other in-place write obeys rather than a
         // second, stricter one: `data_mut` copies when the storage is shared
         // *and* the tensor is detached or non-leaf, but writes through shared
@@ -2304,28 +2303,62 @@ impl Tensor {
         let dtype = self.dtype;
         let data = self.data_mut();
 
-        // One arm per dtype, and the walk written once inside them: the five
-        // used to be spelled out in full, and the index arithmetic -- which is
-        // the only part that could be wrong -- was written five times over.
+        // The selection is walked a row at a time along its innermost axis.
+        // Unravelling every element's coordinates -- a division and a
+        // remainder per axis, per element -- made `t[...] = v` on a million
+        // floats take twelve times `copy_`. Only the outer coordinates are
+        // unravelled now, once a row, and a row is then a plain copy where the
+        // destination and the value both run contiguously along it, a fill
+        // where the value is broadcast along it, and a strided loop otherwise.
+        let numel = out_shape.numel();
+        let rank = out_dims.len();
+        let (inner, dst_first, dst_step, val_step) = match rank.checked_sub(1) {
+            Some(last) => (
+                out_dims[last],
+                starts[last] * strides[orig_dim_map[last]],
+                steps[last] * strides[orig_dim_map[last]],
+                value_strides[last],
+            ),
+            None => (1, 0, 1, 1),
+        };
+        let row_start = |row: usize| {
+            let mut rem = row;
+            let mut dst = offset + dst_first;
+            let mut val = 0;
+            for j in (0..rank.saturating_sub(1)).rev() {
+                let coord = rem % out_dims[j];
+                rem /= out_dims[j];
+                dst += (starts[j] + coord * steps[j]) * strides[orig_dim_map[j]];
+                val += coord * value_strides[j];
+            }
+            (dst, val)
+        };
+
+        // One arm per dtype, and the walk written once inside them: the index
+        // arithmetic is the only part that could be wrong.
         macro_rules! scatter_arm {
             ($read:ident, $write:ident) => {{
                 let slice = data.$write().unwrap();
                 let val_slice = value.data().$read().unwrap();
-                for idx in 0..out_shape.numel() {
-                    // Unravel the flat output position into coordinates, then
-                    // ravel them again against the source's strides and the
-                    // value's, which is what lets one loop serve a strided
-                    // destination and a broadcast source at once.
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        src_idx += (starts[j] + coord * steps[j]) * strides[orig_dim_map[j]];
-                        val_idx += coord * value_strides[j];
+                if numel > 0 {
+                    for row in 0..numel / inner {
+                        let (dst, val) = row_start(row);
+                        if dst_step == 1 && val_step == 1 {
+                            copy_elements(
+                                &mut slice[dst..dst + inner],
+                                &val_slice[val..val + inner],
+                            );
+                        } else if val_step == 0 {
+                            let fill = val_slice[val];
+                            for c in 0..inner {
+                                slice[dst + c * dst_step] = fill;
+                            }
+                        } else {
+                            for c in 0..inner {
+                                slice[dst + c * dst_step] = val_slice[val + c * val_step];
+                            }
+                        }
                     }
-                    slice[src_idx] = val_slice[val_idx];
                 }
             }};
         }
@@ -2339,6 +2372,26 @@ impl Tensor {
         }
         Ok(())
     }
+}
+
+/// `dst.copy_from_slice(src)`, split across the pool once the copy is large
+/// enough to be worth it.
+///
+/// One core moves memory at a fraction of what the machine can: a million
+/// floats took about 0.35 ms through `copy_`, nearly three times the parallel
+/// kernel that had produced them. The chunks are whole cache-friendly blocks,
+/// so the split costs nothing a single copy would not.
+fn copy_elements<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
+    // A copy is all memory traffic, so a block wants to be far larger than
+    // the arithmetic kernels' chunk before a worker is worth waking for it.
+    const COPY_CHUNK: usize = 1 << 15;
+    if dst.len() < PAR_THRESHOLD {
+        dst.copy_from_slice(src);
+        return;
+    }
+    crate::ops::map::par_out_chunks(dst, COPY_CHUNK, &|start, block| {
+        block.copy_from_slice(&src[start..start + block.len()]);
+    });
 }
 
 impl Tensor {
@@ -3331,7 +3384,7 @@ impl Tensor {
                             "failed to access float32 source data for copy_".to_string(),
                         )
                     })?;
-                    dst.copy_from_slice(src);
+                    copy_elements(dst, src);
                 }
                 DataType::Float64 => {
                     let dst = dst_data.as_f64_slice_mut().ok_or_else(|| {
@@ -3344,7 +3397,7 @@ impl Tensor {
                             "failed to access float64 source data for copy_".to_string(),
                         )
                     })?;
-                    dst.copy_from_slice(src);
+                    copy_elements(dst, src);
                 }
                 DataType::Int32 => {
                     let dst = dst_data.as_i32_slice_mut().ok_or_else(|| {
@@ -3357,7 +3410,7 @@ impl Tensor {
                             "failed to access int32 source data for copy_".to_string(),
                         )
                     })?;
-                    dst.copy_from_slice(src);
+                    copy_elements(dst, src);
                 }
                 DataType::Int64 => {
                     let dst = dst_data.as_i64_slice_mut().ok_or_else(|| {
@@ -3370,7 +3423,7 @@ impl Tensor {
                             "failed to access int64 source data for copy_".to_string(),
                         )
                     })?;
-                    dst.copy_from_slice(src);
+                    copy_elements(dst, src);
                 }
                 DataType::Bool => {
                     let dst = dst_data.as_bool_slice_mut().ok_or_else(|| {
@@ -3383,7 +3436,7 @@ impl Tensor {
                             "failed to access bool source data for copy_".to_string(),
                         )
                     })?;
-                    dst.copy_from_slice(src);
+                    copy_elements(dst, src);
                 }
             }
         }
