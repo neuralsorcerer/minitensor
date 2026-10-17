@@ -88,3 +88,39 @@ def test_masked_assignment_agrees_with_numpy(size, density, mode):
     tensor = mt.Tensor(base, dtype="float64")
     tensor[mt.Tensor(mask)] = value if mode == "scalar" else mt.Tensor(value)
     np.testing.assert_array_equal(tensor.numpy(), want)
+
+
+@pytest.mark.parametrize("dtype", ["float64", "int32"])
+def test_assignment_along_one_indexed_axis_agrees_with_numpy(dtype):
+    # `t[:, idx] = v` with every other axis whole is written in one pass in
+    # storage order; positions may repeat, wrap negatively and broadcast.
+    rng = np.random.default_rng(23)
+    for _ in range(500):
+        shape = tuple(int(d) for d in rng.integers(1, 6, rng.integers(1, 4)))
+        axis = int(rng.integers(0, len(shape)))
+        count = int(rng.integers(1, 6))
+        positions = [int(p) for p in rng.integers(-shape[axis], shape[axis], count)]
+        key = tuple([slice(None)] * axis + [positions])
+        base = (rng.standard_normal(shape) * 10).astype(dtype)
+        selection = list(shape)
+        selection[axis] = count
+        choice = rng.integers(0, 3)
+        if choice == 0:
+            value = np.asarray(3, dtype=dtype)
+        elif choice == 1:
+            value = (rng.standard_normal(selection) * 10).astype(dtype)
+        else:
+            value = (rng.standard_normal(selection[axis:]) * 10).astype(dtype)
+        want = base.copy()
+        want[key] = value
+        tensor = mt.Tensor(base, dtype=dtype)
+        tensor[key] = mt.Tensor(value, dtype=dtype) if value.ndim else value.item()
+        np.testing.assert_array_equal(tensor.numpy(), want)
+
+
+def test_a_value_read_from_the_target_along_an_axis_is_read_first():
+    grid = mt.Tensor(np.arange(12.0).reshape(3, 4))
+    grid[:, [0, 1]] = grid[:, [1, 0]]
+    assert grid.tolist()[0] == [1.0, 0.0, 2.0, 3.0]
+    grid[:, [0, 1, 2, 3]] = grid
+    assert grid.tolist()[0] == [1.0, 0.0, 2.0, 3.0]

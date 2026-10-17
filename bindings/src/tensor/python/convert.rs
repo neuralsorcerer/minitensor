@@ -1696,17 +1696,21 @@ pub(crate) fn apply_single_array_assign(
     if plan.selected.is_empty() {
         return Ok(());
     }
+    // One axis indexed by a flat list, every other axis taken whole -- `t[:,
+    // idx] = v`, the common case -- is written in one pass in storage order
+    // rather than one basic assignment per position.
+    if let Some(positions) = plan.whole_but_one_axis(target.shape().dims()) {
+        return target
+            .index_assign_along(
+                plan.input_axis,
+                &positions,
+                &strip_leading_ones(value, plan)?,
+            )
+            .map_err(_convert_error);
+    }
     // The value is read between writes, so `t[:, [0, 1]] = t[:, [1, 0]]` needs
     // a copy to read from: by the second position the first is already gone.
-    let mut value = value.deep_clone().map_err(_convert_error)?;
-    // Leading axes of extent one need not be spelled out in the value, which is
-    // what the basic path allows too.
-    while value.ndim() > plan.selection.len() && value.shape().dims()[0] == 1 {
-        let rest: Vec<usize> = value.shape().dims()[1..].to_vec();
-        value = value
-            .reshape(engine::tensor::Shape::new(rest))
-            .map_err(_convert_error)?;
-    }
+    let value = strip_leading_ones(&value.deep_clone().map_err(_convert_error)?, plan)?;
 
     let mut dest = plan.indices.clone();
     if plan.selection.len().saturating_sub(value.ndim()) >= plan.selection_span {
@@ -1748,7 +1752,37 @@ pub(crate) fn apply_single_array_assign(
     Ok(())
 }
 
+/// `value` without the leading axes of extent one it may carry beyond the
+/// selection's rank, which the basic path allows too.
+fn strip_leading_ones(value: &Tensor, plan: &AxisAssign) -> PyResult<Tensor> {
+    let mut value = value.clone();
+    while value.ndim() > plan.selection.len() && value.shape().dims()[0] == 1 {
+        let rest: Vec<usize> = value.shape().dims()[1..].to_vec();
+        value = value
+            .reshape(engine::tensor::Shape::new(rest))
+            .map_err(_convert_error)?;
+    }
+    Ok(value)
+}
+
 impl AxisAssign {
+    /// The positions, when the subscript indexes one axis with a flat list
+    /// and takes every other axis whole, so the selection is the tensor's own
+    /// shape with that axis shortened.
+    fn whole_but_one_axis(&self, dims: &[usize]) -> Option<Vec<usize>> {
+        let whole = self.indices.len() == dims.len()
+            && self.indices.iter().zip(dims).all(|(index, &extent)| {
+                matches!(index, TensorIndex::Slice { start: 0, end, step: 1 } if *end == extent)
+            });
+        if !whole || self.spanned.len() != 1 || self.selection != self.flat {
+            return None;
+        }
+        self.selected
+            .iter()
+            .map(|&position| usize::try_from(position).ok())
+            .collect()
+    }
+
     /// Point the replaced entries of `dest` at one selected position, which
     /// for a mask over several axes means one coordinate on each.
     fn place(&self, dest: &mut [TensorIndex], position: i64) {

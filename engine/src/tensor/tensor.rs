@@ -2395,6 +2395,136 @@ fn copy_elements<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
 }
 
 impl Tensor {
+    /// `t[..., positions, ...] = value` along `axis`, with every other axis
+    /// taken whole: the same write as one basic assignment per position, done
+    /// in one pass in storage order.
+    ///
+    /// One assignment per position walked the tensor once per position, and
+    /// along any axis but the first each walk touched a fresh cache line per
+    /// element: `m[:, idx] = 1` over 512 of a 1024 by 1024 matrix's columns
+    /// took 6 ms. Here each run of `inner` elements is written once, outer
+    /// block by outer block, which is the order the storage is laid out in.
+    /// `value` is lined up against the selection -- this tensor's shape with
+    /// `axis` as long as `positions` -- from the right, and a position named
+    /// twice keeps the last write.
+    pub fn index_assign_along(
+        &mut self,
+        axis: usize,
+        positions: &[usize],
+        value: &Tensor,
+    ) -> Result<()> {
+        self.ensure_not_consumed_by_graph("index assignment")?;
+        if value.dtype() != self.dtype {
+            return Err(MinitensorError::type_mismatch(
+                format!("{:?}", self.dtype),
+                format!("{:?}", value.dtype()),
+            ));
+        }
+        if value.device() != self.device {
+            return Err(MinitensorError::device_mismatch(
+                format!("{:?}", self.device),
+                format!("{:?}", value.device()),
+            ));
+        }
+        let dims = self.shape.dims().to_vec();
+        let Some(&extent) = dims.get(axis) else {
+            return Err(MinitensorError::invalid_argument(format!(
+                "index assignment along axis {axis} of a {}-d tensor",
+                dims.len()
+            )));
+        };
+        if let Some(&bad) = positions.iter().find(|&&position| position >= extent) {
+            return Err(MinitensorError::index_error(bad as isize, axis, extent));
+        }
+        let outer: usize = dims[..axis].iter().product();
+        let inner: usize = dims[axis + 1..].iter().product();
+        let count = positions.len();
+        if outer == 0 || inner == 0 || count == 0 {
+            return Ok(());
+        }
+        let mut selection = dims;
+        selection[axis] = count;
+        let selection = Shape::new(selection);
+
+        // One value fills every position; anything else is laid out at the
+        // selection's shape first, so each run reads straight off it. A value
+        // over this tensor's own storage is read from a copy, since the write
+        // would otherwise change it under the read.
+        let single = value.numel() == 1;
+        let laid_out;
+        let source = if single {
+            value
+        } else {
+            if !matches!(value.shape().broadcast_with(&selection), Ok(ref fits) if *fits == selection)
+            {
+                return Err(MinitensorError::invalid_argument(format!(
+                    "cannot broadcast a value of shape {:?} into the selection of shape {:?}",
+                    value.shape().dims(),
+                    selection.dims()
+                )));
+            }
+            let dims: Vec<isize> = selection.dims().iter().map(|&d| d as isize).collect();
+            laid_out = if Arc::ptr_eq(&self.data, &value.data) {
+                value.deep_clone()?.expand(dims)?.contiguous()?
+            } else {
+                value.expand(dims)?.contiguous()?
+            };
+            &laid_out
+        };
+
+        // Outer blocks never overlap, so they split across the pool, enough of
+        // them to a task to be worth the hand-off.
+        let block_len = extent * inner;
+        let per_task = ((1usize << 15) / (count * inner)).max(1);
+        let dtype = self.dtype;
+        let data = self.data_mut();
+        macro_rules! along_arm {
+            ($read:ident, $write:ident) => {{
+                let dst = data.$write().unwrap();
+                let src = source.data().$read().unwrap();
+                crate::ops::map::par_out_chunks(dst, block_len * per_task, &|start, blocks| {
+                    let first = start / block_len;
+                    for (offset, row) in blocks.chunks_exact_mut(block_len).enumerate() {
+                        let block = first + offset;
+                        let values = &src[(block * count * inner).min(src.len() - 1)..];
+                        if inner == 1 {
+                            // One element a position: a store each, without
+                            // a slice and a call around it.
+                            if single {
+                                for &position in positions {
+                                    row[position] = src[0];
+                                }
+                            } else {
+                                for (&position, &value) in positions.iter().zip(values) {
+                                    row[position] = value;
+                                }
+                            }
+                            continue;
+                        }
+                        for (step, &position) in positions.iter().enumerate() {
+                            let run = &mut row[position * inner..(position + 1) * inner];
+                            if single {
+                                run.fill(src[0]);
+                            } else {
+                                run.copy_from_slice(&values[step * inner..(step + 1) * inner]);
+                            }
+                        }
+                    }
+                });
+            }};
+        }
+        match dtype {
+            DataType::Float32 => along_arm!(as_f32_slice, as_f32_slice_mut),
+            DataType::Float64 => along_arm!(as_f64_slice, as_f64_slice_mut),
+            DataType::Int32 => along_arm!(as_i32_slice, as_i32_slice_mut),
+            DataType::Int64 => along_arm!(as_i64_slice, as_i64_slice_mut),
+            DataType::Bool => along_arm!(as_bool_slice, as_bool_slice_mut),
+        }
+        Ok(())
+    }
+}
+
+impl Tensor {
     /// Generates one of the whole-tensor float queries (`has_nan`, `has_inf`).
     ///
     /// Parallel above [`PAR_THRESHOLD`], and short-circuiting: `par_iter().any`
