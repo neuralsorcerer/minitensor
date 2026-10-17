@@ -954,7 +954,12 @@ float32, and an int64 above 2^53 is not equal to the float64 below it. The
 operators, the functional forms, `isclose`, `allclose`, `array_equal`, `isin`
 and the membership tests behind `intersect1d` and `setdiff1d` all follow this.
 A Python number beside an integer tensor is read at full width for a
-comparison -- `int32_tensor < 2**40` is `True` rather than refused.
+comparison -- `int32_tensor < 2**40` is `True` rather than refused -- and a
+Python int, or a list of them, is the exact integer it names beside a float
+tensor too: `float32_tensor == [16_777_217]` is `False` for a float32 holding
+`16777216.0`. A Python float beside a float tensor is read at that tensor's
+width, so `x == 0.1` asks about the float nearest `0.1` at the precision `x` is
+held in.
 
 The same promotion applies to the operations that *join* values rather than
 combine them arithmetically -- `cat`, `stack`, `hstack`, `vstack`, `dstack`,
@@ -971,6 +976,20 @@ exception, for its own reason:
 
 `convolve` and `correlate` answer in `float64` for an integer input: the
 sliding product is `conv1d`, which is a float kernel. That is exact for any result below 2^53.
+
+A Python number or list handed to any operation -- an operator, a join, a
+search, a membership test, `einsum`, `where`, a value written with `copy_` --
+carries no dtype, so it is typed by what it stands beside. Beside a tensor or
+an array it takes that operand's width by the rules above: `append(float64_x,
+0.1)` joins the float64 `0.1`, `insert(int32_x, 1, 7)` stays `int32` as
+`int32_x + 7` does, and `searchsorted(float64_x, [0.1])` looks for the float64
+`0.1`. Beside several typed operands it takes the width they promote to. On
+its own it is typed by what it holds, as `as_tensor` types it -- integers as
+`int64`, booleans as `bool`, floats at the default float -- and an array
+keeps its own dtype, so `cummax([1, 3, 2])` is `int64` and a `float64` array
+stays `float64`. A value the width cannot hold is refused rather than widened:
+`int32_x + [2**40]` raises as `int32_x + 2**40` does, since a result's dtype
+follows from its operands' dtypes, never from the values in them.
 
 Whether an operation accepts a boolean operand is decided by that promoted
 dtype, not by the operands. `-`, `//` and `%` have no boolean result to land

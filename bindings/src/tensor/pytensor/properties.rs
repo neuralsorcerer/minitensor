@@ -119,7 +119,8 @@ impl PyTensor {
             self.inner.zero_grad(true);
             return Ok(());
         }
-        let given = PyTensor::from_python_value(value)?;
+        // A list or number takes the tensor's width, the gradient's dtype.
+        let given = PyTensor::from_tensor(tensor_from_py_value(&self.inner, value)?);
         let grad = given.tensor();
         if !self.inner.requires_grad() {
             return Err(PyValueError::new_err(

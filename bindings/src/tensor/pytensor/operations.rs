@@ -231,6 +231,23 @@ impl PyTensor {
         let result = self.inner.astype(dtype).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
+
+    /// `value` as an operand beside this tensor, by the rule the operators
+    /// use: a tensor or an array keeps its dtype, and a Python number or list
+    /// takes its width from this tensor's -- the arithmetic width, or with
+    /// `comparison` the full width a comparison reads it at. The Python
+    /// helpers that join a value onto a tensor, or test one against it, read
+    /// it through here rather than restating the rule, so `insert(x, 1, 7)`
+    /// and `x + 7` agree on what `7` is beside an int32 `x`.
+    #[pyo3(signature = (value, comparison=false))]
+    fn _operand(&self, value: &Bound<PyAny>, comparison: bool) -> PyResult<Self> {
+        let tensor = if comparison {
+            comparison_operands_from_py(&self.inner, value, false)?.1
+        } else {
+            tensor_from_py_value(&self.inner, value)?
+        };
+        Ok(Self::from_tensor(tensor))
+    }
 }
 
 /// A clamp bound given as a tensor, which bounds each element separately.

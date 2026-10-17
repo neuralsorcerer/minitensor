@@ -98,7 +98,10 @@ impl PyTensor {
         // Resolving it borrows the source, and `t.copy_(t)` makes the source
         // `self`: taken the other way round, that borrow found `self` already
         // held mutably and a copy that changes nothing raised instead.
-        let reference = PyTensor::from_python_value(source)?;
+        // A list or number takes the destination's width, as anything written
+        // into a tensor does; built standalone, `[0.1]` copied into a float64
+        // tensor arrived as the float32 `0.1`.
+        let reference = PyTensor::from_tensor(tensor_from_py_value(&slf.borrow().inner, source)?);
         {
             let mut this = slf.borrow_mut();
             this.inner

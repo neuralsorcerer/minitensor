@@ -448,8 +448,9 @@ impl PyTensor {
         Self { inner: tensor }
     }
 
+    /// `value` as a tensor typed by what it is; see [`operand_from_py`].
     pub fn from_python_value(value: &Bound<PyAny>) -> PyResult<Self> {
-        Self::from_python_value_with_dtype(value, dtype::default_dtype())
+        Ok(Self::from_tensor(operand_from_py(value)?))
     }
 
     pub fn from_python_value_with_dtype(value: &Bound<PyAny>, dtype: DataType) -> PyResult<Self> {

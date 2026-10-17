@@ -237,6 +237,63 @@ def _atleast_tensor(input: object) -> Tensor:
     return as_tensor(input)
 
 
+def _is_typed(value: object) -> bool:
+    """Whether `value` carries a dtype of its own: a tensor or an array."""
+
+    return isinstance(value, (Tensor, _np.ndarray))
+
+
+def _beside(value: object, other: Tensor, comparison: bool = False) -> Tensor:
+    """`value` as an operand joined onto, or tested against, `other`.
+
+    A tensor or an array keeps its own dtype. A Python number or list carries
+    none, so it takes `other`'s width by the rule the operators use -- with
+    `comparison`, the full width a comparison reads it at. Built on its own
+    first, it was typed by the default dtype: `append(float64_x, 0.1)` joined
+    the float32 `0.1`, which is a different number, and `insert(int32_x, 1, 7)`
+    came back int64 where `int32_x + 7` stays int32.
+    """
+
+    if isinstance(value, Tensor):
+        return value
+    return other._operand(value, comparison)
+
+
+def _operand_pair(
+    first: object, second: object, comparison: bool = False
+) -> tuple[Tensor, Tensor]:
+    """`first` and `second` as the two operands of one operation, the Python
+    value among them, if one is, read beside the typed one (see `_beside`)."""
+
+    if _is_typed(first) or not _is_typed(second):
+        left = _atleast_tensor(first)
+        return left, _beside(second, left, comparison)
+    right = _atleast_tensor(second)
+    return _beside(first, right, comparison), right
+
+
+def _operands(values: list[object]) -> list[Tensor]:
+    """`values` as the operands of one operation, typed as the operators type
+    theirs: a tensor or an array keeps its dtype, and a Python number or list
+    takes its width from the dtype the typed ones promote to (see `_beside`).
+    With nothing typed among them, each is typed by what it holds."""
+
+    tensors = [_atleast_tensor(value) if _is_typed(value) else None for value in values]
+    typed = [tensor for tensor in tensors if tensor is not None]
+    if not typed or len(typed) == len(tensors):
+        return [_atleast_tensor(value) for value in values]
+    # An empty tensor of the promoted dtype, to read the literals beside --
+    # widening one of the typed operands themselves would copy it.
+    context = _C.functional.narrow(typed[0].reshape(-1), 0, 0, 0)
+    for other in typed[1:]:
+        if str(other.dtype) != str(context.dtype):
+            context = context.astype(_promoted_dtype(context, other))
+    return [
+        tensor if tensor is not None else context._operand(value)
+        for tensor, value in zip(tensors, values)
+    ]
+
+
 def _flat(tensor: Tensor) -> Tensor:
     """`tensor` as a vector, without a reshape when it already is one."""
 
@@ -419,7 +476,7 @@ def _stack_inputs(tensors: object, name: str) -> list[Tensor]:
 
     if not items:
         raise ValueError(f"{name} needs at least one tensor")
-    return [_atleast_tensor(item) for item in items]
+    return _operands(items)
 
 
 def hstack(tensors: object) -> Tensor:
@@ -1106,7 +1163,7 @@ def append(input: object, values: object, dim: int | None = None) -> Tensor:
     is why this is a poor way to build one up element by element.
     """
 
-    tensor, extra = _promote_pair(_atleast_tensor(input), _atleast_tensor(values))
+    tensor, extra = _promote_pair(*_operand_pair(input, values))
     if dim is None:
         return _C.functional.cat([tensor.reshape(-1), extra.reshape(-1)], 0)
     axis = _normalize_axis(dim, tensor.ndim(), "append")
@@ -1275,7 +1332,7 @@ def insert(
     `dim`. So `insert(x, 1, [a, b])` is `insert(x, [1, 1], [a, b])`.
     """
 
-    tensor = _atleast_tensor(input)
+    tensor, values = _operand_pair(input, values)
     if dim is None:
         tensor = tensor.reshape(-1)
         axis = 0
@@ -1291,7 +1348,7 @@ def insert(
     # onto the tensor's dtype instead, `insert([1, 2, 3], 1, 2.5)` answered
     # `[1, 2, 2, 3]` -- a value the caller never passed -- and the result is a
     # new tensor, so nothing holds it to the input's dtype.
-    tensor, extra = _promote_pair(tensor, _atleast_tensor(values))
+    tensor, extra = _promote_pair(tensor, values)
     if _is_one_position(obj) and extra.ndim() <= tensor.ndim():
         # The block's extent along the axis, its missing leading axes counting
         # as one, is how many slices go in at that one position. Read as one

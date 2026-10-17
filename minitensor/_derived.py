@@ -24,6 +24,7 @@ from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import (
     _atleast_tensor,
+    _beside,
     _flat,
     _normalize_axis,
     _normalize_axis_tuple,
@@ -371,7 +372,7 @@ def _diff_end(end: object, tensor: Tensor, axis: int, name: str) -> Tensor:
     lower-rank block against the axes it leaves out.
     """
 
-    block = _atleast_tensor(end)
+    block = _beside(end, tensor)
     shape = list(tensor.shape)
     if block.ndim() == 0:
         shape[axis] = 1
@@ -1003,19 +1004,23 @@ def ediff1d(
     # onto their dtype: `to_begin=2.5` against an integer input used to arrive
     # as 2. Promoting keeps the value, which is what `append` does with the
     # same argument.
-    for end in (to_begin, to_end):
-        if end is not None:
-            flat, _ = _promote_pair(flat, _atleast_tensor(end).reshape(-1))
+    begin, end = (
+        None if value is None else _beside(value, flat).reshape(-1)
+        for value in (to_begin, to_end)
+    )
+    for block in (begin, end):
+        if block is not None:
+            flat, _ = _promote_pair(flat, block)
     length = flat.shape[0]
     pieces = []
-    if to_begin is not None:
-        pieces.append(_atleast_tensor(to_begin).reshape(-1).astype(str(flat.dtype)))
+    if begin is not None:
+        pieces.append(begin.astype(str(flat.dtype)))
     if length > 1:
         pieces.append(diff(flat))
-    elif not pieces and to_end is None:
+    elif not pieces and end is None:
         return _F.narrow(flat, 0, 0, 0)
-    if to_end is not None:
-        pieces.append(_atleast_tensor(to_end).reshape(-1).astype(str(flat.dtype)))
+    if end is not None:
+        pieces.append(end.astype(str(flat.dtype)))
     if not pieces:
         return _F.narrow(flat, 0, 0, 0)
     return pieces[0] if len(pieces) == 1 else _F.cat(pieces)

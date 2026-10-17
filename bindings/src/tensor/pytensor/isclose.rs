@@ -15,12 +15,25 @@ impl PyTensor {
         atol: Option<f64>,
         equal_nan: bool,
     ) -> PyResult<Self> {
-        let rtol = rtol.unwrap_or(1e-5);
-        let atol = atol.unwrap_or(1e-8);
         // Uncoerced, as the comparisons are: the engine measures an integer
         // against a float in float64 rather than at their common dtype.
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
-        let result = engine::ops::comparison::isclose(&lhs, &rhs, rtol, atol, equal_nan)
+        Self::isclose_tensors(&lhs, &rhs, rtol, atol, equal_nan)
+    }
+}
+
+impl PyTensor {
+    /// [`PyTensor::isclose`] on two operands already converted.
+    pub(crate) fn isclose_tensors(
+        lhs: &Tensor,
+        rhs: &Tensor,
+        rtol: Option<f64>,
+        atol: Option<f64>,
+        equal_nan: bool,
+    ) -> PyResult<Self> {
+        let rtol = rtol.unwrap_or(1e-5);
+        let atol = atol.unwrap_or(1e-8);
+        let result = engine::ops::comparison::isclose(lhs, rhs, rtol, atol, equal_nan)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

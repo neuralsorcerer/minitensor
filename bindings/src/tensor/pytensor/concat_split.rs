@@ -23,10 +23,10 @@ impl PyTensor {
             ));
         }
 
-        let tensor_vec: Vec<Tensor> = tensors
-            .iter()
-            .map(|obj| PyTensor::from_python_value(&obj).map(|t| t.inner.clone()))
-            .collect::<PyResult<_>>()?;
+        // A list or number among them takes its width from the tensors beside
+        // it: `cat([int32_x, [7, 8]])` was a float32, and `[0.1]` joined onto
+        // a float64 tensor arrived as the float32 `0.1`.
+        let tensor_vec = operands_from_py(&tensors.iter().collect::<Vec<_>>())?;
 
         let tensor_refs: Vec<&Tensor> = tensor_vec.iter().collect();
         let result =
@@ -49,12 +49,10 @@ impl PyTensor {
 
         let axis = dim;
 
-        let unsqueezed: Vec<Tensor> = tensors
+        // Typed as `concatenate` types its operands.
+        let unsqueezed: Vec<Tensor> = operands_from_py(&tensors.iter().collect::<Vec<_>>())?
             .iter()
-            .map(|obj| {
-                let t = PyTensor::from_python_value(&obj)?;
-                engine::ops::shape_ops::unsqueeze(&t.inner, axis).map_err(_convert_error)
-            })
+            .map(|t| engine::ops::shape_ops::unsqueeze(t, axis).map_err(_convert_error))
             .collect::<PyResult<_>>()?;
 
         let refs: Vec<&Tensor> = unsqueezed.iter().collect();

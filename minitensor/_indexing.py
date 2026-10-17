@@ -42,6 +42,7 @@ from ._shape import (
     _normalize_axis_tuple,
     _normalize_shape_argument,
     _numpy_view,
+    _operand_pair,
     _promote_pair,
     _promoted_dtype,
     broadcast_tensors,
@@ -340,8 +341,11 @@ def isin(
     """
 
     del assume_unique
-    values = _atleast_tensor(elements)
-    tests = _atleast_tensor(test_elements).reshape(-1)
+    # A list on either side is read as a comparison reads it beside the
+    # other: built on its own, `[0.1]` was the float32 `0.1`, which no
+    # float64 holding `0.1` is equal to.
+    values, tests = _operand_pair(elements, test_elements, comparison=True)
+    tests = tests.reshape(-1)
 
     shape = list(values.shape)
     dtype = _membership_dtype(values, tests)
@@ -1145,9 +1149,8 @@ def union1d(input: object, other: object) -> Tensor:
     Both are flattened first: a set has no shape.
     """
 
-    left, right = _promote_pair(
-        _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
-    )
+    left, right = _operand_pair(input, other)
+    left, right = _promote_pair(left.reshape(-1), right.reshape(-1))
     if str(left.dtype) in _FLOAT_DTYPES:
         return _from_numpy(
             _distinct(_np.concatenate([_numpy_view(left), _numpy_view(right)]))
@@ -1173,8 +1176,9 @@ def intersect1d(
     """
 
     del assume_unique
-    left = _atleast_tensor(input).reshape(-1)
-    right = _atleast_tensor(other).reshape(-1)
+    # Read as `isin` reads its operands.
+    left, right = _operand_pair(input, other, comparison=True)
+    left, right = left.reshape(-1), right.reshape(-1)
 
     if return_indices:
         left_values, left_first = unique(left, return_index=True)
@@ -1219,8 +1223,9 @@ def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tens
     """The distinct values in the first tensor and not the second, ascending."""
 
     del assume_unique
-    left = _atleast_tensor(input).reshape(-1)
-    right = _atleast_tensor(other).reshape(-1)
+    # Read as `isin` reads its operands.
+    left, right = _operand_pair(input, other, comparison=True)
+    left, right = left.reshape(-1), right.reshape(-1)
     if str(left.dtype) in _FLOAT_DTYPES:
         ours, _, wide_ours, wide_theirs = _distinct_pair(
             left, right, _membership_dtype(left, right)
@@ -1240,9 +1245,8 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
     """
 
     del assume_unique
-    left, right = _promote_pair(
-        _atleast_tensor(input).reshape(-1), _atleast_tensor(other).reshape(-1)
-    )
+    left, right = _operand_pair(input, other)
+    left, right = _promote_pair(left.reshape(-1), right.reshape(-1))
     if str(left.dtype) in _FLOAT_DTYPES:
         # Both sides distinct, so a value is in exactly one of them precisely
         # when it differs from both its neighbours once the two are merged --

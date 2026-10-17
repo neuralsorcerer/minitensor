@@ -8,6 +8,7 @@ use crate::device::PyDevice;
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use crate::tensor::normalize_optional_axes;
+use crate::tensor::{comparison_pair_from_py, operands_from_py};
 use engine::Device;
 use engine::TensorIndex;
 use engine::ops::arithmetic::{mul, sub};
@@ -213,12 +214,9 @@ fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTenso
                 "Cannot concatenate empty list of tensors",
             ));
         }
-        let flattened: Vec<engine::Tensor> = tensors
+        let flattened: Vec<engine::Tensor> = operands_from_py(&tensors.iter().collect::<Vec<_>>())?
             .iter()
-            .map(|obj| {
-                PyTensor::from_python_value(&obj)
-                    .and_then(|t| t.tensor().flatten_all().map_err(_convert_error))
-            })
+            .map(|t| t.flatten_all().map_err(_convert_error))
             .collect::<PyResult<_>>()?;
         let refs: Vec<&engine::Tensor> = flattened.iter().collect();
         let joined = tensor_concatenate(&refs, 0).map_err(_convert_error)?;
@@ -249,32 +247,32 @@ fn split(tensor: &PyTensor, sections: crate::Size, axis: Option<isize>) -> PyRes
 /// Dot product of two tensors
 #[pyfunction]
 fn dot(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let a_tensor = PyTensor::from_python_value(a)?;
-    if a_tensor.ndim() == 1 {
-        let b_tensor = PyTensor::from_python_value(b)?;
-        if b_tensor.ndim() == 1 {
-            let product = mul(a_tensor.tensor(), b_tensor.tensor()).map_err(_convert_error)?;
-            let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
-            return Ok(PyTensor::from_tensor(summed));
-        }
-        return a_tensor.matmul(b);
+    let [a_tensor, b_tensor]: [engine::Tensor; 2] = operands_from_py(&[a.clone(), b.clone()])?
+        .try_into()
+        .map_err(|_| PyValueError::new_err("dot takes two operands"))?;
+    if a_tensor.ndim() == 1 && b_tensor.ndim() == 1 {
+        let product = mul(&a_tensor, &b_tensor).map_err(_convert_error)?;
+        let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
+        return Ok(PyTensor::from_tensor(summed));
     }
-
-    a_tensor.matmul(b)
+    let result = a_tensor.matmul(&b_tensor).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
 }
 
 /// Matrix multiplication
 #[pyfunction]
 fn matmul(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let a_tensor = PyTensor::from_python_value(a)?;
-    a_tensor.matmul(b)
+    let [a_tensor, b_tensor]: [engine::Tensor; 2] = operands_from_py(&[a.clone(), b.clone()])?
+        .try_into()
+        .map_err(|_| PyValueError::new_err("matmul takes two operands"))?;
+    let result = a_tensor.matmul(&b_tensor).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
 }
 
 /// Element-wise selection based on a boolean condition
 #[pyfunction(name = "where")]
 fn where_py(condition: &Bound<PyAny>, x: &Bound<PyAny>, y: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let x_tensor = PyTensor::from_python_value(x)?;
-    x_tensor.where_method(condition, y)
+    crate::functional::where_function(condition, x, y)
 }
 
 pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
@@ -401,9 +399,14 @@ pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyRes
 #[pyfunction]
 #[pyo3(signature = (a, b, dim=None))]
 fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, dim: Option<i32>) -> PyResult<PyTensor> {
-    let a_tensor = PyTensor::from_python_value(a)?;
-    let b_tensor = PyTensor::from_python_value(b)?;
-    cross_impl(&a_tensor, &b_tensor, dim)
+    let [a_tensor, b_tensor]: [engine::Tensor; 2] = operands_from_py(&[a.clone(), b.clone()])?
+        .try_into()
+        .map_err(|_| PyValueError::new_err("cross takes two operands"))?;
+    cross_impl(
+        &PyTensor::from_tensor(a_tensor),
+        &PyTensor::from_tensor(b_tensor),
+        dim,
+    )
 }
 
 /// Check if arrays are approximately equal, to NumPy's tolerances.
@@ -416,17 +419,20 @@ fn allclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<bool> {
-    let a_tensor = PyTensor::from_python_value(a)?;
-    let b_tensor = PyTensor::from_python_value(b)?;
-    a_tensor.allclose(&b_tensor, Some(rtol), Some(atol), equal_nan)
+    let (a_tensor, b_tensor) = comparison_pair_from_py(a, b)?;
+    PyTensor::from_tensor(a_tensor).allclose(
+        &PyTensor::from_tensor(b_tensor),
+        Some(rtol),
+        Some(atol),
+        equal_nan,
+    )
 }
 
 /// Check if arrays are exactly equal
 #[pyfunction]
 fn array_equal(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<bool> {
-    let a_tensor = PyTensor::from_python_value(a)?;
-    let b_tensor = PyTensor::from_python_value(b)?;
-    a_tensor.array_equal(&b_tensor)
+    let (a_tensor, b_tensor) = comparison_pair_from_py(a, b)?;
+    PyTensor::from_tensor(a_tensor).array_equal(&PyTensor::from_tensor(b_tensor))
 }
 
 /// Compute mean along axis

@@ -27,7 +27,13 @@ import math as _math
 import numpy as _np
 
 from . import _core as _C
-from ._shape import _atleast_tensor, _flat, _from_numpy, _numpy_view, _promote_pair
+from ._shape import (
+    _flat,
+    _from_numpy,
+    _numpy_view,
+    _operand_pair,
+    _promote_pair,
+)
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -154,8 +160,7 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
     state as an offset than to arrive at by padding.
     """
 
-    signal = _flat(_atleast_tensor(first))
-    kernel = _flat(_atleast_tensor(second))
+    signal, kernel = (_flat(side) for side in _operand_pair(first, second))
     if signal.shape[0] == 0 or kernel.shape[0] == 0:
         raise ValueError(f"{name} needs two non-empty sequences")
     if mode not in ("full", "same", "valid"):

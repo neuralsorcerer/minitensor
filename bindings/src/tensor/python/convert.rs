@@ -404,9 +404,16 @@ pub(crate) fn tensor_from_py_value_in(
         }
     }
 
+    // Last, the same dtype the first attempt chose, so that its error is the
+    // one reported. Falling back to the list's own inferred dtype instead let
+    // a value the context cannot hold widen the result: `int32 + [2**40]`
+    // answered in int64 where `int32 + 2**40` refused, and a result's dtype
+    // must not depend on the values it was handed.
     let dtype = match dtype::resolve_scalar_dtype(value, context) {
         Ok(dt) => dt,
-        Err(_) => infer_python_value_dtype(value).unwrap_or(context),
+        Err(_) => infer_python_value_dtype(value)
+            .map(|inferred| dtype::dtype_for_context(inferred, context))
+            .unwrap_or(context),
     };
     convert_python_data_to_tensor(value, dtype, device, false)
 }
@@ -617,12 +624,102 @@ pub(crate) fn comparison_operands_from_py(
         DataType::Float32 | DataType::Float64 if int_literal => DataType::Int64,
         dtype => dtype,
     };
+    // A list of ints is as exact as one int: `x == [16777217]` matched the
+    // float32 16777216 that `x == 16777217` does not. A list with an int past
+    // int64 has no exact reading, and keeps the float one.
+    if context.is_float()
+        && (other.cast::<PyList>().is_ok() || other.cast::<PyTuple>().is_ok())
+        && matches!(
+            infer_python_value_dtype(other),
+            Some(DataType::Int32 | DataType::Int64)
+        )
+        && let Ok(exact) = tensor_from_py_value_in(DataType::Int64, reference.device(), other)
+    {
+        return Ok(if reverse {
+            (exact, reference.clone())
+        } else {
+            (reference.clone(), exact)
+        });
+    }
     let other = tensor_from_py_value_in(context, reference.device(), other)?;
     Ok(if reverse {
         (other, reference.clone())
     } else {
         (reference.clone(), other)
     })
+}
+
+/// A value handed to an operation on its own, typed by what it is.
+///
+/// A tensor as it stands and an array at its own dtype; a Python number or
+/// list by what its values call for -- integers as int64, booleans as bool,
+/// floats at the default float -- as `as_tensor` types it. Building every such
+/// value at the default float instead made `cummax([1, 3, 2])` a float, a
+/// list of labels unusable as labels, and a float64 array a float32 tensor
+/// that had already lost the digits the caller handed over.
+pub(crate) fn operand_from_py(value: &Bound<PyAny>) -> PyResult<Tensor> {
+    if let Some(py_tensor) = borrow_wrapped_tensor(value) {
+        return Ok(py_tensor.inner.clone());
+    }
+    convert_python_data_inferring(value, None, Device::cpu(), false)
+}
+
+/// The dtype and device of a value that carries a dtype of its own -- a
+/// tensor or an array -- and `None` for a Python number or list, which does
+/// not.
+fn typed_operand(value: &Bound<PyAny>) -> Option<(DataType, Device)> {
+    if let Some(py_tensor) = borrow_wrapped_tensor(value) {
+        return Some((py_tensor.inner.dtype(), py_tensor.inner.device()));
+    }
+    if value.cast::<PyUntypedArray>().is_ok() {
+        return infer_python_value_dtype(value).map(|dtype| (dtype, Device::cpu()));
+    }
+    None
+}
+
+/// The operands of one operation, each typed the way an operator's are.
+///
+/// One that carries a dtype keeps it, and a Python number or list takes its
+/// width from the dtype the typed ones promote to, as it does beside a single
+/// tensor in `x + 0.1`: written beside a float64 tensor, `[0.1]` is the
+/// float64 `0.1`, and beside an int32 one `[7]` is an int32. With nothing typed
+/// among them, each is typed by what it holds.
+pub(crate) fn operands_from_py(values: &[Bound<PyAny>]) -> PyResult<Vec<Tensor>> {
+    let mut context: Option<(DataType, Device)> = None;
+    for value in values {
+        if let Some((dtype, device)) = typed_operand(value) {
+            context = Some(match context {
+                Some((current, first)) => (promote_dtypes(current, dtype), first),
+                None => (dtype, device),
+            });
+        }
+    }
+    values
+        .iter()
+        .map(|value| match context {
+            Some((dtype, device)) => tensor_from_py_value_in(dtype, device, value),
+            None => operand_from_py(value),
+        })
+        .collect()
+}
+
+/// The two operands of a comparison, either of which may be the Python value.
+///
+/// [`comparison_operands_from_py`] with the typed operand as the reference
+/// whichever side it is on, so `isclose([0.1], x)` reads `0.1` as it reads it
+/// in `isclose(x, [0.1])`. Built standalone, the literal on the left was the
+/// float32 `0.1`, which a float64 `x` holding `0.1` is not equal to.
+pub(crate) fn comparison_pair_from_py(
+    lhs: &Bound<PyAny>,
+    rhs: &Bound<PyAny>,
+) -> PyResult<(Tensor, Tensor)> {
+    if typed_operand(lhs).is_none() && typed_operand(rhs).is_some() {
+        return comparison_operands_from_py(&operand_from_py(rhs)?, lhs, true);
+    }
+    if typed_operand(lhs).is_some() {
+        return comparison_operands_from_py(&operand_from_py(lhs)?, rhs, false);
+    }
+    Ok((operand_from_py(lhs)?, operand_from_py(rhs)?))
 }
 
 pub(crate) fn prepare_binary_operands_from_py(

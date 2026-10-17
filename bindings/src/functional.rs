@@ -7,6 +7,7 @@
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use crate::tensor::borrow_wrapped_tensor;
+use crate::tensor::{comparison_pair_from_py, operands_from_py, tensor_from_py_value};
 use crate::tensor::{normalize_indexed_axis, normalize_optional_axes};
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor};
@@ -605,8 +606,11 @@ pub fn where_function(
     match borrow_tensor(input) {
         Ok(tensor) => tensor.where_method(condition, other),
         Err(_) => {
-            let tensor = PyTensor::from_python_value(input)?;
-            tensor.where_method(condition, other)
+            // A list or number takes its width from `other` when `other` has
+            // one, as it would beside it in arithmetic: `where(c, [1, 2],
+            // int32_y)` was a float32.
+            let operands = operands_from_py(&[input.clone(), other.clone()])?;
+            PyTensor::from_tensor(operands[0].clone()).where_method(condition, other)
         }
     }
 }
@@ -956,7 +960,8 @@ pub fn scatter_reduce(
 ) -> PyResult<PyTensor> {
     let target = PyTensor::from_python_value(input)?;
     let positions = PyTensor::from_python_value(index)?;
-    let values = PyTensor::from_python_value(src)?;
+    // Written into `target`, so a list or number takes its width.
+    let values = PyTensor::from_tensor(tensor_from_py_value(target.tensor(), src)?);
     let how = engine::ops::Reduction::from_name(reduce).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(
         engine::ops::scatter_reduce(
@@ -1533,10 +1538,12 @@ pub fn searchsorted(
     values: &Bound<PyAny>,
     right: bool,
 ) -> PyResult<PyTensor> {
-    let sequence = PyTensor::from_python_value(sorted_sequence)?;
-    let needles = PyTensor::from_python_value(values)?;
-    let result = engine::ops::searchsorted(sequence.tensor(), needles.tensor(), right)
-        .map_err(_convert_error)?;
+    // A list on either side is read at the other side's width, so
+    // `searchsorted(float64_x, [0.1])` looks for the float64 `0.1` rather
+    // than refusing a float32 one.
+    let operands = operands_from_py(&[sorted_sequence.clone(), values.clone()])?;
+    let result =
+        engine::ops::searchsorted(&operands[0], &operands[1], right).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -1548,10 +1555,10 @@ pub fn bucketize(
     boundaries: &Bound<PyAny>,
     right: bool,
 ) -> PyResult<PyTensor> {
-    let values = PyTensor::from_python_value(input)?;
-    let edges = PyTensor::from_python_value(boundaries)?;
+    // Typed as `searchsorted` types them.
+    let operands = operands_from_py(&[input.clone(), boundaries.clone()])?;
     let result =
-        engine::ops::bucketize(values.tensor(), edges.tensor(), right).map_err(_convert_error)?;
+        engine::ops::bucketize(&operands[0], &operands[1], right).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -1660,14 +1667,10 @@ pub fn einsum(equation: &str, operands: &Bound<PyTuple>) -> PyResult<PyTensor> {
             "einsum: at least one operand is required",
         ));
     }
-    let mut tensors = Vec::with_capacity(operands.len());
-    for index in 0..operands.len() {
-        let item = operands.get_item(index)?;
-        tensors.push(match borrow_tensor(&item) {
-            Ok(tensor) => tensor.tensor().clone(),
-            Err(_) => PyTensor::from_python_value(&item)?.tensor().clone(),
-        });
-    }
+    let items = (0..operands.len())
+        .map(|index| operands.get_item(index))
+        .collect::<PyResult<Vec<_>>>()?;
+    let tensors = operands_from_py(&items)?;
     let result = engine::ops::einsum(equation, &tensors).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -2054,16 +2057,15 @@ pub fn isclose(
     atol: Option<f64>,
     equal_nan: bool,
 ) -> PyResult<PyTensor> {
-    let lhs = PyTensor::from_python_value(input)?;
-    lhs.isclose(other, rtol, atol, equal_nan)
+    let (lhs, rhs) = comparison_pair_from_py(input, other)?;
+    PyTensor::isclose_tensors(&lhs, &rhs, rtol, atol, equal_nan)
 }
 
 /// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
 #[pyfunction]
 pub fn array_equal(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<bool> {
-    let lhs = PyTensor::from_python_value(input)?;
-    let rhs = PyTensor::from_python_value(other)?;
-    lhs.array_equal(&rhs)
+    let (lhs, rhs) = comparison_pair_from_py(input, other)?;
+    PyTensor::from_tensor(lhs).array_equal(&PyTensor::from_tensor(rhs))
 }
 
 /// Whether every pair of elements is within `rtol`/`atol`.
@@ -2076,9 +2078,8 @@ pub fn allclose(
     atol: Option<f64>,
     equal_nan: bool,
 ) -> PyResult<bool> {
-    let lhs = PyTensor::from_python_value(input)?;
-    let rhs = PyTensor::from_python_value(other)?;
-    lhs.allclose(&rhs, rtol, atol, equal_nan)
+    let (lhs, rhs) = comparison_pair_from_py(input, other)?;
+    PyTensor::from_tensor(lhs).allclose(&PyTensor::from_tensor(rhs), rtol, atol, equal_nan)
 }
 
 pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
