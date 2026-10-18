@@ -2230,7 +2230,10 @@ assert row_std.shape == (2, 3)
   is precisely the tail `erfc` exists to give you (`erfc(20) ≈ 5.4e-176`).
 - `erfinv(input)` — the inverse of `erf` on `[-1, 1]`, infinite at the
   endpoints. Anything outside that interval gives NaN: `erf` never reaches
-  there, so nothing inverts to it.
+  there, so nothing inverts to it. Its slope is `sqrt(pi)/2 exp(y**2)` for
+  `y = erfinv(x)`, taken from `|x| = 1/2` on as `sqrt(pi)/2 erfcx(y) / (1 - |x|)`,
+  the same value: the exponential multiplies the relative error of `y` by
+  `2 y**2`, and `erfcx` does not.
 - `exp2(input)` — `2 ** x` from the hardware's own base-2 exponential.
   `exp(x * log(2))` rounds the exponent before using it, which costs the last
   few bits of every answer and all of them for a large `x`.
@@ -2276,14 +2279,20 @@ assert row_std.shape == (2, 3)
   cancels, and an asymptotic series above it taken to a fixed sixteen terms.
   Fixed rather than stopped where the terms turn, which is the usual rule and
   makes the truncation depend on the last bit of the argument — two inputs a
-  billionth apart would then differ in the tenth digit.
+  billionth apart would then differ in the tenth digit. Both series are summed
+  with their roundings carried, so the scaled forms are within about half an
+  ulp everywhere, and `i0` and `i1` below thirty; above it those are the scaled
+  forms times `exp(|x|)`, within an ulp and a half, and finite up to 713.99
+  where `exp(|x|)` alone overflows at 709.78.
 - `erfcx(input)` — `exp(x**2) erfc(x)`. `erfc` underflows to zero a little past
   26 and `exp(x**2)` overflows a little past 26.6, so above there the product is
   `inf * 0` — while the value it reaches for is ordinary: `erfcx(30)` is
   `0.0188` and `erfcx(1e100)` is `5.6e-101`. Every Gaussian tail computation
   that divides one by another needs it, a Mills ratio being the plainest.
   Its derivative is `2 x erfcx(x) - 2/sqrt(pi)`, where the constant is constant
-  because `erfc`'s own derivative cancels the scaling exactly.
+  because `erfc`'s own derivative cancels the scaling exactly. From eight on it
+  is an asymptotic series with every rounding carried, correctly rounded to the
+  top of the float range, where the answer is subnormal.
 - `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
   With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
   answer for a probability that has rounded to 0 or 1 and flattens the gradient

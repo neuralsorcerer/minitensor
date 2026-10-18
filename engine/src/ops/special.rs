@@ -35,7 +35,7 @@ use libm::erfc;
 // lower tail. It replaced `statrs`, whose only other use was the
 // truncated-normal sampler.
 use crate::ops::gaussian::erf_inverse as erf_inv;
-use std::f64::consts::{LN_2, PI};
+use std::f64::consts::{FRAC_2_SQRT_PI, LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
 /// widening, evaluating there, and rounding once at the end.
@@ -915,8 +915,8 @@ pub fn polygamma(order: i64, tensor: &Tensor) -> Result<Tensor> {
 /// nothing cancels; what grows is the number of them, roughly with the
 /// argument -- forty-five at thirty, which is nothing. The asymptotic series
 /// diverges and is only worth having once it gets close before it turns. Thirty
-/// is where a fixed sixteen terms of it reach 4e-16 for both orders and stay
-/// there for every larger argument, which is what makes the count fixed.
+/// is where a fixed sixteen terms of it leave out 6e-18 for both orders, and
+/// less for every larger argument, which is what makes the count fixed.
 const BESSEL_CROSSOVER: f64 = 30.0;
 
 /// How many terms of the asymptotic series to take, chosen for the crossover.
@@ -1028,7 +1028,7 @@ fn i0_scalar(x: f64) -> f64 {
         // `exp(inf) * i0e(inf)` is `inf * 0`; the limit is infinite.
         f64::INFINITY
     } else {
-        t.exp() * i0e_scalar(x)
+        rescale(t, i0e_scalar(x))
     }
 }
 
@@ -1041,18 +1041,50 @@ fn i1_scalar(x: f64) -> f64 {
     } else if t.is_infinite() {
         x
     } else {
-        t.exp() * i1e_scalar(x)
+        rescale(t, i1e_scalar(x))
     }
 }
+
+/// `exp(t) * scaled`, for the `exp(-t)`-scaled value of a function that
+/// overflows after `exp(t)` does.
+///
+/// `I_0` and `I_1` grow as `exp(t) / sqrt(2 pi t)`, so between 709.78, where
+/// `exp(t)` passes the largest double, and 713.99, where they do, the product
+/// was infinite for an answer in range: `i0(710)` is 3.3e306. There the
+/// exponential is taken in two halves, each exact in its argument.
+fn rescale(t: f64, scaled: f64) -> f64 {
+    let rising = t.exp();
+    if rising.is_finite() {
+        rising * scaled
+    } else {
+        let half = (t / 2.0).exp();
+        half * scaled * half
+    }
+}
+
+/// `2 pi` as the double nearest it and what that leaves out.
+const TWO_PI_HIGH: f64 = std::f64::consts::TAU;
+const TWO_PI_LOW: f64 = 2.4492935982947064e-16;
 
 /// `exp(-t) I_order(t)` by the asymptotic series, for a `t` above the
 /// crossover.
 ///
 /// `1/sqrt(2 pi t) sum_k (-1)^k a_k / t^k`, with
-/// `a_k = a_(k-1) (4 v^2 - (2k-1)^2) / (8k)`.
+/// `a_k = a_(k-1) (4 v^2 - (2k-1)^2) / (8k)`. For orders zero and one every
+/// term after the first has the same sign, and from the third on each is less
+/// than an ulp of the sum: added to it one at a time they were each rounded
+/// away, the same way every time, and `i0e` came out five ulps low. They are
+/// summed apart from the leading one here, which is joined to them exactly,
+/// and the root is divided out with its roundings carried, so the result is
+/// within about half an ulp. Sixteen terms leave out 6e-18 of the sum at the
+/// crossover, and less above it.
 fn scaled_bessel_asymptotic(order: u32, t: f64) -> f64 {
+    use crate::ops::simd::product_error;
+    if t.is_infinite() {
+        return 0.0;
+    }
     let mu = 4.0 * (order as f64) * (order as f64);
-    let mut total = 1.0;
+    let mut tail = 0.0;
     let mut coefficient = 1.0;
     let mut sign = -1.0;
     let mut power = 1.0;
@@ -1060,17 +1092,42 @@ fn scaled_bessel_asymptotic(order: u32, t: f64) -> f64 {
         let step = 2.0 * k as f64 - 1.0;
         coefficient *= (mu - step * step) / (8.0 * k as f64);
         power *= t;
-        total += sign * coefficient / power;
+        tail += sign * coefficient / power;
         sign = -sign;
     }
-    total / root_two_pi_t(t)
+    // The tail is a few thousandths at most, so this sum and what it rounded
+    // off are exact.
+    let sum = 1.0 + tail;
+    let sum_low = (1.0 - sum) + tail;
+    // Past about 2.9e307 `2 pi t` overflows, and from about 1e300 the split
+    // that recovers a product's error does. A power of two taken out of `t`,
+    // and half of it out of the root, keeps both in range exactly.
+    let (t, unscale) = if t > 1e290 {
+        (t * 2f64.powi(-128), 2f64.powi(-64))
+    } else {
+        (t, 1.0)
+    };
+    // `sqrt(2 pi t)`, and the correction the root's rounding leaves: the
+    // differences of nearly equal values below are exact, and the products'
+    // errors are recovered whole.
+    let product = TWO_PI_HIGH * t;
+    let product_low = product_error::<false>(TWO_PI_HIGH, t, product) + TWO_PI_LOW * t;
+    let root = product.sqrt();
+    let square = root * root;
+    let root_low = ((product - square) - product_error::<false>(root, root, square) + product_low)
+        / (2.0 * root);
+    // And the quotient the same way.
+    let quotient = sum / root;
+    let back = quotient * root;
+    let quotient_low = ((sum - back) - product_error::<false>(quotient, root, back) + sum_low
+        - quotient * root_low)
+        / root;
+    (quotient + quotient_low) * unscale
 }
 
 /// `sqrt(2 pi t)`, which past about 2.9e307 cannot be formed as written:
-/// `2 pi t` overflows, and the series then divided by infinity -- `i0e(1e308)`
-/// came back 0 rather than 4.0e-155, and `i0` and `i1` there `inf * 0`, NaN.
-/// Split, the root fits; below the split it is the expression it always was,
-/// to the bit.
+/// `2 pi t` overflows, and the series then divided by infinity. Split, the
+/// root fits; below the split it is the expression as written, to the bit.
 fn root_two_pi_t(t: f64) -> f64 {
     if t > 1e300 {
         (2.0 * PI).sqrt() * t.sqrt()
@@ -1088,7 +1145,9 @@ fn root_two_pi_t(t: f64) -> f64 {
 /// the series instead leaves nothing to cancel.
 fn scaled_bessel_asymptotic_slope(order: u32, t: f64) -> f64 {
     let mu = 4.0 * (order as f64) * (order as f64);
-    let mut total = 0.5;
+    // The terms after the first are summed apart from it, for the reason
+    // given in `scaled_bessel_asymptotic`.
+    let mut tail = 0.0;
     let mut coefficient = 1.0;
     let mut sign = -1.0;
     let mut power = 1.0;
@@ -1096,10 +1155,10 @@ fn scaled_bessel_asymptotic_slope(order: u32, t: f64) -> f64 {
         let step = 2.0 * k as f64 - 1.0;
         coefficient *= (mu - step * step) / (8.0 * k as f64);
         power *= t;
-        total += sign * (k as f64 + 0.5) * coefficient / power;
+        tail += sign * (k as f64 + 0.5) * coefficient / power;
         sign = -sign;
     }
-    -total / (t * root_two_pi_t(t))
+    -(0.5 + tail) / (t * root_two_pi_t(t))
 }
 
 /// `exp(-|x|) I_0(x)`. Even, and bounded by one.
@@ -1169,7 +1228,7 @@ wide_grad_kernel!(
         // `inf * (0 - 0)`; the slope grows without bound either way.
         g * f64::INFINITY
     } else {
-        g * (x.abs()).exp() * (i0e_scalar(x) - scaled_i1_over_x(x))
+        g * rescale(x.abs(), i0e_scalar(x) - scaled_i1_over_x(x))
     }
 );
 wide_kernel!(
@@ -1258,9 +1317,9 @@ const ERFCX_CROSSOVER: f64 = 8.0;
 /// How many terms of that series to take, chosen for the crossover.
 ///
 /// Fixed rather than stopped where the terms turn, for the reason
-/// [`BESSEL_ASYMPTOTIC_TERMS`] is fixed. Sixteen already reaches 2e-16 at the
-/// crossover and no count above that improves on it; twenty is the same cost
-/// with margin.
+/// [`BESSEL_ASYMPTOTIC_TERMS`] is fixed. Sixteen leave out 8e-18 of the sum at
+/// the crossover, already far below its last bit; twenty, 6e-20, at the same
+/// cost.
 const ERFCX_ASYMPTOTIC_TERMS: i32 = 20;
 
 /// `exp(x^2)`, with `x^2` split exactly into `hi + lo` first.
@@ -1304,9 +1363,49 @@ fn erfcx_scalar(x: f64) -> f64 {
         return exp_of_square(x) * erfc(x);
     }
 
-    // `1/(x sqrt(pi)) sum_k (-1)^k (2k-1)!! / (2 x^2)^k`.
-    (1.0 + erfcx_asymptotic_tail(x)) / (x * PI.sqrt())
+    // `1/(x sqrt(pi)) sum_k (-1)^k (2k-1)!! / (2 x^2)^k`, with the roundings
+    // of the sum, of `x sqrt(pi)` and of the quotient each carried into the
+    // last one: as three plain operations on a root that was itself an ulp
+    // off -- `sqrt` of the rounded `pi` -- they left `erfcx` two ulps out.
+    use crate::ops::simd::product_error;
+    let tail = erfcx_asymptotic_tail(x);
+    // Under a hundredth from the crossover on, so the pair is exact.
+    let sum = 1.0 + tail;
+    let sum_low = (1.0 - sum) + tail;
+    // From about 1e300 the split that recovers a product's error overflows,
+    // and past about 1e308 so does the product: a power of two taken out of
+    // `x` and put back into the quotient keeps both in range.
+    let (x, unscale) = if x > 1e290 {
+        (x * 2f64.powi(-64), 2f64.powi(-64))
+    } else {
+        (x, 1.0)
+    };
+    let denominator = x * SQRT_PI_HIGH;
+    let denominator_low = product_error::<false>(x, SQRT_PI_HIGH, denominator) + x * SQRT_PI_LOW;
+    let quotient = sum / denominator;
+    let back = quotient * denominator;
+    let quotient_low = ((sum - back) - product_error::<false>(quotient, denominator, back)
+        + sum_low
+        - quotient * denominator_low)
+        / denominator;
+    if unscale == 1.0 {
+        return quotient + quotient_low;
+    }
+    // Scaling a normal answer back is exact. From about 2.5e307 the answer is
+    // subnormal, though, and rounding the quotient and then scaling it would
+    // round twice: scaled first, what the scaling lost is exact, and adding it
+    // rounds to the nearest subnormal once.
+    let scaled = quotient * unscale;
+    if scaled >= f64::MIN_POSITIVE {
+        (quotient + quotient_low) * unscale
+    } else {
+        scaled + ((quotient - scaled / unscale) + quotient_low) * unscale
+    }
 }
+
+/// `sqrt(pi)` as the double nearest it and what that leaves out.
+const SQRT_PI_HIGH: f64 = 1.772453850905516;
+const SQRT_PI_LOW: f64 = -7.666586499825799e-17;
 
 /// `d/dx erfcx(x) = 2 x erfcx(x) - 2/sqrt(pi)`.
 ///
@@ -1317,9 +1416,9 @@ fn erfcx_scalar(x: f64) -> f64 {
 /// `x = 1e4` and had the wrong sign by `1e12`; at `+inf` it is 0, the limit.
 fn erfcx_derivative(x: f64) -> f64 {
     if x >= ERFCX_CROSSOVER {
-        return 2.0 / PI.sqrt() * erfcx_asymptotic_tail(x);
+        return FRAC_2_SQRT_PI * erfcx_asymptotic_tail(x);
     }
-    2.0 * x * erfcx_scalar(x) - 2.0 / PI.sqrt()
+    2.0 * x * erfcx_scalar(x) - FRAC_2_SQRT_PI
 }
 
 wide_kernel!(
@@ -1364,12 +1463,24 @@ wide_kernel!(
 wide_grad_kernel!(
     /// `d/dx erfinv(x) = (sqrt(pi) / 2) exp(erfinv(x)^2)`, from
     /// differentiating `erf(erfinv(x)) = x`.
+    ///
+    /// `exp(y^2)` multiplies the relative error of `y` by `2 y^2`, so near the
+    /// ends, where `y` is five or six, `erfinv`'s own ulp came out as thirty or
+    /// more. From `|x| = 1/2` on the factor is taken instead as
+    /// `erfcx(y) / erfc(y)`, and `erfc(y)` is `1 - |x|`, which is exact there:
+    /// `erfcx` changes with `y` only as `1/y` does, so `y`'s error passes
+    /// through it unamplified. Below a half `y^2` is under a quarter.
     ERFINV_D, |x, g, _p| {
-        if !(-1.0..=1.0).contains(&x) {
+        let magnitude = x.abs();
+        if magnitude.is_nan() || magnitude > 1.0 {
             f64::NAN
+        } else if magnitude == 1.0 {
+            g * f64::INFINITY
+        } else if magnitude < 0.5 {
+            g * (SQRT_PI_HIGH * 0.5) * exp_of_square(erf_inv(x))
         } else {
-            let y = erf_inv(x);
-            g * (PI.sqrt() * 0.5) * (y * y).exp()
+            let y = erf_inv(magnitude);
+            g * (SQRT_PI_HIGH * 0.5) * (erfcx_scalar(y) / (1.0 - magnitude))
         }
     }
 );
@@ -1906,6 +2017,39 @@ mod tests {
         assert!(i1_scalar(-0.0).is_sign_negative() && i1e_scalar(-0.0).is_sign_negative());
     }
 
+    #[test]
+    fn the_scaled_forms_are_correctly_rounded_above_the_crossover() {
+        // The first was five ulps low, the series' small terms rounded away.
+        let cases = [
+            (0, 44.65043493139369, 0.05987244328919441),
+            (0, 30.0, 0.0731459464822373),
+            (0, 512.25, 0.01763092764367014),
+            (1, 170.0183838313482, 0.030528213722980924),
+            (1, -96.5, -0.04045292334307893),
+        ];
+        for (order, x, want) in cases {
+            let got = if order == 0 {
+                i0e_scalar(x)
+            } else {
+                i1e_scalar(x)
+            };
+            assert_eq!(
+                got.to_bits(),
+                f64::to_bits(want),
+                "exp(-|x|) I_{order}({x}) = {got}, wanted {want}"
+            );
+        }
+        // Past where `exp(x)` overflows, and short of where they do.
+        for (got, want) in [
+            (i0_scalar(710.0), 3.345334558619656e306),
+            (i1_scalar(-712.5), -4.0654371450013245e307),
+        ] {
+            assert!((got - want).abs() <= 3e-16 * want.abs(), "{got} vs {want}");
+        }
+        assert_eq!(i0_scalar(714.0), f64::INFINITY);
+        assert_eq!(i0e_scalar(f64::INFINITY), 0.0);
+    }
+
     /// `I_v(t)` by its defining series in extended range, for a reference the
     /// implementation shares no code with.
     fn bessel_reference(order: u32, t: f64) -> f64 {
@@ -2029,6 +2173,48 @@ mod tests {
             );
         }
         assert_eq!(erfcx_derivative(f64::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn erfcx_is_correctly_rounded_past_the_crossover() {
+        // Two ulps out before, the roundings of the asymptotic form left in.
+        let cases = [
+            (8.0, 0.06998516620088092),
+            (10.0, 0.05614099274382259),
+            (2441.878009286336, 0.00023104738815486164),
+            (1e200, 5.641895835477563e-201),
+            // Where `x sqrt(pi)` overflows, and the answer is subnormal.
+            (1.5e308, 3.761263890318373e-309),
+        ];
+        for (x, want) in cases {
+            let got = erfcx_scalar(x);
+            assert_eq!(
+                got.to_bits(),
+                f64::to_bits(want),
+                "erfcx({x}) = {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_inverse_error_function_s_slope_keeps_its_digits_near_the_ends() {
+        // `exp(erfinv(x)^2)` there multiplied `erfinv`'s own rounding by
+        // `2 erfinv(x)^2`, and was thirty ulps out.
+        let cases = [
+            (0.9999999995677267, 255800173.6168971),
+            (1.0 - 2f64.powi(-40), 106817285124.65913),
+            (-0.75, 1.7174997693674523),
+            (0.999999, 139146.31032670866),
+        ];
+        for (x, want) in cases {
+            let got = (ERFINV_D.1)(x, 1.0, [0.0; 2]);
+            assert!(
+                (got - want).abs() <= 3.0 * f64::EPSILON * want,
+                "erfinv'({x}) = {got}, want {want}"
+            );
+        }
+        assert_eq!((ERFINV_D.1)(1.0, 1.0, [0.0; 2]), f64::INFINITY);
+        assert!((ERFINV_D.1)(1.5, 1.0, [0.0; 2]).is_nan());
     }
 
     #[test]
