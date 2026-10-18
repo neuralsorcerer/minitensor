@@ -122,13 +122,10 @@ pub(crate) use {unit_grad_kernel, unit_kernel};
 /// can call the tensor-level `sigmoid` from inside an element kernel.
 macro_rules! stable_sigmoid {
     ($x:expr) => {{
+        // As `ops::util::stable_sigmoid_f64` is, without a branch on the sign.
         let x = $x;
-        if x >= 0.0 {
-            1.0 / (1.0 + (-x).exp())
-        } else {
-            let e = x.exp();
-            e / (1.0 + e)
-        }
+        let e = (-x.abs()).exp();
+        std::hint::select_unpredictable(x >= 0.0, 1.0, e) / (1.0 + e)
     }};
 }
 

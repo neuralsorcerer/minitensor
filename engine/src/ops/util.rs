@@ -509,28 +509,25 @@ where
     values[0]
 }
 
-/// Sigmoid evaluated through whichever of `e^-x` / `e^x` cannot overflow, so a
+/// Sigmoid evaluated through `e^-|x|`, which cannot overflow, so a
 /// large-magnitude input saturates to 1 or 0 instead of producing `inf/inf`
 /// (NaN). Used by the sigmoid/SiLU forward kernels and their gradients.
+///
+/// `1 / (1 + e)` for a non-negative `x` and `e / (1 + e)` for a negative one,
+/// with the numerator chosen by a select. As a branch on the sign it was
+/// mispredicted for half of any mixed-sign input, which cost float64 sigmoid
+/// as much again as its exponential.
 #[inline]
 pub(crate) fn stable_sigmoid_f32(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let exp_pos = x.exp();
-        exp_pos / (1.0 + exp_pos)
-    }
+    let e = (-x.abs()).exp();
+    std::hint::select_unpredictable(x >= 0.0, 1.0, e) / (1.0 + e)
 }
 
 /// [`stable_sigmoid_f32`] in double precision.
 #[inline]
 pub(crate) fn stable_sigmoid_f64(x: f64) -> f64 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let exp_pos = x.exp();
-        exp_pos / (1.0 + exp_pos)
-    }
+    let e = (-x.abs()).exp();
+    std::hint::select_unpredictable(x >= 0.0, 1.0, e) / (1.0 + e)
 }
 
 /// `log(exp(a) + exp(b))`, without forming either exponential.
