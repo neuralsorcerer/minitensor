@@ -198,11 +198,24 @@ pub(crate) fn erf_inverse(x: f64) -> f64 {
         return f64::NEG_INFINITY;
     }
     let size = x.abs();
-    let magnitude = if size <= 2.0 * CENTRAL_HALF_WIDTH {
+    let estimate = if size <= 2.0 * CENTRAL_HALF_WIDTH {
         size * (central_quantile_ratio(0.5 * size) * (0.5 / SQRT_2))
     } else {
         -standard_normal_quantile((1.0 - size) * 0.5) / SQRT_2
     };
+    // One Newton step on `erf(y) = |x|`. AS241 is good to about 1e-16
+    // relative, which with the scaling around it came out as 4 ulps across
+    // the whole range; the step brings that to about one. Below a half the
+    // residual is `erf(y) - |x|`; above it `(1 - |x|) - erfc(y)`, the same
+    // number, whose subtraction is exact (Sterbenz) and whose `erfc` keeps
+    // the digits `erf` rounds away next to one.
+    let residual = if size < 0.5 {
+        libm::erf(estimate) - size
+    } else {
+        (1.0 - size) - libm::erfc(estimate)
+    };
+    let slope = FRAC_2_SQRT_PI * (-estimate * estimate).exp();
+    let magnitude = estimate - residual / slope;
     magnitude.copysign(x)
 }
 
@@ -321,6 +334,31 @@ fn standard_normal_quantile(p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the AS241 estimate alone was 3.5 to 4 ulps out; the Newton step
+    /// brings each within one and a half. References are 200-bit values at
+    /// the doubles passed.
+    #[test]
+    fn erf_inverse_is_within_an_ulp_and_a_half() {
+        let cases = [
+            (0.06587005607025587, 0.05844228570630508),
+            (0.12454395388079771, 0.11082627821799679),
+            (0.7543030212444997, 0.8208552102059348),
+            (0.9835752494902221, 1.6965880954774557),
+            (0.9998792938953495, 2.71860468547257),
+            (5.339734293178689e-07, 4.7322163053787586e-07),
+            (-0.5, -0.4769362762044699),
+            (0.9999999999999805, 5.41192654423848),
+        ];
+        for (x, want) in cases {
+            let got: f64 = erf_inverse(x);
+            let ulps = (got - want).abs() / (want.abs() * f64::EPSILON / 2.0);
+            assert!(
+                ulps <= 3.0,
+                "erf_inverse({x}) = {got}, wanted {want} ({ulps} half-ulps)"
+            );
+        }
+    }
 
     /// Values from the standard normal table, to the digits a table carries.
     #[test]
