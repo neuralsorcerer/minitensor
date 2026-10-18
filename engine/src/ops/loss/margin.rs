@@ -213,6 +213,13 @@ pub fn cosine_embedding_loss(
     }
 
     check_same_shape("cosine_embedding_loss", &[("input1", x1), ("input2", x2)])?;
+    // A cosine is an angle between vectors, and a 0-d input has no feature
+    // axis to hold one; asked for its axis, the shape had none to remove.
+    if x1.ndim() == 0 {
+        return Err(MinitensorError::invalid_argument(
+            "cosine_embedding_loss compares vectors of features, and its inputs are 0-d",
+        ));
+    }
 
     // The similarity runs along the feature axis, which is the last one for a
     // 1-D input and the second for the usual `(batch, features)`.

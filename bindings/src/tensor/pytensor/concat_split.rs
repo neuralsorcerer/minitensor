@@ -112,6 +112,7 @@ impl PyTensor {
         }
 
         let chunk_size = dim_size / sections;
+        reject_unallocatable_pieces(sections)?;
         self.split_sections_at(&vec![chunk_size; sections], axis)
     }
 
@@ -220,5 +221,27 @@ impl PyTensor {
             start = end;
         }
         Ok(outputs)
+    }
+}
+
+/// Refuse a count of pieces this machine cannot hold, instead of aborting on it.
+///
+/// An empty axis divides evenly into any number of pieces, and
+/// `chunk(empty, 2**40)` asked for 2^40 of them: the vector of their sizes
+/// could not be allocated, and a failed allocation aborts the process rather
+/// than raising. A piece is a tensor handle and the Python object around it, a
+/// few hundred bytes, which is what the count is weighed at -- by the same
+/// policy that refuses an unallocatable tensor.
+pub(crate) fn reject_unallocatable_pieces(count: usize) -> PyResult<()> {
+    const PIECE_BYTES: usize = 256;
+    let holdable = count
+        .checked_mul(PIECE_BYTES)
+        .is_some_and(engine::tensor::TensorData::is_allocatable_size);
+    if holdable {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyMemoryError::new_err(format!(
+            "{count} pieces are more than this machine can hold"
+        )))
     }
 }

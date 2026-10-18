@@ -129,9 +129,19 @@ pub fn repeat_interleave(
     } else {
         expand_repeats(repeats, dim_size)?
     };
+    // Checked: a count of 2^63 over three elements wrapped to a small total in
+    // a release build, and the output was sized from it.
+    let too_many = || {
+        MinitensorError::invalid_argument(format!(
+            "repeat_interleave: the repeats along axis {dim} total more than usize can represent"
+        ))
+    };
     let total_repeats: usize = match uniform {
-        Some(count) => count * dim_size,
-        None => reps.iter().sum(),
+        Some(count) => count.checked_mul(dim_size).ok_or_else(too_many)?,
+        None => reps
+            .iter()
+            .try_fold(0usize, |total, &rep| total.checked_add(rep))
+            .ok_or_else(too_many)?,
     };
 
     if let Some(expected) = output_size
@@ -150,7 +160,11 @@ pub fn repeat_interleave(
     let mut output_shape = dims.to_vec();
     output_shape[dim] = target_dim;
     let output_shape_obj = Shape::new(output_shape);
-    let output_numel = output_shape_obj.numel();
+    let output_numel = output_shape_obj.try_numel()?;
+    // The output is built by an allocation that cannot fail softly, and one
+    // that is refused aborts the process: `repeat_interleave(x, 2**40)` took
+    // the interpreter down rather than raising.
+    TensorData::ensure_allocatable(output_numel, tensor.dtype())?;
 
     let inner: usize = dims[dim + 1..].iter().product();
     let outer: usize = if dim == 0 {

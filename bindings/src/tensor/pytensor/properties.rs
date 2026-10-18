@@ -477,6 +477,13 @@ impl PyTensor {
             return Ok(Self::from_tensor(result));
         }
 
+        // An integer past `i64` fails the first extraction and would land
+        // here as "must be an int", which it is.
+        if repeats.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(PyValueError::new_err(format!(
+                "repeat_interleave: a repeat of {repeats} is more than this platform can count"
+            )));
+        }
         Err(PyTypeError::new_err(
             "repeat_interleave: repeats must be an int, sequence of ints, or Tensor",
         ))

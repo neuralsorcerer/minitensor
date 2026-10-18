@@ -1323,10 +1323,17 @@ def local_response_norm(
     # `(batch, 1, channels, positions, 1)`: the channel axis in the depth slot
     # of a 3-D pooling, and one on either side of it so the window is 1-D.
     stacked = (tensor * tensor).reshape(sizes[0], 1, sizes[1], positions, 1)
+    # From `2 * channels - 1` on, every position's window holds every channel,
+    # and a wider one only adds padding: it is pooled at that width and
+    # divided by its own. Padded out in full, `size=2**63` asked for a tensor
+    # no machine can hold.
+    reach = min(window, max(2 * sizes[1] - 1, 1))
     # An even window has no centre, so it takes one more from below than
     # above.
-    padded = _F.pad(stacked, [0, 0, 0, 0, window // 2, (window - 1) // 2])
-    energy = avg_pool3d(padded, (window, 1, 1), (1, 1, 1))
+    padded = _F.pad(stacked, [0, 0, 0, 0, reach // 2, (reach - 1) // 2])
+    energy = avg_pool3d(padded, (reach, 1, 1), (1, 1, 1))
+    if reach != window:
+        energy = energy * (reach / window)
     divisor = (energy.reshape(sizes) * float(alpha) + float(k)) ** float(beta)
     return tensor / divisor
 
