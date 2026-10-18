@@ -111,3 +111,17 @@ def test_the_gradients_are_unchanged():
     root = mt.Tensor([1.0, 4.0], requires_grad=True)
     (root**0.5).sum().backward()
     assert root.grad.tolist() == [0.5, 0.25]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("exponent", [3, 0.5, 2, -1])
+def test_a_single_element_takes_the_same_form(dtype, exponent):
+    # A one-element base beside a one-element exponent took the general power
+    # -- the platform's `pow` -- rather than the exponent's exact form.
+    values = np.abs(np.random.default_rng(109).normal(0, 3, 64)).astype(dtype)
+    values[0] = -2.0 if exponent in (3, -1) else 0.0
+    together = (mt.Tensor(values) ** exponent).numpy()
+    for value, want in zip(values, together):
+        alone = (mt.Tensor([value], dtype=dtype) ** exponent).item()
+        assert alone == want, value
+        assert (mt.Tensor(value, dtype=dtype) ** exponent).item() == want, value

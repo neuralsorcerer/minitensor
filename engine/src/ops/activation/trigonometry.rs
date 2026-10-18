@@ -241,12 +241,17 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     let base_numel = base_shape.numel();
     let exp_numel = exponent_shape.numel();
 
+    // A one-element exponent is asked first, even against a one-element base:
+    // its forms are the exact ones -- the cube rounded once, the half power as
+    // the square root -- and asked the other way round `tensor([x]) ** 3` took
+    // the general power instead, which is the platform's `pow`, and came back
+    // an ulp off on one of them.
     let broadcast = if base_shape == exponent_shape {
         PowBroadcast::None
-    } else if base_numel == 1 {
-        PowBroadcast::BaseScalar
     } else if exp_numel == 1 {
         PowBroadcast::ExponentScalar
+    } else if base_numel == 1 {
+        PowBroadcast::BaseScalar
     } else {
         // General broadcasting: materialize both operands at the broadcast
         // shape (expand and contiguous are grad-aware) and recurse into the
