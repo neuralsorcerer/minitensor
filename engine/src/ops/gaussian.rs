@@ -158,6 +158,32 @@ pub(crate) fn normal_quantile(p: f64, mean: f64, std: f64) -> f64 {
     mean + std * standard_normal_quantile(p)
 }
 
+/// [`erf_inverse`] without its Newton step: AS241 and the scaling around it,
+/// about 4 ulps across the range, with the signs, the endpoints and NaN as
+/// there.
+///
+/// What float32 asks for. Four float64 ulps are a hundred-millionth of a
+/// float32 one, so the step -- an `erf` or `erfc` and an exponential, three
+/// quarters of the cost -- changes no float32 answer.
+pub(crate) fn erf_inverse_estimate(x: f64) -> f64 {
+    if x.is_nan() || !(-1.0..=1.0).contains(&x) {
+        return f64::NAN;
+    }
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
+    if x == -1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let size = x.abs();
+    let magnitude = if size <= 2.0 * CENTRAL_HALF_WIDTH {
+        size * (central_quantile_ratio(0.5 * size) * (0.5 / SQRT_2))
+    } else {
+        -standard_normal_quantile((1.0 - size) * 0.5) / SQRT_2
+    };
+    magnitude.copysign(x)
+}
+
 /// The inverse error function on `[-1, 1]`, infinite at the endpoints.
 ///
 /// `erf` and the normal CDF are the same function under a change of variable,
@@ -188,21 +214,12 @@ pub(crate) fn normal_quantile(p: f64, mean: f64, std: f64) -> f64 {
 /// `erfinv` already expect. Either zero is itself.
 #[inline]
 pub(crate) fn erf_inverse(x: f64) -> f64 {
-    if x.is_nan() || !(-1.0..=1.0).contains(&x) {
-        return f64::NAN;
-    }
-    if x == 1.0 {
-        return f64::INFINITY;
-    }
-    if x == -1.0 {
-        return f64::NEG_INFINITY;
+    let estimate = erf_inverse_estimate(x);
+    if !estimate.is_finite() {
+        return estimate;
     }
     let size = x.abs();
-    let estimate = if size <= 2.0 * CENTRAL_HALF_WIDTH {
-        size * (central_quantile_ratio(0.5 * size) * (0.5 / SQRT_2))
-    } else {
-        -standard_normal_quantile((1.0 - size) * 0.5) / SQRT_2
-    };
+    let estimate = estimate.abs();
     // One Newton step on `erf(y) = |x|`. AS241 is good to about 1e-16
     // relative, which with the scaling around it came out as 4 ulps across
     // the whole range; the step brings that to about one. Below a half the

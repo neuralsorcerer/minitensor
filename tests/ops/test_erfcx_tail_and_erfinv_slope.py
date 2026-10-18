@@ -123,3 +123,24 @@ def test_the_slope_of_erfinv_at_and_past_the_ends():
     outside = mt.Tensor([1.5], dtype="float64", requires_grad=True)
     mt.erfinv(outside).sum().backward()
     assert math.isnan(outside.grad.item())
+
+
+def test_float32_takes_the_float64_answer_rounded_once():
+    # Float32 skips the Newton step float64 takes, which moves no float32
+    # answer: four float64 ulps are a hundred-millionth of a float32 one.
+    rng = np.random.default_rng(167)
+    x = np.concatenate(
+        [rng.uniform(-1, 1, 4000), 1 - np.exp(-rng.uniform(1, 16, 1000))]
+    ).astype(np.float32)
+    x = x[np.abs(x) < 1]
+    narrow = mt.Tensor(x, requires_grad=True)
+    wide = mt.Tensor(x.astype(np.float64), dtype="float64", requires_grad=True)
+    mt.erfinv(narrow).sum().backward()
+    mt.erfinv(wide).sum().backward()
+    np.testing.assert_array_equal(
+        mt.erfinv(narrow.detach()).numpy(),
+        mt.erfinv(wide.detach()).numpy().astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        narrow.grad.numpy(), wide.grad.numpy().astype(np.float32)
+    )

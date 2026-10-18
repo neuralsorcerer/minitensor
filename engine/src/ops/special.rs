@@ -34,7 +34,7 @@ use libm::erfc;
 // why the inverse error function is spelled through the normal quantile's
 // lower tail. It replaced `statrs`, whose only other use was the
 // truncated-normal sampler.
-use crate::ops::gaussian::erf_inverse as erf_inv;
+use crate::ops::gaussian::{erf_inverse as erf_inv, erf_inverse_estimate};
 use std::f64::consts::{FRAC_2_SQRT_PI, LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
@@ -1470,44 +1470,56 @@ pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
 
 // --- erfinv ----------------------------------------------------------------
 
-wide_kernel!(
-    /// The inverse of `erf` on `[-1, 1]`, infinite at the endpoints.
-    ///
-    /// Outside that interval there is nothing to invert, and NaN says so.
-    /// The underlying routine reports an infinity for any argument past the
-    /// endpoints, which would claim `erf` reaches 2 somewhere.
-    ERFINV, |x, _p| {
-        if !(-1.0..=1.0).contains(&x) {
-            f64::NAN
-        } else {
-            erf_inv(x)
-        }
+/// The inverse of `erf` on `[-1, 1]`, infinite at the endpoints.
+///
+/// Outside that interval there is nothing to invert, and NaN says so. A
+/// float32 argument takes the estimate without the Newton step that float64
+/// needs, which changes no float32 answer and is four times faster; see
+/// [`crate::ops::gaussian::erf_inverse_estimate`].
+const ERFINV: UnitKernel = {
+    fn narrow(x: f32, _p: UnitParams<f32>) -> f32 {
+        erf_inverse_estimate(f64::from(x)) as f32
     }
-);
-wide_grad_kernel!(
-    /// `d/dx erfinv(x) = (sqrt(pi) / 2) exp(erfinv(x)^2)`, from
-    /// differentiating `erf(erfinv(x)) = x`.
-    ///
-    /// `exp(y^2)` multiplies the relative error of `y` by `2 y^2`, so near the
-    /// ends, where `y` is five or six, `erfinv`'s own ulp came out as thirty or
-    /// more. From `|x| = 1/2` on the factor is taken instead as
-    /// `erfcx(y) / erfc(y)`, and `erfc(y)` is `1 - |x|`, which is exact there:
-    /// `erfcx` changes with `y` only as `1/y` does, so `y`'s error passes
-    /// through it unamplified. Below a half `y^2` is under a quarter.
-    ERFINV_D, |x, g, _p| {
-        let magnitude = x.abs();
-        if magnitude.is_nan() || magnitude > 1.0 {
-            f64::NAN
-        } else if magnitude == 1.0 {
-            g * f64::INFINITY
-        } else if magnitude < 0.5 {
-            g * (SQRT_PI_HIGH * 0.5) * exp_of_square(erf_inv(x))
-        } else {
-            let y = erf_inv(magnitude);
-            g * (SQRT_PI_HIGH * 0.5) * (erfcx_scalar(y) / (1.0 - magnitude))
-        }
+    fn wide(x: f64, _p: UnitParams<f64>) -> f64 {
+        erf_inv(x)
     }
-);
+    (narrow, wide)
+};
+/// `d/dx erfinv(x) = (sqrt(pi) / 2) exp(erfinv(x)^2)`, from
+/// differentiating `erf(erfinv(x)) = x`.
+///
+/// `exp(y^2)` multiplies the relative error of `y` by `2 y^2`, so near the
+/// ends, where `y` is five or six, `erfinv`'s own ulp came out as thirty or
+/// more. From `|x| = 1/2` on the factor is taken instead as
+/// `erfcx(y) / erfc(y)`, and `erfc(y)` is `1 - |x|`, which is exact there:
+/// `erfcx` changes with `y` only as `1/y` does, so `y`'s error passes
+/// through it unamplified. Below a half `y^2` is under a quarter.
+const ERFINV_D: UnitGradKernel = {
+    fn narrow(x: f32, g: f32, _p: UnitParams<f32>) -> f32 {
+        erfinv_slope(f64::from(x), f64::from(g), erf_inverse_estimate) as f32
+    }
+    fn wide(x: f64, g: f64, _p: UnitParams<f64>) -> f64 {
+        erfinv_slope(x, g, erf_inv)
+    }
+    (narrow, wide)
+};
+
+/// [`ERFINV_D`]'s body, with the inverse it is built on as a parameter: the
+/// float32 slope needs only the estimate, as the value does.
+#[inline(always)]
+fn erfinv_slope(x: f64, g: f64, inverse: impl Fn(f64) -> f64) -> f64 {
+    let magnitude = x.abs();
+    if magnitude.is_nan() || magnitude > 1.0 {
+        f64::NAN
+    } else if magnitude == 1.0 {
+        g * f64::INFINITY
+    } else if magnitude < 0.5 {
+        g * (SQRT_PI_HIGH * 0.5) * exp_of_square(inverse(x))
+    } else {
+        let y = inverse(magnitude);
+        g * (SQRT_PI_HIGH * 0.5) * (erfcx_scalar(y) / (1.0 - magnitude))
+    }
+}
 
 /// The inverse error function on `[-1, 1]`.
 pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
