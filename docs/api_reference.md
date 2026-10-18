@@ -689,7 +689,10 @@ its values, so nothing flows back to the source through it.
 - `logspace`
 
 `linspace`, `logspace` and `geomspace` with `steps=0` give an empty tensor, as
-`arange(1, 0)` does; with no `dtype` they give the default one.
+`arange(1, 0)` does; with no `dtype` they give the default one. At an integer
+`dtype` each point is rounded to the nearest integer, a half away from zero --
+`linspace(0, 10, 5, dtype="int64")` is `[0, 3, 5, 8, 10]` -- where `astype`
+of the float points would truncate them to `[0, 2, 5, 7, 10]`.
 
 `arange` and `full` are typed by what they are given unless `dtype=` names
 one, as the constructors are: `arange(5)` counts in `int64`, and only a float
