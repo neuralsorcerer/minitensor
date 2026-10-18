@@ -930,21 +930,119 @@ const BESSEL_CROSSOVER: f64 = 30.0;
 const BESSEL_ASYMPTOTIC_TERMS: i32 = 16;
 
 /// `exp(-t) I_order(t)` by the power series, for a non-negative `t`.
-///
-/// `I_v(t) = sum_k (t/2)^(2k+v) / (k! (k+v)!)`, scaled at the end. The scaling
-/// is what the `e`-suffixed functions want and what keeps the others from
-/// overflowing before their own result does.
 fn scaled_bessel_series(order: u32, t: f64) -> f64 {
-    let half = t / 2.0;
-    let mut term = half.powi(order as i32) / (1..=order).map(|k| k as f64).product::<f64>();
-    let mut total = term;
-    let mut k = 1.0;
-    while term > 1e-18 * total {
-        term *= half * half / (k * (k + order as f64));
-        total += term;
-        k += 1.0;
+    bessel_series(order, t) * (-t).exp()
+}
+
+/// `I_order(t)` by the power series, for a non-negative `t` below
+/// [`BESSEL_CROSSOVER`] and an order of zero or one, rounded once.
+///
+/// `I_v(t) = sum_k (t/2)^(2k+v) / (k! (k+v)!)`, each term from the last by
+/// `(t/2)^2 / (k (k+v))`. In doubles every term carried the roundings of every
+/// one before it and of `(t/2)^2` once per step: the terms that matter near
+/// `t = 30` had forty of them, and `i0` was 13 ulps out there. Here each term
+/// carries what its roundings left -- the products' errors recovered exactly,
+/// the reciprocals' taken from a table -- and the sum carries its own, so the
+/// result is the float nearest the series. That costs about three times what
+/// the plain series did, for a function that is not on any hot path.
+fn bessel_series(order: u32, t: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("fma") {
+            #[target_feature(enable = "fma")]
+            fn with_fma(order: u32, t: f64) -> f64 {
+                bessel_series_with::<true>(order, t)
+            }
+            // SAFETY: the feature was detected on this CPU just above.
+            unsafe { with_fma(order, t) }
+        } else {
+            bessel_series_with::<false>(order, t)
+        }
     }
-    total * (-t).exp()
+    // A fused multiply is in the baseline here.
+    #[cfg(target_arch = "aarch64")]
+    {
+        bessel_series_with::<true>(order, t)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        bessel_series_with::<false>(order, t)
+    }
+}
+
+/// `1 / (k (k + v))` for `k` from one, as the double nearest it and what that
+/// leaves out, for orders zero and one.
+fn bessel_reciprocals(order: u32) -> &'static [(f64, f64)] {
+    static TABLES: [std::sync::OnceLock<Vec<(f64, f64)>>; 2] =
+        [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+    TABLES[order as usize].get_or_init(|| {
+        // Past every term the series reaches below the crossover: at thirty it
+        // has converged by seventy.
+        (0..128u32)
+            .map(|k| {
+                let divisor = f64::from(k.max(1) * (k.max(1) + order));
+                let high = 1.0 / divisor;
+                (high, -high.mul_add(divisor, -1.0) / divisor)
+            })
+            .collect()
+    })
+}
+
+#[inline(always)]
+fn bessel_series_with<const FMA: bool>(order: u32, t: f64) -> f64 {
+    use crate::ops::simd::product_error;
+    let reciprocals = bessel_reciprocals(order);
+    let half = t / 2.0;
+    let square = half * half;
+    let square_low = product_error::<FMA>(half, half, square);
+    // `(t/2)^v / v!` for the orders here, zero and one, is exact.
+    let (mut term, mut term_low) = (half.powi(order as i32), 0.0);
+    let (mut total, mut total_low) = (term, 0.0);
+    let mut k = 1;
+    while term > 1e-18 * total && k < reciprocals.len() {
+        let (reciprocal, reciprocal_low) = reciprocals[k];
+        let product = term * square;
+        let product_low = product_error::<FMA>(term, square, product);
+        let next = product * reciprocal;
+        let next_low = product_error::<FMA>(product, reciprocal, next);
+        term_low = (term_low * square + product_low + term * square_low) * reciprocal
+            + next_low
+            + product * reciprocal_low;
+        term = next;
+        let sum = total + term;
+        let back = sum - total;
+        total_low += (total - (sum - back)) + (term - back) + term_low;
+        total = sum;
+        k += 1;
+    }
+    total + total_low
+}
+
+/// `I_0(x)` itself, by the series below the crossover rather than as
+/// `exp(|x|) i0e(x)`, whose two exponentials cancel and leave both roundings.
+fn i0_scalar(x: f64) -> f64 {
+    let t = x.abs();
+    if t < BESSEL_CROSSOVER {
+        bessel_series(0, t)
+    } else if t.is_infinite() {
+        // `exp(inf) * i0e(inf)` is `inf * 0`; the limit is infinite.
+        f64::INFINITY
+    } else {
+        t.exp() * i0e_scalar(x)
+    }
+}
+
+/// `I_1(x)` itself, as [`i0_scalar`] is; odd, which the sign of `x` carries.
+fn i1_scalar(x: f64) -> f64 {
+    let t = x.abs();
+    if t < BESSEL_CROSSOVER {
+        let magnitude = bessel_series(1, t);
+        magnitude.copysign(x)
+    } else if t.is_infinite() {
+        x
+    } else {
+        t.exp() * i1e_scalar(x)
+    }
 }
 
 /// `exp(-t) I_order(t)` by the asymptotic series, for a `t` above the
@@ -1022,7 +1120,7 @@ fn i1e_scalar(x: f64) -> f64 {
     } else {
         scaled_bessel_asymptotic(1, t)
     };
-    if x < 0.0 { -magnitude } else { magnitude }
+    magnitude.copysign(x)
 }
 
 /// `exp(-|x|) I_1(x) / x`, which is `1/2` at the origin where the quotient is
@@ -1055,19 +1153,24 @@ fn direction(x: f64) -> f64 {
 
 wide_kernel!(
     /// `I_0(x)`, the modified Bessel function of the first kind, order zero.
-    I0, |x, _p| (x.abs()).exp() * i0e_scalar(x)
+    I0, |x, _p| i0_scalar(x)
 );
 wide_grad_kernel!(
     /// `d/dx I_0(x) = I_1(x)`.
-    I0_D, |x, g, _p| g * (x.abs()).exp() * i1e_scalar(x)
+    I0_D, |x, g, _p| g * i1_scalar(x)
 );
 wide_kernel!(
     /// `I_1(x)`, the modified Bessel function of the first kind, order one.
-    I1, |x, _p| (x.abs()).exp() * i1e_scalar(x)
+    I1, |x, _p| i1_scalar(x)
 );
 wide_grad_kernel!(
     /// `d/dx I_1(x) = I_0(x) - I_1(x) / x`, and `1/2` at the origin.
-    I1_D, |x, g, _p| g * (x.abs()).exp() * (i0e_scalar(x) - scaled_i1_over_x(x))
+    I1_D, |x, g, _p| if x.is_infinite() {
+        // `inf * (0 - 0)`; the slope grows without bound either way.
+        g * f64::INFINITY
+    } else {
+        g * (x.abs()).exp() * (i0e_scalar(x) - scaled_i1_over_x(x))
+    }
 );
 wide_kernel!(
     /// `exp(-|x|) I_0(x)`, which stays under one where `I_0` overflows.
@@ -1770,6 +1873,37 @@ mod tests {
         assert_eq!(trigamma(0.0), f64::INFINITY);
         assert_eq!(trigamma(-3.0), f64::INFINITY);
         assert!(trigamma(f64::NAN).is_nan());
+    }
+
+    /// Below the crossover the series is summed with every rounding carried:
+    /// in doubles it was 13 ulps out near thirty and 6 near nine. References
+    /// are 200-bit values at the doubles passed; each is the nearest float.
+    #[test]
+    fn i0_and_i1_are_correctly_rounded_below_the_crossover() {
+        let cases = [
+            (0, 26.6132, 28080652006.10763),
+            (0, 8.797, 903.2429611923352),
+            (0, 29.9, 708478330489.0145),
+            (1, -13.2106, -58198.322660846796),
+            (1, 29.5, 469968885416.2773),
+            (1, 0.25, 0.12597910894546793),
+        ];
+        for (order, x, want) in cases {
+            let got: f64 = if order == 0 {
+                i0_scalar(x)
+            } else {
+                i1_scalar(x)
+            };
+            assert_eq!(
+                got.to_bits(),
+                f64::to_bits(want),
+                "I_{order}({x}) = {got}, wanted {want}"
+            );
+        }
+        assert_eq!(i0_scalar(f64::INFINITY), f64::INFINITY);
+        assert_eq!(i0_scalar(f64::NEG_INFINITY), f64::INFINITY);
+        assert_eq!(i1_scalar(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!(i1_scalar(-0.0).is_sign_negative() && i1e_scalar(-0.0).is_sign_negative());
     }
 
     /// `I_v(t)` by its defining series in extended range, for a reference the
