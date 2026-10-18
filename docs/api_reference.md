@@ -2250,10 +2250,11 @@ assert row_std.shape == (2, 3)
 
   `polygamma(n, x)` is `(-1)^(n+1) n! zeta(n+1, x)`, and the two factors sit at
   opposite ends of the range: at order 169 the factorial is `4e304` while the
-  zeta at a large argument is far below the smallest double. They are combined
-  as logarithms rather than as a product, which is what makes the high orders
-  work — `polygamma(169, 1)` is `169!`, and `polygamma(169, 1e4)` is a perfectly
-  ordinary small number that forming the product would have lost.
+  zeta at a large argument is far below the smallest double. The factorial is
+  multiplied into each term of the zeta's sum between two half-powers of it,
+  so nothing underflows before the answer does — `polygamma(169, 1)` is
+  `169!`, and `polygamma(169, 100)` is `5.2e-36`, an ordinary small number,
+  though `100^-170` is not a double at all. Every order is within a few ulps.
 
   Orders above 1 take non-negative arguments only, and give NaN below zero.
   Reaching a positive argument by the recurrence sums terms that are enormous
