@@ -7,7 +7,9 @@
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use crate::tensor::borrow_wrapped_tensor;
-use crate::tensor::{comparison_pair_from_py, operands_from_py, tensor_from_py_value};
+use crate::tensor::{
+    comparison_pair_from_py, operands_from_py, tensor_from_py_value, wide_integer_pair,
+};
 use crate::tensor::{normalize_indexed_axis, normalize_optional_axes};
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor};
@@ -404,11 +406,15 @@ macro_rules! binary_forwarders {
 /// Python number or list on either side at the full width beside the other
 /// operand, so `lt([16777217], float32_x)` asks about the integer written.
 macro_rules! comparison_forwarders {
-    ($($name:ident => $doc:literal),* $(,)?) => {
+    ($($name:ident, $relation:ident => $doc:literal),* $(,)?) => {
         $(
             #[doc = $doc]
             #[pyfunction]
             pub fn $name(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+                let relation = engine::ops::comparison::Relation::$relation;
+                if let Some(result) = wide_integer_pair(input, other, relation)? {
+                    return Ok(PyTensor::from_tensor(result));
+                }
                 let (lhs, rhs) = comparison_pair_from_py(input, other)?;
                 Ok(PyTensor::from_tensor(lhs.$name(&rhs).map_err(_convert_error)?))
             }
@@ -515,12 +521,12 @@ binary_forwarders!(
 );
 
 comparison_forwarders!(
-    eq => "Element-wise equality, giving a boolean tensor.",
-    ge => "Element-wise `>=`, giving a boolean tensor.",
-    gt => "Element-wise `>`, giving a boolean tensor.",
-    le => "Element-wise `<=`, giving a boolean tensor.",
-    lt => "Element-wise `<`, giving a boolean tensor.",
-    ne => "Element-wise inequality, giving a boolean tensor.",
+    eq, Eq => "Element-wise equality, giving a boolean tensor.",
+    ge, Ge => "Element-wise `>=`, giving a boolean tensor.",
+    gt, Gt => "Element-wise `>`, giving a boolean tensor.",
+    le, Le => "Element-wise `<=`, giving a boolean tensor.",
+    lt, Lt => "Element-wise `<`, giving a boolean tensor.",
+    ne, Ne => "Element-wise inequality, giving a boolean tensor.",
 );
 
 /// Raise every element below `min` up to it.

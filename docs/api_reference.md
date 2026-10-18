@@ -980,7 +980,9 @@ A Python number beside an integer tensor is read at full width for a
 comparison -- `int32_tensor < 2**40` is `True` rather than refused -- and a
 Python int, or a list of them, is the exact integer it names beside a float
 tensor too: `float32_tensor == [16_777_217]` is `False` for a float32 holding
-`16777216.0`. A Python float beside a float tensor is read at that tensor's
+`16777216.0`. That holds past int64 as well, where no tensor can hold the int:
+`int64_tensor < 2**63` is `True` throughout, and a float64 holding `2.0**64`
+is not equal to `2**64 + 1`. A Python float beside a float tensor is read at that tensor's
 width, so `x == 0.1` asks about the float nearest `0.1` at the precision `x` is
 held in.
 

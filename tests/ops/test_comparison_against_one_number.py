@@ -146,3 +146,45 @@ def test_tensors_of_mixed_dtypes_are_compared_exactly_too():
                 swapped = SWAPPED.get(op, op)
                 want = [[_exact(swapped, a, b) for b in fv] for a in iv]
                 assert op(row, column).tolist() == want, op.__name__
+
+
+WIDE = [2**63, -(2**63) - 1, 2**64 + 1, 10**30, -(10**30), 2**128 - 2**104]
+WIDE += [2**128, 10**308 + 1, 10**400, -(10**400)]
+
+
+def _tensor_values(dtype):
+    if dtype == "bool":
+        return [True, False]
+    if dtype.startswith("int"):
+        return _values(dtype)
+    raw = [0.0, -1.0, 2.0**63, -(2.0**63), 2.0**64, 1e30, -1e30, 3.4e38, 1e308]
+    raw += [math.inf, -math.inf, math.nan]
+    with np.errstate(over="ignore"):
+        return [float(np.array(v, dtype=dtype)) for v in raw]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+def test_an_int_past_int64_is_compared_exactly_rather_than_refused(dtype):
+    # Beside an integer tensor it was refused -- `x < 2**63` raised -- and
+    # beside a float one it was rounded to the tensor's width first, so the
+    # float nearest it compared equal to it.
+    values = _tensor_values(dtype)
+    tensor = mt.Tensor(np.array(values, dtype=dtype), dtype=dtype)
+    for number in WIDE:
+        for op in OPERATORS:
+            want = [_exact(op, v, number) for v in values]
+            reflected = [_exact(SWAPPED.get(op, op), v, number) for v in values]
+            function = getattr(mt, op.__name__)
+            assert op(tensor, number).tolist() == want, (op.__name__, number)
+            assert op(number, tensor).tolist() == reflected, (op.__name__, number)
+            assert function(tensor, number).tolist() == want, (op.__name__, number)
+            assert function(number, tensor).tolist() == reflected, op.__name__
+
+
+def test_the_nearest_float_is_not_the_int():
+    nearest = float(2**64 + 1)  # 2**64
+    tensor = mt.Tensor([nearest], dtype="float64")
+    assert (tensor == 2**64 + 1).tolist() == [False]
+    assert (tensor < 2**64 + 1).tolist() == [True]
+    assert (tensor == 2**64).tolist() == [True]
+    assert (mt.Tensor([2**62]) < 2**63).tolist() == [True]

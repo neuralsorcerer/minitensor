@@ -703,6 +703,64 @@ pub(crate) fn operands_from_py(values: &[Bound<PyAny>]) -> PyResult<Vec<Tensor>>
         .collect()
 }
 
+/// A Python int outside int64, as [`engine::ops::compare_with_wide_integer`]
+/// takes one: the float64 nearest it -- the largest finite one past them all
+/// -- and how that float compares with it. `None` for anything else.
+fn wide_integer(value: &Bound<PyAny>) -> PyResult<Option<(f64, std::cmp::Ordering)>> {
+    if !value.is_exact_instance_of::<PyInt>() || value.extract::<i64>().is_ok() {
+        return Ok(None);
+    }
+    // Python rounds an int to the nearest float and refuses one past the
+    // largest, and its comparison of a float with an int is exact.
+    let nearest = match value.extract::<f64>() {
+        Ok(nearest) => nearest,
+        Err(_) if value.gt(0)? => f64::MAX,
+        Err(_) => f64::MIN,
+    };
+    let order = PyFloat::new(value.py(), nearest).compare(value)?;
+    Ok(Some((nearest, order)))
+}
+
+/// `reference ? value` for a Python int `value` outside int64, exactly, or
+/// `value ? reference` with `value_on_left`; `None` for any other value.
+///
+/// No tensor holds such an int, so it never reaches the comparison as one:
+/// beside an integer tensor it was refused -- `x < 2**63` raised -- and
+/// beside a float tensor it was rounded to that tensor's width first.
+pub(crate) fn wide_integer_comparison(
+    reference: &Tensor,
+    value: &Bound<PyAny>,
+    relation: engine::ops::comparison::Relation,
+    value_on_left: bool,
+) -> PyResult<Option<Tensor>> {
+    let Some((nearest, order)) = wide_integer(value)? else {
+        return Ok(None);
+    };
+    engine::ops::comparison::compare_with_wide_integer(
+        reference,
+        nearest,
+        order,
+        relation,
+        value_on_left,
+    )
+    .map(Some)
+    .map_err(_convert_error)
+}
+
+/// [`wide_integer_comparison`] for two operands, either of which may be the
+/// int; the other is read as an operand on its own.
+pub(crate) fn wide_integer_pair(
+    lhs: &Bound<PyAny>,
+    rhs: &Bound<PyAny>,
+    relation: engine::ops::comparison::Relation,
+) -> PyResult<Option<Tensor>> {
+    match (wide_integer(lhs)?.is_some(), wide_integer(rhs)?.is_some()) {
+        (false, true) => wide_integer_comparison(&operand_from_py(lhs)?, rhs, relation, false),
+        (true, false) => wide_integer_comparison(&operand_from_py(rhs)?, lhs, relation, true),
+        _ => Ok(None),
+    }
+}
+
 /// The two operands of a comparison, either of which may be the Python value.
 ///
 /// [`comparison_operands_from_py`] with the typed operand as the reference

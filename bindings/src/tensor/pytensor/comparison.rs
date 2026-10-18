@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use engine::ops::comparison::Relation;
 #[pymethods]
 impl PyTensor {
     /// Element-wise equality, giving a boolean tensor.
@@ -130,36 +131,54 @@ fn mixes_integer_and_float(lhs: &Tensor, rhs: &Tensor) -> bool {
 /// method doing exactly what its one-line wrapper above does.
 impl PyTensor {
     pub(crate) fn eq_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Eq, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.eq(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub(crate) fn ne_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Ne, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.ne(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub(crate) fn lt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Lt, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.lt(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub(crate) fn le_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Le, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.le(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub(crate) fn gt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Gt, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.gt(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub(crate) fn ge_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        if let Some(result) = wide_integer_comparison(&self.inner, other, Relation::Ge, false)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (lhs, rhs) = comparison_operands_from_py(&self.inner, other, false)?;
         let result = lhs.ge(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

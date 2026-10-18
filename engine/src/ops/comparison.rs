@@ -142,7 +142,7 @@ fn mixed_comparison(
 
 /// The six comparisons, as values, so one can be turned into another.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Relation {
+pub enum Relation {
     Eq,
     Ne,
     Lt,
@@ -179,6 +179,9 @@ impl Relation {
 enum Number {
     Integer(i64),
     Float(f64),
+    /// An integer outside int64, as the float64 nearest it -- or the largest
+    /// one, for an integer past them all -- and how that float compares with it.
+    Wide(f64, Ordering),
 }
 
 /// What `x ? value` comes to for every `x` of a tensor's dtype: one answer for
@@ -226,6 +229,11 @@ fn posed_for_integer(relation: Relation, value: Number, min: i64, max: i64) -> P
     const BOUND: f64 = 9_223_372_036_854_775_808.0;
     let (relation, threshold) = match value {
         Number::Integer(n) => (relation, n),
+        // Outside int64, so past every integer of any narrower range too.
+        Number::Wide(nearest, _) if nearest > 0.0 => {
+            return Posed::Constant(relation.holds_below());
+        }
+        Number::Wide(..) => return Posed::Constant(relation.holds_above()),
         Number::Float(f) if f.is_nan() => return Posed::Constant(relation == Relation::Ne),
         Number::Float(f) if f >= BOUND => return Posed::Constant(relation.holds_below()),
         Number::Float(f) if f < -BOUND => return Posed::Constant(relation.holds_above()),
@@ -291,10 +299,17 @@ fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<O
         DataType::Float64 => single.data().as_f64_slice().map(|v| Number::Float(v[0])),
         DataType::Bool => return Ok(None),
     };
-    let Some(value) = value else {
+    let Some(posed) = value.and_then(|value| pose(tensor.dtype(), value, relation)) else {
         return Ok(None);
     };
-    let posed = match (tensor.dtype(), value) {
+    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    answer_posed(tensor, single.shape(), output_shape, posed).map(Some)
+}
+
+/// `x ? value` for every `x` of `dtype`, posed at that dtype; `None` for a pair
+/// the plain comparison already makes at one dtype.
+fn pose(dtype: DataType, value: Number, relation: Relation) -> Option<Posed> {
+    Some(match (dtype, value) {
         (DataType::Float32, Number::Integer(n)) => {
             // To the nearest float32, which every int64 is within range of.
             let rounded = n as f32;
@@ -328,6 +343,25 @@ fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<O
                 )
             }
         }
+        (DataType::Float32, Number::Wide(nearest, order)) => {
+            // The float32 nearest the float64 nearest the integer: where the
+            // two differ, which way they differ is which way the integer lies,
+            // since no float64 is between it and its own nearest.
+            let rounded = nearest as f32;
+            let order = if f64::from(rounded) == nearest {
+                order
+            } else {
+                f64::from(rounded).total_cmp(&nearest)
+            };
+            posed_for_float(
+                relation,
+                rounded,
+                order,
+                f32::next_down,
+                f32::next_up,
+                f64::from,
+            )
+        }
         (DataType::Float64, Number::Integer(n)) => {
             let rounded = n as f64;
             let order = int_against_float(n, rounded).map_or(Ordering::Equal, Ordering::reverse);
@@ -340,31 +374,48 @@ fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<O
                 |v| v,
             )
         }
+        (DataType::Float64, Number::Wide(nearest, order)) => posed_for_float(
+            relation,
+            nearest,
+            order,
+            f64::next_down,
+            f64::next_up,
+            |v| v,
+        ),
         (DataType::Int32, value) => {
             posed_for_integer(relation, value, i64::from(i32::MIN), i64::from(i32::MAX))
         }
-        (DataType::Int64, value @ Number::Float(_)) => {
+        (DataType::Int64 | DataType::Bool, value @ Number::Wide(..))
+        | (DataType::Int64, value @ Number::Float(_)) => {
             posed_for_integer(relation, value, i64::MIN, i64::MAX)
         }
-        _ => return Ok(None),
-    };
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+        _ => return None,
+    })
+}
+
+/// The comparison [`pose`] arrived at, made: a tensor of its one answer, or
+/// the tensor against its number, which is laid in the single operand's own
+/// shape so that broadcasting comes out as it would have.
+fn answer_posed(
+    tensor: &Tensor,
+    single_shape: &Shape,
+    output_shape: Shape,
+    posed: Posed,
+) -> Result<Tensor> {
     let device = tensor.device();
     let (relation, number) = match posed {
         Posed::Constant(answer) => {
             let data = TensorData::from_vec_bool(vec![answer; output_shape.numel()], device);
-            return Ok(Some(Tensor::new(
+            return Ok(Tensor::new(
                 Arc::new(data),
                 output_shape,
                 DataType::Bool,
                 device,
                 false,
-            )));
+            ));
         }
         Posed::Against(relation, number) => (relation, number),
     };
-    // The number at the tensor's dtype, in the single operand's own shape so
-    // that broadcasting comes out as it would have.
     let data = match (tensor.dtype(), number) {
         (DataType::Float32, Number::Float(f)) => TensorData::from_vec_f32(vec![f as f32], device),
         (DataType::Float64, Number::Float(f)) => TensorData::from_vec_f64(vec![f], device),
@@ -378,7 +429,7 @@ fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<O
     };
     let other = Tensor::new(
         Arc::new(data),
-        single.shape().clone(),
+        single_shape.clone(),
         tensor.dtype(),
         device,
         false,
@@ -396,9 +447,42 @@ fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<O
     // left can still add leading ones; the result takes the shape the pair
     // broadcasts to, which reshaping a contiguous result to is free.
     if result.shape() != &output_shape {
-        return Ok(Some(result.reshape(output_shape)?));
+        return result.reshape(output_shape);
     }
-    Ok(Some(result))
+    Ok(result)
+}
+
+/// `tensor ? value`, or `value ? tensor` with `value_on_left`, for an integer
+/// `value` outside int64, exactly.
+///
+/// No tensor can hold such an integer, so it is given as the float64 nearest
+/// it -- the largest finite one for an integer past them all -- and how that
+/// float compares with it: enough to place it among the floats of either
+/// width, and outside every integer dtype's range. Read as a tensor, it was
+/// refused beside an integer tensor -- `x < 2**63` raised -- and rounded to
+/// the float tensor's width beside a float one, where the nearest float then
+/// compared equal to it.
+pub fn compare_with_wide_integer(
+    tensor: &Tensor,
+    nearest: f64,
+    nearest_against_value: Ordering,
+    relation: Relation,
+    value_on_left: bool,
+) -> Result<Tensor> {
+    let relation = if value_on_left {
+        relation.swapped()
+    } else {
+        relation
+    };
+    let posed = pose(
+        tensor.dtype(),
+        Number::Wide(nearest, nearest_against_value),
+        relation,
+    )
+    .ok_or_else(|| {
+        MinitensorError::internal_error("comparison: a wide integer has no reading at this dtype")
+    })?;
+    answer_posed(tensor, &Shape::scalar(), tensor.shape().clone(), posed)
 }
 
 macro_rules! cmp_op {
