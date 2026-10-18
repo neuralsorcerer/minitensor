@@ -1051,6 +1051,22 @@ fn first_list_leaf<'py>(item: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, 
 
 /// Select rows along dim 0 for integer fancy indexing, wrapping negative
 /// indices.
+/// [`select_rows`] without its copy where none is needed.
+///
+/// Positions that are all in range already are the selection's own input,
+/// and the selection checks them as it goes; only a negative position, which
+/// counts from the end, or one out of range, which has to be reported, needs
+/// the copy that resolves them. Copied every time, a million positions cost
+/// two fresh eight-megabyte buffers and ten times the selection itself.
+fn select_rows_in_place(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
+    if reference.ndim() > 0
+        && let Ok(rows) = engine::ops::shape_ops::index_select(reference, 0, vals)
+    {
+        return Ok(rows);
+    }
+    select_rows(reference, vals)
+}
+
 fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
     if reference.ndim() == 0 {
         return Err(PyIndexError::new_err("too many indices for a 0-d tensor"));
@@ -1077,8 +1093,11 @@ fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
 /// transposed indices into the right shape -- wrong values, no error. And it
 /// refuses a strided array outright, so `t[idx[::2]]` raised an error about
 /// alignment. The slice is taken only when the array is C-contiguous, where
-/// memory order is row-major order; otherwise the array's own iterator walks
-/// it in logical order, strides and all, with no copy through Python.
+/// memory order is row-major order; any other array is first copied into
+/// that order by NumPy. Walking it in place with the array's own iterator,
+/// whose index has a dimension count known only at run time, cost 18 ns a
+/// position: `t[idx[::2]]` over half a million took 9 ms, and the copy takes
+/// half of one.
 fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<usize>)>> {
     macro_rules! read {
         ($ty:ty) => {
@@ -1093,17 +1112,17 @@ fn numpy_integer_values(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<u
                 // SAFETY: read without rust-numpy's dynamic borrow, for the
                 // reason `convert_numpy_to_tensor` gives: the bindings never
                 // release the GIL, and nothing here calls back into Python.
-                let values: Vec<i64> = if array.is_c_contiguous() {
-                    unsafe { array.as_slice() }?
-                        .iter()
-                        .map(|&v| widen(v))
-                        .collect()
+                let ordered;
+                let array = if array.is_c_contiguous() {
+                    array
                 } else {
-                    unsafe { array.as_array() }
-                        .iter()
-                        .map(|&v| widen(v))
-                        .collect()
+                    ordered = as_c_contiguous(item)?;
+                    ordered.cast::<PyArrayDyn<$ty>>()?
                 };
+                let values: Vec<i64> = unsafe { array.as_slice() }?
+                    .iter()
+                    .map(|&v| widen(v))
+                    .collect();
                 return Ok(Some((values, shape)));
             }
         };
@@ -1299,28 +1318,37 @@ pub(crate) fn try_fancy_index_tensor(
         let t = pt.tensor();
         if matches!(t.dtype(), DataType::Int32 | DataType::Int64) && t.ndim() == 1 {
             let t = t.contiguous().map_err(_convert_error)?;
-            let vals: Vec<i64> = match t.dtype() {
-                DataType::Int32 => t
-                    .data()
-                    .as_i32_slice()
-                    .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
-                    .iter()
-                    .map(|&v| v as i64)
-                    .collect(),
-                _ => t
-                    .data()
-                    .as_i64_slice()
-                    .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
-                    .to_vec(),
-            };
-            return select_rows(reference, &vals).map(Some);
+            let missing = || PyRuntimeError::new_err("failed to read index tensor");
+            return match t.dtype() {
+                DataType::Int32 => {
+                    let vals: Vec<i64> = t
+                        .data()
+                        .as_i32_slice()
+                        .ok_or_else(missing)?
+                        .iter()
+                        .map(|&v| i64::from(v))
+                        .collect();
+                    select_rows_in_place(reference, &vals)
+                }
+                _ => select_rows_in_place(reference, t.data().as_i64_slice().ok_or_else(missing)?),
+            }
+            .map(Some);
         }
         return Ok(None);
     }
 
+    // A C-ordered int64 array is the positions as they stand.
+    if let Ok(array) = key.cast::<PyArrayDyn<i64>>()
+        && array.ndim() == 1
+        && array.is_c_contiguous()
+    {
+        // SAFETY: read without rust-numpy's dynamic borrow, for the reason
+        // `numpy_integer_values` gives.
+        return select_rows_in_place(reference, unsafe { array.as_slice() }?).map(Some);
+    }
     if let Some((values, shape)) = numpy_integer_values(key)? {
         if shape.len() == 1 {
-            return select_rows(reference, &values).map(Some);
+            return select_rows_in_place(reference, &values).map(Some);
         }
         return Ok(None);
     }
@@ -1338,7 +1366,7 @@ pub(crate) fn try_fancy_index_tensor(
                 Err(_) => return Ok(None),
             }
         }
-        return select_rows(reference, &vals).map(Some);
+        return select_rows_in_place(reference, &vals).map(Some);
     }
 
     Ok(None)
