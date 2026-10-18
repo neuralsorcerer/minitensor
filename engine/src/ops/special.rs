@@ -953,11 +953,6 @@ const BESSEL_CROSSOVER: f64 = 30.0;
 /// function of its input.
 const BESSEL_ASYMPTOTIC_TERMS: i32 = 16;
 
-/// `exp(-t) I_order(t)` by the power series, for a non-negative `t`.
-fn scaled_bessel_series(order: u32, t: f64) -> f64 {
-    bessel_series(order, t) * (-t).exp()
-}
-
 /// `I_order(t)` by the power series, for a non-negative `t` below
 /// [`BESSEL_CROSSOVER`] and an order of zero or one, rounded once.
 ///
@@ -1042,12 +1037,40 @@ fn bessel_series_with<const FMA: bool>(order: u32, t: f64) -> f64 {
     total + total_low
 }
 
-/// `I_0(x)` itself, by the series below the crossover rather than as
-/// `exp(|x|) i0e(x)`, whose two exponentials cancel and leave both roundings.
+/// [`bessel_series`] without the roundings carried, which is what float32
+/// asks of it.
+///
+/// Each term then carries the roundings of the ones before it, about forty
+/// of them near the crossover and 13 float64 ulps of the answer -- a
+/// ten-millionth of a float32 ulp, at a quarter of the cost.
+fn plain_bessel_series(order: u32, t: f64) -> f64 {
+    let reciprocals = bessel_reciprocals(order);
+    let half = t / 2.0;
+    let square = half * half;
+    let mut term = half.powi(order as i32);
+    let mut total = term;
+    let mut k = 1;
+    while term > 1e-18 * total && k < reciprocals.len() {
+        term *= square * reciprocals[k].0;
+        total += term;
+        k += 1;
+    }
+    total
+}
+
+/// [`i0_with`] as float64 takes it, for the tests.
+#[cfg(test)]
 fn i0_scalar(x: f64) -> f64 {
+    i0_with(x, bessel_series)
+}
+
+/// `I_0(x)` itself, by `series` below the crossover rather than as
+/// `exp(|x|) i0e(x)`, whose two exponentials cancel and leave both roundings.
+#[inline(always)]
+fn i0_with(x: f64, series: impl Fn(u32, f64) -> f64) -> f64 {
     let t = x.abs();
     if t < BESSEL_CROSSOVER {
-        bessel_series(0, t)
+        series(0, t)
     } else if t.is_infinite() {
         // `exp(inf) * i0e(inf)` is `inf * 0`; the limit is infinite.
         f64::INFINITY
@@ -1056,11 +1079,18 @@ fn i0_scalar(x: f64) -> f64 {
     }
 }
 
-/// `I_1(x)` itself, as [`i0_scalar`] is; odd, which the sign of `x` carries.
+/// [`i1_with`] as float64 takes it, for the tests.
+#[cfg(test)]
 fn i1_scalar(x: f64) -> f64 {
+    i1_with(x, bessel_series)
+}
+
+/// `I_1(x)` itself, as [`i0_with`] is; odd, which the sign of `x` carries.
+#[inline(always)]
+fn i1_with(x: f64, series: impl Fn(u32, f64) -> f64) -> f64 {
     let t = x.abs();
     if t < BESSEL_CROSSOVER {
-        let magnitude = bessel_series(1, t);
+        let magnitude = series(1, t);
         magnitude.copysign(x)
     } else if t.is_infinite() {
         x
@@ -1187,9 +1217,15 @@ fn scaled_bessel_asymptotic_slope(order: u32, t: f64) -> f64 {
 
 /// `exp(-|x|) I_0(x)`. Even, and bounded by one.
 fn i0e_scalar(x: f64) -> f64 {
+    i0e_with(x, bessel_series)
+}
+
+/// [`i0e_scalar`] with the power series it sums below the crossover.
+#[inline(always)]
+fn i0e_with(x: f64, series: impl Fn(u32, f64) -> f64) -> f64 {
     let t = x.abs();
     if t < BESSEL_CROSSOVER {
-        scaled_bessel_series(0, t)
+        series(0, t) * (-t).exp()
     } else {
         scaled_bessel_asymptotic(0, t)
     }
@@ -1197,9 +1233,15 @@ fn i0e_scalar(x: f64) -> f64 {
 
 /// `exp(-|x|) I_1(x)`. Odd, which the sign of `x` carries.
 fn i1e_scalar(x: f64) -> f64 {
+    i1e_with(x, bessel_series)
+}
+
+/// [`i1e_scalar`] with the power series it sums below the crossover.
+#[inline(always)]
+fn i1e_with(x: f64, series: impl Fn(u32, f64) -> f64) -> f64 {
     let t = x.abs();
     let magnitude = if t < BESSEL_CROSSOVER {
-        scaled_bessel_series(1, t)
+        series(1, t) * (-t).exp()
     } else {
         scaled_bessel_asymptotic(1, t)
     };
@@ -1234,54 +1276,94 @@ fn direction(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x.signum() }
 }
 
-wide_kernel!(
+/// A Bessel kernel whose float32 arm sums the plain series, which is exact to
+/// float32, and whose float64 arm the one with its roundings carried; `$series`
+/// names whichever it is in the body.
+macro_rules! bessel_kernel {
+    ($(#[$meta:meta])* $name:ident, |$x:ident, $series:ident| $body:expr) => {
+        $(#[$meta])*
+        const $name: UnitKernel = {
+            fn narrow(x: f32, _p: UnitParams<f32>) -> f32 {
+                let $x = f64::from(x);
+                let $series = plain_bessel_series;
+                ($body) as f32
+            }
+            fn wide($x: f64, _p: UnitParams<f64>) -> f64 {
+                let $series = bessel_series;
+                $body
+            }
+            (narrow, wide)
+        };
+    };
+}
+
+/// [`bessel_kernel!`] for the chain rule.
+macro_rules! bessel_grad_kernel {
+    ($(#[$meta:meta])* $name:ident, |$x:ident, $g:ident, $series:ident| $body:expr) => {
+        $(#[$meta])*
+        const $name: UnitGradKernel = {
+            fn narrow(x: f32, g: f32, _p: UnitParams<f32>) -> f32 {
+                let ($x, $g) = (f64::from(x), f64::from(g));
+                let $series = plain_bessel_series;
+                ($body) as f32
+            }
+            fn wide($x: f64, $g: f64, _p: UnitParams<f64>) -> f64 {
+                let $series = bessel_series;
+                $body
+            }
+            (narrow, wide)
+        };
+    };
+}
+
+bessel_kernel!(
     /// `I_0(x)`, the modified Bessel function of the first kind, order zero.
-    I0, |x, _p| i0_scalar(x)
+    I0, |x, series| i0_with(x, series)
 );
-wide_grad_kernel!(
+bessel_grad_kernel!(
     /// `d/dx I_0(x) = I_1(x)`.
-    I0_D, |x, g, _p| g * i1_scalar(x)
+    I0_D, |x, g, series| g * i1_with(x, series)
 );
-wide_kernel!(
+bessel_kernel!(
     /// `I_1(x)`, the modified Bessel function of the first kind, order one.
-    I1, |x, _p| i1_scalar(x)
+    I1, |x, series| i1_with(x, series)
 );
-wide_grad_kernel!(
+bessel_grad_kernel!(
     /// `d/dx I_1(x) = I_0(x) - I_1(x) / x`, and `1/2` at the origin.
-    I1_D, |x, g, _p| if x.is_infinite() {
+    I1_D, |x, g, series| if x.is_infinite() {
         // `inf * (0 - 0)`; the slope grows without bound either way.
         g * f64::INFINITY
     } else {
-        g * rescale(x.abs(), i0e_scalar(x) - scaled_i1_over_x(x))
+        g * rescale(x.abs(), i0e_with(x, series) - scaled_i1_over_x(x))
     }
 );
-wide_kernel!(
+bessel_kernel!(
     /// `exp(-|x|) I_0(x)`, which stays under one where `I_0` overflows.
-    I0E, |x, _p| i0e_scalar(x)
+    I0E, |x, series| i0e_with(x, series)
 );
-wide_grad_kernel!(
+bessel_grad_kernel!(
     /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`; past the
     /// crossover, the asymptotic series' own slope, odd as `i0e` is even.
-    I0E_D, |x, g, _p| {
+    I0E_D, |x, g, series| {
         if x.abs() >= BESSEL_CROSSOVER {
             g * direction(x) * scaled_bessel_asymptotic_slope(0, x.abs())
         } else {
-            g * (i1e_scalar(x) - direction(x) * i0e_scalar(x))
+            g * (i1e_with(x, series) - direction(x) * i0e_with(x, series))
         }
     }
 );
-wide_kernel!(
+bessel_kernel!(
     /// `exp(-|x|) I_1(x)`.
-    I1E, |x, _p| i1e_scalar(x)
+    I1E, |x, series| i1e_with(x, series)
 );
-wide_grad_kernel!(
+bessel_grad_kernel!(
     /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`; past
     /// the crossover, the asymptotic series' own slope, even as `i1e` is odd.
-    I1E_D, |x, g, _p| {
+    I1E_D, |x, g, series| {
         if x.abs() >= BESSEL_CROSSOVER {
             g * scaled_bessel_asymptotic_slope(1, x.abs())
         } else {
-            g * (i0e_scalar(x) - scaled_i1_over_x(x) - direction(x) * i1e_scalar(x))
+            g * (i0e_with(x, series) - scaled_i1_over_x(x) - direction(x) * i1e_with(x, series))
         }
     }
 );
@@ -2286,7 +2368,7 @@ mod tests {
         // and comparing points a whisker apart would measure the function's own
         // slope instead -- which at thirty is enough to swamp the agreement.
         for order in [0_u32, 1] {
-            let series = scaled_bessel_series(order, BESSEL_CROSSOVER);
+            let series = bessel_series(order, BESSEL_CROSSOVER) * (-BESSEL_CROSSOVER).exp();
             let asymptotic = scaled_bessel_asymptotic(order, BESSEL_CROSSOVER);
             assert!(
                 (series - asymptotic).abs() <= 1e-14 * series.abs(),

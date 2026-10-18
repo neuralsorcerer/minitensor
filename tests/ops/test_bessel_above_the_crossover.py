@@ -113,3 +113,24 @@ def test_far_out_the_scaled_forms_are_the_leading_term(name):
         assert _ulps(got, want) <= 1, x
     limits = getattr(F, name)(mt.Tensor([math.inf, -math.inf], dtype="float64"))
     assert [abs(v) for v in limits.tolist()] == [0.0, 0.0]
+
+
+@pytest.mark.parametrize("name", ["i0", "i1", "i0e", "i1e"])
+def test_float32_is_the_float64_answer_rounded_once(name):
+    # Below the crossover float32 sums the series without its roundings
+    # carried: 13 float64 ulps at worst, a ten-millionth of a float32 one.
+    rng = np.random.default_rng(173)
+    x = np.concatenate([rng.normal(0, 8, 4000), rng.uniform(-90, 90, 1000)])
+    x = x.astype(np.float32)
+    narrow = mt.Tensor(x, requires_grad=True)
+    wide = mt.Tensor(x.astype(np.float64), dtype="float64", requires_grad=True)
+    function = getattr(F, name)
+    function(narrow).sum().backward()
+    function(wide).sum().backward()
+    np.testing.assert_array_equal(
+        function(narrow.detach()).numpy(),
+        function(wide.detach()).numpy().astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        narrow.grad.numpy(), wide.grad.numpy().astype(np.float32)
+    )
