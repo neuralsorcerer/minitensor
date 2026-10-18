@@ -825,6 +825,98 @@ split_gemm!(
     GEMM_MIN_MACS_F64
 );
 
+/// `out[b] = lhs[b] @ rhs[b]` for each of `batch` products of `(m, k)` by
+/// `(k, n)`, with either operand read in the layout it is stored in: offered
+/// to the provider whole, and otherwise one product at a time through the
+/// engine's own kernels, which split a large one across the pool themselves.
+///
+/// What a product's gradient asks for. `g @ rhs^T` and `lhs^T @ g` read the
+/// forward operands transposed, and materializing each transpose first cost
+/// a copy of the operand on every backward pass. `out` arrives zeroed.
+macro_rules! stored_gemm {
+    ($name:ident, $ty:ty, $offer:path, $nn:path, $nt:path, $tn:path) => {
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn $name(
+            batch: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+            lhs: &[$ty],
+            lhs_storage: crate::ops::provider::Storage,
+            rhs: &[$ty],
+            rhs_storage: crate::ops::provider::Storage,
+            out: &mut [$ty],
+        ) -> Result<()> {
+            use crate::ops::provider::{Gemm, Storage};
+            // The kernels read through raw pointers sized by the shapes, so
+            // the storage is checked against them rather than trusted.
+            assert!(
+                lhs.len() == batch * m * k
+                    && rhs.len() == batch * k * n
+                    && out.len() == batch * m * n,
+                "product buffers do not match their shapes"
+            );
+            if batch == 0 || m == 0 || k == 0 || n == 0 {
+                return Ok(());
+            }
+            if matches!(
+                (lhs_storage, rhs_storage),
+                (Storage::Transposed, Storage::Transposed)
+            ) {
+                return Err(MinitensorError::internal_error(
+                    "a product with both operands transposed has no kernel here",
+                ));
+            }
+            if $offer(Gemm {
+                batch,
+                m,
+                k,
+                n,
+                lhs,
+                lhs_storage,
+                rhs,
+                rhs_storage,
+                out: &mut *out,
+            }) {
+                return Ok(());
+            }
+            let (a_size, b_size, c_size) = (m * k, k * n, m * n);
+            for b in 0..batch {
+                let a = lhs[b * a_size..(b + 1) * a_size].as_ptr();
+                let r = rhs[b * b_size..(b + 1) * b_size].as_ptr();
+                let c = out[b * c_size..(b + 1) * c_size].as_mut_ptr();
+                // SAFETY: each pointer is to a slice of exactly the extent its
+                // kernel reads or writes, checked above.
+                unsafe {
+                    match (lhs_storage, rhs_storage) {
+                        (Storage::RowMajor, Storage::RowMajor) => $nn(m, k, n, a, r, c),
+                        (Storage::RowMajor, Storage::Transposed) => $nt(m, k, n, a, r, c),
+                        _ => $tn(m, k, n, a, r, c),
+                    }
+                }
+            }
+            Ok(())
+        }
+    };
+}
+
+stored_gemm!(
+    stored_gemm_f32,
+    f32,
+    crate::ops::provider::offer_gemm_f32,
+    gemm_f32,
+    gemm_nt_f32,
+    gemm_tn_f32
+);
+stored_gemm!(
+    stored_gemm_f64,
+    f64,
+    crate::ops::provider::offer_gemm_f64,
+    gemm_f64,
+    gemm_nt_f64,
+    gemm_tn_f64
+);
+
 /// `c = a * b`, everything row-major and contiguous. The common case.
 ///
 /// # Safety

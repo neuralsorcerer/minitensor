@@ -293,8 +293,123 @@ pub struct MatMulBackward {
     pub lhs_requires_grad: bool,
     pub rhs_requires_grad: bool,
 }
+impl MatMulBackward {
+    /// Both gradients as products that read the forward operands where they
+    /// lie, `g @ rhs^T` and `lhs^T @ g`; `None` for operands that are not
+    /// float matrices of one dtype on the CPU with the same batch axes, which
+    /// take the general path.
+    ///
+    /// The general path transposes each operand into a copy and multiplies
+    /// that, so a backward through `x @ w` copied all of `w` and all of `x`
+    /// on every pass: half again the products' own cost for a weight matrix.
+    fn stored_backward(&self, grad_output: &Tensor) -> Result<Option<FxHashMap<TensorId, Tensor>>> {
+        use crate::ops::linalg::{stored_gemm_f32, stored_gemm_f64};
+        use crate::ops::provider::Storage;
+        use crate::tensor::{DataType, TensorData};
+        use std::sync::Arc;
+
+        let dtype = grad_output.dtype();
+        let all = [&self.lhs, &self.rhs, grad_output];
+        if !matches!(dtype, DataType::Float32 | DataType::Float64)
+            || all
+                .iter()
+                .any(|t| t.dtype() != dtype || !t.device().is_cpu())
+        {
+            return Ok(None);
+        }
+        let (lhs_dims, rhs_dims, grad_dims) = (
+            self.lhs.shape().dims(),
+            self.rhs.shape().dims(),
+            grad_output.shape().dims(),
+        );
+        let rank = lhs_dims.len();
+        if rank < 2 || rhs_dims.len() != rank || grad_dims.len() != rank {
+            return Ok(None);
+        }
+        let batch_axes = &lhs_dims[..rank - 2];
+        if &rhs_dims[..rank - 2] != batch_axes || &grad_dims[..rank - 2] != batch_axes {
+            return Ok(None);
+        }
+        let (m, k, n) = (lhs_dims[rank - 2], lhs_dims[rank - 1], rhs_dims[rank - 1]);
+        if rhs_dims[rank - 2] != k || grad_dims[rank - 2] != m || grad_dims[rank - 1] != n {
+            return Ok(None);
+        }
+        let batch: usize = batch_axes.iter().product();
+
+        let mut gradients = FxHashMap::default();
+        // The lhs gradient is `(m, k)`, from `g` and the rhs read transposed;
+        // the rhs one is `(k, n)`, from the lhs read transposed and `g`.
+        let product = |lhs_side: bool| -> Result<Tensor> {
+            let (rows, inner, cols) = if lhs_side { (m, n, k) } else { (k, m, n) };
+            let mut data =
+                TensorData::zeros_on_device(batch * rows * cols, dtype, grad_output.device());
+            macro_rules! run {
+                ($accessor:ident, $mut_accessor:ident, $gemm:path) => {{
+                    let missing =
+                        || MinitensorError::internal_error("matmul backward: operand dtype");
+                    let g = grad_output.data().$accessor().ok_or_else(missing)?;
+                    let out = data.$mut_accessor().ok_or_else(missing)?;
+                    if lhs_side {
+                        let r = self.rhs.data().$accessor().ok_or_else(missing)?;
+                        $gemm(
+                            batch,
+                            rows,
+                            inner,
+                            cols,
+                            g,
+                            Storage::RowMajor,
+                            r,
+                            Storage::Transposed,
+                            out,
+                        )?;
+                    } else {
+                        let l = self.lhs.data().$accessor().ok_or_else(missing)?;
+                        $gemm(
+                            batch,
+                            rows,
+                            inner,
+                            cols,
+                            l,
+                            Storage::Transposed,
+                            g,
+                            Storage::RowMajor,
+                            out,
+                        )?;
+                    }
+                }};
+            }
+            match dtype {
+                DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut, stored_gemm_f32),
+                _ => run!(as_f64_slice, as_f64_slice_mut, stored_gemm_f64),
+            }
+            let shape = if lhs_side {
+                self.lhs.shape()
+            } else {
+                self.rhs.shape()
+            };
+            Ok(Tensor::new(
+                Arc::new(data),
+                shape.clone(),
+                dtype,
+                grad_output.device(),
+                false,
+            ))
+        };
+        if self.lhs_requires_grad {
+            accumulate_grad(&mut gradients, self.input_ids[0], product(true)?)?;
+        }
+        if self.rhs_requires_grad {
+            accumulate_grad(&mut gradients, self.input_ids[1], product(false)?)?;
+        }
+        Ok(Some(gradients))
+    }
+}
+
 impl GradientFunction for MatMulBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        if let Some(gradients) = self.stored_backward(grad_output)? {
+            return Ok(gradients);
+        }
         let mut gradients = FxHashMap::default();
         gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
 
