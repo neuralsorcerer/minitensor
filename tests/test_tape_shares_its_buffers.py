@@ -149,10 +149,19 @@ def test_a_backward_through_copies_costs_no_more_than_the_copies_did(side):
     below anything a per-node copy could come in at.
     """
 
-    forward = _cost_per_level(side, with_backward=False)
-    both = _cost_per_level(side, with_backward=True)
-
-    assert both < forward * 3.0, (
-        f"{both * 1e3:.3f}ms per level with the backward against "
-        f"{forward * 1e3:.3f}ms without it"
+    # Up to three attempts, each a pair of best-of-five timings. On a shared
+    # runner one pair came back at 1.0ms against 0.16 -- the backward caught
+    # faulting in fresh pages while the forward did not -- and passed on the
+    # same commit everywhere else. A per-node copy is 10x on every attempt;
+    # noise is not, so the first attempt under the threshold settles it.
+    attempts = []
+    for _ in range(3):
+        forward = _cost_per_level(side, with_backward=False)
+        both = _cost_per_level(side, with_backward=True)
+        attempts.append((both, forward))
+        if both < forward * 3.0:
+            return
+    raise AssertionError(
+        "per level with the backward against without it: "
+        + ", ".join(f"{b * 1e3:.3f}ms against {f * 1e3:.3f}ms" for b, f in attempts)
     )
