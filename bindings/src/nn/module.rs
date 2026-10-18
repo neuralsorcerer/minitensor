@@ -60,7 +60,7 @@ use engine::ops::pooling::{
     max_pool1d_with_indices as max_pool1d_with_indices_op, max_pool2d as max_pool2d_op,
     max_pool2d_with_indices as max_pool2d_with_indices_op,
 };
-use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
+use engine::serialization::{ModelMetadata, ModelSerializer, SerializedModel};
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::intern;
@@ -2173,17 +2173,12 @@ impl PyModule {
 
         let metadata = ModelMetadata::new("module".to_string(), "Module".to_string());
         let model = SerializedModel::new(metadata, state);
-        match format.map(|s| s.to_lowercase()) {
-            Some(ref s) if s == "json" => {
-                ModelSerializer::save(&model, path, SerializationFormat::Json)
-            }
-            Some(ref s) if s == "bin" || s == "binary" => {
-                ModelSerializer::save(&model, path, SerializationFormat::Binary)
-            }
-            Some(ref s) if s == "msgpack" || s == "messagepack" => {
-                ModelSerializer::save(&model, path, SerializationFormat::MessagePack)
-            }
-            _ => ModelSerializer::save_auto(&model, path),
+        // An unknown format is refused; it used to fall through to the
+        // extension, so `save(path, format="xml")` wrote binary and said
+        // nothing.
+        match crate::serialization::parse_format(format)? {
+            Some(format) => ModelSerializer::save(&model, path, format),
+            None => ModelSerializer::save_auto(&model, path),
         }
         .map_err(_convert_error)
     }
@@ -2192,15 +2187,9 @@ impl PyModule {
     #[staticmethod]
     #[pyo3(signature = (path, format=None))]
     fn load_state_from(path: &str, format: Option<&str>) -> PyResult<PyStateDict> {
-        let model = match format.map(|s| s.to_lowercase()) {
-            Some(ref s) if s == "json" => ModelSerializer::load(path, SerializationFormat::Json),
-            Some(ref s) if s == "bin" || s == "binary" => {
-                ModelSerializer::load(path, SerializationFormat::Binary)
-            }
-            Some(ref s) if s == "msgpack" || s == "messagepack" => {
-                ModelSerializer::load(path, SerializationFormat::MessagePack)
-            }
-            _ => ModelSerializer::load_auto(path),
+        let model = match crate::serialization::parse_format(format)? {
+            Some(format) => ModelSerializer::load(path, format),
+            None => ModelSerializer::load_auto(path),
         }
         .map_err(_convert_error)?;
         Ok(crate::serialization::PyStateDict::from_engine(

@@ -646,28 +646,64 @@ impl PyDeploymentModel {
     }
 }
 
-/// Write `model` to `path`, in `format` or else the one its extension names.
-#[pyfunction]
-#[pyo3(signature = (model, path, format=None))]
-fn save_model(model: &PySerializedModel, path: &str, format: Option<&str>) -> PyResult<()> {
-    let format = if let Some(fmt_str) = format {
-        Some(PySerializationFormat::new(fmt_str)?)
-    } else {
-        None
-    };
-    PyModelSerializer::save(model, path, format.as_ref())
+/// The format a `format=` argument names, or `None` to take it from the
+/// path's extension. A name that is none of them is refused rather than read
+/// as "whatever the extension says".
+pub(crate) fn parse_format(format: Option<&str>) -> PyResult<Option<SerializationFormat>> {
+    format
+        .map(|name| PySerializationFormat::new(name).map(|parsed| parsed.inner))
+        .transpose()
 }
 
-/// Read a model saved by `save_model`, inferring the format from the file extension.
+/// Write a module or a `SerializedModel` to `path`, in `format` or the one its extension names.
+///
+/// The extension is read without regard to case: `.json`, `.msgpack`, and
+/// binary otherwise. A module's state dict is written with its class name as
+/// the architecture -- what `module.save(path)` writes.
+#[pyfunction]
+#[pyo3(signature = (model, path, format=None))]
+fn save_model(model: &Bound<PyAny>, path: &str, format: Option<&str>) -> PyResult<()> {
+    let format = parse_format(format)?;
+    let serialized = match model.extract::<PySerializedModel>() {
+        Ok(serialized) => serialized.inner,
+        Err(_) => {
+            let state = model.call_method0("state_dict").map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "save_model expects a SerializedModel or a module, got {}",
+                    model
+                        .get_type()
+                        .name()
+                        .map_or_else(|_| "?".into(), |n| n.to_string())
+                ))
+            })?;
+            let state = state.extract::<PyStateDict>()?;
+            let architecture = model.get_type().name()?.to_string();
+            SerializedModel::new(
+                ModelMetadata::new("module".to_string(), architecture),
+                state.inner,
+            )
+        }
+    };
+    match format {
+        Some(format) => ModelSerializer::save(&serialized, path, format),
+        None => ModelSerializer::save_auto(&serialized, path),
+    }
+    .map_err(_convert_error)
+}
+
+/// Read a model written by `save_model`, in `format` or the one its extension names.
+///
+/// A path whose extension names no format is read in the one the file's own
+/// first bytes do.
 #[pyfunction]
 #[pyo3(signature = (path, format=None))]
 fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
-    let format = if let Some(fmt_str) = format {
-        Some(PySerializationFormat::new(fmt_str)?)
-    } else {
-        None
-    };
-    PyModelSerializer::load(path, format.as_ref())
+    let model = match parse_format(format)? {
+        Some(format) => ModelSerializer::load(path, format),
+        None => ModelSerializer::load_auto(path),
+    }
+    .map_err(_convert_error)?;
+    Ok(PySerializedModel { inner: model })
 }
 
 pub fn register_serialization_module(py: Python, parent_module: &Bound<PyModule>) -> PyResult<()> {

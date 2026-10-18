@@ -3915,13 +3915,20 @@ True False
 
 ### Convenience functions
 
-- `save_model(model, path, format=None)`
-- `load_model(path, format=None)`
+- `save_model(model, path, format=None)` -- `model` is a module or a
+  `SerializedModel`; a module's state dict is written with its class name as
+  the architecture.
+- `load_model(path, format=None)` -- a `SerializedModel`, whose `state_dict`
+  a module's `load_state_dict` applies.
 
 Any module can write its own weights with `module.save(path, format=...)` and
 read a saved file back with `Module.load_state_from(path, format=...)`, which
-returns a `StateDict` that `load_state_dict` applies. Passing `format=None`
-picks the format from the file extension.
+returns a `StateDict` that `load_state_dict` applies. `format` is `"json"`,
+`"binary"` (or `"bin"`) or `"messagepack"` (or `"msgpack"`), and anything else
+is refused. Passing `format=None`, everywhere, picks the format from the file
+extension, read without regard to case -- `.json`, `.msgpack`, and binary
+otherwise -- and on loading a path whose extension names no format is read in
+the one its first bytes do.
 
 Parameters and buffers are keyed by name: `weight` / `bias` for the dense,
 convolution and normalization layers, `running_mean` / `running_var` for

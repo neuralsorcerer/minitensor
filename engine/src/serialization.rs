@@ -874,7 +874,12 @@ impl ModelSerializer {
     /// Save model with automatic format detection from extension
     pub fn save_auto<P: AsRef<Path>>(model: &SerializedModel, path: P) -> Result<()> {
         let path_ref = path.as_ref();
-        let format = match path_ref.extension().and_then(|ext| ext.to_str()) {
+        // Read without regard to case: `MODEL.JSON` is a JSON file.
+        let extension = path_ref
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase);
+        let format = match extension.as_deref() {
             Some("json") => SerializationFormat::Json,
             Some("bin") => SerializationFormat::Binary,
             Some("msgpack") => SerializationFormat::MessagePack,
@@ -887,7 +892,11 @@ impl ModelSerializer {
     /// Load model with automatic format detection from extension
     pub fn load_auto<P: AsRef<Path>>(path: P) -> Result<SerializedModel> {
         let path_ref = path.as_ref();
-        let format = match path_ref.extension().and_then(|ext| ext.to_str()) {
+        let extension = path_ref
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase);
+        let format = match extension.as_deref() {
             Some("json") => SerializationFormat::Json,
             Some("bin") => SerializationFormat::Binary,
             Some("msgpack") => SerializationFormat::MessagePack,

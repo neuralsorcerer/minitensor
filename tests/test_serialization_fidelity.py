@@ -40,6 +40,14 @@ from minitensor import nn
 
 FORMATS = ["json", "bin", "msgpack", "extension"]
 
+
+def _format(fmt):
+    """`extension` is no format's name: it is `None`, the format the path
+    names -- here an extension none of them use, which the file's own first
+    bytes then decide."""
+    return None if fmt == "extension" else fmt
+
+
 # NaN and both infinities, both zeros, the smallest subnormal and the largest
 # finite value -- every float a format is liable to mangle, in one row.
 #
@@ -65,10 +73,10 @@ def _roundtrip(build, path, fmt, seed=0):
     model = build()
     saved = [np.asarray(p).copy() for p in model.parameters()]
 
-    model.save(str(path), fmt)
+    model.save(str(path), _format(fmt))
     mt.manual_seed(seed + 999)  # different initial parameters
     fresh = build()
-    fresh.load_state_dict(type(model).load_state_from(str(path), fmt))
+    fresh.load_state_dict(type(model).load_state_from(str(path), _format(fmt)))
     return saved, [np.asarray(p).copy() for p in fresh.parameters()]
 
 
@@ -109,11 +117,11 @@ def test_the_dtype_survives_as_well_as_the_values(tmp_path, fmt, dtype):
         model = nn.Sequential([nn.DenseLayer(4, 3)])
         saved = [np.asarray(p).copy() for p in model.parameters()]
 
-        model.save(str(tmp_path / f"m.{fmt}"), fmt)
+        model.save(str(tmp_path / f"m.{fmt}"), _format(fmt))
         mt.manual_seed(999)
         fresh = nn.Sequential([nn.DenseLayer(4, 3)])
         fresh.load_state_dict(
-            type(model).load_state_from(str(tmp_path / f"m.{fmt}"), fmt)
+            type(model).load_state_from(str(tmp_path / f"m.{fmt}"), _format(fmt))
         )
 
         assert [p.dtype for p in fresh.parameters()] == [dtype] * len(saved)
@@ -137,10 +145,10 @@ def test_values_a_text_format_cannot_spell_survive(tmp_path, fmt):
     before = np.asarray(weight).copy()
 
     path = tmp_path / f"awkward.{fmt}"
-    model.save(str(path), fmt)
+    model.save(str(path), _format(fmt))
     mt.manual_seed(999)
     fresh = nn.Sequential([nn.DenseLayer(8, 8)])
-    fresh.load_state_dict(type(model).load_state_from(str(path), fmt))
+    fresh.load_state_dict(type(model).load_state_from(str(path), _format(fmt)))
     after = np.asarray(list(fresh.parameters())[0])
 
     np.testing.assert_array_equal(_bits(before), _bits(after))
