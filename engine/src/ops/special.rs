@@ -30,12 +30,11 @@ use crate::{
     tensor::{DataType, Tensor},
 };
 use libm::erfc;
-// `lgamma` from `libm`, which this crate already depends on, and `erf_inverse`
-// from the AS241 quantile in `ops::gaussian` -- see there for why the inverse
-// error function is spelled through the normal quantile's lower tail. Both
-// replaced `statrs`, whose only other use was the truncated-normal sampler.
+// `erf_inverse` from the AS241 quantile in `ops::gaussian` -- see there for
+// why the inverse error function is spelled through the normal quantile's
+// lower tail. It replaced `statrs`, whose only other use was the
+// truncated-normal sampler.
 use crate::ops::gaussian::erf_inverse as erf_inv;
-use libm::lgamma as ln_gamma;
 use std::f64::consts::{LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
@@ -458,12 +457,13 @@ const BERNOULLI: [f64; 7] = [
 /// Where the recurrence stops and the expansion below takes over, for a zeta
 /// of order `s`.
 ///
-/// Twelve is where the first dropped term falls under 1e-14 of the answer for
-/// the small orders; the higher ones need the argument to lead the order,
-/// because the expansion's terms carry a rising factorial in `s`. Stopping at
-/// six, as some implementations do, leaves a thousand times more error.
+/// Where the first term the expansion drops falls under 2^-56 of its leading
+/// one, from 12.9 at order two to 201 at order a hundred. The expansion's
+/// terms carry a rising factorial in `s`, so the argument has to lead the
+/// order; `s + 7`, which this was, left that term at 1e-13 for order eleven,
+/// 600 ulps of `polygamma(10, x)`.
 fn expansion_threshold(s: f64) -> f64 {
-    (s + 7.0).max(12.0)
+    2.0 * s + 12.0
 }
 
 /// `zeta(s, a)` divided by `a^-s`, for an `a` already large enough, by
@@ -489,41 +489,83 @@ fn hurwitz_bracket(s: f64, a: f64) -> f64 {
     total
 }
 
-/// `zeta(s, x)` divided by `|x|^-s`, and nothing else.
+/// `n!` for `n` up to 170, the last that is finite, as the double nearest it.
 ///
-/// Everything is measured against the first term, which is the largest one for
-/// a positive argument, so the sum stays near one and the scale lives in the
-/// exponent outside. That is what lets a high order work at all: `n!` sits near
-/// the top of the range and `x^-s` near the bottom, and multiplying them loses
-/// the answer to overflow or underflow on the way to a value that fits.
-fn scaled_zeta(order: u32, x: f64) -> f64 {
-    let exponent = order as i32 + 1;
-    let threshold = expansion_threshold(exponent as f64);
-    let steps = if x < threshold {
-        (threshold - x).ceil() as i64
-    } else {
-        0
-    };
-    let argument = x + steps as f64;
-    let reference = x.abs();
-
-    // `(x + k)^-s / |x|^-s`, which `powi` keeps the sign of when the argument
-    // starts out negative and the recurrence has yet to walk it up.
-    let mut total = 0.0;
-    for step in 0..steps {
-        total += (reference / (x + step as f64)).powi(exponent);
-    }
-    total + (reference / argument).powi(exponent) * hurwitz_bracket(exponent as f64, argument)
+/// Built once, with each product's rounding carried: a hundred plain
+/// multiplications leave it several ulps out, and every `polygamma` element
+/// used to multiply it out again for itself.
+fn factorial(n: u32) -> f64 {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = vec![1.0, 1.0];
+        let (mut high, mut low) = (1.0f64, 0.0f64);
+        for k in 2..=170u32 {
+            let k = f64::from(k);
+            let product = high * k;
+            // The rounding of `high * k`, exactly; `mul_add` cannot overflow
+            // where splitting the factors in halves would, near the top.
+            low = high.mul_add(k, -product) + low * k;
+            high = product;
+            table.push(high + low);
+        }
+        table
+    })[n as usize]
 }
 
-/// `polygamma(order, x)` for an order of one or more and an argument that is
-/// neither a pole nor beyond [`RECURRENCE_FLOOR`].
+/// `polygamma(order, x)` for an order of one or more and a positive argument:
+/// `(-1)^(n+1) n! zeta(n + 1, x)`, by the recurrence up to
+/// [`expansion_threshold`] and the expansion past it, summed from the far end
+/// with every rounding carried.
+///
+/// Each term is `n! (x + k)^-s`, and three things about it decide the error.
+/// `x + k` rounds, and raised to the power that comes out `s` times over, so it
+/// is taken as a sum and the rounding it leaves, `hi + lo`, and the term is
+/// `hi^-s (1 - s lo / hi)`. The power is `powf`, rounded about once. And `n!`
+/// goes in as `(n! hi^(-s/2)) hi^(-s/2)`, which underflows only where the
+/// answer does: `hi^-s` alone vanishes long before `n! hi^-s`.
+///
+/// What this replaced scaled every term by `|x|^-s` and restored the scale as
+/// `exp(lgamma(s) - s ln x)`. The ratios in the sum carried their rounding `s`
+/// times and the exponential its argument's, and between them `polygamma` was
+/// 27 ulps out at order three and 600 at order ten; it is now within four.
 fn polygamma_series(order: u32, x: f64) -> f64 {
-    let s = order as f64 + 1.0;
     let sign = if order.is_multiple_of(2) { -1.0 } else { 1.0 };
-    // `n! * |x|^-s` in the exponent rather than as a product, for the reason
-    // `scaled_zeta` divides by `|x|^-s` in the first place.
-    sign * (ln_gamma(s) - s * x.abs().ln()).exp() * scaled_zeta(order, x)
+    let s = f64::from(order + 1);
+    let factorial = factorial(order);
+    let threshold = expansion_threshold(s);
+    let steps = if x < threshold {
+        (threshold - x).ceil()
+    } else {
+        0.0
+    };
+    // `n! (x + k)^-s`, times `scale` before the second half of the power.
+    // The tail's scale is the expansion's bracket, near `x / (s - 1)` and so
+    // large exactly where the power is small: applied after it, the product
+    // went subnormal first and came back 1e-7 out from 5.8e-308.
+    let term = |k: f64, scale: f64| {
+        let hi = x + k;
+        let back = hi - x;
+        let lo = (x - (hi - back)) + (k - back);
+        let half = hi.powf(-0.5 * s);
+        ((factorial * half) * scale) * half * (1.0 - s * lo / hi)
+    };
+    let mut total = term(steps, hurwitz_bracket(s, x + steps));
+    let mut carried = 0.0;
+    let mut k = steps - 1.0;
+    while k >= 0.0 {
+        let next = term(k, 1.0);
+        let sum = total + next;
+        let back = sum - total;
+        carried += (total - (sum - back)) + (next - back);
+        total = sum;
+        k -= 1.0;
+    }
+    // An infinite answer -- `x` so small its first term overflows -- is the
+    // answer, and its compensation `inf - inf`.
+    if total.is_infinite() {
+        return sign * total;
+    }
+    sign * (total + carried)
 }
 
 // --- digamma ---------------------------------------------------------------
@@ -1955,6 +1997,32 @@ mod tests {
         for &x in &[0.25_f64, 0.5, 1.0, 2.5, 7.0, 40.0] {
             assert!((polygamma_scalar(0, x) - digamma_scalar(x)).abs() < 1e-15);
             assert!((polygamma_scalar(1, x) - trigamma(x)).abs() <= 1e-14 * trigamma(x).abs());
+        }
+    }
+
+    /// Orders and arguments where the scaled sum was tens to hundreds of ulps
+    /// out -- the middle of the range at high order, and the edge of
+    /// underflow, where the tail went subnormal before its bracket was
+    /// applied. References are 200-bit values at the doubles passed.
+    #[test]
+    fn polygamma_is_within_a_few_ulps_at_every_order() {
+        let cases = [
+            (3, 12.0883, 0.0012804458934699784),
+            (5, 9.5, 0.0004002927721168353),
+            (10, 4.25, -0.49561885678680834),
+            (10, 18.75, -8.733691867796471e-08),
+            (30, 138900000000.0, -4.628832313880745e-304),
+            (100, 13890.0, -5.0273774960827806e-259),
+            (2, 0.001, -2000000002.3976321),
+            (169, 25.0, 9.573800601666352e+66),
+        ];
+        for (order, x, want) in cases {
+            let got: f64 = polygamma_scalar(order, x);
+            let ulps = (got - want).abs() / (want.abs() * f64::EPSILON / 2.0);
+            assert!(
+                ulps <= 8.0,
+                "polygamma({order}, {x}) = {got}, wanted {want} ({ulps} half-ulps)"
+            );
         }
     }
 
