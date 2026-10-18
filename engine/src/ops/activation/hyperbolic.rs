@@ -859,10 +859,14 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
 /// cancels every digit, and `elu(-1e-8)` in float32 came out as exactly 0.
 /// The scalar `exp_m1` that fixes that is three times the cost of the
 /// vectorized one.
+///
+/// The scales are float64 and the products taken there, so each is rounded
+/// once into float32: as float32 constants multiplied in float32, `selu`'s
+/// were each half an ulp out before the product rounded too.
 fn scaled_expm1_unit_f32(
     tensor: &Tensor,
-    positive_scale: f32,
-    negative_scale: f32,
+    positive_scale: f64,
+    negative_scale: f64,
 ) -> Result<TensorData> {
     // SAFETY: `expm1` initializes every element of `dst` before the select
     // reads it back; see `map_f32_kernel`.
@@ -871,17 +875,18 @@ fn scaled_expm1_unit_f32(
             kernel.expm1(src, dst);
             for (o, &x) in dst.iter_mut().zip(src) {
                 let em1 = o.assume_init_read();
-                o.write(if x > 0.0 {
-                    positive_scale * x
-                } else {
-                    negative_scale * em1
-                });
+                // Both arms formed and one selected: as a branch on the sign
+                // it was mispredicted for half of any mixed-sign input, and
+                // cost five times the exponential it follows.
+                let positive = (positive_scale * f64::from(x)) as f32;
+                let negative = (negative_scale * f64::from(em1)) as f32;
+                o.write(std::hint::select_unpredictable(x > 0.0, positive, negative));
             }
         })
     }
 }
 
-pub(crate) fn elu_f32(tensor: &Tensor, alpha: f32) -> Result<TensorData> {
+pub(crate) fn elu_f32(tensor: &Tensor, alpha: f64) -> Result<TensorData> {
     scaled_expm1_unit_f32(tensor, 1.0, alpha)
 }
 
@@ -900,8 +905,8 @@ float_unary_kernel_param!(
 );
 
 pub(crate) fn selu_f32(tensor: &Tensor) -> Result<TensorData> {
-    const ALPHA: f32 = 1.6732632;
-    const SCALE: f32 = 1.050701;
+    const ALPHA: f64 = 1.673_263_242_354_377_2;
+    const SCALE: f64 = 1.050_700_987_355_480_5;
     scaled_expm1_unit_f32(tensor, SCALE, SCALE * ALPHA)
 }
 
@@ -948,8 +953,10 @@ float_unary_kernel!(softsign_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
     if x.is_infinite() {
         return x.signum();
     }
-    let denom = 1.0 + x.abs();
-    x / denom
+    // In float64 and rounded once: in float32 the sum and the quotient each
+    // rounded, and the answer was an ulp and a third out.
+    let x = f64::from(x);
+    (x / (1.0 + x.abs())) as f32
 });
 
 float_unary_kernel!(softsign_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {

@@ -670,7 +670,7 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
         return elu(&widened, alpha);
     }
     let output_data = match tensor.dtype() {
-        DataType::Float32 => elu_f32(tensor, alpha as f32)?,
+        DataType::Float32 => elu_f32(tensor, alpha)?,
         DataType::Float64 => elu_f64(tensor, alpha)?,
         _ => {
             return Err(MinitensorError::invalid_operation(

@@ -170,16 +170,36 @@ unit_grad_kernel!(
     }
 );
 
-unit_kernel!(
-    /// `x * hardsigmoid(x)`: the piecewise-linear stand-in for `silu`.
-    HARDSWISH, |x, _p| if x <= -3.0 {
-        0.0
-    } else if x >= 3.0 {
-        x
-    } else {
-        x * (x + 3.0) / 6.0
+/// `x * hardsigmoid(x)`: the piecewise-linear stand-in for `silu`.
+///
+/// A float32 `x` is taken through float64, where `x (x + 3)` is exact -- the
+/// sum needs at most 26 bits and the product 50 -- so the division is the one
+/// rounding before the last. In float32 all three operations rounded, and the
+/// answer was nearly two ulps out.
+const HARDSWISH: UnitKernel = {
+    #[inline(always)]
+    fn narrow(x: f32, _p: UnitParams<f32>) -> f32 {
+        if x <= -3.0 {
+            0.0
+        } else if x >= 3.0 {
+            x
+        } else {
+            let x = f64::from(x);
+            (x * (x + 3.0) / 6.0) as f32
+        }
     }
-);
+    #[inline(always)]
+    fn wide(x: f64, _p: UnitParams<f64>) -> f64 {
+        if x <= -3.0 {
+            0.0
+        } else if x >= 3.0 {
+            x
+        } else {
+            x * (x + 3.0) / 6.0
+        }
+    }
+    (narrow, wide)
+};
 unit_grad_kernel!(
     /// `d/dx x(x+3)/6 = (2x+3)/6` on the quadratic segment; `0` and `1` on the
     /// flats either side.

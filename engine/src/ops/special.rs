@@ -194,42 +194,66 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
 
 // --- logit -----------------------------------------------------------------
 
-unit_kernel!(
-    /// `log(x / (1 - x))`, the inverse of `sigmoid`, taken two ways depending
-    /// on where the input sits.
-    ///
-    /// The ratio is near one when `x` is near a half, and its logarithm then
-    /// keeps almost none of the answer: 1.1e-11 measured there against a
-    /// 40-digit reference, where the same quantity is a rounding anywhere
-    /// else. On `[1/4, 3/4]` the identity `logit(x) = 2 * atanh(2x - 1)` moves
-    /// the problem to `atanh` near zero, where it is not one -- and `2x - 1`
-    /// is exact across exactly that interval, since `2x` lands in `[1/2, 3/2]`
-    /// where subtracting one takes nothing away. Substituting the `log1p` form
-    /// of `atanh` collapses the identity to a single logarithm, so the
-    /// accurate branch costs what the inaccurate one did.
-    ///
-    /// Outside that interval the direct form is the accurate one and the
-    /// identity is not: `2x - 1` rounds to exactly -1 as `x` approaches zero,
-    /// and every digit of a small `x` goes with it.
-    ///
-    /// `p[0]` is the clamp: inputs are pulled into `[eps, 1 - eps]` first, so
-    /// a probability that has reached 0 or 1 by rounding gives a large finite
-    /// number instead of an infinity. A NaN there means no clamp was asked
-    /// for -- there is no epsilon that is not a number -- and then an input
-    /// outside `[0, 1]` gives NaN, as the formula says it should.
-    LOGIT, |x, p| {
+/// `log(x / (1 - x))`, the inverse of `sigmoid`, taken two ways depending on
+/// where the input sits.
+///
+/// The ratio is near one when `x` is near a half, and its logarithm then keeps
+/// almost none of the answer: 1.1e-11 measured there against a 40-digit
+/// reference, where the same quantity is a rounding anywhere else. On
+/// `[1/4, 3/4]` the identity `logit(x) = 2 * atanh(2x - 1)` moves the problem
+/// to `atanh` near zero, where it is not one -- and `2x - 1` is exact across
+/// exactly that interval, since `2x` lands in `[1/2, 3/2]` where subtracting
+/// one takes nothing away. Substituting the `log1p` form of `atanh` collapses
+/// the identity to a single logarithm, so the accurate branch costs what the
+/// inaccurate one did.
+///
+/// Outside that interval the direct form is the accurate one and the identity
+/// is not: `2x - 1` rounds to exactly -1 as `x` approaches zero, and every
+/// digit of a small `x` goes with it.
+#[inline(always)]
+fn logit_of(z: f64) -> f64 {
+    if (z - 0.5).abs() <= 0.25 {
+        ((2.0 * z - 1.0) / (1.0 - z)).ln_1p()
+    } else {
+        (z / (1.0 - z)).ln()
+    }
+}
+
+/// [`logit_of`] behind the clamp.
+///
+/// `p[0]` is the clamp: inputs are pulled into `[eps, 1 - eps]` first, so a
+/// probability that has reached 0 or 1 by rounding gives a large finite number
+/// instead of an infinity. A NaN there means no clamp was asked for -- there
+/// is no epsilon that is not a number -- and then an input outside `[0, 1]`
+/// gives NaN, as the formula says it should.
+///
+/// A float32 input is clamped at its own width, where the gradient tests the
+/// same bounds, and its logarithm then taken in float64 and rounded once: in
+/// float32 the quotient and the logarithm each rounded, and the answer was
+/// up to 2.7 ulps out. Float64 needs neither of the two forms there. The
+/// float32 nearest a half other than a half is `2^-25` from it, where the
+/// answer is `2^-23` and the quotient's rounding, `2^-53` of the answer's
+/// argument, is a billionth of the answer -- so the direct form is exact to
+/// float32 everywhere, and costs one logarithm and no branch.
+const LOGIT: UnitKernel = {
+    fn narrow(x: f32, p: UnitParams<f32>) -> f32 {
+        let z = f64::from(if p[0].is_nan() {
+            x
+        } else {
+            x.clamp(p[0], 1.0 - p[0])
+        });
+        (z / (1.0 - z)).ln() as f32
+    }
+    fn wide(x: f64, p: UnitParams<f64>) -> f64 {
         let z = if p[0].is_nan() {
             x
         } else {
             x.clamp(p[0], 1.0 - p[0])
         };
-        if (z - 0.5).abs() <= 0.25 {
-            ((2.0 * z - 1.0) / (1.0 - z)).ln_1p()
-        } else {
-            (z / (1.0 - z)).ln()
-        }
+        logit_of(z)
     }
-);
+    (narrow, wide)
+};
 unit_grad_kernel!(
     /// `d/dx logit(x) = 1 / (x(1 - x))`, and zero wherever the clamp took
     /// over: there the output does not vary with the input at all.
