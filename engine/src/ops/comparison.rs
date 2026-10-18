@@ -76,11 +76,13 @@ fn int_against_float(int: i64, float: f64) -> Option<Ordering> {
 /// [`int_against_float`]. `None` when the operands are not such a pair.
 ///
 /// `holds` says whether an ordering satisfies the comparison, read with the
-/// operands in their original order; a NaN satisfies only `!=`.
+/// operands in their original order, and `in_f64` is the same comparison of
+/// two float64s; a NaN satisfies only `!=`.
 fn mixed_comparison(
     lhs: &Tensor,
     rhs: &Tensor,
-    holds: fn(Ordering) -> bool,
+    holds: impl Fn(Ordering) -> bool + Copy + Send + Sync,
+    in_f64: impl Fn(f64, f64) -> bool + Copy + Send + Sync,
     nan_holds: bool,
 ) -> Result<Option<(TensorData, Shape)>> {
     let is_int = |t: &Tensor| matches!(t.dtype(), DataType::Int32 | DataType::Int64);
@@ -92,44 +94,315 @@ fn mixed_comparison(
     } else {
         return Ok(None);
     };
-    // Both widenings are exact: every int32 is an int64, every float32 a float64.
-    let ints = int_side.astype(DataType::Int64)?;
-    let floats = float_side.astype(DataType::Float64)?;
-    let int_data = ints.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("comparison: integer operand did not widen to int64")
-    })?;
-    let float_data = floats.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("comparison: float operand did not widen to float64")
-    })?;
     let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let missing = || MinitensorError::internal_error("comparison: operand slice missing");
     let answer = move |ordering: Option<Ordering>| match ordering {
         Some(ordering) => holds(ordering),
         None => nan_holds,
     };
-    let data = if int_on_left {
-        broadcast_binary_data(
-            &ints,
-            &floats,
-            int_data,
-            float_data,
-            &output_shape,
-            |a, b| answer(int_against_float(a, b)),
-        )?
-    } else {
-        broadcast_binary_data(
-            &floats,
-            &ints,
-            float_data,
-            int_data,
-            &output_shape,
-            |b, a| answer(int_against_float(a, b).map(Ordering::reverse)),
-        )?
+    // Each pair is widened as it is read rather than both tensors copied
+    // first. A float is a float64 exactly, and so is every int32 and every
+    // int64 within 2^53, and those pairs compare exactly as float64s -- with
+    // the plain operator, which vectorizes. Only an int64 past 2^53 needs the
+    // floor.
+    macro_rules! compare_as {
+        ($int_slice:ident, $float_slice:ident, $exact:expr) => {{
+            let ints = int_side.data().$int_slice().ok_or_else(missing)?;
+            let floats = float_side.data().$float_slice().ok_or_else(missing)?;
+            let exact = $exact;
+            if int_on_left {
+                broadcast_binary_data(int_side, float_side, ints, floats, &output_shape, |a, b| {
+                    let b = f64::from(b);
+                    match exact(a) {
+                        Some(a) => in_f64(a, b),
+                        None => answer(int_against_float(a.into(), b)),
+                    }
+                })?
+            } else {
+                broadcast_binary_data(float_side, int_side, floats, ints, &output_shape, |b, a| {
+                    let b = f64::from(b);
+                    match exact(a) {
+                        Some(a) => in_f64(b, a),
+                        None => answer(int_against_float(a.into(), b).map(Ordering::reverse)),
+                    }
+                })?
+            }
+        }};
+    }
+    let int32 = |a: i32| Some(f64::from(a));
+    let int64 = |a: i64| (a.unsigned_abs() <= 1 << 53).then_some(a as f64);
+    let data = match (int_side.dtype(), float_side.dtype()) {
+        (DataType::Int32, DataType::Float32) => compare_as!(as_i32_slice, as_f32_slice, int32),
+        (DataType::Int32, _) => compare_as!(as_i32_slice, as_f64_slice, int32),
+        (_, DataType::Float32) => compare_as!(as_i64_slice, as_f32_slice, int64),
+        _ => compare_as!(as_i64_slice, as_f64_slice, int64),
     };
     Ok(Some((data, output_shape)))
 }
 
+/// The six comparisons, as values, so one can be turned into another.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Relation {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Relation {
+    /// The relation `b ? a` that holds exactly when `a ? b` does.
+    fn swapped(self) -> Self {
+        match self {
+            Relation::Lt => Relation::Gt,
+            Relation::Le => Relation::Ge,
+            Relation::Gt => Relation::Lt,
+            Relation::Ge => Relation::Le,
+            same => same,
+        }
+    }
+
+    /// Whether `x ? value` holds of an `x` above the value.
+    fn holds_above(self) -> bool {
+        matches!(self, Relation::Ne | Relation::Gt | Relation::Ge)
+    }
+
+    /// Whether `x ? value` holds of an `x` below the value.
+    fn holds_below(self) -> bool {
+        matches!(self, Relation::Ne | Relation::Lt | Relation::Le)
+    }
+}
+
+/// A single number, read from a one-element tensor.
+#[derive(Clone, Copy)]
+enum Number {
+    Integer(i64),
+    Float(f64),
+}
+
+/// What `x ? value` comes to for every `x` of a tensor's dtype: one answer for
+/// all of them, or the same question about a number of that dtype.
+enum Posed {
+    Constant(bool),
+    Against(Relation, Number),
+}
+
+/// `x ? value` for a float `x` of the dtype `F`, posed against a float of that
+/// dtype, exactly.
+///
+/// A value the dtype holds is itself. One it does not lies strictly between
+/// two neighbouring floats `below < value < above`, and then no `x` equals it,
+/// every `x` below it is at most `below`, and every one above it at least
+/// `above` -- which `x < above` and `x > below` say. A NaN is neither below nor
+/// above anything, and the floats asked about are not NaN, so that carries
+/// over.
+fn posed_for_float<F: Copy>(
+    relation: Relation,
+    rounded: F,
+    order: Ordering,
+    next_down: impl Fn(F) -> F,
+    next_up: impl Fn(F) -> F,
+    widen: impl Fn(F) -> f64,
+) -> Posed {
+    // `order` is how `rounded` compares with the value.
+    let (below, above) = match order {
+        Ordering::Equal => return Posed::Against(relation, Number::Float(widen(rounded))),
+        Ordering::Greater => (next_down(rounded), rounded),
+        Ordering::Less => (rounded, next_up(rounded)),
+    };
+    match relation {
+        Relation::Eq => Posed::Constant(false),
+        Relation::Ne => Posed::Constant(true),
+        Relation::Lt | Relation::Le => Posed::Against(Relation::Lt, Number::Float(widen(above))),
+        Relation::Gt | Relation::Ge => Posed::Against(Relation::Gt, Number::Float(widen(below))),
+    }
+}
+
+/// `x ? value` for an integer `x` between `min` and `max`, posed against an
+/// integer in that range, exactly.
+fn posed_for_integer(relation: Relation, value: Number, min: i64, max: i64) -> Posed {
+    // 2^63, exactly; every int64 is below it.
+    const BOUND: f64 = 9_223_372_036_854_775_808.0;
+    let (relation, threshold) = match value {
+        Number::Integer(n) => (relation, n),
+        Number::Float(f) if f.is_nan() => return Posed::Constant(relation == Relation::Ne),
+        Number::Float(f) if f >= BOUND => return Posed::Constant(relation.holds_below()),
+        Number::Float(f) if f < -BOUND => return Posed::Constant(relation.holds_above()),
+        Number::Float(f) => {
+            // Inside the int64 range a float's floor is an int64 exactly.
+            let floor = f.floor();
+            if floor == f {
+                (relation, floor as i64)
+            } else {
+                // Strictly between `floor` and `floor + 1`, which no integer is.
+                match relation {
+                    Relation::Eq => return Posed::Constant(false),
+                    Relation::Ne => return Posed::Constant(true),
+                    Relation::Lt | Relation::Le => (Relation::Le, floor as i64),
+                    Relation::Gt | Relation::Ge => (Relation::Gt, floor as i64),
+                }
+            }
+        }
+    };
+    // Every `x` is below a threshold past the top of its range, and above one
+    // past the bottom.
+    if threshold > max {
+        Posed::Constant(relation.holds_below())
+    } else if threshold < min {
+        Posed::Constant(relation.holds_above())
+    } else {
+        Posed::Against(relation, Number::Integer(threshold))
+    }
+}
+
+/// A comparison of a tensor with one number of another dtype, made at the
+/// tensor's own dtype; `None` when the operands are not such a pair.
+///
+/// The exact comparison of an integer with a float, below, widens both whole
+/// tensors to int64 and float64 and orders every pair through a floor. Against
+/// one number that is all avoidable: the question each element is asked can
+/// be posed once, exactly, about a number of the tensor's dtype -- or answered
+/// for all of them -- and the tensor compared as it is. `x > 0` on a float32
+/// tensor, which the literal makes an integer comparison, was forty times the
+/// cost of `x > 0.0`; and an int32 tensor against any Python int widened to
+/// int64 first.
+fn scalar_comparison(lhs: &Tensor, rhs: &Tensor, relation: Relation) -> Result<Option<Tensor>> {
+    let (tensor, single, relation) = if rhs.numel() == 1 {
+        (lhs, rhs, relation)
+    } else if lhs.numel() == 1 {
+        (rhs, lhs, relation.swapped())
+    } else {
+        return Ok(None);
+    };
+    if tensor.dtype() == single.dtype() {
+        return Ok(None);
+    }
+    let value = match single.dtype() {
+        DataType::Int32 => single
+            .data()
+            .as_i32_slice()
+            .map(|v| Number::Integer(i64::from(v[0]))),
+        DataType::Int64 => single.data().as_i64_slice().map(|v| Number::Integer(v[0])),
+        DataType::Float32 => single
+            .data()
+            .as_f32_slice()
+            .map(|v| Number::Float(f64::from(v[0]))),
+        DataType::Float64 => single.data().as_f64_slice().map(|v| Number::Float(v[0])),
+        DataType::Bool => return Ok(None),
+    };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let posed = match (tensor.dtype(), value) {
+        (DataType::Float32, Number::Integer(n)) => {
+            // To the nearest float32, which every int64 is within range of.
+            let rounded = n as f32;
+            let order =
+                int_against_float(n, f64::from(rounded)).map_or(Ordering::Equal, Ordering::reverse);
+            posed_for_float(
+                relation,
+                rounded,
+                order,
+                f32::next_down,
+                f32::next_up,
+                f64::from,
+            )
+        }
+        (DataType::Float32, Number::Float(f)) => {
+            if f.is_nan() {
+                Posed::Constant(relation == Relation::Ne)
+            } else {
+                // Rounded to nearest, past the largest float32 to infinity, so
+                // a neighbour can be infinite -- and `x < inf` is still exactly
+                // `x <= f32::MAX`.
+                let rounded = f as f32;
+                let order = f64::from(rounded).total_cmp(&f);
+                posed_for_float(
+                    relation,
+                    rounded,
+                    order,
+                    f32::next_down,
+                    f32::next_up,
+                    f64::from,
+                )
+            }
+        }
+        (DataType::Float64, Number::Integer(n)) => {
+            let rounded = n as f64;
+            let order = int_against_float(n, rounded).map_or(Ordering::Equal, Ordering::reverse);
+            posed_for_float(
+                relation,
+                rounded,
+                order,
+                f64::next_down,
+                f64::next_up,
+                |v| v,
+            )
+        }
+        (DataType::Int32, value) => {
+            posed_for_integer(relation, value, i64::from(i32::MIN), i64::from(i32::MAX))
+        }
+        (DataType::Int64, value @ Number::Float(_)) => {
+            posed_for_integer(relation, value, i64::MIN, i64::MAX)
+        }
+        _ => return Ok(None),
+    };
+    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let device = tensor.device();
+    let (relation, number) = match posed {
+        Posed::Constant(answer) => {
+            let data = TensorData::from_vec_bool(vec![answer; output_shape.numel()], device);
+            return Ok(Some(Tensor::new(
+                Arc::new(data),
+                output_shape,
+                DataType::Bool,
+                device,
+                false,
+            )));
+        }
+        Posed::Against(relation, number) => (relation, number),
+    };
+    // The number at the tensor's dtype, in the single operand's own shape so
+    // that broadcasting comes out as it would have.
+    let data = match (tensor.dtype(), number) {
+        (DataType::Float32, Number::Float(f)) => TensorData::from_vec_f32(vec![f as f32], device),
+        (DataType::Float64, Number::Float(f)) => TensorData::from_vec_f64(vec![f], device),
+        (DataType::Int32, Number::Integer(n)) => TensorData::from_vec_i32(vec![n as i32], device),
+        (DataType::Int64, Number::Integer(n)) => TensorData::from_vec_i64(vec![n], device),
+        _ => {
+            return Err(MinitensorError::internal_error(
+                "comparison: a scalar was posed in a dtype other than its tensor's",
+            ));
+        }
+    };
+    let other = Tensor::new(
+        Arc::new(data),
+        single.shape().clone(),
+        tensor.dtype(),
+        device,
+        false,
+    );
+    let compare = match relation {
+        Relation::Eq => eq,
+        Relation::Ne => ne,
+        Relation::Lt => lt,
+        Relation::Le => le,
+        Relation::Gt => gt,
+        Relation::Ge => ge,
+    };
+    let result = compare(tensor, &other)?;
+    // Broadcasting is symmetric in the dims, but a one-element operand on the
+    // left can still add leading ones; the result takes the shape the pair
+    // broadcasts to, which reshaping a contiguous result to is free.
+    if result.shape() != &output_shape {
+        return Ok(Some(result.reshape(output_shape)?));
+    }
+    Ok(Some(result))
+}
+
 macro_rules! cmp_op {
-    ($fn_name:ident, $op:tt) => {
+    ($fn_name:ident, $op:tt, $relation:expr) => {
         pub fn $fn_name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             if lhs.device() != rhs.device() {
                 return Err(MinitensorError::device_mismatch(
@@ -137,10 +410,14 @@ macro_rules! cmp_op {
                     format!("{:?}", rhs.device()),
                 ));
             }
+            if let Some(result) = scalar_comparison(lhs, rhs, $relation)? {
+                return Ok(result);
+            }
             if let Some((data, shape)) = mixed_comparison(
                 lhs,
                 rhs,
                 |ordering| ordering $op Ordering::Equal,
+                |a: f64, b: f64| a $op b,
                 stringify!($op) == "!=",
             )? {
                 return Ok(Tensor::new(
@@ -269,16 +546,16 @@ pub fn isclose(
     ))
 }
 
-cmp_op!(eq, ==);
-cmp_op!(ne, !=);
+cmp_op!(eq, ==, Relation::Eq);
+cmp_op!(ne, !=, Relation::Ne);
 // Ordered comparisons apply to booleans as well, with `false < true`. Refusing
 // them was inconsistent with everything around it: `eq`/`ne` accepted booleans,
 // `minimum`/`maximum` already ordered them, and a boolean compared against a
 // number promoted and compared fine -- only two boolean operands were rejected.
-cmp_op!(lt, <);
-cmp_op!(le, <=);
-cmp_op!(gt, >);
-cmp_op!(ge, >=);
+cmp_op!(lt, <, Relation::Lt);
+cmp_op!(le, <=, Relation::Le);
+cmp_op!(gt, >, Relation::Gt);
+cmp_op!(ge, >=, Relation::Ge);
 
 #[cfg(test)]
 mod tests {
