@@ -537,27 +537,30 @@ fn polygamma_series(order: u32, x: f64) -> f64 {
 const DIGAMMA_ROOT_HI: f64 = 1.4616321449683622;
 const DIGAMMA_ROOT_LO: f64 = 9.549995429965697e-17;
 
-/// How far either side of the root the series below is used.
+/// Where the series below is used: from just under one to two, so that every
+/// other positive argument below [`DIGAMMA_ASYMPTOTIC_MIN`] reaches it in one
+/// step up or in steps down.
 ///
-/// Chosen by measuring both branches at the seam rather than by rule of
-/// thumb. Inside it the series is good to 2.5e-16 whatever the radius, so the
-/// radius is set by what happens *outside*: `digamma` is small near its root
-/// and the general path computes it as a difference of quantities near 2.5,
-/// where one rounding of `ln` is 4.4e-16 -- a relative error that shrinks only
-/// as the window widens and the function grows. At 0.4 the worst just outside
-/// is 1.8e-15; at 0.2 it is 3.3e-15.
-const DIGAMMA_ROOT_RADIUS: f64 = 0.4;
+/// A narrower window around the root left the arguments either side of it to
+/// walk up to the asymptotic expansion, adding a dozen negative reciprocals
+/// to a positive total of about 2.5 -- a subtraction that cost 14 ulps next
+/// to one and two. Stepping down instead adds positive reciprocals to a value
+/// on the window, and stepping from below adds one, so nothing cancels. Forty
+/// terms hold the series to 2 ulps across it; its radius of convergence is
+/// the root's distance to the pole at zero.
+const DIGAMMA_SERIES_LOW: f64 = 0.92;
+const DIGAMMA_SERIES_HIGH: f64 = 2.0;
 
 /// Above this the asymptotic expansion below has converged; below it the
-/// recurrence walks up to it.
+/// recurrence steps down to the series window.
 ///
-/// The pair is measured against the term count. Walking further costs a
-/// rounding per step, and stopping earlier leaves the expansion to do more
-/// than an asymptotic series can -- nine terms at a threshold of six measure
-/// an order of magnitude worse than six at twelve.
+/// Measured against the expansion's term count: stopping earlier leaves the
+/// expansion to do more than an asymptotic series can -- nine terms at a
+/// threshold of six measure an order of magnitude worse than six at twelve.
 const DIGAMMA_ASYMPTOTIC_MIN: f64 = 12.0;
 
-/// `digamma` near its positive root, as a Taylor series in `d = x - root`.
+/// `digamma` on `[0.92, 2]`, as a Taylor series in `d = x - root` about its
+/// positive root.
 ///
 /// The root is where every other route fails: `digamma` is zero there, so any
 /// method that reaches it by subtracting two quantities of size one loses
@@ -567,7 +570,13 @@ const DIGAMMA_ASYMPTOTIC_MIN: f64 = 12.0;
 /// The leading `d` stays outside the polynomial, as it does in `atan_poly`,
 /// so the relative accuracy survives as `d -> 0`.
 fn digamma_at_root(d: f64) -> f64 {
-    let mut s = -1.7008538854332607e-06;
+    let mut s = -1.7443695117727745e-07;
+    s = s * d + 2.549626552021554e-07;
+    s = s * d + -3.7266161283438227e-07;
+    s = s * d + 5.446941930669446e-07;
+    s = s * d + -7.96142543124197e-07;
+    s = s * d + 1.1636675363548843e-06;
+    s = s * d + -1.7008538854332607e-06;
     s = s * d + 2.486022733129538e-06;
     s = s * d + -3.6336507898010456e-06;
     s = s * d + 5.3110609208898636e-06;
@@ -642,9 +651,12 @@ fn pi_cot_pi(x: f64) -> f64 {
 /// Three routes, because no one of them holds everywhere. The negative half
 /// reflects, so a large negative argument is one step rather than a million
 /// of them, the same way [`trigamma`] handles it. The neighbourhood of the
-/// positive root gets its own series, because that is where the general route
-/// has nothing left to be accurate about. Everything else walks up by the
-/// recurrence to where the asymptotic expansion has converged.
+/// positive root gets its own series, because that is where any other route
+/// has nothing left to be accurate about, and the series is made wide enough
+/// that every positive argument below the asymptotic expansion reaches it by
+/// the recurrence without a subtraction: one step up from below it, steps
+/// down from above, adding reciprocals of the same sign as the answer. The
+/// worst of it is 2.4 ulps, where it was 14 walking up to the expansion.
 ///
 /// The route this replaces -- `statrs`'s -- had no root case, and paid for it:
 /// 7.2e-10 relative within a thousandth of the root against the 2.5e-16 here,
@@ -682,19 +694,37 @@ fn digamma_scalar(x: f64) -> f64 {
         return digamma_scalar(1.0 - x) - pi_cot_pi(x);
     }
 
-    let d = (x - DIGAMMA_ROOT_HI) - DIGAMMA_ROOT_LO;
-    if d.abs() <= DIGAMMA_ROOT_RADIUS {
-        return digamma_at_root(d);
+    if x >= DIGAMMA_ASYMPTOTIC_MIN {
+        return digamma_asymptotic(x);
     }
-
-    // `digamma(x) = digamma(x + 1) - 1/x`, applied until the expansion holds.
-    let mut walked = x;
-    let mut correction = 0.0;
-    while walked < DIGAMMA_ASYMPTOTIC_MIN {
-        correction -= 1.0 / walked;
-        walked += 1.0;
+    if x < DIGAMMA_SERIES_LOW {
+        // `digamma(x) = digamma(x + 1) - 1/x`, with `x + 1` on the window.
+        // Its distance to the root is taken from `x` itself, since one less
+        // than the root is exact and `x + 1` would round `x`.
+        return digamma_at_root((x - (DIGAMMA_ROOT_HI - 1.0)) - DIGAMMA_ROOT_LO) - 1.0 / x;
     }
-    digamma_asymptotic(walked) + correction
+    if x <= DIGAMMA_SERIES_HIGH {
+        return digamma_at_root((x - DIGAMMA_ROOT_HI) - DIGAMMA_ROOT_LO);
+    }
+    // `digamma(x) = digamma(x - n) + 1/(x - 1) + ... + 1/(x - n)`, with
+    // `x - n` in `[1, 2)`. Every `x - k` is exact here -- `x` is a multiple of
+    // its own ulp, which is fine enough below twelve -- and the terms are
+    // added smallest first, each rounding carried in a two-sum.
+    let steps = x.floor() - 1.0;
+    let (mut total, mut carried) = (
+        digamma_at_root(((x - steps) - DIGAMMA_ROOT_HI) - DIGAMMA_ROOT_LO),
+        0.0,
+    );
+    let mut k = 1.0;
+    while k <= steps {
+        let term = 1.0 / (x - k);
+        let sum = total + term;
+        let back = sum - total;
+        carried += (total - (sum - back)) + (term - back);
+        total = sum;
+        k += 1.0;
+    }
+    total + carried
 }
 
 /// `trigamma(x)`, the derivative of [`digamma`].
@@ -1550,6 +1580,34 @@ mod tests {
             assert!(
                 relative < 4e-15,
                 "digamma({x}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
+    /// Either side of the series window, where walking up to the asymptotic
+    /// expansion added a dozen negative reciprocals to a total of about 2.5:
+    /// 13 ulps at 1.054 and 14 at 1.999. References are 200-bit values at
+    /// the doubles passed.
+    #[test]
+    fn digamma_is_within_a_few_ulps_either_side_of_the_series() {
+        let cases = [
+            (1.05363, -0.492296380827151),
+            (1.99887, 0.42205530147762477),
+            (0.897024, -0.7606626502649955),
+            (2.04057, 0.44862213868034984),
+            (0.92, -0.7171037973327289),
+            (2.0, 0.42278433509846713),
+            (1.0, -0.5772156649015329),
+            (0.25, -4.2274535333762655),
+            (7.5, 1.9467574842460869),
+            (11.5, 2.3982391295357814),
+        ];
+        for (x, want) in cases {
+            let got: f64 = digamma_scalar(x);
+            let ulps = (got - want).abs() / (want.abs() * f64::EPSILON / 2.0);
+            assert!(
+                ulps <= 6.0,
+                "digamma({x}) = {got}, wanted {want} ({ulps} half-ulps)"
             );
         }
     }
