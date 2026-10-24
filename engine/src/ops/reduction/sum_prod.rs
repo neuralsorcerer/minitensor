@@ -508,6 +508,17 @@ nansum_along_dim_kernel!(
 );
 
 sum_along_dim_kernel!(
+    // A float32 axis summed in float64, as a float32 mean takes it.
+    sum_along_dim_f32_wide,
+    as_f32_slice,
+    as_f64_slice_mut,
+    "f32",
+    f64,
+    0f64,
+    simd_sum_f32_wide
+);
+
+sum_along_dim_kernel!(
     sum_along_dim_f64,
     as_f64_slice,
     as_f64_slice_mut,

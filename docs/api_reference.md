@@ -1813,6 +1813,11 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
+A float32 `mean` or `nanmean` is summed in float64 and divided by the exact
+count, so it is the float32 nearest the exact mean: the mean of a constant
+tensor is the constant, where a float32 sum had put offset data tens of ulps
+out. An int32 mean divides its exact int64 sum in float64 and rounds once.
+
 A float `mean`, `var` or `std` that is itself in range is computed in range.
 The sum behind a mean and the squares behind a variance can leave the float
 range when the answer does not: the mean of `[1e308, 1e308]` is `1e308`, and

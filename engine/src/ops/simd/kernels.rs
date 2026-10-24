@@ -581,6 +581,94 @@ float_sum_kernel!(
     simd_nansum_f64, simd_nansum_f64_by, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
 );
 
+/// The sum of an f32 run in double precision, each element widened as it is
+/// read.
+///
+/// A float32 mean accumulates here. Its own float32 sum carried a rounding
+/// per addition against a total that grows with the run, which put the mean
+/// of offset data tens of ulps out and left the mean of a constant run off the
+/// constant; with 29 more bits in the accumulator the quotient rounds to the
+/// float32 nearest the exact mean.
+///
+/// The tree of [`float_sum_kernel`] -- 128-element leaves folded pairwise --
+/// over sixteen float64 lanes, compiled a second time with `avx`: four lanes,
+/// the float64 sum's width, left the loop waiting on one add's latency per
+/// vector at half the float32 sum's speed, the shape [`simd_square_sum_f32`]
+/// measured best for the same reason.
+pub fn simd_sum_f32_wide(data: &[f32]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if simd_capabilities().avx {
+        // SAFETY: `detect` confirmed avx on this CPU.
+        return unsafe { wide_sum_avx(data) };
+    }
+    wide_sum_body(data)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn wide_sum_avx(data: &[f32]) -> f64 {
+    wide_sum_body(data)
+}
+
+/// The loop of [`simd_sum_f32_wide`], written once; see [`square_sum_body`]
+/// for why it is `#[inline(always)]`.
+#[inline(always)]
+fn wide_sum_body(data: &[f32]) -> f64 {
+    const LANES: usize = 16;
+    const LEAF: usize = 128;
+
+    #[inline(always)]
+    fn lane_sums(block: &[f32]) -> [f64; LANES] {
+        let mut sums = [0.0f64; LANES];
+        let (chunks, rest) = block.as_chunks::<LANES>();
+        for chunk in chunks {
+            for lane in 0..LANES {
+                sums[lane] += f64::from(chunk[lane]);
+            }
+        }
+        // Padded to a full block and folded in as one more, rather than added
+        // at a runtime index; see `square_sum_body`.
+        if !rest.is_empty() {
+            let mut block = [0.0f32; LANES];
+            block[..rest.len()].copy_from_slice(rest);
+            for lane in 0..LANES {
+                sums[lane] += f64::from(block[lane]);
+            }
+        }
+        sums
+    }
+
+    let mut pending = [[0.0f64; LANES]; 40];
+    let mut leaves: usize = 0;
+    let (blocks, rest) = data.as_chunks::<LEAF>();
+    for block in blocks {
+        let mut sums = lane_sums(block);
+        let mut level = 0;
+        while leaves & (1 << level) != 0 {
+            for lane in 0..LANES {
+                sums[lane] += pending[level][lane];
+            }
+            leaves &= !(1 << level);
+            level += 1;
+        }
+        pending[level] = sums;
+        leaves |= 1 << level;
+    }
+    let mut acc = lane_sums(rest);
+    let mut level = 0;
+    let mut remaining = leaves;
+    while remaining != 0 {
+        if remaining & 1 != 0 {
+            for lane in 0..LANES {
+                acc[lane] += pending[level][lane];
+            }
+        }
+        remaining >>= 1;
+        level += 1;
+    }
+    pairwise_lanes(&mut acc)
+}
+
 /// The sum and the sum of squares of a run's deviations from a centre.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DeviationSums<T> {

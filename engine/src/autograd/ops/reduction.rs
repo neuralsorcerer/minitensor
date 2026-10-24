@@ -956,6 +956,45 @@ impl GradientFunction for RmsNormBackward {
     }
 }
 
+/// Gradient function for a mean: the output's gradient over the count,
+/// repeated over the axes averaged away.
+///
+/// The quotient is formed as the forward one is, by the exact count; see
+/// `divide_by_count`.
+pub struct MeanBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub dims: Option<Vec<usize>>,
+    pub keepdim: bool,
+    pub count: f64,
+}
+
+impl GradientFunction for MeanBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let share = reduction::divide_by_count(grad_output, self.count)?;
+        let grad = expand_reduction_grad(&share, &self.input_shape, &self.dims, self.keepdim)?;
+        // An empty input has nothing to repeat over; see `SumBackward`.
+        let grad_input = if self.input_shape.contains(&0) {
+            Tensor::zeros(
+                Shape::new(self.input_shape.clone()),
+                grad_output.dtype(),
+                grad_output.device(),
+                false,
+            )
+        } else {
+            let dims: Vec<isize> = self.input_shape.iter().map(|&d| d as isize).collect();
+            grad.expand(dims)?.contiguous()?
+        };
+        gradients.insert(self.input_id, grad_input);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient of the square root that turns a variance into a standard
 /// deviation.
 ///

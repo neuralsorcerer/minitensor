@@ -776,6 +776,27 @@ pub(crate) fn rescaled(
     Ok((statistic, scales))
 }
 
+/// `tensor` over a count of elements, exactly as counted.
+///
+/// A count past `2^24` is not a float32, and dividing by its rounding is an
+/// error on top of the dividend's own; there the quotient is formed in
+/// float64, where every count is exact, and rounds once on its way back.
+/// Otherwise it is the division in the tensor's dtype, which is the same
+/// rounding. A count of zero divides by zero.
+pub(crate) fn divide_by_count(tensor: &Tensor, count: f64) -> Result<Tensor> {
+    let scalar = |value: f64, dtype: DataType| {
+        crate::ops::util::create_scalar_tensor(value, dtype, tensor.device())
+    };
+    if tensor.dtype() == DataType::Float32 && count > f64::from(1u32 << 24) {
+        let quotient = crate::ops::arithmetic::div(
+            &tensor.astype(DataType::Float64)?,
+            &scalar(count, DataType::Float64)?,
+        )?;
+        return quotient.astype(DataType::Float32);
+    }
+    crate::ops::arithmetic::div(tensor, &scalar(count, tensor.dtype())?)
+}
+
 /// The square root of a variance, as a standard deviation.
 ///
 /// The square root's own gradient is infinite at a zero variance, which the
@@ -864,67 +885,42 @@ fn var_direct(
     let mean_tensor = mean(tensor, Some(reduction_dims_isize.clone()), true)?;
     let diff = crate::ops::arithmetic::sub(tensor, &mean_tensor)?;
     let squared_diff = crate::ops::arithmetic::mul(&diff, &diff)?;
-    let mut variance = mean(&squared_diff, Some(reduction_dims_isize.clone()), true)?;
-    // Less the square of the deviations' own mean, which is the rounding of
-    // `mean_tensor`; see `DeviationSums::centred_squares`. Its gradient is
-    // zero, the deviations summing to zero whatever the input, so this
-    // changes the value alone.
-    let offset = mean(&diff, Some(reduction_dims_isize), true)?;
-    variance =
-        crate::ops::arithmetic::sub(&variance, &crate::ops::arithmetic::mul(&offset, &offset)?)?;
-    variance = crate::ops::minmax::maximum(
-        &variance,
-        &crate::ops::util::create_scalar_tensor(0.0, variance.dtype(), variance.device())?,
-    )?;
-
+    let squares = sum(&squared_diff, Some(reduction_dims_isize.clone()), true)?;
     let sample_count = reduction_dims
         .iter()
         .map(|&axis| tensor.shape().dims()[axis])
-        .product::<usize>();
+        .product::<usize>() as f64;
+    // Less the deviations' own sum squared over the count, the rounding of
+    // `mean_tensor`; see `DeviationSums::centred_squares`. Its gradient is
+    // zero, the deviations summing to zero whatever the input, so this
+    // changes the value alone.
+    let offset = sum(&diff, Some(reduction_dims_isize), true)?;
+    let shift = crate::ops::arithmetic::mul(&offset, &divide_by_count(&offset, sample_count)?)?;
+    let centred = crate::ops::minmax::maximum(
+        &crate::ops::arithmetic::sub(&squares, &shift)?,
+        &crate::ops::util::create_scalar_tensor(0.0, squares.dtype(), squares.device())?,
+    )?;
 
-    if unbiased {
-        // A single sample makes Bessel's correction `n / (n - 1)` undefined, and
-        // the biased variance it scales is exactly zero, so the product is NaN
-        // -- which is the honest answer for an undefined correction.
-        //
-        // That case goes through the same multiply as any other correction
-        // rather than substituting a freshly built NaN tensor. A replacement
-        // carries a new tensor id, no `grad_fn` and no graph node, so while it
-        // inherited `requires_grad` it had nothing behind it: `x.var(1)` on a
-        // width-1 axis reported `requires_grad = true` and then left `x` with no
-        // gradient at all after `backward()`. A missing gradient reads as "this
-        // parameter was not used" and an optimizer skips it silently, where the
-        // NaN this now produces says plainly that something is undefined.
-        let correction = if sample_count <= 1 {
-            f64::NAN
-        } else {
-            sample_count as f64 / (sample_count - 1) as f64
-        };
-        let correction_tensor = match variance.dtype() {
-            DataType::Float32 => Tensor::new(
-                Arc::new(TensorData::from_vec_f32(
-                    vec![correction as f32],
-                    variance.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float32,
-                variance.device(),
-                false,
-            ),
-            DataType::Float64 => Tensor::new(
-                Arc::new(TensorData::from_vec_f64(
-                    vec![correction],
-                    variance.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float64,
-                variance.device(),
-                false,
-            ),
-            _ => unreachable!("variance is only defined for floating point tensors"),
-        };
-        variance = crate::ops::arithmetic::mul(&variance, &correction_tensor)?;
-    }
+    // The centred squares over the count, or the count less one: one division,
+    // where the mean of the squares times `n / (n - 1)` rounded twice. A
+    // single sample leaves Bessel's divisor zero, and its centred squares are
+    // zero too, so the quotient is NaN -- the honest answer for an undefined
+    // correction.
+    //
+    // That case goes through the same division as any other rather than
+    // substituting a freshly built NaN tensor. A replacement carries a new
+    // tensor id, no `grad_fn` and no graph node, so while it inherited
+    // `requires_grad` it had nothing behind it: `x.var(1)` on a width-1 axis
+    // reported `requires_grad = true` and then left `x` with no gradient at
+    // all after `backward()`. A missing gradient reads as "this parameter was
+    // not used" and an optimizer skips it silently, where the NaN this
+    // produces says plainly that something is undefined.
+    let divisor = if unbiased {
+        (sample_count - 1.0).max(0.0)
+    } else {
+        sample_count
+    };
+    let variance = divide_by_count(&centred, divisor)?;
 
     if keepdim {
         return Ok(variance);
@@ -984,7 +980,12 @@ fn var_fused_single_axis(
                 .$accessor_mut()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let n = dim_size as $ty;
-            let divisor = if unbiased { n - 1.0 } else { n };
+            // The divisions by the count are made in float64, where it is
+            // exact; see `divide_by_count`. For a float64 tensor, and a
+            // float32 count up to 2^24, that is the same rounding.
+            let count = dim_size as f64;
+            let divisor = if unbiased { count - 1.0 } else { count };
+            let over = |value: $ty, by: f64| (f64::from(value) / by) as $ty;
             let all_nan = unbiased && dim_size <= 1;
 
             if all_nan {
@@ -1022,10 +1023,10 @@ fn var_fused_single_axis(
                         let base = (first + i) * dim_size;
                         let row = &input[base..base + dim_size];
                         let total = accurate_run_sum(row, |part: &[$ty]| $sum_by(part, |v| v));
-                        let mean = total / n;
+                        let mean = over(total, count);
                         let deviations =
                             accurate_run_sum(row, |part: &[$ty]| $deviations(part, mean));
-                        *slot = deviations.centred_squares(n) / divisor;
+                        *slot = over(deviations.centred_squares(n), divisor);
                     }
                 };
                 if tensor.numel() < crate::ops::map::PAR_THRESHOLD {
@@ -1061,8 +1062,12 @@ fn var_fused_single_axis(
                         |x, y| x + y,
                         spread,
                     );
-                    let means: Vec<$ty> =
-                        totals.iter().cycle().take(lanes).map(|&t| t / n).collect();
+                    let means: Vec<$ty> = totals
+                        .iter()
+                        .cycle()
+                        .take(lanes)
+                        .map(|&t| over(t, count))
+                        .collect();
                     let deviations = fold_slab_with(
                         source,
                         inner,
@@ -1079,7 +1084,7 @@ fn var_fused_single_axis(
                         spread,
                     );
                     for (slot, &q) in target.iter_mut().zip(&deviations) {
-                        *slot = q.centred_squares(n) / divisor;
+                        *slot = over(q.centred_squares(n), divisor);
                     }
                 };
                 // A slab too short to split by rows is split by columns, and
@@ -1103,7 +1108,7 @@ fn var_fused_single_axis(
                         },
                         add,
                     );
-                    let means: Vec<$ty> = totals.iter().map(|&t| t / n).collect();
+                    let means: Vec<$ty> = totals.iter().map(|&t| over(t, count)).collect();
                     let deviations = fold_column_band(
                         source,
                         inner,
@@ -1120,7 +1125,7 @@ fn var_fused_single_axis(
                         |x, y| x + y,
                     );
                     for (slot, &q) in target.iter_mut().zip(&deviations) {
-                        *slot = q.centred_squares(n) / divisor;
+                        *slot = over(q.centred_squares(n), divisor);
                     }
                 };
                 let outer = out.len() / inner;
@@ -1431,42 +1436,6 @@ pub(crate) fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> R
     Ok(())
 }
 
-pub(crate) fn nanmean_all_f32(
-    tensor: &Tensor,
-    sum_data: &mut TensorData,
-    count_data: &mut TensorData,
-) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-
-    let count_chunk = |chunk: &[f32]| {
-        chunk.iter().fold((0.0_f32, 0usize), |(s, c), &v| {
-            if v.is_nan() { (s, c) } else { (s + v, c + 1) }
-        })
-    };
-    let partials: Vec<(f32, usize)> = if data.len() > 8192 {
-        crate::parallel::install(|| data.par_chunks(8192).map(count_chunk).collect())
-    } else {
-        data.chunks(8192).map(count_chunk).collect()
-    };
-    let (sum, count) = pairwise_fold(partials, (0.0_f32, 0usize), |(s1, c1), (s2, c2)| {
-        (s1 + s2, c1 + c2)
-    });
-
-    let sum_slice = sum_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-    let count_slice = count_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-
-    sum_slice[0] = sum;
-    count_slice[0] = count as f32;
-    Ok(())
-}
-
 pub(crate) fn nanmean_all_f64(
     tensor: &Tensor,
     sum_data: &mut TensorData,
@@ -1477,10 +1446,14 @@ pub(crate) fn nanmean_all_f64(
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
+    // Each block's total through the lane-and-tree kernel `nansum` uses, not
+    // a running total: a chain of 8192 roundings left the mean this feeds,
+    // the one a gradient goes through, less accurate than the one without.
     let count_chunk = |chunk: &[f64]| {
-        chunk.iter().fold((0.0_f64, 0usize), |(s, c), &v| {
-            if v.is_nan() { (s, c) } else { (s + v, c + 1) }
-        })
+        (
+            simd_nansum_f64(chunk),
+            chunk.iter().filter(|v| !v.is_nan()).count(),
+        )
     };
     let partials: Vec<(f64, usize)> = if data.len() > 8192 {
         crate::parallel::install(|| data.par_chunks(8192).map(count_chunk).collect())

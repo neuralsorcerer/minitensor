@@ -716,110 +716,138 @@ fn rescue_mean(
 fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
     let normalized = normalize_reduction_dims(dim, tensor.ndim())?;
+    if matches!(&normalized, Some(dims) if dims.is_empty()) {
+        return Ok(tensor.clone());
+    }
+    let num_elements = slice_length(tensor, normalized.as_deref()) as f64;
+    let as_isize = |dims: &Option<Vec<usize>>| {
+        dims.as_ref()
+            .map(|d| d.iter().map(|&x| x as isize).collect::<Vec<_>>())
+    };
 
-    // An int64 sum wraps past 2^63 though the mean it feeds is always in
-    // range: the mean of [2^62, 2^62] came back as -2^62. The result is
-    // float64 either way, so the values are summed there. An int32 sum
-    // accumulates in int64, which holds any count of int32 values that fits
-    // in memory, so it keeps the exact integer sum.
-    let widened;
-    let summed = if tensor.dtype() == DataType::Int64 {
-        widened = tensor.astype(DataType::Float64)?;
-        &widened
+    match tensor.dtype() {
+        // Summed in float64 and rounded once, which makes a float32 mean as
+        // good as correctly rounded: summed in float32 it carried a rounding
+        // per addition against a growing total, tens of ulps on offset data,
+        // and the mean of a constant run came back off the constant. The
+        // value is the same whether or not a gradient is asked for; the
+        // gradient is the mean's own, the output's over the count.
+        DataType::Float32 => {
+            let total = widened_sum(tensor, normalized.as_deref(), keepdim)?;
+            let value = super::sort_impl::divide_by_count(&total, num_elements)?
+                .astype(DataType::Float32)?;
+            if !tensor.requires_grad() {
+                return Ok(value);
+            }
+            let grad_fn = Arc::new(crate::autograd::MeanBackward {
+                input_id: tensor.id(),
+                input_shape: tensor.shape().dims().to_vec(),
+                dims: normalized,
+                keepdim,
+                count: num_elements,
+            });
+            with_grad_fn(value.requires_grad_(true), grad_fn)
+        }
+        DataType::Float64 => {
+            let total = sum(tensor, as_isize(&normalized), keepdim)?;
+            super::sort_impl::divide_by_count(&total, num_elements)
+        }
+        // An int64 sum wraps past 2^63 though the mean it feeds is always in
+        // range: the mean of [2^62, 2^62] came back as -2^62. The result is
+        // float64 either way, so the values are summed there.
+        DataType::Int64 => {
+            let total = sum(
+                &tensor.astype(DataType::Float64)?,
+                as_isize(&normalized),
+                keepdim,
+            )?;
+            super::sort_impl::divide_by_count(&total, num_elements)
+        }
+        // An int32 sum accumulates in int64, which holds any count of int32
+        // values that fits in memory, so it is the exact integer sum -- and
+        // converting it to float32 before dividing rounded it first: the mean
+        // of 2^24 + 1 threes came out 3.0000002. It is divided in float64,
+        // where it and the count are exact, and rounds once on its way to
+        // float32.
+        DataType::Int32 => {
+            let total = sum(tensor, as_isize(&normalized), keepdim)?;
+            super::sort_impl::divide_by_count(&total.astype(DataType::Float64)?, num_elements)?
+                .astype(DataType::Float32)
+        }
+        DataType::Bool => Err(MinitensorError::invalid_operation(
+            "Mean not supported for boolean tensors",
+        )),
+    }
+}
+
+/// `sum` of a float32 tensor in float64, with no gradient: over the axes
+/// `sum` takes, in its order, without a widened copy -- the first axis is
+/// read as float32 and widened in the fold, and the rest are float64
+/// already.
+fn widened_sum(tensor: &Tensor, dims: Option<&[usize]>, keepdim: bool) -> Result<Tensor> {
+    let missing = || MinitensorError::internal_error("widened sum: f32 slice");
+    let Some(dims) = dims else {
+        let data = tensor.data().as_f32_slice().ok_or_else(missing)?;
+        let total = if data.len() >= 1024 {
+            crate::ops::util::deterministic_par_sum(data, 8192, crate::ops::simd::simd_sum_f32_wide)
+        } else {
+            crate::ops::simd::simd_sum_f32_wide(data)
+        };
+        let shape = if keepdim {
+            Shape::new(vec![1; tensor.ndim()])
+        } else {
+            Shape::scalar()
+        };
+        return Ok(Tensor::new(
+            Arc::new(TensorData::from_vec_f64(vec![total], tensor.device())),
+            shape,
+            DataType::Float64,
+            tensor.device(),
+            false,
+        ));
+    };
+    // `sum` takes the axes first to last when it keeps them and last to first
+    // when it drops them, so that the later indices still name their axes.
+    let order: Vec<usize> = if keepdim {
+        dims.to_vec()
     } else {
-        tensor
+        dims.iter().rev().copied().collect()
     };
-
-    let sum_result = sum(
-        summed,
-        normalized
-            .clone()
-            .map(|d| d.iter().map(|&x| x as isize).collect()),
-        keepdim,
-    )?;
-
-    // Compute the number of elements being averaged
-    let num_elements = match &normalized {
-        None => tensor.numel() as f64,
-        Some(dims) => {
-            if dims.is_empty() {
-                return Ok(tensor.clone());
-            }
-
-            let mut count = 1.0;
-            for &d in dims {
-                count *= tensor.shape().dims()[d] as f64;
-            }
-            count
-        }
-    };
-
-    // Prepare sum tensor and divisor for division
-    let (sum_tensor, divisor) = match tensor.dtype() {
-        DataType::Float32 => (
-            sum_result,
-            Tensor::new(
-                Arc::new(TensorData::from_vec(
-                    vec![num_elements as f32],
-                    DataType::Float32,
-                    tensor.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float32,
-                tensor.device(),
-                false,
-            ),
-        ),
-        DataType::Float64 => (
-            sum_result,
-            Tensor::new(
-                Arc::new(TensorData::from_vec(
-                    vec![num_elements],
+    let mut result: Option<Tensor> = None;
+    for &dim in &order {
+        result = Some(match result {
+            Some(partial) => sum_along_dim(&partial, dim, keepdim)?,
+            None => {
+                let mut shape = tensor.shape().dims().to_vec();
+                if keepdim {
+                    shape[dim] = 1;
+                } else {
+                    shape.remove(dim);
+                }
+                let shape = Shape::new(shape);
+                let mut data =
+                    TensorData::zeros_on_device(shape.numel(), DataType::Float64, tensor.device());
+                super::sum_prod_impl::sum_along_dim_f32_wide(tensor, &mut data, dim)?;
+                Tensor::new(
+                    Arc::new(data),
+                    shape,
                     DataType::Float64,
                     tensor.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float64,
-                tensor.device(),
-                false,
-            ),
-        ),
-        DataType::Int32 => (
-            sum_result.astype(DataType::Float32)?,
-            Tensor::new(
-                Arc::new(TensorData::from_vec(
-                    vec![num_elements as f32],
-                    DataType::Float32,
-                    tensor.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float32,
-                tensor.device(),
-                false,
-            ),
-        ),
-        DataType::Int64 => (
-            sum_result,
-            Tensor::new(
-                Arc::new(TensorData::from_vec(
-                    vec![num_elements],
-                    DataType::Float64,
-                    tensor.device(),
-                )),
-                Shape::scalar(),
-                DataType::Float64,
-                tensor.device(),
-                false,
-            ),
-        ),
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Mean not supported for boolean tensors",
-            ));
-        }
-    };
+                    false,
+                )
+            }
+        });
+    }
+    result.ok_or_else(|| MinitensorError::internal_error("widened sum: no axes"))
+}
 
-    crate::ops::arithmetic::div(&sum_tensor, &divisor)
+/// How many elements a reduction over `dims` takes into each result, every
+/// element for `None`.
+pub(crate) fn slice_length(tensor: &Tensor, dims: Option<&[usize]>) -> usize {
+    match dims {
+        None => tensor.numel(),
+        Some(dims) => dims.iter().map(|&d| tensor.shape().dims()[d]).product(),
+    }
 }
 
 /// NaN-aware mean reduction along specified dimensions
@@ -852,6 +880,14 @@ fn nanmean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Re
     {
         return Ok(fused);
     }
+    // A float32 tensor is averaged in float64 and rounded once on the way
+    // back, as the fused kernel and `mean` average one; the conversion is
+    // in the graph, so the gradient comes back as float32.
+    if tensor.dtype() == DataType::Float32 {
+        let dim = dim.map(|dims| dims.iter().map(|&d| d as isize).collect());
+        return nanmean_direct(&tensor.astype(DataType::Float64)?, dim, keepdim)?
+            .astype(DataType::Float32);
+    }
     let dims_clone = dim.clone();
     let needs_mask =
         tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);
@@ -878,9 +914,8 @@ fn nanmean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Re
             let mut count_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
             match tensor.dtype() {
-                DataType::Float32 => nanmean_all_f32(tensor, &mut sum_data, &mut count_data)?,
                 DataType::Float64 => nanmean_all_f64(tensor, &mut sum_data, &mut count_data)?,
-                _ => unreachable!("nanmean only supports floating point tensors"),
+                _ => unreachable!("a float32 nanmean is taken in float64 above"),
             }
 
             (

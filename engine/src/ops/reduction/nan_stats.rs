@@ -216,17 +216,22 @@ fn slab_moments<T>(slab: &[T], cols: usize, spread: bool, moment: NanMoment) -> 
 where
     T: Float + Send + Sync,
 {
-    let add = |x: T, y: T| x + y;
+    // The sums in float64, which for a float32 slab makes the mean as good as
+    // correctly rounded; see `mean`. A float64 slab is summed as before.
     let sums = fold_slab_with(
         slab,
         cols,
-        T::zero(),
-        |acc: &mut [T], values: &[T], _| {
+        0.0f64,
+        |acc: &mut [f64], values: &[T], _| {
             for (a, &v) in acc.iter_mut().zip(values) {
-                *a = *a + if v.is_nan() { T::zero() } else { v };
+                *a += if v.is_nan() {
+                    0.0
+                } else {
+                    v.to_f64().unwrap_or(f64::NAN)
+                };
             }
         },
-        add,
+        |x, y| x + y,
         spread,
     );
     let counts = fold_slab_with(
@@ -242,10 +247,13 @@ where
         spread,
     );
     let count = |c: u32| T::from(c).unwrap_or_else(T::nan);
+    // Divided in float64, where every count is exact; see `divide_by_count`.
+    let wide_over = |value: f64, c: u32| T::from(value / f64::from(c)).unwrap_or_else(T::nan);
+    let over = |value: T, c: u32| wide_over(value.to_f64().unwrap_or(f64::NAN), c);
     let means: Vec<T> = sums
         .iter()
         .zip(&counts)
-        .map(|(&s, &c)| s / count(c))
+        .map(|(&s, &c)| wide_over(s, c))
         .collect();
     let NanMoment::Var { correction } = moment else {
         return means;
@@ -281,8 +289,10 @@ where
         .iter()
         .zip(&counts)
         .map(|(&q, &c)| {
-            q.centred_squares(count(c))
-                / count(c.saturating_sub(correction.min(u32::MAX as usize) as u32))
+            over(
+                q.centred_squares(count(c)),
+                c.saturating_sub(correction.min(u32::MAX as usize) as u32),
+            )
         })
         .collect()
 }
@@ -336,6 +346,16 @@ fn nanvar_direct(
         )?
     {
         return Ok(fused);
+    }
+
+    // The count of a float32 slice longer than 2^24 is not always a float32;
+    // such a slice is taken in float64, where it is exact, and rounded once on
+    // the way back. See `divide_by_count`.
+    if tensor.dtype() == DataType::Float32
+        && super::logsumexp_impl::slice_length(tensor, dims.as_deref()) > 1 << 24
+    {
+        return nanvar_direct(&tensor.astype(DataType::Float64)?, dim, keepdim, unbiased)?
+            .astype(DataType::Float32);
     }
 
     // Centred on the NaN-skipping mean, kept broadcastable.
