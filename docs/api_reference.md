@@ -120,8 +120,8 @@ of convenience aliases.
 | `pdist(input, p=2.0)` | The `p`-distance between every pair of rows without the repeats: `n * (n - 1) / 2` values, ordered by row then column -- the strict upper triangle of `cdist(x, x)`. Built from the pairs rather than from that matrix, so it forms half as many differences as it would discard. |
 | `diff(input, n=1, dim=-1, prepend=None, append=None)` | The `n`-th discrete difference along `dim`. `prepend` and `append` are joined on along `dim` first -- a scalar as one slice, a tensor matching every other dimension -- which is how a difference keeps the length of what it was taken from. |
 | `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
-| `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. |
-| `corrcoef(input)` | The Pearson correlation matrix of the rows, clamped to `[-1, 1]` -- the division is exact in theory and lands a hair outside it in floating point. |
+| `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. An integer input is centred exactly, and an entry in range is computed in range, as for `var`. |
+| `corrcoef(input)` | The Pearson correlation matrix of the rows, clamped to `[-1, 1]` -- the division is exact in theory and lands a hair outside it in floating point -- with a diagonal of exactly one, or NaN for a row that never varies. A correlation does not depend on the scale of a row, and rows whose covariance leaves the float range are correlated as rows scaled back into it. |
 | `append(input, values, dim=None)` | `values` joined onto the end along `dim`, or onto the flattened tensor with no `dim`. Every call copies -- there is no room at the end of a tensor to grow into, which is why this is a poor way to build one up element by element. |
 | `insert(input, obj, values, dim=None)` | `values` placed *before* the positions `obj` names, which refer to the original tensor -- so `insert(x, [1, 1], [a, b])` puts both before the element that was at 1, in that order. `obj` may be one position, several, or a slice; `-1` wraps against the axis and the position one past the end is allowed. At one position `values` is a block laid out along the tensor's axes, and as many slices go in as it has along `dim`: `insert(x, 1, [a, b])` is `insert(x, [1, 1], [a, b])`. |
 | `delete(input, obj, dim=None)` | `input` without the positions `obj` names: one, several, a slice or a boolean mask. Unlike `insert`, the position one past the end is not a place to delete. |
@@ -1823,6 +1823,15 @@ exact, and scaled back. An infinite or NaN input still gives a non-finite
 result. An integer variance is taken from each element less the first of its
 slice, exactly, so int64s past `2^53` keep the steps between them:
 `var([2^53, 2^53 + 1, 2^53 + 2])` is `1`.
+
+A variance is centred on the exact mean, not on its rounding. The mean
+rounded to the dtype is off by up to half an ulp, and every squared deviation
+from it carries that offset, which is most of the answer for data that varies
+over a few ulps of its mean: float32 readings near `1` varying by `1e-7` had
+a variance `4e-4` high. The deviations' own sum measures the offset, and its
+square over the count is taken back out -- `sum(d^2) - sum(d)^2 / n` -- so
+`var`, `std`, `nanvar` and `nanstd` are within a few roundings of the exact
+answer, and constant data has a variance of exactly zero.
 
 #### Running totals that are not sums
 

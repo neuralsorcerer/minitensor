@@ -24,6 +24,7 @@
 use super::core_impl::normalize_reduction_dims;
 use super::sum_prod_impl::{fold_lanes, fold_slab_with};
 use crate::ops::map::{outputs_per_task, par_map_indexed};
+use crate::ops::simd::DeviationSums;
 use crate::{
     error::{MinitensorError, Result},
     ops::{
@@ -256,24 +257,33 @@ where
         .cycle()
         .take(fold_lanes(cols).max(cols))
         .collect();
-    let squares = fold_slab_with(
+    // The deviations' sum beside their squares, to take the mean's rounding
+    // back out; see `DeviationSums::centred_squares`.
+    let deviations = fold_slab_with(
         slab,
         cols,
-        T::zero(),
-        |acc: &mut [T], values: &[T], first| {
+        DeviationSums {
+            sum: T::zero(),
+            squares: T::zero(),
+        },
+        |acc: &mut [DeviationSums<T>], values: &[T], first| {
             let means = &tiled[first..first + acc.len()];
             for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                let d = v - m;
-                *a = *a + if v.is_nan() { T::zero() } else { d * d };
+                let d = if v.is_nan() { T::zero() } else { v - m };
+                a.sum = a.sum + d;
+                a.squares = a.squares + d * d;
             }
         },
-        add,
+        |x, y| x + y,
         spread,
     );
-    squares
+    deviations
         .iter()
         .zip(&counts)
-        .map(|(&q, &c)| q / count(c.saturating_sub(correction.min(u32::MAX as usize) as u32)))
+        .map(|(&q, &c)| {
+            q.centred_squares(count(c))
+                / count(c.saturating_sub(correction.min(u32::MAX as usize) as u32))
+        })
         .collect()
 }
 
@@ -282,6 +292,9 @@ where
 /// A slice with fewer non-NaN entries than the correction demands has no
 /// variance to report, and the division says so: `0 / 0` is NaN and `x / 0` is
 /// infinity.
+///
+/// Kept inside the float range as `var` is, with the NaN entries skipped in
+/// deciding a slice's scale as they are in its variance.
 pub fn nanvar(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -293,6 +306,23 @@ pub fn nanvar(
     if !tensor.dtype().is_float() {
         return crate::ops::reduction::var(tensor, dim, keepdim, unbiased);
     }
+    let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
+    let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {
+        return Ok(variance);
+    };
+    let (variance, scales) = super::sort_impl::rescaled(tensor, &scales, |scaled| {
+        nanvar_direct(scaled, dim, keepdim, unbiased)
+    })?;
+    mul(&mul(&variance, &scales)?, &scales)
+}
+
+/// The NaN-aware variance of a float tensor as computed directly.
+fn nanvar_direct(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<Tensor> {
     // An empty `dim` reduces nothing; the composition already answers that.
     let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?;
     if dims.as_ref().is_none_or(|dims| !dims.is_empty())
@@ -323,7 +353,15 @@ pub fn nanvar(
     let squared = mul(&finite_deviation, &finite_deviation)?;
 
     let total = sum(&squared, dim.clone(), keepdim)?;
-    let count = non_nan_count(tensor, dim, keepdim)?;
+    let count = non_nan_count(tensor, dim.clone(), keepdim)?;
+    // Less the deviations' own sum squared over the count, the rounding of
+    // `centre`; see `DeviationSums::centred_squares`. Its gradient is zero.
+    let offset = sum(&finite_deviation, dim, keepdim)?;
+    let total = sub(&total, &mul(&offset, &div(&offset, &count)?)?)?;
+    let total = maximum(
+        &total,
+        &create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?,
+    )?;
     let divisor = if unbiased {
         // Clamped at zero, because a slice with nothing in it has no variance
         // to report and the division is how this says so. `count - 1` is -1
@@ -353,7 +391,18 @@ pub fn nanstd(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    super::sort_impl::std_from_variance(&nanvar(tensor, dim, keepdim, unbiased)?)
+    use super::sort_impl::std_from_variance;
+    if !tensor.dtype().is_float() {
+        return crate::ops::reduction::std(tensor, dim, keepdim, unbiased);
+    }
+    let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
+    let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {
+        return std_from_variance(&variance);
+    };
+    let (variance, scales) = super::sort_impl::rescaled(tensor, &scales, |scaled| {
+        nanvar_direct(scaled, dim, keepdim, unbiased)
+    })?;
+    mul(&std_from_variance(&variance)?, &scales)
 }
 
 /// Product over the non-NaN entries, taking an all-NaN slice as 1.

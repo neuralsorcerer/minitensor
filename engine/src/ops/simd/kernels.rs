@@ -581,6 +581,142 @@ float_sum_kernel!(
     simd_nansum_f64, simd_nansum_f64_by, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
 );
 
+/// The sum and the sum of squares of a run's deviations from a centre.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DeviationSums<T> {
+    /// `sum(x - centre)`.
+    pub sum: T,
+    /// `sum((x - centre)^2)`.
+    pub squares: T,
+}
+
+impl<T: std::ops::Add<Output = T>> std::ops::Add for DeviationSums<T> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            sum: self.sum + other.sum,
+            squares: self.squares + other.squares,
+        }
+    }
+}
+
+impl<T: num_traits::Float> DeviationSums<T> {
+    /// `sum((x - mean)^2)` for the exact mean of the `count` values, from the
+    /// deviations from a centre near it: the sum of squares less
+    /// `sum(x - centre)^2 / count`.
+    ///
+    /// A mean rounded to its dtype is off by up to half an ulp, and every
+    /// squared deviation from it carries that offset: `n * offset^2` too much
+    /// in all, which is nothing for data that varies over many ulps of its
+    /// mean and most of the answer for data that varies over a few. The
+    /// float32s `999 x 2.0` and one `2.0 + 2^-22` have a mean that rounds to
+    /// `2.0`, and the variance came out a thousandth high. The deviations'
+    /// own sum is that offset times `n`, measured, and subtracting its square
+    /// over `n` takes it back out.
+    ///
+    /// Written `sum * (sum / count)`, which by Cauchy-Schwarz is at most the
+    /// sum of squares and cannot overflow where it did not. Never below zero,
+    /// which only rounding could make it; a NaN stays a NaN.
+    ///
+    /// The second sum is not free: a float32 variance along a last axis in
+    /// cache measured 10-20% slower carrying it, and one down a column, where
+    /// the pair of accumulators interleaves, up to half again; an input that
+    /// streams from memory, nothing.
+    pub fn centred_squares(self, count: T) -> T {
+        let corrected = self.squares - self.sum * (self.sum / count);
+        if corrected < T::zero() {
+            T::zero()
+        } else {
+            corrected
+        }
+    }
+}
+
+/// [`DeviationSums`] of an f32 run from `centre`, each of the two accumulated
+/// as [`simd_sum_f32_by`] accumulates its one sum.
+pub fn simd_deviation_sums_f32(data: &[f32], centre: f32) -> DeviationSums<f32> {
+    deviation_sums::<f32, 8>(data, centre)
+}
+
+/// [`simd_deviation_sums_f32`] in double precision.
+pub fn simd_deviation_sums_f64(data: &[f64], centre: f64) -> DeviationSums<f64> {
+    deviation_sums::<f64, 4>(data, centre)
+}
+
+/// The two sums of [`DeviationSums`] in lanes, over 128-element leaves folded
+/// as a tree -- the shape of [`float_sum_kernel`], with a second accumulator
+/// beside each lane.
+#[inline(always)]
+fn deviation_sums<T: num_traits::Float, const LANES: usize>(
+    data: &[T],
+    centre: T,
+) -> DeviationSums<T> {
+    const LEAF: usize = 128;
+    type Lanes<T, const LANES: usize> = ([T; LANES], [T; LANES]);
+
+    #[inline(always)]
+    fn leaf<T: num_traits::Float, const LANES: usize>(block: &[T], centre: T) -> Lanes<T, LANES> {
+        let mut sums = [T::zero(); LANES];
+        let mut squares = [T::zero(); LANES];
+        let (chunks, rest) = block.as_chunks::<LANES>();
+        for chunk in chunks {
+            for lane in 0..LANES {
+                let d = chunk[lane] - centre;
+                sums[lane] = sums[lane] + d;
+                squares[lane] = squares[lane] + d * d;
+            }
+        }
+        for &v in rest {
+            let d = v - centre;
+            sums[0] = sums[0] + d;
+            squares[0] = squares[0] + d * d;
+        }
+        (sums, squares)
+    }
+
+    #[inline(always)]
+    fn absorb<T: num_traits::Float, const LANES: usize>(
+        into: &mut Lanes<T, LANES>,
+        from: &Lanes<T, LANES>,
+    ) {
+        for lane in 0..LANES {
+            into.0[lane] = into.0[lane] + from.0[lane];
+            into.1[lane] = into.1[lane] + from.1[lane];
+        }
+    }
+
+    let empty = ([T::zero(); LANES], [T::zero(); LANES]);
+    let mut pending = [empty; 40];
+    let mut leaves: usize = 0;
+    let (blocks, rest) = data.as_chunks::<LEAF>();
+    for block in blocks {
+        let mut sums = leaf::<T, LANES>(block, centre);
+        let mut level = 0;
+        while leaves & (1 << level) != 0 {
+            absorb(&mut sums, &pending[level]);
+            leaves &= !(1 << level);
+            level += 1;
+        }
+        pending[level] = sums;
+        leaves |= 1 << level;
+    }
+    let mut acc = leaf::<T, LANES>(rest, centre);
+    let mut level = 0;
+    let mut rest = leaves;
+    while rest != 0 {
+        if rest & 1 != 0 {
+            absorb(&mut acc, &pending[level]);
+        }
+        rest >>= 1;
+        level += 1;
+    }
+    DeviationSums {
+        sum: pairwise_lanes(&mut acc.0),
+        squares: pairwise_lanes(&mut acc.1),
+    }
+}
+
 /// `simd_sum_f32` for the products of two slices, which is what a dot product
 /// and every inner product built on one needs.
 ///

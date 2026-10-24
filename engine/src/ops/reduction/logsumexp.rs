@@ -682,22 +682,33 @@ pub fn cumprod_backward(
 /// two near its largest magnitude, which is exact, and scaled back.
 pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     let result = mean_direct(tensor, dim.clone(), keepdim)?;
-    if !tensor.dtype().is_float()
-        || tensor.numel() == 0
-        || !super::any_non_finite(&result)
-        || !super::all_finite(tensor)
-    {
+    rescue_mean(tensor, dim, result, |scaled, dim| {
+        mean_direct(scaled, dim, keepdim)
+    })
+}
+
+/// `result`, a mean of `tensor` over `dim`, with each slice whose sum may
+/// have overflowed taken again by `compute` over the slice scaled into range
+/// and scaled back; see [`super::rescue_scales`].
+fn rescue_mean(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    result: Tensor,
+    compute: impl FnOnce(&Tensor, Option<Vec<isize>>) -> Result<Tensor>,
+) -> Result<Tensor> {
+    if !tensor.dtype().is_float() || tensor.numel() == 0 {
         return Ok(result);
     }
-    let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?
-        .unwrap_or_else(|| (0..tensor.ndim()).collect());
+    let dims = super::sort_impl::statistic_dims(tensor, &dim)?;
     if dims.is_empty() {
         return Ok(result);
     }
-    let scales = super::slice_scales(tensor, &dims)?;
-    let scaled = crate::ops::arithmetic::div(tensor, &scales)?;
-    let averaged = mean_direct(&scaled, dim, keepdim)?;
-    let scales = super::scales_for_result(&scales, averaged.shape())?;
+    let Some(scales) = super::rescue_scales(tensor, &dims, &result, super::Intermediate::Sum)?
+    else {
+        return Ok(result);
+    };
+    let (averaged, scales) =
+        super::sort_impl::rescaled(tensor, &scales, |scaled| compute(scaled, dim))?;
     crate::ops::arithmetic::mul(&averaged, &scales)
 }
 
@@ -812,11 +823,22 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
 }
 
 /// NaN-aware mean reduction along specified dimensions
+///
+/// Kept inside the float range as [`mean`] is, with the NaN entries skipped
+/// in deciding a slice's scale as they are in its mean.
 pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return mean(tensor, dim, keepdim);
     }
+    let result = nanmean_direct(tensor, dim.clone(), keepdim)?;
+    rescue_mean(tensor, dim, result, |scaled, dim| {
+        nanmean_direct(scaled, dim, keepdim)
+    })
+}
 
+/// The NaN-aware mean as computed directly: the sum of the non-NaN entries
+/// over their count.
+fn nanmean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     // One axis or all of them, with no gradient to record: one fused kernel
     // rather than a mask, a float copy of it and two reductions.

@@ -150,3 +150,52 @@ def test_cosine_similarity_of_large_vectors():
     other = mt.Tensor([[1e-7, 1e-7]], dtype="float32")
     got = F.cosine_similarity(small, other, dim=1).item()
     assert math.isclose(got, 1 / math.sqrt(2), rel_tol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "dtype,scale",
+    [("float32", 1e20), ("float32", 1e-25), ("float64", 1e200), ("float64", 1e-200)],
+)
+def test_the_nan_statistics_too(dtype, scale):
+    values = np.array([1.0, -1.0, np.nan, 0.5, 2.0], dtype=np.float64) * scale
+    tensor = mt.Tensor(values.astype(dtype), dtype=dtype)
+    finite = values[~np.isnan(values)].astype(dtype)
+    tolerance = 1e-6 if dtype == "float32" else 1e-14
+    want = _sqrt(_exact_var(finite))
+    assert math.isclose(tensor.nanstd().item(), want, rel_tol=tolerance)
+    big = math.ldexp(1.5, 127 if dtype == "float32" else 1023)
+    mean = mt.Tensor([big, np.nan, big, big / 2, big / 2], dtype=dtype).nanmean().item()
+    assert mean == big * 0.75
+
+
+def test_each_slice_is_rescued_on_its_own():
+    nan, inf = math.nan, math.inf
+    # A slice with a NaN or an infinity in it does not stop another slice
+    # being rescued, nor is a slice that never left the range recomputed:
+    # the cancelling first row keeps its exact answer.
+    rows = mt.Tensor(
+        [[1e300, -1e300, 1e-300], [1e308, 1e308, 1e308], [nan, 1.0, 2.0]],
+        dtype="float64",
+    )
+    assert rows.mean(dim=1).tolist()[:2] == [1e-300 / 3, 1e308]
+    assert math.isnan(rows.mean(dim=1).tolist()[2])
+    # The infinity wins against finite values whose own sum overflows the
+    # other way.
+    assert mt.Tensor([inf, -1e308, -1e308], dtype="float64").mean().item() == inf
+    spread = mt.Tensor([[nan, 1.0, 2.0], [1e200, -1e200, 0.0]], dtype="float64")
+    assert spread.std(dim=1).tolist()[1] == 1e200
+    nan_rows = mt.Tensor(
+        [[1e200, -1e200, nan], [nan, nan, nan], [1.0, 2.0, 3.0]], dtype="float64"
+    )
+    got = nan_rows.nanvar(dim=1).tolist()
+    assert got[0] == inf and math.isnan(got[1]) and got[2] == 1.0
+
+
+def test_a_zero_variance_over_many_tiny_values():
+    # One element an ulp from 999 others: the squares are subnormal and their
+    # mean is below the smallest one, so the variance underflows -- but its
+    # root is an ordinary float32.
+    a = np.float32(2.0**-50)
+    values = np.array([a] * 999 + [np.nextafter(a, np.float32(1))], dtype=np.float32)
+    want = _sqrt(_exact_var(values))
+    assert math.isclose(mt.Tensor(values).std().item(), want, rel_tol=1e-6)

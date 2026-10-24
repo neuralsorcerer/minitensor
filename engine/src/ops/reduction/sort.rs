@@ -710,7 +710,7 @@ pub fn argsort(
 /// or underflowed into the subnormals -- when the root is taken of the
 /// variance of each slice scaled by a power of two and scaled back: the
 /// float32 `[1e20, -1e20]` has a standard deviation of `1.4e20`, though its
-/// variance is past the top of float32. See [`scaled_variance`].
+/// variance is past the top of float32. See [`rescaled`].
 pub fn std(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -722,64 +722,58 @@ pub fn std(
         return std(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
     }
     let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    if needs_rescaling(tensor, &dim, keepdim, &variance, unbiased)? {
-        let (variance, scales) = scaled_variance(tensor, dim, keepdim, unbiased)?;
-        return crate::ops::arithmetic::mul(&std_from_variance(&variance)?, &scales);
-    }
-    std_from_variance(&variance)
+    let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
+        return std_from_variance(&variance);
+    };
+    let (variance, scales) = rescaled(tensor, &scales, |scaled| {
+        var_direct(scaled, dim, keepdim, unbiased)
+    })?;
+    crate::ops::arithmetic::mul(&std_from_variance(&variance)?, &scales)
 }
 
 /// The axes a statistic over `dim` reduces, every one when `dim` is `None`.
-fn statistic_dims(tensor: &Tensor, dim: &Option<Vec<isize>>) -> Result<Vec<usize>> {
+pub(crate) fn statistic_dims(tensor: &Tensor, dim: &Option<Vec<isize>>) -> Result<Vec<usize>> {
     Ok(normalize_reduction_dims(dim.clone(), tensor.ndim())?
         .unwrap_or_else(|| (0..tensor.ndim()).collect()))
 }
 
-/// Whether a variance may have been computed outside the float range: a
-/// result non-finite or below the smallest normal, of finite float input,
-/// over a slice with the samples to have a variance at all.
-fn needs_rescaling(
+/// The scales for the slices of `variance`, a variance of `tensor` over
+/// `dim`, that may have been computed outside the float range, or `None`
+/// when none was; see [`rescue_scales`]. A slice without the samples to have
+/// a variance at all is left to say so.
+pub(crate) fn variance_rescue(
     tensor: &Tensor,
     dim: &Option<Vec<isize>>,
-    keepdim: bool,
     variance: &Tensor,
     unbiased: bool,
-) -> Result<bool> {
+) -> Result<Option<Tensor>> {
     if !tensor.dtype().is_float() {
-        return Ok(false);
+        return Ok(None);
     }
     let dims = statistic_dims(tensor, dim)?;
     let samples: usize = dims.iter().map(|&d| tensor.shape().dims()[d]).product();
     if dims.is_empty() || samples <= usize::from(unbiased) {
-        return Ok(false);
+        return Ok(None);
     }
-    if !any_out_of_normal_range(variance)
-        && !zero_may_have_underflowed(tensor, &dims, keepdim, variance)?
-    {
-        return Ok(false);
-    }
-    Ok(all_finite(tensor))
+    rescue_scales(tensor, &dims, variance, Intermediate::Squares)
 }
 
-/// The variance of each slice divided by a power of two near its largest
-/// magnitude, and those scales laid out as the variance is.
+/// A statistic taken again by `compute` over `tensor` divided by `scales`,
+/// and the scales laid out as its result is.
 ///
-/// Dividing by a power of two is exact, and leaves every slice's largest
-/// magnitude in `[1, 2)`, where neither its squares nor their sum can leave
-/// the range; the variance is the result times the scale squared, and the
-/// standard deviation its root times the scale.
-fn scaled_variance(
+/// Dividing by a power of two is exact, and leaves the largest finite
+/// magnitude of every rescued slice in `[1, 2)`, where neither a sum nor its
+/// squares can leave the range: a mean is the result times the scale, a
+/// variance the result times it twice and a standard deviation its root
+/// times it once.
+pub(crate) fn rescaled(
     tensor: &Tensor,
-    dim: Option<Vec<isize>>,
-    keepdim: bool,
-    unbiased: bool,
+    scales: &Tensor,
+    compute: impl FnOnce(&Tensor) -> Result<Tensor>,
 ) -> Result<(Tensor, Tensor)> {
-    let dims = statistic_dims(tensor, &dim)?;
-    let scales = slice_scales(tensor, &dims)?;
-    let scaled = crate::ops::arithmetic::div(tensor, &scales)?;
-    let variance = var_direct(&scaled, dim, keepdim, unbiased)?;
-    let scales = scales_for_result(&scales, variance.shape())?;
-    Ok((variance, scales))
+    let statistic = compute(&crate::ops::arithmetic::div(tensor, scales)?)?;
+    let scales = scales_for_result(scales, statistic.shape())?;
+    Ok((statistic, scales))
 }
 
 /// The square root of a variance, as a standard deviation.
@@ -806,7 +800,7 @@ pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
 /// already follows -- a variance of integers is a real number -- and does so
 /// after its slices are shifted to start at zero, exactly; see
 /// [`integer_deviations`]. A float variance whose sum of squares left the
-/// float range is taken again over scaled slices; see [`scaled_variance`].
+/// float range is taken again over scaled slices; see [`rescaled`].
 pub fn var(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -818,12 +812,16 @@ pub fn var(
         return var(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
     }
     let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    if needs_rescaling(tensor, &dim, keepdim, &variance, unbiased)? {
-        let (variance, scales) = scaled_variance(tensor, dim, keepdim, unbiased)?;
-        let once = crate::ops::arithmetic::mul(&variance, &scales)?;
-        return crate::ops::arithmetic::mul(&once, &scales);
-    }
-    Ok(variance)
+    let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
+        return Ok(variance);
+    };
+    let (variance, scales) = rescaled(tensor, &scales, |scaled| {
+        var_direct(scaled, dim, keepdim, unbiased)
+    })?;
+    // Once and then again, not by the square of the scale, which can overflow
+    // where the variance does not.
+    let once = crate::ops::arithmetic::mul(&variance, &scales)?;
+    crate::ops::arithmetic::mul(&once, &scales)
 }
 
 /// The variance as computed directly, in the input's own range.
@@ -848,7 +846,7 @@ fn var_direct(
     let reduction_dims: Vec<usize> = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
 
     // Fused fast path: single-axis variance for tensors that don't require
-    // gradients. Computes mean and the sum of squared deviations in two
+    // gradients. Computes the mean and the deviations' sums in two
     // cache-friendly passes, avoiding the full-size difference/square
     // intermediates that the autograd composition below materializes. The
     // gradient path is left entirely to that composition.
@@ -866,7 +864,18 @@ fn var_direct(
     let mean_tensor = mean(tensor, Some(reduction_dims_isize.clone()), true)?;
     let diff = crate::ops::arithmetic::sub(tensor, &mean_tensor)?;
     let squared_diff = crate::ops::arithmetic::mul(&diff, &diff)?;
-    let mut variance = mean(&squared_diff, Some(reduction_dims_isize), true)?;
+    let mut variance = mean(&squared_diff, Some(reduction_dims_isize.clone()), true)?;
+    // Less the square of the deviations' own mean, which is the rounding of
+    // `mean_tensor`; see `DeviationSums::centred_squares`. Its gradient is
+    // zero, the deviations summing to zero whatever the input, so this
+    // changes the value alone.
+    let offset = mean(&diff, Some(reduction_dims_isize), true)?;
+    variance =
+        crate::ops::arithmetic::sub(&variance, &crate::ops::arithmetic::mul(&offset, &offset)?)?;
+    variance = crate::ops::minmax::maximum(
+        &variance,
+        &crate::ops::util::create_scalar_tensor(0.0, variance.dtype(), variance.device())?,
+    )?;
 
     let sample_count = reduction_dims
         .iter()
@@ -946,11 +955,11 @@ const VAR_MIN_SLABS: usize = 4;
 
 /// Fused single-axis variance for tensors that do not require gradients.
 ///
-/// Two cache-friendly slab passes per outer block (mean, then sum of squared
-/// deviations), parallel over the outer index. Numerically matches the autograd
-/// composition (`mean` -> `x - mean` -> square -> `mean` -> Bessel): biased
-/// variance is `sum_sq_dev / n`, unbiased is `sum_sq_dev / (n - 1)` (and NaN
-/// when `n <= 1`).
+/// Two cache-friendly slab passes per outer block (mean, then the sum and the
+/// sum of squares of the deviations from it), parallel over the outer index.
+/// The same formula as the autograd composition: the centred squares
+/// `sum(d^2) - sum(d)^2 / n` (see [`DeviationSums::centred_squares`]) over
+/// `n`, or `n - 1` unbiased (and NaN when `n <= 1`).
 fn var_fused_single_axis(
     tensor: &Tensor,
     axis: usize,
@@ -966,7 +975,7 @@ fn var_fused_single_axis(
     let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
 
     macro_rules! fill {
-        ($accessor:ident, $accessor_mut:ident, $ty:ty, $sum_by:ident) => {{
+        ($accessor:ident, $accessor_mut:ident, $ty:ty, $sum_by:ident, $deviations:ident) => {{
             let input = tensor
                 .data()
                 .$accessor()
@@ -1014,13 +1023,9 @@ fn var_fused_single_axis(
                         let row = &input[base..base + dim_size];
                         let total = accurate_run_sum(row, |part: &[$ty]| $sum_by(part, |v| v));
                         let mean = total / n;
-                        let acc = accurate_run_sum(row, |part: &[$ty]| {
-                            $sum_by(part, |v| {
-                                let d = v - mean;
-                                d * d
-                            })
-                        });
-                        *slot = acc / divisor;
+                        let deviations =
+                            accurate_run_sum(row, |part: &[$ty]| $deviations(part, mean));
+                        *slot = deviations.centred_squares(n) / divisor;
                     }
                 };
                 if tensor.numel() < crate::ops::map::PAR_THRESHOLD {
@@ -1058,22 +1063,23 @@ fn var_fused_single_axis(
                     );
                     let means: Vec<$ty> =
                         totals.iter().cycle().take(lanes).map(|&t| t / n).collect();
-                    let squares = fold_slab_with(
+                    let deviations = fold_slab_with(
                         source,
                         inner,
-                        0.0 as $ty,
-                        |acc: &mut [$ty], values: &[$ty], first| {
+                        DeviationSums::<$ty>::default(),
+                        |acc: &mut [DeviationSums<$ty>], values: &[$ty], first| {
                             let means = &means[first..first + acc.len()];
                             for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
                                 let d = v - m;
-                                *a += d * d;
+                                a.sum += d;
+                                a.squares += d * d;
                             }
                         },
                         |x, y| x + y,
                         spread,
                     );
-                    for (slot, &q) in target.iter_mut().zip(&squares) {
-                        *slot = q / divisor;
+                    for (slot, &q) in target.iter_mut().zip(&deviations) {
+                        *slot = q.centred_squares(n) / divisor;
                     }
                 };
                 // A slab too short to split by rows is split by columns, and
@@ -1098,22 +1104,23 @@ fn var_fused_single_axis(
                         add,
                     );
                     let means: Vec<$ty> = totals.iter().map(|&t| t / n).collect();
-                    let squares = fold_column_band(
+                    let deviations = fold_column_band(
                         source,
                         inner,
                         start,
                         width,
-                        0.0 as $ty,
-                        |acc: &mut [$ty], values: &[$ty], _| {
+                        DeviationSums::<$ty>::default(),
+                        |acc: &mut [DeviationSums<$ty>], values: &[$ty], _| {
                             for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
                                 let d = v - m;
-                                *a += d * d;
+                                a.sum += d;
+                                a.squares += d * d;
                             }
                         },
-                        add,
+                        |x, y| x + y,
                     );
-                    for (slot, &q) in target.iter_mut().zip(&squares) {
-                        *slot = q / divisor;
+                    for (slot, &q) in target.iter_mut().zip(&deviations) {
+                        *slot = q.centred_squares(n) / divisor;
                     }
                 };
                 let outer = out.len() / inner;
@@ -1144,8 +1151,20 @@ fn var_fused_single_axis(
     }
 
     match tensor.dtype() {
-        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32, simd_sum_f32_by),
-        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64, simd_sum_f64_by),
+        DataType::Float32 => fill!(
+            as_f32_slice,
+            as_f32_slice_mut,
+            f32,
+            simd_sum_f32_by,
+            simd_deviation_sums_f32
+        ),
+        DataType::Float64 => fill!(
+            as_f64_slice,
+            as_f64_slice_mut,
+            f64,
+            simd_sum_f64_by,
+            simd_deviation_sums_f64
+        ),
         _ => unreachable!("variance is only defined for floating point tensors"),
     }
 

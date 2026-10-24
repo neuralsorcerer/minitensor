@@ -20,6 +20,7 @@ import math as _math
 import operator as _operator
 
 from . import _core as _C
+from ._elementwise import frexp as _frexp
 from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import (
@@ -519,27 +520,70 @@ def cov(
     `fweights` counts repeats of each observation and `aweights` weights their
     reliability; the difference shows in the denominator, where `aweights`
     reduces the effective sample size rather than the count.
+
+    An integer input is taken as each row less its first element, exactly,
+    which moves no covariance and keeps the steps between int64s past `2^53`
+    that converting first would round away; see `_integer_deviations`. An
+    entry that comes out non-finite or below the smallest normal, where the
+    products of the deviations may have left the float range though the
+    covariance did not, is computed again from rows scaled into range by
+    powers of two and scaled back; see `_row_scales`.
     """
 
-    matrix = _require_float(_atleast_tensor(input), "cov")
+    matrix, single_variable, weights, scaled = _cov_operands(
+        input, fweights, aweights, "cov"
+    )
+    result = _cov_matrix(matrix, correction, weights, scaled)
+    doubtful = _out_of_normal_range(result)
+    if bool(_F.any(doubtful).item()):
+        scales = _row_scales(matrix)
+        rescued = _cov_matrix(matrix / scales, correction, weights, scaled)
+        rescued = rescued * scales * _F.transpose(scales, 0, 1)
+        result = _F.where(doubtful, rescued, result)
+    return result.reshape([]) if single_variable else result
+
+
+def _cov_operands(
+    input: object, fweights: object | None, aweights: object | None, name: str
+) -> tuple[Tensor, bool, Tensor | None, Tensor | None]:
+    """`cov`'s operands, checked: the rows as a float matrix, whether there was
+    one variable, the combined weights, and the `aweights` alone."""
+
+    matrix = _atleast_tensor(input)
     if matrix.ndim() > 2:
-        raise ValueError("cov requires a 1-D or 2-D tensor")
+        raise ValueError(f"{name} requires a 1-D or 2-D tensor")
     # A single variable has a scalar variance, not a one-by-one matrix.
     single_variable = matrix.ndim() <= 1
     if single_variable:
         matrix = matrix.reshape(1, -1)
+    if str(matrix.dtype) in ("int32", "int64"):
+        matrix = _integer_deviations(matrix)
+    else:
+        matrix = _require_float(matrix, name)
 
     observations = matrix.shape[1]
     if observations == 0:
-        raise ValueError("cov requires at least one observation")
+        raise ValueError(f"{name} requires at least one observation")
 
     weights = None
+    scaled = None
     if fweights is not None:
         weights = _check_weights(fweights, observations, "fweights")
     if aweights is not None:
         scaled = _check_weights(aweights, observations, "aweights")
         weights = scaled if weights is None else weights * scaled
+    return matrix, single_variable, weights, scaled
 
+
+def _cov_matrix(
+    matrix: Tensor,
+    correction: int,
+    weights: Tensor | None,
+    scaled: Tensor | None,
+) -> Tensor:
+    """The covariance of the rows of a float matrix, as computed directly."""
+
+    observations = matrix.shape[1]
     if weights is None:
         total = float(observations)
         centred = matrix - _F.mean(matrix, [1], True)
@@ -550,7 +594,7 @@ def cov(
         if total <= 0.0:
             raise ValueError("cov requires the weights to sum to a positive value")
         centred = matrix - _F.sum(matrix * weights, [1], True) / total
-        if aweights is None:
+        if scaled is None:
             scale = total - correction
         else:
             # `aweights` shrinks the effective sample size rather than the
@@ -566,8 +610,61 @@ def cov(
             f"for {observations} observations"
         )
 
-    result = _F.matmul(weighted, _F.transpose(centred, 0, 1)) / scale
-    return result.reshape([]) if single_variable else result
+    return _F.matmul(weighted, _F.transpose(centred, 0, 1)) / scale
+
+
+def _integer_deviations(matrix: Tensor) -> Tensor:
+    """An integer matrix's rows less their first elements, exactly, in the
+    float dtype integer statistics take: float32 for int32, float64 for int64.
+
+    A covariance does not move when a row is shifted by one amount, and
+    shifted by its own first element a row is as small as its spread. An int32
+    difference is exact in int64. An int64 one can wrap there, so each value
+    is split into its top and bottom 32 bits, each half is differenced -- no
+    half's difference reaches `2^33` -- and the two are put back together in
+    float64, where the top's is exact and the sum rounds once. Converted
+    first, int64s above `2^53` a step apart became one float, and the variance
+    of `[2^53, 2^53 + 1, 2^53 + 2]` was 2.
+    """
+
+    if str(matrix.dtype) == "int32":
+        wide = matrix.astype("int64")
+        return (wide - wide[:, :1]).astype("float32")
+    high = matrix >> 32
+    low = matrix & 0xFFFFFFFF
+    high = (high - high[:, :1]).astype("float64")
+    low = (low - low[:, :1]).astype("float64")
+    return high * 4294967296.0 + low
+
+
+def _out_of_normal_range(tensor: Tensor) -> Tensor:
+    """Where a float tensor is non-finite or below the smallest normal
+    magnitude, zero included."""
+
+    tiny = (
+        1.1754943508222875e-38
+        if str(tensor.dtype) == "float32"
+        else 2.2250738585072014e-308
+    )
+    return ~_F.isfinite(tensor) | (_F.abs(tensor) < tiny)
+
+
+def _row_scales(matrix: Tensor) -> Tensor:
+    """For each row of a float matrix, the power of two at or below its largest
+    finite magnitude, one for a row with none, as a detached column.
+
+    Dividing by a power of two is exact, and leaves every row's largest finite
+    magnitude in `[1, 2)`, where the products of its deviations cannot leave
+    the range; a covariance is the scaled one times a row's scale and a
+    column's.
+    """
+
+    magnitude = _F.abs(matrix.detach())
+    finite = _F.where(_F.isfinite(magnitude), magnitude, Tensor.zeros_like(magnitude))
+    largest = _F.amax(finite, [1], True)
+    _, exponent = _frexp(largest)
+    ones = Tensor.ones_like(largest)
+    return _F.where(largest > 0, ones.ldexp(exponent - 1), ones)
 
 
 def _check_weights(weights: object, observations: int, name: str) -> Tensor:
@@ -586,17 +683,33 @@ def corrcoef(input: object) -> Tensor:
     The covariance divided by the outer product of the standard deviations, and
     then clamped: the division is exact in theory and can land a hair outside
     `[-1, 1]` in floating point, which a caller comparing against 1 would see.
+
+    A correlation does not depend on the scale of a row, and where the
+    covariance left the float range -- the float32 rows `[1e20, 2e20]` have a
+    covariance past its top -- it is taken of the rows scaled into range by
+    powers of two instead, which is the same correlation. Integers are taken
+    as exact deviations, as `cov` takes them.
     """
 
-    covariance = cov(input, correction=1)
-    if covariance.ndim() == 0:
+    matrix, single_variable, _, _ = _cov_operands(input, None, None, "corrcoef")
+    covariance = _cov_matrix(matrix, 1, None, None)
+    if bool(_F.any(_out_of_normal_range(covariance)).item()):
+        covariance = _cov_matrix(matrix / _row_scales(matrix), 1, None, None)
+    if single_variable:
         # One variable is perfectly correlated with itself, unless it never
         # varies at all -- and `0 / 0` is what says so.
+        covariance = covariance.reshape([])
         return covariance / covariance
 
     deviations = _F.sqrt(_F.diagonal(covariance))
-    normalized = covariance / outer(deviations, deviations)
-    return _F.clamp(normalized, -1.0, 1.0)
+    normalized = _F.clamp(covariance / outer(deviations, deviations), -1.0, 1.0)
+    # A variable's correlation with itself is one, and `c / sqrt(c)^2` is a
+    # rounding either side of it; `c / c` is one exactly, or NaN for a row
+    # that never varies.
+    variables = covariance.shape[0]
+    on_diagonal = Tensor.eye(variables, variables, dtype="bool")
+    itself = _F.diagonal(covariance)
+    return _F.where(on_diagonal, _F.diag_embed(itself / itself), normalized)
 
 
 def ptp(input: object, dim: object = None, keepdim: bool = False) -> Tensor:

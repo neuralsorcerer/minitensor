@@ -376,6 +376,11 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
     `log2` of a power of two can land a hair either side of the integer; one
     step in each direction is enough, and without it the mantissa would
     occasionally sit outside its half-open range.
+
+    The mantissa is the input with its exponent taken off by `ldexp`, exactly.
+    It was the product with `exp2(-exponent)`, which forms the power on its
+    own first, and for a subnormal input that power is past the top of the
+    dtype: `frexp(1e-310)` had an infinite mantissa.
     """
 
     tensor = _atleast_tensor(input)
@@ -385,8 +390,8 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
     ordinary = _F.isfinite(tensor) & (magnitude > 0)
 
     safe = _F.where(ordinary, magnitude, Tensor.ones_like(magnitude))
-    exponent = _F.floor(_F.log2(safe)) + 1
-    mantissa = tensor * _F.exp2(-exponent)
+    exponent = (_F.floor(_F.log2(safe)) + 1).astype("int64")
+    mantissa = tensor.ldexp(-exponent)
 
     # One correction each way: a mantissa at or above 1 belongs to the next
     # exponent up, one below a half to the one down.
@@ -400,5 +405,5 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
     zeros = Tensor.zeros_like(exponent)
     return (
         _F.where(ordinary, mantissa, tensor),
-        _F.where(ordinary, exponent, zeros).astype("int64"),
+        _F.where(ordinary, exponent, zeros),
     )
