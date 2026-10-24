@@ -255,7 +255,7 @@ fn nan_moments_runs_f32(input: &[f32], outer: usize, len: usize, moment: NanMome
     let one = |run: &[f32], spread: bool| {
         let sum = total(
             run,
-            |v: f32| if v.is_nan() { 0.0 } else { f64::from(v) },
+            |v: f32| f64::from(if v.is_nan() { 0.0 } else { v }),
             spread,
         );
         let count = total(run, |v: f32| if v.is_nan() { 0.0 } else { 1.0 }, spread);

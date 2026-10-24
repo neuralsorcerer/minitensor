@@ -734,7 +734,12 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
         // value is the same whether or not a gradient is asked for; the
         // gradient is the mean's own, the output's over the count.
         DataType::Float32 => {
-            let total = widened_sum(tensor, normalized.as_deref(), keepdim)?;
+            let total = super::nanquantile_impl::widened_sum(
+                tensor,
+                normalized.as_deref(),
+                keepdim,
+                false,
+            )?;
             let value = super::sort_impl::divide_by_count(&total, num_elements)?
                 .astype(DataType::Float32)?;
             if !tensor.requires_grad() {
@@ -779,67 +784,6 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
             "Mean not supported for boolean tensors",
         )),
     }
-}
-
-/// `sum` of a float32 tensor in float64, with no gradient: over the axes
-/// `sum` takes, in its order, without a widened copy -- the first axis is
-/// read as float32 and widened in the fold, and the rest are float64
-/// already.
-fn widened_sum(tensor: &Tensor, dims: Option<&[usize]>, keepdim: bool) -> Result<Tensor> {
-    let missing = || MinitensorError::internal_error("widened sum: f32 slice");
-    let Some(dims) = dims else {
-        let data = tensor.data().as_f32_slice().ok_or_else(missing)?;
-        let total = if data.len() >= 1024 {
-            crate::ops::util::deterministic_par_sum(data, 8192, crate::ops::simd::simd_sum_f32_wide)
-        } else {
-            crate::ops::simd::simd_sum_f32_wide(data)
-        };
-        let shape = if keepdim {
-            Shape::new(vec![1; tensor.ndim()])
-        } else {
-            Shape::scalar()
-        };
-        return Ok(Tensor::new(
-            Arc::new(TensorData::from_vec_f64(vec![total], tensor.device())),
-            shape,
-            DataType::Float64,
-            tensor.device(),
-            false,
-        ));
-    };
-    // `sum` takes the axes first to last when it keeps them and last to first
-    // when it drops them, so that the later indices still name their axes.
-    let order: Vec<usize> = if keepdim {
-        dims.to_vec()
-    } else {
-        dims.iter().rev().copied().collect()
-    };
-    let mut result: Option<Tensor> = None;
-    for &dim in &order {
-        result = Some(match result {
-            Some(partial) => sum_along_dim(&partial, dim, keepdim)?,
-            None => {
-                let mut shape = tensor.shape().dims().to_vec();
-                if keepdim {
-                    shape[dim] = 1;
-                } else {
-                    shape.remove(dim);
-                }
-                let shape = Shape::new(shape);
-                let mut data =
-                    TensorData::zeros_on_device(shape.numel(), DataType::Float64, tensor.device());
-                super::sum_prod_impl::sum_along_dim_f32_wide(tensor, &mut data, dim)?;
-                Tensor::new(
-                    Arc::new(data),
-                    shape,
-                    DataType::Float64,
-                    tensor.device(),
-                    false,
-                )
-            }
-        });
-    }
-    result.ok_or_else(|| MinitensorError::internal_error("widened sum: no axes"))
 }
 
 /// How many elements a reduction over `dims` takes into each result, every

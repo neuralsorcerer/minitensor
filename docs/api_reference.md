@@ -1813,6 +1813,11 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
+A float32 `sum` or `nansum` is carried in float64 and rounded once, over one
+axis or several, so it is the float32 nearest the exact sum, where float32
+additions had put offset data tens of ulps out. `nansum` skips the input's own
+NaN entries; a NaN made of `inf + -inf` on the way is the answer and stays.
+
 Float32 statistics -- `mean`, `var`, `std` and their NaN-skipping forms -- are
 carried in float64 and rounded once, the root of a standard deviation
 included, so each is the float32 nearest the exact answer: the mean of a
