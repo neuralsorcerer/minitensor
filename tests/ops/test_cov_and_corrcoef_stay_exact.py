@@ -141,3 +141,36 @@ def test_gradients_flow_through_the_rescue():
     np.testing.assert_allclose(
         large.grad.numpy() * 1e200, small.grad.numpy(), rtol=1e-12
     )
+
+
+@pytest.mark.parametrize("offset", [0.0, 100.0, 1e4])
+def test_float32_is_carried_in_float64(offset):
+    rng = np.random.default_rng(281)
+    rows = (offset + rng.normal(0, 1, (3, 4000))).astype(np.float32)
+    wide = rows.astype(np.float64)
+    got = mt.cov(mt.Tensor(rows))
+    assert str(got.dtype) == "float32"
+    np.testing.assert_array_equal(got.numpy(), np.cov(wide).astype(np.float32))
+    correlation = mt.corrcoef(mt.Tensor(rows)).numpy()
+    want = np.corrcoef(wide)
+    np.testing.assert_allclose(correlation, want, rtol=6e-8, atol=6e-8)
+    assert np.all(np.diag(correlation) == 1.0)
+
+
+def test_float64_centring_is_corrected():
+    rng = np.random.default_rng(283)
+    rows = 1e8 + rng.normal(0, 1e-6, (2, 400))
+    got = mt.cov(mt.Tensor(rows, dtype="float64")).numpy()
+    want = np.array([[float(v) for v in row] for row in _exact_cov(rows)])
+    np.testing.assert_allclose(got, want, rtol=1e-14)
+
+
+def test_float32_gradients_come_back_float32():
+    rng = np.random.default_rng(293)
+    rows = rng.normal(0, 1, (3, 7))
+    narrow = mt.Tensor(rows.astype(np.float32), requires_grad=True)
+    mt.corrcoef(narrow).sum().backward()
+    wide = mt.Tensor(rows, dtype="float64", requires_grad=True)
+    mt.corrcoef(wide).sum().backward()
+    assert str(narrow.grad.dtype) == "float32"
+    np.testing.assert_allclose(narrow.grad.numpy(), wide.grad.numpy(), atol=1e-6)
