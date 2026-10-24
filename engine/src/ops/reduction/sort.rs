@@ -705,13 +705,81 @@ pub fn argsort(
 }
 
 /// Standard deviation along specified dimensions
+///
+/// From the variance, except where that left the float range -- overflowed,
+/// or underflowed into the subnormals -- when the root is taken of the
+/// variance of each slice scaled by a power of two and scaled back: the
+/// float32 `[1e20, -1e20]` has a standard deviation of `1.4e20`, though its
+/// variance is past the top of float32. See [`scaled_variance`].
 pub fn std(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    std_from_variance(&var(tensor, dim, keepdim, unbiased)?)
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
+        let dims = statistic_dims(tensor, &dim)?;
+        return std(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
+    }
+    let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
+    if needs_rescaling(tensor, &dim, keepdim, &variance, unbiased)? {
+        let (variance, scales) = scaled_variance(tensor, dim, keepdim, unbiased)?;
+        return crate::ops::arithmetic::mul(&std_from_variance(&variance)?, &scales);
+    }
+    std_from_variance(&variance)
+}
+
+/// The axes a statistic over `dim` reduces, every one when `dim` is `None`.
+fn statistic_dims(tensor: &Tensor, dim: &Option<Vec<isize>>) -> Result<Vec<usize>> {
+    Ok(normalize_reduction_dims(dim.clone(), tensor.ndim())?
+        .unwrap_or_else(|| (0..tensor.ndim()).collect()))
+}
+
+/// Whether a variance may have been computed outside the float range: a
+/// result non-finite or below the smallest normal, of finite float input,
+/// over a slice with the samples to have a variance at all.
+fn needs_rescaling(
+    tensor: &Tensor,
+    dim: &Option<Vec<isize>>,
+    keepdim: bool,
+    variance: &Tensor,
+    unbiased: bool,
+) -> Result<bool> {
+    if !tensor.dtype().is_float() {
+        return Ok(false);
+    }
+    let dims = statistic_dims(tensor, dim)?;
+    let samples: usize = dims.iter().map(|&d| tensor.shape().dims()[d]).product();
+    if dims.is_empty() || samples <= usize::from(unbiased) {
+        return Ok(false);
+    }
+    if !any_out_of_normal_range(variance)
+        && !zero_may_have_underflowed(tensor, &dims, keepdim, variance)?
+    {
+        return Ok(false);
+    }
+    Ok(all_finite(tensor))
+}
+
+/// The variance of each slice divided by a power of two near its largest
+/// magnitude, and those scales laid out as the variance is.
+///
+/// Dividing by a power of two is exact, and leaves every slice's largest
+/// magnitude in `[1, 2)`, where neither its squares nor their sum can leave
+/// the range; the variance is the result times the scale squared, and the
+/// standard deviation its root times the scale.
+fn scaled_variance(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<(Tensor, Tensor)> {
+    let dims = statistic_dims(tensor, &dim)?;
+    let scales = slice_scales(tensor, &dims)?;
+    let scaled = crate::ops::arithmetic::div(tensor, &scales)?;
+    let variance = var_direct(&scaled, dim, keepdim, unbiased)?;
+    let scales = scales_for_result(&scales, variance.shape())?;
+    Ok((variance, scales))
 }
 
 /// The square root of a variance, as a standard deviation.
@@ -733,18 +801,38 @@ pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
 }
 
 /// Variance along specified dimensions
+///
+/// An integer argument widens rather than being refused, the rule `mean`
+/// already follows -- a variance of integers is a real number -- and does so
+/// after its slices are shifted to start at zero, exactly; see
+/// [`integer_deviations`]. A float variance whose sum of squares left the
+/// float range is taken again over scaled slices; see [`scaled_variance`].
 pub fn var(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    // An integer argument widens rather than being refused, the rule `mean`
-    // already follows: a variance, a norm and a log-sum-exp of integers are
-    // all real numbers. See `ops::util::widen_integer_input`.
-    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return var(&widened, dim, keepdim, unbiased);
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
+        let dims = statistic_dims(tensor, &dim)?;
+        return var(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
     }
+    let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
+    if needs_rescaling(tensor, &dim, keepdim, &variance, unbiased)? {
+        let (variance, scales) = scaled_variance(tensor, dim, keepdim, unbiased)?;
+        let once = crate::ops::arithmetic::mul(&variance, &scales)?;
+        return crate::ops::arithmetic::mul(&once, &scales);
+    }
+    Ok(variance)
+}
+
+/// The variance as computed directly, in the input's own range.
+fn var_direct(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",

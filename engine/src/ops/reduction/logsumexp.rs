@@ -675,7 +675,34 @@ pub fn cumprod_backward(
 }
 
 /// Mean reduction along specified dimensions
+///
+/// A float mean sums before it divides, and where the sum leaves the float
+/// range the mean need not: `mean([1e308, 1e308])` is `1e308`, and was
+/// infinite. Such a mean is taken again over each slice divided by a power of
+/// two near its largest magnitude, which is exact, and scaled back.
 pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    let result = mean_direct(tensor, dim.clone(), keepdim)?;
+    if !tensor.dtype().is_float()
+        || tensor.numel() == 0
+        || !super::any_non_finite(&result)
+        || !super::all_finite(tensor)
+    {
+        return Ok(result);
+    }
+    let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?
+        .unwrap_or_else(|| (0..tensor.ndim()).collect());
+    if dims.is_empty() {
+        return Ok(result);
+    }
+    let scales = super::slice_scales(tensor, &dims)?;
+    let scaled = crate::ops::arithmetic::div(tensor, &scales)?;
+    let averaged = mean_direct(&scaled, dim, keepdim)?;
+    let scales = super::scales_for_result(&scales, averaged.shape())?;
+    crate::ops::arithmetic::mul(&averaged, &scales)
+}
+
+/// The mean as computed directly: the sum over the count.
+fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
     let normalized = normalize_reduction_dims(dim, tensor.ndim())?;
 

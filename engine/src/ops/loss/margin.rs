@@ -130,12 +130,17 @@ pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Resu
     let axis = crate::ops::normalize_dim(dim, shape.ndim())?;
     let reduce = Some(vec![axis as isize]);
 
-    let dot = sum(&mul(&a, &b)?, reduce.clone(), false)?;
+    // Each operand over its own norm, and then their dot product: the same
+    // number as the dot product over the two norms, with every term at most
+    // one in magnitude. As written the other way the dot product overflowed
+    // or underflowed on its own, though the norms were taken safely and the
+    // answer is scale-free: in float32 two equal vectors of 1e20 came out
+    // NaN, and two of 1e-25 under a floor below them at 0 rather than their
+    // cosine.
     let floor = scalar(eps, &a)?;
-    let norm_a = crate::ops::minmax::maximum(&norm(&a, 2.0, reduce.clone(), false)?, &floor)?;
-    let norm_b = crate::ops::minmax::maximum(&norm(&b, 2.0, reduce, false)?, &floor)?;
-
-    div(&dot, &mul(&norm_a, &norm_b)?)
+    let norm_a = crate::ops::minmax::maximum(&norm(&a, 2.0, reduce.clone(), true)?, &floor)?;
+    let norm_b = crate::ops::minmax::maximum(&norm(&b, 2.0, reduce.clone(), true)?, &floor)?;
+    sum(&mul(&div(&a, &norm_a)?, &div(&b, &norm_b)?)?, reduce, false)
 }
 
 /// `||x1 - x2||_p` along the last dimension, the distance the triplet loss

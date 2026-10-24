@@ -24,6 +24,8 @@ mod nanquantile_impl;
 mod norm_impl;
 #[path = "reduction/quantile.rs"]
 mod quantile_impl;
+#[path = "reduction/range.rs"]
+mod range_impl;
 #[path = "reduction/scan.rs"]
 mod scan_impl;
 #[path = "reduction/sort.rs"]
@@ -41,6 +43,7 @@ pub use self::nan_stats_impl::*;
 pub use self::nanquantile_impl::*;
 pub use self::norm_impl::*;
 pub(crate) use self::quantile_impl::*;
+pub(crate) use self::range_impl::*;
 pub use self::scan_impl::*;
 pub use self::sort_impl::*;
 pub use self::sum_prod_impl::*;

@@ -1813,6 +1813,17 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
+A float `mean`, `var` or `std` that is itself in range is computed in range.
+The sum behind a mean and the squares behind a variance can leave the float
+range when the answer does not: the mean of `[1e308, 1e308]` is `1e308`, and
+the standard deviation of the float32s `[1e20, -1e20]` is `1.4e20`. A slice
+whose direct result came out non-finite, or lost digits to underflow, is
+computed again divided by a power of two near its largest magnitude, which is
+exact, and scaled back. An infinite or NaN input still gives a non-finite
+result. An integer variance is taken from each element less the first of its
+slice, exactly, so int64s past `2^53` keep the steps between them:
+`var([2^53, 2^53 + 1, 2^53 + 2])` is `1`.
+
 #### Running totals that are not sums
 
 `cumsum(input, dim=None)` and `cumprod(input, dim=None)` accumulate with `+`
@@ -2338,7 +2349,9 @@ assert row_std.shape == (2, 3)
 - `cosine_similarity(input, other, dim=1, eps=1e-8)` — the cosine of the angle
   between them along `dim`. Each norm is floored at `eps` on its own rather
   than their product being floored once, which is what keeps a zero vector
-  paired with a long one inside `[-1, 1]`.
+  paired with a long one inside `[-1, 1]`. Each operand is divided by its
+  norm before they are multiplied, so neither the product of the norms nor the
+  dot product leaves the float range for vectors whose cosine is in it.
 - `softplus(input, beta=1.0, threshold=None)` is `log1p(exp(beta * x)) / beta`,
   evaluated as `max(beta * x, 0) + log1p(exp(-|beta * x|))` so that it cannot
   overflow and returns `x` itself where that is the answer. A `threshold` takes
