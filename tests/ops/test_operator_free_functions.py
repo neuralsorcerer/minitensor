@@ -768,11 +768,12 @@ def test_maximum_and_minimum_keep_their_rule_on_the_vectorised_path(dtype):
     in the loop became two selects to get there.
 
     The rule that has to survive is not just "propagates NaN". It is which
-    operand comes back when both are NaN, and which comes back on a tie --
-    `a`, in both cases, which for signed zeros is observable. So this compares
-    bit patterns rather than values, over every pair of the interesting
-    floats, and at a length past the parallel threshold so the blocked path is
-    the one under test.
+    operand comes back when both are NaN -- `a` -- and what comes back when the
+    two zeros meet: IEEE 754-2019 puts `+0.0` above `-0.0` for both
+    operations, whichever side each is on. So this compares bit patterns
+    rather than values, over every pair of the interesting floats, and at a
+    length past the parallel threshold so the blocked path is the one under
+    test.
     """
     specials = [np.nan, np.inf, -np.inf, 0.0, -0.0, 1.0, -1.0, 3.5, -2.25]
     pairs = [(a, b) for a in specials for b in specials]
@@ -789,6 +790,13 @@ def test_maximum_and_minimum_keep_their_rule_on_the_vectorised_path(dtype):
                 want[i] = a
             elif np.isnan(b):
                 want[i] = b
+            elif a == 0 and b == 0:
+                # Negative only if both are, for the maximum; if either is,
+                # for the minimum.
+                negative = np.signbit(a) and np.signbit(b)
+                if not ahead:
+                    negative = np.signbit(a) or np.signbit(b)
+                want[i] = -0.0 if negative else 0.0
             elif (a >= b) if ahead else (a <= b):
                 want[i] = a
             else:

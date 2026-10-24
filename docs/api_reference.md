@@ -2223,7 +2223,13 @@ assert row_std.shape == (2, 3)
   is the only differentiable one (its gradient is 1); the rest are step
   functions, so they return a constant. `round` sends halves to the even neighbour
   (`round(0.5) == 0`, `round(2.5) == 2`), as Python's built-in `round`
-  does. It takes an optional `decimals` argument.
+  does. It takes an optional `decimals` argument, and rounds the value the
+  float actually holds: `round(x, d)` is the float nearest `N / 10**d`, for
+  `N` the integer nearest the exact `x * 10**d`, again as Python's `round`
+  gives it. So `round(2.675, 2)` is `2.67` -- the double written `2.675` is
+  2.67499999999999982..., below the half -- where scaling, rounding and
+  scaling back in floating point would round the product to exactly 267.5
+  first and answer `2.68`.
 - `log2`, `log10` — the natural log rescaled; they share `log`'s behaviour at
   `0`, negatives, infinities and NaN
 - `erf`, `erfc` — the Gauss error function and its complement. `erfc` uses a
@@ -2667,6 +2673,13 @@ Behavior and validation:
   matching the rest of the tensor-centric functional binary helpers.
 - Boolean inputs use logical OR for `maximum` and logical AND for `minimum`.
 - Floating-point NaNs are propagated when either operand at an element is NaN.
+- `+0.0` is above `-0.0`, as IEEE 754-2019 orders them for these two
+  operations: `maximum(-0.0, 0.0)` and `maximum(0.0, -0.0)` are both `0.0`,
+  and the `minimum` of either pair is `-0.0`, so both are commutative to the
+  bit and agree with `fmax`/`fmin` wherever neither operand is NaN. Where the
+  two operands tie, the gradient goes to the first. The reductions `max`,
+  `min`, `amax` and `amin` instead return the first of their tied elements,
+  the one `argmax` and `argmin` name, so a value and its index always agree.
 - Incompatible shapes raise the normal MiniTensor shape/broadcasting error.
 
 Example:

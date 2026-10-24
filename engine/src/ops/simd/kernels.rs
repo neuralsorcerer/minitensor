@@ -241,7 +241,8 @@ binary_elementwise!(
     /// Element-wise `lhs * rhs` for equal-length f64 slices.
     simd_mul_f64, mul_f64_blocks, f64, *
 );
-/// The NaN-propagating pairwise maximum, written as two selects.
+/// The NaN-propagating pairwise maximum, written as selects: IEEE 754-2019's
+/// `maximum`.
 ///
 /// `maximum` is not `a.max(b)`: the standard library's returns the operand
 /// that is *not* NaN, and a tensor `maximum` has to carry the NaN through.
@@ -251,28 +252,43 @@ binary_elementwise!(
 ///
 /// This is the same function without one. `a >= b` is already false whenever
 /// either side is NaN, so the first select lands on `b` for every NaN case and
-/// only a NaN in `a` is left to fix. It keeps the tie-break the branchy form
-/// had, `a` winning when the two compare equal, signed zeros included.
+/// only a NaN in `a` is left to fix. The standard puts `+0` above `-0`, and
+/// the two zeros are the only distinct values that compare equal: settled by
+/// their sum, which is `+0` unless both are `-0`, as [`fmax`] settles them.
+/// Taking `a` on every tie instead made `maximum(-0.0, 0.0)` `-0.0` and
+/// `maximum(0.0, -0.0)` `0.0` -- not commutative, and not the `fmax` of the
+/// same two numbers.
 ///
 /// It lives here as a function rather than in the loop so the blocked kernel
 /// and the broadcasting fallback in `ops::kernels::binary` are the same rule
 /// and cannot drift apart.
-// `a == a` is the NaN test. The generic parameter is only `PartialOrd`, so
-// `is_nan` is not available; self-comparison is the definition it would have
-// called anyway, and it is the form that stays a bare `cmpss`.
+///
+/// [`fmax`]: crate::ops::binary_math::fmax
+// `a == a` is the NaN test, the form that stays a bare `cmpss`.
 #[allow(clippy::eq_op)]
 #[inline(always)]
-pub(crate) fn nan_maximum<T: PartialOrd + Copy>(a: T, b: T) -> T {
+pub(crate) fn nan_maximum<T: num_traits::Float>(a: T, b: T) -> T {
     let m = if a >= b { a } else { b };
-    if a == a { m } else { a }
+    let m = if a == a { m } else { a };
+    if a == T::zero() && b == T::zero() {
+        a + b
+    } else {
+        m
+    }
 }
 
-/// [`nan_maximum`] with the comparison turned around.
+/// [`nan_maximum`] with the comparison turned around, and IEEE's `minimum`:
+/// `-0` below `+0`, which negating both zeros turns into the sum's rule.
 #[allow(clippy::eq_op)]
 #[inline(always)]
-pub(crate) fn nan_minimum<T: PartialOrd + Copy>(a: T, b: T) -> T {
+pub(crate) fn nan_minimum<T: num_traits::Float>(a: T, b: T) -> T {
     let m = if a <= b { a } else { b };
-    if a == a { m } else { a }
+    let m = if a == a { m } else { a };
+    if a == T::zero() && b == T::zero() {
+        -((-a) + (-b))
+    } else {
+        m
+    }
 }
 
 binary_elementwise!(
@@ -399,22 +415,13 @@ rounding_kernel!(
     /// Round a block of f32 to the nearest integer, halves to even. `param`
     /// is ignored.
     ///
-    /// [`round_f32_blocks`] at zero decimals, where scaling by one is exact
-    /// and changes nothing -- but still cost a multiply and a divide per
-    /// element, and the divide made `round` twice the price of `floor`.
+    /// The zero-decimal case of `round`, where no scaling is needed and the
+    /// rounding instruction is the whole of it.
     round_even_f32_blocks, f32, |x| x.round_ties_even()
 );
 rounding_kernel!(
     /// [`round_even_f32_blocks`] for f64. `param` is ignored.
     round_even_f64_blocks, f64, |x| x.round_ties_even()
-);
-rounding_kernel!(
-    /// Round a block of f32 to `param` decimal places, halves to even.
-    round_f32_blocks, f32, |x, m| (x * m).round_ties_even() / m
-);
-rounding_kernel!(
-    /// Round a block of f64 to `param` decimal places, halves to even.
-    round_f64_blocks, f64, |x, m| (x * m).round_ties_even() / m
 );
 
 /// The float sum every reduction in the library bottoms out in: `LANES`

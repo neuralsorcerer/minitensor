@@ -927,22 +927,6 @@ macro_rules! rounding_op {
 // 2. The kernels use `round_ties_even`, which is the mode `roundps`/`roundpd`
 // implement, so the vectorized form needs no correction to agree.
 rounding_op!(
-    round_f32_scaled,
-    f32,
-    Float32,
-    as_f32_slice,
-    round_f32_blocks,
-    "f32"
-);
-rounding_op!(
-    round_f64_scaled,
-    f64,
-    Float64,
-    as_f64_slice,
-    round_f64_blocks,
-    "f64"
-);
-rounding_op!(
     round_even_f32,
     f32,
     Float32,
@@ -996,23 +980,354 @@ rounding_op!(frac_f32, f32, Float32, as_f32_slice, frac_f32_blocks, "f32");
 rounding_op!(frac_f64, f64, Float64, as_f64_slice, frac_f64_blocks, "f64");
 
 fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    match decimals {
-        0 => round_even_f32(tensor, 0.0),
-        _ => round_f32_scaled(tensor, 10.0_f32.powi(decimals)),
+    if decimals == 0 {
+        return round_even_f32(tensor, 0.0);
     }
+    let input = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice from input"))?;
+    let out = crate::ops::map::unary_map(input, move |x: f32| round_decimal_f32(x, decimals));
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
 }
 
 fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    match decimals {
-        0 => round_even_f64(tensor, 0.0),
-        _ => round_f64_scaled(tensor, 10.0_f64.powi(decimals)),
+    if decimals == 0 {
+        return round_even_f64(tensor, 0.0);
     }
+    let input = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice from input"))?;
+    let out = crate::ops::map::unary_map(input, move |x: f64| round_decimal_f64(x, decimals));
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
+}
+
+// --- rounding to a number of decimal places ----------------------------------
+//
+// `round(x, d)` is the float nearest `N / 10^d`, for `N` the integer nearest
+// the exact value of `x * 10^d`, halves to even -- which is what Python's own
+// `round` gives. Scaling in floating point, rounding, and scaling back rounded
+// the product before deciding which integer was nearest, so `2.675`, which as
+// a double is 2.67499999999999982236431605997495353221893310546875, came back
+// as `2.68`: its product with 100 rounds to 267.5 exactly, and the tie went to
+// the even neighbour. Each step below carries its rounding instead.
+
+/// The powers of ten a double holds exactly: `5^22` is the last power of five
+/// under `2^53`.
+const EXACT_POWERS_OF_TEN: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// `2^53`: from here up every double is an integer, and past it in a scaled
+/// value the scaling is finer than the value's own spacing.
+const TWO_TO_53: f64 = 9_007_199_254_740_992.0;
+
+/// `value` rounded to an integer, halves to even, for `|value|` below `2^53`.
+///
+/// Adding `2^52` and taking it away again rounds in the floating-point unit's
+/// own mode, which is this one. `round_ties_even` is the same function, but on
+/// the baseline x86-64 target it is a call into `libm` per element, which made
+/// `round(x, 2)` cost twice what the rest of it did.
+#[inline(always)]
+fn round_half_even(value: f64) -> f64 {
+    const TWO_TO_52: f64 = 4_503_599_627_370_496.0;
+    if value.abs() < TWO_TO_52 {
+        let shift = TWO_TO_52.copysign(value);
+        // A zero keeps its sign: `-0.4 + -2^52 - -2^52` is `+0`.
+        ((value + shift) - shift).copysign(value)
+    } else {
+        value
+    }
+}
+
+/// The integer nearest `value + error`, halves to even, where `value` is a
+/// rounded result below `2^53` in magnitude and `error` is what its rounding
+/// left out -- at most half an ulp of `value`.
+///
+/// The nearest integer to `value` itself is the answer except where `value`
+/// lies exactly halfway between two integers, when the error decides which
+/// side the exact value is on, or where `value` is an integer an ulp of one
+/// from the next and the error is exactly a half, which is a tie of its own.
+/// Anywhere else no integer boundary lies between the two.
+#[inline]
+fn nearest_integer_of(value: f64, error: f64) -> f64 {
+    let nearest = round_half_even(value);
+    let offset = value - nearest;
+    if offset.abs() == 0.5 {
+        if error != 0.0 && (error > 0.0) == (offset > 0.0) {
+            nearest + offset.signum()
+        } else {
+            nearest
+        }
+    } else if offset == 0.0 && error.abs() == 0.5 {
+        let other = nearest + error.signum();
+        if (nearest * 0.5).fract() == 0.0 {
+            nearest
+        } else {
+            other
+        }
+    } else {
+        nearest
+    }
+}
+
+/// `N` for `round(x, decimals)` with `|decimals|` at most 22; `None` when `x`
+/// is already its own answer -- its scaled value past `2^53`, where the
+/// decimal grid is finer than the float's spacing.
+///
+/// The scaled value rounded to the nearest integer is `N` except where it is
+/// exactly halfway, or an integer with an ulp of one; only then is its
+/// rounding error worked out, so the common case costs what the scaling did.
+#[inline]
+fn decimal_integer(x: f64, decimals: i32) -> Option<f64> {
+    use crate::ops::simd::product_error;
+    let scale = EXACT_POWERS_OF_TEN[decimals.unsigned_abs() as usize];
+    // An integer already lies on every finer grid. (Not on a coarser one: a
+    // negative `decimals` still rounds it.)
+    if decimals > 0 && x.abs() >= TWO_TO_53 {
+        return None;
+    }
+    let scaled = if decimals > 0 { x * scale } else { x / scale };
+    if scaled.abs() >= TWO_TO_53 {
+        return None;
+    }
+    let nearest = round_half_even(scaled);
+    if (scaled - nearest).abs() != 0.5 && scaled.abs() < TWO_TO_53 * 0.5 {
+        return Some(nearest);
+    }
+    let error = if decimals > 0 {
+        product_error::<false>(x, scale, scaled)
+    } else {
+        // The remainder of a correctly rounded quotient is a double, and these
+        // two steps form it exactly; over the divisor, its sign and whether it
+        // is a half are what the decision needs, and both survive the division.
+        let back = scaled * scale;
+        ((x - back) - product_error::<false>(scaled, scale, back)) / scale
+    };
+    Some(nearest_integer_of(scaled, error))
+}
+
+/// `round(x, decimals)` in float64; see the section note.
+fn round_decimal_f64(x: f64, decimals: i32) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    if decimals.unsigned_abs() > 22 {
+        return round_decimal_by_text(x, decimals, |text| text.parse::<f64>().ok());
+    }
+    let Some(n) = decimal_integer(x, decimals) else {
+        return x;
+    };
+    // One correctly rounded operation on two exact operands.
+    let scale = EXACT_POWERS_OF_TEN[decimals.unsigned_abs() as usize];
+    if decimals > 0 { n / scale } else { n * scale }
+}
+
+/// `round(x, decimals)` in float32: `N` found in float64, where the float32
+/// is exact, and `N / 10^d` rounded to float32 once. Through float64 it would
+/// round twice, which is wrong exactly where the float64 lands on a midpoint
+/// between two float32s; there the float64's own rounding error says which
+/// way the exact value lies.
+fn round_decimal_f32(x: f32, decimals: i32) -> f32 {
+    use crate::ops::simd::product_error;
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    if decimals.unsigned_abs() > 22 {
+        return round_decimal_by_text(x, decimals, |text| text.parse::<f32>().ok());
+    }
+    let Some(n) = decimal_integer(f64::from(x), decimals) else {
+        return x;
+    };
+    let scale = EXACT_POWERS_OF_TEN[decimals.unsigned_abs() as usize];
+    if decimals > 0 {
+        let quotient = n / scale;
+        float32_nearest(quotient, || {
+            let back = quotient * scale;
+            (n - back) - product_error::<false>(quotient, scale, back)
+        })
+    } else {
+        let product = n * scale;
+        float32_nearest(product, || product_error::<false>(n, scale, product))
+    }
+}
+
+/// The float32 nearest the exact value `value` was rounded from, given the
+/// sign of that rounding's error, which `error` works out only if asked.
+///
+/// Rounding `value` to float32 is right unless it is exactly halfway between
+/// two float32s, both of which are float64s: no other float64 can stand
+/// between the exact answer and that midpoint. Every value this sees is zero,
+/// a normal float32 in range, or past the top of it -- the smallest nonzero
+/// answer is `1e-22` -- and halfway between two normal float32s a float64 has
+/// its low 29 significand bits exactly `1 << 28`. At a midpoint the value is
+/// nudged one float64 ulp towards the exact answer, which takes it off the
+/// midpoint and onto the right side of it.
+#[inline]
+fn float32_nearest(value: f64, error: impl FnOnce() -> f64) -> f32 {
+    const BELOW_FLOAT32: u64 = (1 << 29) - 1;
+    if value.to_bits() & BELOW_FLOAT32 != 1 << 28 {
+        return value as f32;
+    }
+    let error = error();
+    if error > 0.0 {
+        value.next_up() as f32
+    } else if error < 0.0 {
+        value.next_down() as f32
+    } else {
+        value as f32
+    }
+}
+
+/// `round(x, decimals)` for `|decimals|` past 22, where no power of ten the
+/// scaling needs is a double: through the decimal text of `x`, which the
+/// standard library writes exactly and reads back to the nearest float.
+///
+/// Past 22 decimals a value at least `1e-6` is already its own answer, its
+/// scaled value being past `2^53`. Below -22 the step is at least `1e23`, and
+/// every float below `2^53` is nearer zero than half of it; the rest are
+/// integers, written out in full and rounded at the step's digit.
+fn round_decimal_by_text<T>(x: T, decimals: i32, parse: impl Fn(&str) -> Option<T>) -> T
+where
+    T: num_traits::Float + std::fmt::Display,
+{
+    let magnitude = x.abs().to_f64().unwrap_or(f64::INFINITY);
+    let zero = T::zero().copysign(x);
+    if decimals > 0 {
+        if magnitude >= 1e-6 {
+            return x;
+        }
+        return parse(&format!("{:.*}", decimals as usize, x)).unwrap_or(x);
+    }
+    let step = decimals.unsigned_abs() as usize;
+    if magnitude < TWO_TO_53 {
+        return zero;
+    }
+    let digits = format!("{:.0}", x.abs());
+    if digits.len() < step {
+        return zero;
+    }
+    let (head, tail) = digits.split_at(digits.len() - step);
+    let rest_is_zero = tail[1..].bytes().all(|b| b == b'0');
+    let odd = head.bytes().last().is_some_and(|b| (b - b'0') % 2 == 1);
+    let up = match tail.as_bytes()[0].cmp(&b'5') {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => !rest_is_zero || odd,
+    };
+    let mut head: Vec<u8> = if head.is_empty() {
+        vec![b'0']
+    } else {
+        head.as_bytes().to_vec()
+    };
+    if up {
+        // Add one to the decimal digits, carrying.
+        let mut carry = true;
+        for digit in head.iter_mut().rev() {
+            if *digit == b'9' {
+                *digit = b'0';
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            head.insert(0, b'1');
+        }
+    }
+    if head.iter().all(|&b| b == b'0') {
+        return zero;
+    }
+    let sign = if x < T::zero() { "-" } else { "" };
+    let head = String::from_utf8(head).unwrap_or_default();
+    parse(&format!("{sign}{head}e{step}")).unwrap_or(x)
 }
 
 #[cfg(test)]
 mod rounding_and_clip_tests {
     use super::*;
     use crate::device::Device;
+
+    #[test]
+    fn decimal_rounding_decides_on_the_exact_value() {
+        // As a double each of these is just below its written value, and
+        // the nearest two-decimal value is the lower one.
+        assert_eq!(round_decimal_f64(2.675, 2), 2.67);
+        assert_eq!(round_decimal_f64(1.005, 2), 1.0);
+        assert_eq!(round_decimal_f64(0.125, 2), 0.12);
+        assert_eq!(round_decimal_f64(0.375, 2), 0.38);
+        assert_eq!(round_decimal_f64(-2.675, 2), -2.67);
+        assert!(round_decimal_f64(-0.004, 2).is_sign_negative());
+        assert_eq!(round_decimal_f64(25.0, -1), 20.0);
+        assert_eq!(round_decimal_f64(35.0, -1), 40.0);
+        // An integer with an ulp of one, its scaled value exactly a half.
+        assert_eq!(round_decimal_f64(450359962737049.75, 1), 450359962737049.8);
+        // The float32 nearest 2.675 is 2.674999952..., below it.
+        assert_eq!(round_decimal_f32(2.675, 2), 2.67);
+    }
+
+    #[test]
+    fn a_nearest_integer_is_the_rounding_of_the_exact_sum() {
+        // Halfway as rounded: the error decides.
+        assert_eq!(nearest_integer_of(2.5, 1e-17), 3.0);
+        assert_eq!(nearest_integer_of(2.5, -1e-17), 2.0);
+        assert_eq!(nearest_integer_of(2.5, 0.0), 2.0);
+        assert_eq!(nearest_integer_of(-3.5, 1e-17), -3.0);
+        assert_eq!(nearest_integer_of(-3.5, -1e-17), -4.0);
+        // An integer with an ulp of one and the exact value a half past it.
+        let odd = 4_503_599_627_370_497.0;
+        assert_eq!(nearest_integer_of(odd, 0.5), odd + 1.0);
+        assert_eq!(nearest_integer_of(odd, -0.5), odd - 1.0);
+        assert_eq!(nearest_integer_of(odd + 1.0, 0.5), odd + 1.0);
+        assert_eq!(round_half_even(-0.4).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(round_half_even(0.5), 0.0);
+        assert_eq!(round_half_even(1.5), 2.0);
+    }
+
+    #[test]
+    fn a_float32_midpoint_is_settled_by_the_side_the_exact_value_is_on() {
+        // Halfway between 1 and the float32 after it.
+        let midpoint = 1.0 + f64::powi(2.0, -24);
+        let above = 1.0f32.next_up();
+        assert_eq!(float32_nearest(midpoint, || 1e-20), above);
+        assert_eq!(float32_nearest(midpoint, || -1e-20), 1.0);
+        // An exact tie goes to the even neighbour, as a cast does.
+        assert_eq!(float32_nearest(midpoint, || 0.0), 1.0);
+        assert_eq!(float32_nearest(-midpoint, || -1e-20), -above);
+        // Off a midpoint the error is never asked for.
+        assert_eq!(float32_nearest(0.1, || unreachable!()), 0.1f32);
+    }
+
+    #[test]
+    fn decimals_past_the_exact_powers_round_through_the_text() {
+        assert_eq!(round_decimal_f64(1.25e-30, 31), 1.2e-30);
+        // The double nearest 1.35e-30 is below it; the one nearest 1.36e-30
+        // is not near a half at all.
+        assert_eq!(round_decimal_f64(1.35e-30, 31), 1.3e-30);
+        assert_eq!(round_decimal_f64(1.36e-30, 31), 1.4e-30);
+        assert_eq!(round_decimal_f64(0.5, 30), 0.5);
+        // 1.5e23 is 150000000000000004194304 as a double, just past the
+        // half, and 2.5e23 is just short of it.
+        assert_eq!(round_decimal_f64(1.5e23, -23), 2e23);
+        assert_eq!(round_decimal_f64(2.5e23, -23), 2e23);
+        assert_eq!(round_decimal_f64(9.6e23, -23), 1e24);
+        assert_eq!(round_decimal_f64(4.9e22, -23), 0.0);
+        assert!(round_decimal_f64(-4.9e22, -23).is_sign_negative());
+        // The float32 nearest 1.5e30 is 1.4999999e30, short of the half.
+        assert_eq!(round_decimal_f32(1.5e30, -30), 1e30);
+        assert_eq!(round_decimal_f32(1.6e30, -30), 2e30);
+    }
     use crate::tensor::{Shape, TensorData};
     use std::sync::Arc;
 
