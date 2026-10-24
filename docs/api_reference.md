@@ -1813,10 +1813,16 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
-A float32 `mean` or `nanmean` is summed in float64 and divided by the exact
-count, so it is the float32 nearest the exact mean: the mean of a constant
-tensor is the constant, where a float32 sum had put offset data tens of ulps
-out. An int32 mean divides its exact int64 sum in float64 and rounds once.
+Float32 statistics -- `mean`, `var`, `std` and their NaN-skipping forms -- are
+carried in float64 and rounded once, the root of a standard deviation
+included, so each is the float32 nearest the exact answer: the mean of a
+constant tensor is the constant and its variance zero, where float32
+arithmetic had put the mean of offset data tens of ulps out. The squares of
+float32 values cannot leave the float64 range, so the float32 standard
+deviation of `[1e20, -1e20]` is `1.4e20` though its variance overflows
+float32. An int32 statistic is taken the same way, from exact float64
+deviations, and rounded to float32 once. A variance over no axes is zero, or
+NaN unbiased: each slice is one element.
 
 A float `mean`, `var` or `std` that is itself in range is computed in range.
 The sum behind a mean and the squares behind a variance can leave the float

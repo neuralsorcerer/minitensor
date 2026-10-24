@@ -141,33 +141,46 @@ pub(crate) fn nan_moments_fused(
         return Ok(None);
     }
 
-    let data = match tensor.dtype() {
+    // Everything is carried in float64. A mean comes back in the tensor's
+    // dtype, rounded once; a variance comes back in float64, for its caller
+    // to round once after the root a standard deviation takes of it.
+    let moments = match tensor.dtype() {
         DataType::Float32 => {
             let input = tensor
                 .data()
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            TensorData::from_vec_f32(
-                nan_moments(input, outer, len, inner, moment),
-                tensor.device(),
-            )
+            if inner == 1 {
+                nan_moments_runs_f32(input, outer, len, moment)
+            } else {
+                nan_moments(input, outer, len, inner, moment)
+            }
         }
         DataType::Float64 => {
             let input = tensor
                 .data()
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            TensorData::from_vec_f64(
-                nan_moments(input, outer, len, inner, moment),
-                tensor.device(),
-            )
+            nan_moments(input, outer, len, inner, moment)
         }
         _ => return Ok(None),
+    };
+    let (data, dtype) = if moment == NanMoment::Mean && tensor.dtype() == DataType::Float32 {
+        let narrow = moments.into_iter().map(|m| m as f32).collect();
+        (
+            TensorData::from_vec_f32(narrow, tensor.device()),
+            DataType::Float32,
+        )
+    } else {
+        (
+            TensorData::from_vec_f64(moments, tensor.device()),
+            DataType::Float64,
+        )
     };
     Ok(Some(Tensor::new(
         Arc::new(data),
         out_shape,
-        tensor.dtype(),
+        dtype,
         tensor.device(),
         false,
     )))
@@ -179,7 +192,13 @@ pub(crate) fn nan_moments_fused(
 /// the split `sum` makes for the same shape and for the same reason: which
 /// one happens follows from the shape alone, so the thread count cannot
 /// reach the answer.
-fn nan_moments<T>(input: &[T], outer: usize, len: usize, inner: usize, moment: NanMoment) -> Vec<T>
+fn nan_moments<T>(
+    input: &[T],
+    outer: usize,
+    len: usize,
+    inner: usize,
+    moment: NanMoment,
+) -> Vec<f64>
 where
     T: Float + Send + Sync,
 {
@@ -203,7 +222,72 @@ where
         let first = task * per_task;
         (first..(first + per_task).min(outer))
             .flat_map(|index| one(index, false))
-            .collect::<Vec<T>>()
+            .collect::<Vec<f64>>()
+    })
+    .concat()
+}
+
+/// [`NanMoment`] of `outer` contiguous float32 runs of `len` each, through the
+/// widened lane kernel `var` and `mean` use, with the NaN skipped in the map:
+/// the generic fold took a run one narrow lane-group at a time, twice the
+/// time of the kernel.
+///
+/// A single run, the whole tensor, is cut into blocks across the pool; many
+/// are handed out a few to a task, each summed whole. Either split follows
+/// from the shape, and the blocks fold pairwise, so the thread count cannot
+/// reach the answer.
+fn nan_moments_runs_f32(input: &[f32], outer: usize, len: usize, moment: NanMoment) -> Vec<f64> {
+    use crate::ops::simd::simd_sum_f32_wide_by;
+    use crate::ops::util::{accurate_run_sum, deterministic_par_sum};
+    if outer == 0 {
+        return Vec::new();
+    }
+    // Generic rather than through a `dyn Fn`, so the map inlines into the
+    // lanes and they stay vectorized.
+    fn total(run: &[f32], keep: impl Fn(f32) -> f64 + Copy + Sync, spread: bool) -> f64 {
+        let block = |part: &[f32]| simd_sum_f32_wide_by(part, keep);
+        if spread {
+            deterministic_par_sum(run, 8192, block)
+        } else {
+            accurate_run_sum(run, block)
+        }
+    }
+    let one = |run: &[f32], spread: bool| {
+        let sum = total(
+            run,
+            |v: f32| if v.is_nan() { 0.0 } else { f64::from(v) },
+            spread,
+        );
+        let count = total(run, |v: f32| if v.is_nan() { 0.0 } else { 1.0 }, spread);
+        let mean = sum / count;
+        let NanMoment::Var { correction } = moment else {
+            return mean;
+        };
+        // In float64 the mean needs no correction; see
+        // `DeviationSums::centred_squares`.
+        let squares = total(
+            run,
+            move |v: f32| {
+                if v.is_nan() {
+                    0.0
+                } else {
+                    let d = f64::from(v) - mean;
+                    d * d
+                }
+            },
+            spread,
+        );
+        squares / (count - correction as f64).max(0.0)
+    };
+    if outer == 1 {
+        return vec![one(input, true)];
+    }
+    let per_task = outputs_per_task(len.max(1));
+    par_map_indexed(outer.div_ceil(per_task), &|task| {
+        let first = task * per_task;
+        (first..(first + per_task).min(outer))
+            .map(|index| one(&input[index * len..(index + 1) * len], false))
+            .collect::<Vec<f64>>()
     })
     .concat()
 }
@@ -211,24 +295,21 @@ where
 /// Fewer slabs than this are each spread across the pool; `sum`'s threshold.
 const NAN_MOMENT_MIN_SLABS: usize = 4;
 
-/// [`NanMoment`] of each column of one row-major `(rows, cols)` slab.
-fn slab_moments<T>(slab: &[T], cols: usize, spread: bool, moment: NanMoment) -> Vec<T>
+/// [`NanMoment`] of each column of one row-major `(rows, cols)` slab, in
+/// float64: for a float32 slab every sum is carried there, and for a float64
+/// one it is the dtype's own arithmetic.
+fn slab_moments<T>(slab: &[T], cols: usize, spread: bool, moment: NanMoment) -> Vec<f64>
 where
     T: Float + Send + Sync,
 {
-    // The sums in float64, which for a float32 slab makes the mean as good as
-    // correctly rounded; see `mean`. A float64 slab is summed as before.
+    let wide = |v: T| v.to_f64().unwrap_or(f64::NAN);
     let sums = fold_slab_with(
         slab,
         cols,
         0.0f64,
         |acc: &mut [f64], values: &[T], _| {
             for (a, &v) in acc.iter_mut().zip(values) {
-                *a += if v.is_nan() {
-                    0.0
-                } else {
-                    v.to_f64().unwrap_or(f64::NAN)
-                };
+                *a += if v.is_nan() { 0.0 } else { wide(v) };
             }
         },
         |x, y| x + y,
@@ -246,40 +327,57 @@ where
         |x, y| x + y,
         spread,
     );
-    let count = |c: u32| T::from(c).unwrap_or_else(T::nan);
-    // Divided in float64, where every count is exact; see `divide_by_count`.
-    let wide_over = |value: f64, c: u32| T::from(value / f64::from(c)).unwrap_or_else(T::nan);
-    let over = |value: T, c: u32| wide_over(value.to_f64().unwrap_or(f64::NAN), c);
-    let means: Vec<T> = sums
+    let means: Vec<f64> = sums
         .iter()
         .zip(&counts)
-        .map(|(&s, &c)| wide_over(s, c))
+        .map(|(&s, &c)| s / f64::from(c))
         .collect();
     let NanMoment::Var { correction } = moment else {
         return means;
     };
 
-    let tiled: Vec<T> = means
+    let tiled: Vec<f64> = means
         .iter()
         .copied()
         .cycle()
         .take(fold_lanes(cols).max(cols))
         .collect();
+    let correction = correction.min(u32::MAX as usize) as u32;
+    // A float32 slab, carried in float64, needs only the squares; see
+    // `DeviationSums::centred_squares`.
+    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
+        let squares = fold_slab_with(
+            slab,
+            cols,
+            0.0f64,
+            |acc: &mut [f64], values: &[T], first| {
+                let means = &tiled[first..first + acc.len()];
+                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
+                    let d = if v.is_nan() { 0.0 } else { wide(v) - m };
+                    *a += d * d;
+                }
+            },
+            |x, y| x + y,
+            spread,
+        );
+        return squares
+            .iter()
+            .zip(&counts)
+            .map(|(&q, &c)| q / f64::from(c.saturating_sub(correction)))
+            .collect();
+    }
     // The deviations' sum beside their squares, to take the mean's rounding
     // back out; see `DeviationSums::centred_squares`.
     let deviations = fold_slab_with(
         slab,
         cols,
-        DeviationSums {
-            sum: T::zero(),
-            squares: T::zero(),
-        },
-        |acc: &mut [DeviationSums<T>], values: &[T], first| {
+        DeviationSums::<f64>::default(),
+        |acc: &mut [DeviationSums<f64>], values: &[T], first| {
             let means = &tiled[first..first + acc.len()];
             for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                let d = if v.is_nan() { T::zero() } else { v - m };
-                a.sum = a.sum + d;
-                a.squares = a.squares + d * d;
+                let d = if v.is_nan() { 0.0 } else { wide(v) - m };
+                a.sum += d;
+                a.squares += d * d;
             }
         },
         |x, y| x + y,
@@ -288,12 +386,7 @@ where
     deviations
         .iter()
         .zip(&counts)
-        .map(|(&q, &c)| {
-            over(
-                q.centred_squares(count(c)),
-                c.saturating_sub(correction.min(u32::MAX as usize) as u32),
-            )
-        })
+        .map(|(&q, &c)| q.centred_squares(f64::from(c)) / f64::from(c.saturating_sub(correction)))
         .collect()
 }
 
@@ -316,6 +409,10 @@ pub fn nanvar(
     if !tensor.dtype().is_float() {
         return crate::ops::reduction::var(tensor, dim, keepdim, unbiased);
     }
+    // Carried in float64 and rounded once; see `var`.
+    if tensor.dtype() == DataType::Float32 {
+        return nanvar_direct(tensor, dim, keepdim, unbiased)?.astype(DataType::Float32);
+    }
     let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
     let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {
         return Ok(variance);
@@ -326,7 +423,8 @@ pub fn nanvar(
     mul(&mul(&variance, &scales)?, &scales)
 }
 
-/// The NaN-aware variance of a float tensor as computed directly.
+/// The NaN-aware variance of a float tensor as computed directly, in
+/// float64; see `var_direct`.
 fn nanvar_direct(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -348,14 +446,8 @@ fn nanvar_direct(
         return Ok(fused);
     }
 
-    // The count of a float32 slice longer than 2^24 is not always a float32;
-    // such a slice is taken in float64, where it is exact, and rounded once on
-    // the way back. See `divide_by_count`.
-    if tensor.dtype() == DataType::Float32
-        && super::logsumexp_impl::slice_length(tensor, dims.as_deref()) > 1 << 24
-    {
-        return nanvar_direct(&tensor.astype(DataType::Float64)?, dim, keepdim, unbiased)?
-            .astype(DataType::Float32);
+    if tensor.dtype() == DataType::Float32 {
+        return nanvar_direct(&tensor.astype(DataType::Float64)?, dim, keepdim, unbiased);
     }
 
     // Centred on the NaN-skipping mean, kept broadcastable.
@@ -414,6 +506,11 @@ pub fn nanstd(
     use super::sort_impl::std_from_variance;
     if !tensor.dtype().is_float() {
         return crate::ops::reduction::std(tensor, dim, keepdim, unbiased);
+    }
+    // Carried in float64 and rounded once, the root included; see `std`.
+    if tensor.dtype() == DataType::Float32 {
+        let variance = nanvar_direct(tensor, dim, keepdim, unbiased)?;
+        return std_from_variance(&variance)?.astype(DataType::Float32);
     }
     let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
     let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {

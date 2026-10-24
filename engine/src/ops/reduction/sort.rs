@@ -708,18 +708,29 @@ pub fn argsort(
 ///
 /// From the variance, except where that left the float range -- overflowed,
 /// or underflowed into the subnormals -- when the root is taken of the
-/// variance of each slice scaled by a power of two and scaled back: the
-/// float32 `[1e20, -1e20]` has a standard deviation of `1.4e20`, though its
-/// variance is past the top of float32. See [`rescaled`].
+/// variance of each slice scaled by a power of two and scaled back:
+/// `[1e200, -1e200]` has a standard deviation of `1.4e200`, though its
+/// variance is past the top of float64. See [`rescaled`]. A float32 tensor
+/// is carried in float64, its root too, and rounded once.
 pub fn std(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
-        let dims = statistic_dims(tensor, &dim)?;
-        return std(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
+    match tensor.dtype() {
+        DataType::Int32 | DataType::Int64 => {
+            let dims = statistic_dims(tensor, &dim)?;
+            let deviations = integer_deviations(tensor, &dims)?;
+            return narrow_statistic(std(&deviations, dim, keepdim, unbiased)?, tensor);
+        }
+        // Carried in float64 and rounded once, the root included: the root
+        // of a float32 variance past the top of float32 is not.
+        DataType::Float32 => {
+            let variance = var_direct(tensor, dim, keepdim, unbiased)?;
+            return std_from_variance(&variance)?.astype(DataType::Float32);
+        }
+        _ => {}
     }
     let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
     let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
@@ -820,17 +831,25 @@ pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
 /// An integer argument widens rather than being refused, the rule `mean`
 /// already follows -- a variance of integers is a real number -- and does so
 /// after its slices are shifted to start at zero, exactly; see
-/// [`integer_deviations`]. A float variance whose sum of squares left the
-/// float range is taken again over scaled slices; see [`rescaled`].
+/// [`integer_deviations`]. A float32 variance is carried in float64 and
+/// rounded once; a float64 one whose sum of squares left the range is taken
+/// again over scaled slices; see [`rescaled`].
 pub fn var(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
-        let dims = statistic_dims(tensor, &dim)?;
-        return var(&integer_deviations(tensor, &dims)?, dim, keepdim, unbiased);
+    match tensor.dtype() {
+        DataType::Int32 | DataType::Int64 => {
+            let dims = statistic_dims(tensor, &dim)?;
+            let deviations = integer_deviations(tensor, &dims)?;
+            return narrow_statistic(var(&deviations, dim, keepdim, unbiased)?, tensor);
+        }
+        DataType::Float32 => {
+            return var_direct(tensor, dim, keepdim, unbiased)?.astype(DataType::Float32);
+        }
+        _ => {}
     }
     let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
     let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
@@ -845,7 +864,23 @@ pub fn var(
     crate::ops::arithmetic::mul(&once, &scales)
 }
 
-/// The variance as computed directly, in the input's own range.
+/// A statistic of an integer tensor's float64 deviations, in the dtype the
+/// tensor's statistics widen to: float32 for int32, rounded once from the
+/// float64 it was carried in, and float64 for int64.
+fn narrow_statistic(statistic: Tensor, tensor: &Tensor) -> Result<Tensor> {
+    if tensor.dtype() == DataType::Int32 {
+        statistic.astype(DataType::Float32)
+    } else {
+        Ok(statistic)
+    }
+}
+
+/// The variance as computed directly, in float64 -- a float32 tensor is
+/// carried there, where neither its squares nor their sum can leave the range
+/// or lose a digit the float32 answer keeps, and its caller rounds once.
+///
+/// Over no axes each slice is one element, whose variance is zero, or NaN
+/// unbiased; it was the tensor itself.
 fn var_direct(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
@@ -859,11 +894,6 @@ fn var_direct(
     }
 
     let dims = normalize_reduction_dims(dim, tensor.ndim())?;
-
-    if matches!(dims, Some(ref dims) if dims.is_empty()) {
-        return Ok(tensor.clone());
-    }
-
     let reduction_dims: Vec<usize> = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
 
     // Fused fast path: single-axis variance for tensors that don't require
@@ -879,6 +909,10 @@ fn var_direct(
     }
 
     let reduction_dims_isize: Vec<isize> = reduction_dims.iter().map(|&d| d as isize).collect();
+    if tensor.dtype() == DataType::Float32 {
+        let wide = tensor.astype(DataType::Float64)?;
+        return var_direct(&wide, Some(reduction_dims_isize), keepdim, unbiased);
+    }
 
     // Keep reduced axes while computing deviations so broadcasting is unambiguous for
     // both single-axis and multi-axis reductions.
@@ -968,28 +1002,26 @@ fn var_fused_single_axis(
     let outer: usize = dims[..axis].iter().product();
     let out_numel = outer * inner;
 
-    let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
+    // Float64 out whatever the input: a float32 tensor is carried in float64
+    // throughout and rounded by the caller, once; see `var`.
+    let mut result_data =
+        TensorData::zeros_on_device(out_numel, DataType::Float64, tensor.device());
 
     macro_rules! fill {
-        ($accessor:ident, $accessor_mut:ident, $ty:ty, $sum_by:ident, $deviations:ident) => {{
+        ($accessor:ident, $ty:ty, $sum:ident, $row_squares:expr, $paired:literal) => {{
             let input = tensor
                 .data()
                 .$accessor()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
             let out = result_data
-                .$accessor_mut()
+                .as_f64_slice_mut()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
-            let n = dim_size as $ty;
-            // The divisions by the count are made in float64, where it is
-            // exact; see `divide_by_count`. For a float64 tensor, and a
-            // float32 count up to 2^24, that is the same rounding.
             let count = dim_size as f64;
             let divisor = if unbiased { count - 1.0 } else { count };
-            let over = |value: $ty, by: f64| (f64::from(value) / by) as $ty;
             let all_nan = unbiased && dim_size <= 1;
 
             if all_nan {
-                out.fill(<$ty>::NAN);
+                out.fill(f64::NAN);
             } else if inner == 1 {
                 // Reducing the last axis: each output owns one contiguous run
                 // of `dim_size` elements, so the two passes read straight
@@ -1018,15 +1050,13 @@ fn var_fused_single_axis(
                 // large offset -- 3.4e-6 against 2.5e-10 at an offset of 1e12,
                 // where the second figure is the floor set by the mean's own
                 // rounding.
-                let run = |first: usize, chunk: &mut [$ty]| {
+                let run = |first: usize, chunk: &mut [f64]| {
                     for (i, slot) in chunk.iter_mut().enumerate() {
                         let base = (first + i) * dim_size;
                         let row = &input[base..base + dim_size];
-                        let total = accurate_run_sum(row, |part: &[$ty]| $sum_by(part, |v| v));
-                        let mean = over(total, count);
-                        let deviations =
-                            accurate_run_sum(row, |part: &[$ty]| $deviations(part, mean));
-                        *slot = over(deviations.centred_squares(n), divisor);
+                        let total = accurate_run_sum(row, $sum);
+                        let mean = total / count;
+                        *slot = $row_squares(row, mean) / divisor;
                     }
                 };
                 if tensor.numel() < crate::ops::map::PAR_THRESHOLD {
@@ -1049,42 +1079,62 @@ fn var_fused_single_axis(
                 // its middle axis took 2.8ms and landed 10 ulps out.
                 let slab = dim_size * inner;
                 let lanes = fold_lanes(inner).max(inner);
-                let column_var = |source: &[$ty], target: &mut [$ty], spread: bool| {
+                let column_var = |source: &[$ty], target: &mut [f64], spread: bool| {
                     let totals = fold_slab_with(
                         source,
                         inner,
-                        0.0 as $ty,
-                        |acc: &mut [$ty], values: &[$ty], _| {
+                        0.0f64,
+                        |acc: &mut [f64], values: &[$ty], _| {
                             for (a, &v) in acc.iter_mut().zip(values) {
-                                *a += v;
+                                *a += f64::from(v);
                             }
                         },
                         |x, y| x + y,
                         spread,
                     );
-                    let means: Vec<$ty> = totals
+                    let means: Vec<f64> = totals
                         .iter()
                         .cycle()
                         .take(lanes)
-                        .map(|&t| over(t, count))
+                        .map(|&t| t / count)
                         .collect();
-                    let deviations = fold_slab_with(
-                        source,
-                        inner,
-                        DeviationSums::<$ty>::default(),
-                        |acc: &mut [DeviationSums<$ty>], values: &[$ty], first| {
-                            let means = &means[first..first + acc.len()];
-                            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                                let d = v - m;
-                                a.sum += d;
-                                a.squares += d * d;
-                            }
-                        },
-                        |x, y| x + y,
-                        spread,
-                    );
-                    for (slot, &q) in target.iter_mut().zip(&deviations) {
-                        *slot = over(q.centred_squares(n), divisor);
+                    if $paired {
+                        let deviations = fold_slab_with(
+                            source,
+                            inner,
+                            DeviationSums::<f64>::default(),
+                            |acc: &mut [DeviationSums<f64>], values: &[$ty], first| {
+                                let means = &means[first..first + acc.len()];
+                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
+                                    let d = f64::from(v) - m;
+                                    a.sum += d;
+                                    a.squares += d * d;
+                                }
+                            },
+                            |x, y| x + y,
+                            spread,
+                        );
+                        for (slot, &q) in target.iter_mut().zip(&deviations) {
+                            *slot = q.centred_squares(count) / divisor;
+                        }
+                    } else {
+                        let squares = fold_slab_with(
+                            source,
+                            inner,
+                            0.0f64,
+                            |acc: &mut [f64], values: &[$ty], first| {
+                                let means = &means[first..first + acc.len()];
+                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
+                                    let d = f64::from(v) - m;
+                                    *a += d * d;
+                                }
+                            },
+                            |x, y| x + y,
+                            spread,
+                        );
+                        for (slot, &q) in target.iter_mut().zip(&squares) {
+                            *slot = q / divisor;
+                        }
                     }
                 };
                 // A slab too short to split by rows is split by columns, and
@@ -1092,40 +1142,59 @@ fn var_fused_single_axis(
                 // still in cache for the second pass, where running the first
                 // over the whole slab before starting the second evicted it --
                 // 50% slower on a `(512, 4096)` matrix down its rows.
-                let band_var = |source: &[$ty], start: usize, target: &mut [$ty]| {
+                let band_var = |source: &[$ty], start: usize, target: &mut [f64]| {
                     let width = target.len();
-                    let add = |x: $ty, y: $ty| x + y;
                     let totals = fold_column_band(
                         source,
                         inner,
                         start,
                         width,
-                        0.0 as $ty,
-                        |acc: &mut [$ty], values: &[$ty], _| {
+                        0.0f64,
+                        |acc: &mut [f64], values: &[$ty], _| {
                             for (a, &v) in acc.iter_mut().zip(values) {
-                                *a += v;
-                            }
-                        },
-                        add,
-                    );
-                    let means: Vec<$ty> = totals.iter().map(|&t| over(t, count)).collect();
-                    let deviations = fold_column_band(
-                        source,
-                        inner,
-                        start,
-                        width,
-                        DeviationSums::<$ty>::default(),
-                        |acc: &mut [DeviationSums<$ty>], values: &[$ty], _| {
-                            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
-                                let d = v - m;
-                                a.sum += d;
-                                a.squares += d * d;
+                                *a += f64::from(v);
                             }
                         },
                         |x, y| x + y,
                     );
-                    for (slot, &q) in target.iter_mut().zip(&deviations) {
-                        *slot = over(q.centred_squares(n), divisor);
+                    let means: Vec<f64> = totals.iter().map(|&t| t / count).collect();
+                    if $paired {
+                        let deviations = fold_column_band(
+                            source,
+                            inner,
+                            start,
+                            width,
+                            DeviationSums::<f64>::default(),
+                            |acc: &mut [DeviationSums<f64>], values: &[$ty], _| {
+                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
+                                    let d = f64::from(v) - m;
+                                    a.sum += d;
+                                    a.squares += d * d;
+                                }
+                            },
+                            |x, y| x + y,
+                        );
+                        for (slot, &q) in target.iter_mut().zip(&deviations) {
+                            *slot = q.centred_squares(count) / divisor;
+                        }
+                    } else {
+                        let squares = fold_column_band(
+                            source,
+                            inner,
+                            start,
+                            width,
+                            0.0f64,
+                            |acc: &mut [f64], values: &[$ty], _| {
+                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
+                                    let d = f64::from(v) - m;
+                                    *a += d * d;
+                                }
+                            },
+                            |x, y| x + y,
+                        );
+                        for (slot, &q) in target.iter_mut().zip(&squares) {
+                            *slot = q / divisor;
+                        }
                     }
                 };
                 let outer = out.len() / inner;
@@ -1156,19 +1225,30 @@ fn var_fused_single_axis(
     }
 
     match tensor.dtype() {
+        // A float32 tensor in float64 needs only the squares, its mean being
+        // as near exact as makes no difference to them; a float64 one carries
+        // the deviations' sum to correct for its mean's rounding. See
+        // `DeviationSums::centred_squares`.
         DataType::Float32 => fill!(
             as_f32_slice,
-            as_f32_slice_mut,
             f32,
-            simd_sum_f32_by,
-            simd_deviation_sums_f32
+            simd_sum_f32_wide,
+            |row: &[f32], mean: f64| {
+                accurate_run_sum(row, |part: &[f32]| {
+                    simd_square_deviations_f32_wide(part, mean)
+                })
+            },
+            false
         ),
         DataType::Float64 => fill!(
             as_f64_slice,
-            as_f64_slice_mut,
             f64,
-            simd_sum_f64_by,
-            simd_deviation_sums_f64
+            simd_sum_f64,
+            |row: &[f64], mean: f64| {
+                accurate_run_sum(row, |part: &[f64]| simd_deviation_sums_f64(part, mean))
+                    .centred_squares(dim_size as f64)
+            },
+            true
         ),
         _ => unreachable!("variance is only defined for floating point tensors"),
     }
@@ -1193,7 +1273,7 @@ fn var_fused_single_axis(
     Ok(Tensor::new(
         Arc::new(result_data),
         out_shape,
-        tensor.dtype(),
+        DataType::Float64,
         tensor.device(),
         false,
     ))

@@ -9,10 +9,13 @@
 //! A mean sums before it divides, and a variance squares before it averages,
 //! and either intermediate can leave the float range while the answer does
 //! not: the mean of `[1e308, 1e308]` is `1e308`, and the standard deviation
-//! of the float32s `[1e20, -1e20]` is `1.4e20`, though the sum and the
-//! squares are past the top of their dtypes. The squares of small values fall
-//! off the bottom the same way. Each such slice is taken again at a power of
-//! two near its largest magnitude, which scales exactly, and scaled back.
+//! of `[1e200, -1e200]` is `1.4e200`, though the sum and the squares are past
+//! the top of float64. The squares of small values fall off the bottom the
+//! same way. Each such slice is taken again at a power of two near its largest
+//! magnitude, which scales exactly, and scaled back.
+//!
+//! A float32 statistic never needs it: it is carried in float64, where no
+//! float32 values' sum or squares leave the range.
 //!
 //! The direct computation is tried first and checked afterwards, so a
 //! statistic that never left the range costs nothing more than the check,
@@ -316,8 +319,7 @@ pub(crate) fn scales_for_result(scales: &Tensor, result_shape: &Shape) -> Result
 }
 
 /// An integer tensor's elements less the first element of their slice over
-/// `dims`, exactly, in the float dtype its statistics widen to: float32 for
-/// int32 and float64 for int64.
+/// `dims`, exactly or to within a rounding of themselves, in float64.
 ///
 /// A variance does not move when every element is shifted by one amount, and
 /// shifted by an element of their own slice the values are as small as the
@@ -325,9 +327,10 @@ pub(crate) fn scales_for_result(scales: &Tensor, result_shape: &Shape) -> Result
 /// Converted first and subtracted after, two int64s above 2^53 a step apart
 /// became one float64, and `var([2^53, 2^53 + 1, 2^53 + 2])` was 2, not 1.
 ///
-/// Integers that convert exactly -- every int32 up to `2^24` in magnitude and
-/// every int64 up to `2^53` -- are converted as they stand, which is cheaper
-/// and the same variance; the shift is for the rest.
+/// Integers that convert exactly -- every int32, and every int64 up to `2^53`
+/// in magnitude -- are converted as they stand, which is cheaper and the same
+/// variance; the shift is for the rest. An int32 statistic is carried in
+/// float64 and rounded to float32 once, at the end.
 pub(crate) fn integer_deviations(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
     // Checked a block at a time across the pool, each block folded without an
     // early exit: on the baseline target a 64-bit comparison is scalar either
@@ -335,11 +338,7 @@ pub(crate) fn integer_deviations(tensor: &Tensor, dims: &[usize]) -> Result<Tens
     // decides on.
     use crate::ops::map::{SIMD_PAR_CHUNK, par_all_chunk};
     let exact = match tensor.dtype() {
-        DataType::Int32 => tensor.data().as_i32_slice().is_some_and(|v| {
-            par_all_chunk(v, SIMD_PAR_CHUNK, &|block| {
-                block.iter().fold(0, |most, x| most.max(x.unsigned_abs())) <= 1 << 24
-            })
-        }),
+        DataType::Int32 => true,
         DataType::Int64 => tensor.data().as_i64_slice().is_some_and(|v| {
             par_all_chunk(v, SIMD_PAR_CHUNK, &|block| {
                 block.iter().fold(0, |most, x| most.max(x.unsigned_abs())) <= 1 << 53
@@ -348,12 +347,7 @@ pub(crate) fn integer_deviations(tensor: &Tensor, dims: &[usize]) -> Result<Tens
         _ => false,
     };
     if exact || tensor.numel() == 0 {
-        let widened = if tensor.dtype() == DataType::Int32 {
-            DataType::Float32
-        } else {
-            DataType::Float64
-        };
-        return tensor.astype(widened);
+        return tensor.astype(DataType::Float64);
     }
     let mut reference = tensor.clone();
     for &dim in dims {
@@ -362,22 +356,6 @@ pub(crate) fn integer_deviations(tensor: &Tensor, dims: &[usize]) -> Result<Tens
     let out_shape = tensor.shape().clone();
     let missing = || MinitensorError::internal_error("integer deviations: operand slice");
     let (data, dtype) = match tensor.dtype() {
-        DataType::Int32 => {
-            let values = tensor.data().as_i32_slice().ok_or_else(missing)?;
-            let origin = reference.data().as_i32_slice().ok_or_else(missing)?;
-            let out = crate::ops::kernels::broadcast_binary_map(
-                values,
-                origin,
-                tensor.shape(),
-                reference.shape(),
-                &out_shape,
-                |a: i32, b: i32| (i64::from(a) - i64::from(b)) as f32,
-            )?;
-            (
-                TensorData::from_vec_f32(out, tensor.device()),
-                DataType::Float32,
-            )
-        }
         DataType::Int64 => {
             let values = tensor.data().as_i64_slice().ok_or_else(missing)?;
             let origin = reference.data().as_i64_slice().ok_or_else(missing)?;

@@ -596,43 +596,71 @@ float_sum_kernel!(
 /// vector at half the float32 sum's speed, the shape [`simd_square_sum_f32`]
 /// measured best for the same reason.
 pub fn simd_sum_f32_wide(data: &[f32]) -> f64 {
+    wide_sum_dispatch(data, f64::from)
+}
+
+/// `sum((x - centre)^2)` over an f32 run, in float64, accumulated as
+/// [`simd_sum_f32_wide`] accumulates: the sum of squares of a float32
+/// variance. Each deviation from a float64 centre is exact or one rounding
+/// off, and its square cannot leave the range: `f32::MAX^2` is about `1e77`
+/// and the smallest subnormal's square about `2e-90`.
+pub fn simd_square_deviations_f32_wide(data: &[f32], centre: f64) -> f64 {
+    wide_sum_dispatch(data, move |v| {
+        let d = f64::from(v) - centre;
+        d * d
+    })
+}
+
+/// [`simd_sum_f32_wide`] over a map of each element: `keep(x)` in float64,
+/// summed in the same lanes and tree.
+pub fn simd_sum_f32_wide_by(data: &[f32], keep: impl Fn(f32) -> f64 + Copy) -> f64 {
+    wide_sum_dispatch(data, keep)
+}
+
+#[inline]
+fn wide_sum_dispatch(data: &[f32], keep: impl Fn(f32) -> f64 + Copy) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if simd_capabilities().avx {
         // SAFETY: `detect` confirmed avx on this CPU.
-        return unsafe { wide_sum_avx(data) };
+        return unsafe { wide_sum_avx(data, keep) };
     }
-    wide_sum_body(data)
+    wide_sum_body(data, keep)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
-fn wide_sum_avx(data: &[f32]) -> f64 {
-    wide_sum_body(data)
+fn wide_sum_avx(data: &[f32], keep: impl Fn(f32) -> f64 + Copy) -> f64 {
+    wide_sum_body(data, keep)
 }
 
-/// The loop of [`simd_sum_f32_wide`], written once; see [`square_sum_body`]
-/// for why it is `#[inline(always)]`.
+/// The loop of [`simd_sum_f32_wide`], written once over a map of each
+/// element; see [`square_sum_body`] for why it is `#[inline(always)]`.
 #[inline(always)]
-fn wide_sum_body(data: &[f32]) -> f64 {
+fn wide_sum_body(data: &[f32], keep: impl Fn(f32) -> f64 + Copy) -> f64 {
     const LANES: usize = 16;
     const LEAF: usize = 128;
 
     #[inline(always)]
-    fn lane_sums(block: &[f32]) -> [f64; LANES] {
+    fn lane_sums(block: &[f32], keep: impl Fn(f32) -> f64) -> [f64; LANES] {
         let mut sums = [0.0f64; LANES];
         let (chunks, rest) = block.as_chunks::<LANES>();
         for chunk in chunks {
             for lane in 0..LANES {
-                sums[lane] += f64::from(chunk[lane]);
+                sums[lane] += keep(chunk[lane]);
             }
         }
-        // Padded to a full block and folded in as one more, rather than added
-        // at a runtime index; see `square_sum_body`.
+        // The tail goes into the lanes it would have landed in; see
+        // `square_sum_body`. A padding element is not a zero term under every
+        // map -- a squared deviation of one is the centre's square -- so the
+        // tail fills lanes of its own, at runtime indices that keep the ones
+        // above in registers, and those add into the lanes whole.
         if !rest.is_empty() {
-            let mut block = [0.0f32; LANES];
-            block[..rest.len()].copy_from_slice(rest);
+            let mut tail = [0.0f64; LANES];
+            for (slot, &v) in tail.iter_mut().zip(rest) {
+                *slot = keep(v);
+            }
             for lane in 0..LANES {
-                sums[lane] += f64::from(block[lane]);
+                sums[lane] += tail[lane];
             }
         }
         sums
@@ -642,7 +670,7 @@ fn wide_sum_body(data: &[f32]) -> f64 {
     let mut leaves: usize = 0;
     let (blocks, rest) = data.as_chunks::<LEAF>();
     for block in blocks {
-        let mut sums = lane_sums(block);
+        let mut sums = lane_sums(block, keep);
         let mut level = 0;
         while leaves & (1 << level) != 0 {
             for lane in 0..LANES {
@@ -654,7 +682,7 @@ fn wide_sum_body(data: &[f32]) -> f64 {
         pending[level] = sums;
         leaves |= 1 << level;
     }
-    let mut acc = lane_sums(rest);
+    let mut acc = lane_sums(rest, keep);
     let mut level = 0;
     let mut remaining = leaves;
     while remaining != 0 {
@@ -698,7 +726,7 @@ impl<T: num_traits::Float> DeviationSums<T> {
     /// squared deviation from it carries that offset: `n * offset^2` too much
     /// in all, which is nothing for data that varies over many ulps of its
     /// mean and most of the answer for data that varies over a few. The
-    /// float32s `999 x 2.0` and one `2.0 + 2^-22` have a mean that rounds to
+    /// float64s `999 x 2.0` and one `2.0 + 2^-51` have a mean that rounds to
     /// `2.0`, and the variance came out a thousandth high. The deviations'
     /// own sum is that offset times `n`, measured, and subtracting its square
     /// over `n` takes it back out.
@@ -707,10 +735,15 @@ impl<T: num_traits::Float> DeviationSums<T> {
     /// sum of squares and cannot overflow where it did not. Never below zero,
     /// which only rounding could make it; a NaN stays a NaN.
     ///
-    /// The second sum is not free: a float32 variance along a last axis in
-    /// cache measured 10-20% slower carrying it, and one down a column, where
-    /// the pair of accumulators interleaves, up to half again; an input that
+    /// The second sum is not free: a variance along a last axis in cache
+    /// measured 10-20% slower carrying it, and one down a column, where the
+    /// pair of accumulators interleaves, up to half again; an input that
     /// streams from memory, nothing.
+    ///
+    /// A float32 variance does without it. Carried in float64, its mean is
+    /// the float64 nearest the exact one -- a float32 run sums exactly there
+    /// while its values span less than a 2^29 ratio -- and an offset of an
+    /// ulp of float64 is below 2^-30 of any spread float32 values can have.
     pub fn centred_squares(self, count: T) -> T {
         let corrected = self.squares - self.sum * (self.sum / count);
         if corrected < T::zero() {
@@ -721,13 +754,9 @@ impl<T: num_traits::Float> DeviationSums<T> {
     }
 }
 
-/// [`DeviationSums`] of an f32 run from `centre`, each of the two accumulated
-/// as [`simd_sum_f32_by`] accumulates its one sum.
-pub fn simd_deviation_sums_f32(data: &[f32], centre: f32) -> DeviationSums<f32> {
-    deviation_sums::<f32, 8>(data, centre)
-}
-
-/// [`simd_deviation_sums_f32`] in double precision.
+/// [`DeviationSums`] of an f64 run from `centre`, each of the two accumulated
+/// as [`simd_sum_f64_by`] accumulates its one sum. A float32 variance needs
+/// no such pair; see [`simd_square_deviations_f32_wide`].
 pub fn simd_deviation_sums_f64(data: &[f64], centre: f64) -> DeviationSums<f64> {
     deviation_sums::<f64, 4>(data, centre)
 }

@@ -696,7 +696,8 @@ fn rescue_mean(
     result: Tensor,
     compute: impl FnOnce(&Tensor, Option<Vec<isize>>) -> Result<Tensor>,
 ) -> Result<Tensor> {
-    if !tensor.dtype().is_float() || tensor.numel() == 0 {
+    // A float32 mean is summed in float64, which no float32 values overflow.
+    if tensor.dtype() != DataType::Float64 || tensor.numel() == 0 {
         return Ok(result);
     }
     let dims = super::sort_impl::statistic_dims(tensor, &dim)?;
