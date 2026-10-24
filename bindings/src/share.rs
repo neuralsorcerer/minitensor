@@ -28,6 +28,7 @@
 use crate::tensor::PyTensor;
 use engine::tensor::{DataType, Shape, TensorData};
 use engine::{Device, Tensor};
+use numpy::npyffi::objects::_PyArray_GET_ITEM_DATA;
 use numpy::{PyArrayDescrMethods, PyUntypedArray, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::ffi;
@@ -109,8 +110,10 @@ pub(crate) fn tensor_from_array_shared(
     // in-place operation on a tensor sharing it would write it anyway: into
     // an object Python promised was immutable, or into a page the kernel
     // mapped read-only, which is a segfault.
-    // SAFETY: the header of a live array; `PyArray_FLAGS` reads this field.
-    let flags = unsafe { (*untyped.as_array_ptr()).flags };
+    // SAFETY: the header of a live array, read with the thread attached --
+    // `PyArray_FLAGS` reads this field. Through the accessor rather than the
+    // struct, which is opaque under the free-threaded stable ABI.
+    let flags = unsafe { (*_PyArray_GET_ITEM_DATA(untyped.as_array_ptr())).flags };
     if flags & numpy::npyffi::NPY_ARRAY_WRITEABLE == 0 {
         return Err(PyValueError::new_err(
             "from_numpy_shared needs a writeable array, because in-place tensor operations \
@@ -131,8 +134,9 @@ pub(crate) fn tensor_from_array_shared(
     let numel: usize = shape.iter().product();
     let size = numel * dtype.size_in_bytes();
     // No accessor for this on `PyUntypedArrayMethods`; the field is what
-    // `PyArray_DATA` reads in C.
-    let data = unsafe { (*untyped.as_array_ptr()).data } as *mut u8;
+    // `PyArray_DATA` reads in C, reached as the flags are above.
+    // SAFETY: as for the flags.
+    let data = unsafe { (*_PyArray_GET_ITEM_DATA(untyped.as_array_ptr())).data } as *mut u8;
 
     if size != 0 && !(data as usize).is_multiple_of(dtype.size_in_bytes()) {
         return Err(PyValueError::new_err(

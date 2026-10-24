@@ -49,8 +49,8 @@ rand_distr = "0.6"
 libm = "0.2"
 
 # Python bindings
-pyo3 = { version = "0.29", features = ["auto-initialize", "multiple-pymethods"] }
-numpy = "0.29"
+pyo3 = { version = "0.30", features = ["auto-initialize", "multiple-pymethods"] }
+numpy = "0.30"
 
 
 # Release builds are what ship in the wheel and what every benchmark quotes.
