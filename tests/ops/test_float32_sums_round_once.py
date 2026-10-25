@@ -82,3 +82,14 @@ def test_nansum_keeps_the_nan_an_infinity_makes(dtype):
     assert math.isnan(tensor.nansum(dim=[1, 0], keepdim=True).reshape([]).item())
     skipped = mt.Tensor([[[1.0], [math.nan]], [[1.0], [2.0]]], dtype=dtype)
     assert skipped.nansum(dim=[0, 1]).item() == 4.0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_nanmean_keeps_the_nan_an_infinity_makes(dtype):
+    values = [[[math.inf, 1.0], [2.0, math.nan]], [[-math.inf, 3.0], [1.0, 1.0]]]
+    got = mt.Tensor(values, dtype=dtype).nanmean(dim=[0, 1]).tolist()
+    assert math.isnan(got[0]) and math.isclose(got[1], 5.0 / 3.0, rel_tol=1e-7)
+    kept = mt.Tensor(values, dtype=dtype).nanmean(dim=[1, 0], keepdim=True)
+    assert math.isnan(kept.reshape([2]).tolist()[0])
+    traced = mt.Tensor(values, dtype=dtype, requires_grad=True).nanmean(dim=[0, 1])
+    assert math.isnan(traced.tolist()[0])

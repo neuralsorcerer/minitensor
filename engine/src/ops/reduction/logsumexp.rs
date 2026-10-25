@@ -966,19 +966,23 @@ fn nanmean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Re
             let mask = mask.as_ref().ok_or_else(|| {
                 MinitensorError::internal_error("nanmean expected mask for count computation")
             })?;
-            let mut sum = tensor.clone();
             let mut count = mask.astype(tensor.dtype())?;
-
-            if keepdim {
-                for &d in &dims {
-                    sum = nansum_along_dim(&sum, d, true)?;
-                    count = sum_along_dim(&count, d, true)?;
-                }
+            let order: Vec<usize> = if keepdim {
+                dims.clone()
             } else {
-                for &d in dims.iter().rev() {
-                    sum = nansum_along_dim(&sum, d, false)?;
-                    count = sum_along_dim(&count, d, false)?;
-                }
+                dims.iter().rev().copied().collect()
+            };
+            // NaN is skipped on the first axis, which reads the input; the
+            // later ones sum partial totals, and a NaN among those is the
+            // `inf - inf` of a slice holding both, which has to stand.
+            // Skipped there too, a slice of `inf`, `-inf` and finite values
+            // averaged over two axes came out finite.
+            let mut sum = nansum_along_dim(tensor, order[0], keepdim)?;
+            for &d in &order[1..] {
+                sum = sum_along_dim(&sum, d, keepdim)?;
+            }
+            for &d in &order {
+                count = sum_along_dim(&count, d, keepdim)?;
             }
             (sum, count)
         }
