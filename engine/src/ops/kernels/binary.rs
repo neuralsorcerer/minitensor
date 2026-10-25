@@ -387,21 +387,112 @@ macro_rules! floored_quotient {
 floored_quotient!(floored_quotient_f32, f32);
 floored_quotient!(floored_quotient_f64, f64);
 
-binary_kernel!(
+/// Float floor division: [`floored_quotient_f32`]/[`floored_quotient_f64`]
+/// for every element, and the exact floor for the few whose quotient reaches
+/// `2^digits`.
+///
+/// Below that every whole number is a float and the floor above is exact.
+/// Past it the floats' midpoints are whole numbers, and the floor of the
+/// rounded quotient is not always the rounded floor: a floor exactly halfway
+/// between two floats rounds to even, where the quotient just above it rounds
+/// up -- a float64 quotient past 2^53 came out an ulp high one time in two
+/// hundred. Each block is filled without a branch and gone over again only
+/// where some quotient got that far.
+macro_rules! floordiv_kernel {
+    ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $quotient:ident, $exact:path, $digits:expr) => {
+        pub(crate) fn $name(
+            lhs: &Tensor,
+            rhs: &Tensor,
+            output_shape: &Shape,
+        ) -> Result<TensorData> {
+            let (lhs_data, rhs_data) = match (lhs.data().$accessor(), rhs.data().$accessor()) {
+                (Some(left), Some(right)) => (left, right),
+                _ => {
+                    return Err(MinitensorError::internal_error(concat!(
+                        "Failed to get ",
+                        stringify!($ty),
+                        " slices for floor division"
+                    )));
+                }
+            };
+            #[inline(always)]
+            fn far(q: $ty) -> bool {
+                q.is_finite() & (q.abs() >= (2.0 as $ty).powi($digits))
+            }
+            // The quotient's check is a fused multiply-add, an instruction in
+            // the `fma` build and a library call per element without it, as
+            // the element-wise map's builds have it.
+            #[inline(always)]
+            fn fill(a: &[$ty], b: &[$ty], out: &mut [std::mem::MaybeUninit<$ty>]) -> bool {
+                let mut pending = false;
+                for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+                    let q = $quotient(x, y);
+                    pending |= far(q);
+                    slot.write(q);
+                }
+                pending
+            }
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2,fma")]
+            fn fill_fma(a: &[$ty], b: &[$ty], out: &mut [std::mem::MaybeUninit<$ty>]) -> bool {
+                fill(a, b, out)
+            }
+            let block = |a: &[$ty], b: &[$ty], out: &mut [std::mem::MaybeUninit<$ty>]| {
+                #[cfg(target_arch = "x86_64")]
+                let pending = if crate::ops::simd::simd_capabilities().avx2_fma {
+                    // SAFETY: avx2 and fma were detected on this CPU.
+                    unsafe { fill_fma(a, b, out) }
+                } else {
+                    fill(a, b, out)
+                };
+                #[cfg(not(target_arch = "x86_64"))]
+                let pending = fill(a, b, out);
+                if pending {
+                    for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+                        // SAFETY: written in the pass above.
+                        if far(unsafe { slot.assume_init_read() }) {
+                            slot.write($exact(x, y));
+                        }
+                    }
+                }
+            };
+            // SAFETY: `block` writes every element of the block it is handed.
+            let out = unsafe {
+                broadcast_binary_blocks(
+                    lhs_data,
+                    rhs_data,
+                    lhs.shape(),
+                    rhs.shape(),
+                    output_shape,
+                    BINARY_PAR_THRESHOLD,
+                    block,
+                )
+            };
+            Ok(TensorData::from_vec::<$ty>(
+                out,
+                DataType::$dtype,
+                lhs.device(),
+            ))
+        }
+    };
+}
+floordiv_kernel!(
     floordiv_f32_direct,
     as_f32_slice,
     f32,
     Float32,
-    "f32",
-    floored_quotient_f32
+    floored_quotient_f32,
+    crate::ops::arithmetic::rounded_once::exact_floor_quotient_f32,
+    24
 );
-binary_kernel!(
+floordiv_kernel!(
     floordiv_f64_direct,
     as_f64_slice,
     f64,
     Float64,
-    "f64",
-    floored_quotient_f64
+    floored_quotient_f64,
+    crate::ops::arithmetic::rounded_once::exact_floor_quotient_f64,
+    53
 );
 binary_kernel!(
     floordiv_i32_direct,

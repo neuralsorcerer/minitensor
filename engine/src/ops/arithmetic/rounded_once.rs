@@ -1024,6 +1024,21 @@ fn modulus_exactly<T: Target>(
     }
 }
 
+/// `floor(x / y)` for finite float32 operands, exactly, rounded once to
+/// float32. For a quotient past 2^24, where float32's midpoints are whole
+/// numbers, the floor of the rounded quotient is not always the rounded
+/// floor: a floor exactly halfway between two float32s rounds to even, where
+/// the quotient just above it rounds up.
+pub(crate) fn exact_floor_quotient_f32(x: f32, y: f32) -> f32 {
+    let (x, y) = (f64::from(x), f64::from(y));
+    modulus_exactly::<f32>(Modulus::FloorDiv, Exact::float(x), Exact::float(y), x, y)
+}
+
+/// [`exact_floor_quotient_f32`] for float64, past 2^53.
+pub(crate) fn exact_floor_quotient_f64(x: f64, y: f64) -> f64 {
+    modulus_exactly::<f64>(Modulus::FloorDiv, Exact::float(x), Exact::float(y), x, y)
+}
+
 /// A remainder from the truncated one, `rest`, rounded once: `b` is the
 /// divisor, or `None` for an infinite one, and `y` the divisor in float64.
 fn finish_remainder<T: Target>(kind: Modulus, rest: Exact, b: Option<Exact>, y: f64) -> T {

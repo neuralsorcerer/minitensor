@@ -10,6 +10,6 @@
 #[path = "arithmetic/elementwise.rs"]
 mod elementwise_impl;
 #[path = "arithmetic/rounded_once.rs"]
-mod rounded_once;
+pub(crate) mod rounded_once;
 
 pub use self::elementwise_impl::*;

@@ -287,3 +287,34 @@ def test_differences_of_integers_beside_float_ends():
     extremes = mt.tensor([2**31 - 1, -(2**31)], dtype="int32")
     assert mt.ediff1d(extremes, to_begin=0.5).tolist() == [0.5, -4294967296.0]
     assert str(mt.ediff1d(big, to_end=7).dtype) == "int32"
+
+
+def test_float_floor_division_rounds_the_exact_floor():
+    # Past 2^p the floats' midpoints are whole numbers: a floor exactly
+    # halfway between two floats rounds to even, where the rounded quotient
+    # just above it rounds up.
+    rng = np.random.default_rng(443)
+    numerators = rng.uniform(1, 2, 3000) * np.exp2(rng.integers(0, 60, 3000))
+    denominators = rng.uniform(1, 2, 3000) * np.exp2(rng.integers(-60, 0, 3000))
+    got = (
+        mt.tensor(numerators.tolist(), dtype="float64")
+        // mt.tensor(denominators.tolist(), dtype="float64")
+    ).tolist()
+    want = [
+        float(Fraction(math.floor(Fraction(a) / Fraction(b))))
+        for a, b in zip(numerators, denominators)
+    ]
+    assert got == want
+    single = [float(np.float32(v)) for v in numerators]
+    singles = [float(np.float32(v)) for v in denominators]
+    got = (mt.tensor(single) // mt.tensor(singles)).tolist()
+    want = [
+        _float32(Fraction(math.floor(Fraction(a) / Fraction(b))))
+        for a, b in zip(single, singles)
+    ]
+    assert got == want
+    specials = mt.tensor([1.0, -1.0, math.inf, 0.0, -3.0, 5.0])
+    divisors = mt.tensor([0.0, 0.0, 2.0, -3.0, math.inf, -math.inf])
+    result = (specials // divisors).tolist()
+    assert result[:2] == [math.inf, -math.inf] and math.isnan(result[2])
+    assert math.copysign(1.0, result[3]) == -1.0 and result[4:] == [-1.0, -1.0]

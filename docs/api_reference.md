@@ -2466,8 +2466,12 @@ assert row_std.shape == (2, 3)
 - `softmin(input, dim=None)` — `softmax` of the negated input
 - `floor_divide` / `//` — Python floor division (rounds toward negative
   infinity; integer operands stay integral, integer zero divisors raise,
-  not differentiable). Beside a float, an integer is divided exactly and the
-  floor rounded once, and a zero integer divisor divides as a float zero does.
+  not differentiable). A float result is the exact floor rounded once: past
+  2^24 in float32 and 2^53 in float64 the floats' midpoints are whole
+  numbers, and a floor exactly halfway between two floats rounds to even
+  where the rounded quotient just above it would round up. Beside a float, an
+  integer is divided exactly too, and a zero integer divisor divides as a
+  float zero does.
 - `remainder` / `%` — Python-style remainder (takes the divisor's sign;
   `a == (a // b) * b + a % b` holds for every dtype; differentiable for
   float dtypes)
