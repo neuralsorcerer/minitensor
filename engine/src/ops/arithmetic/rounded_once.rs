@@ -27,6 +27,7 @@
 //! An int64 past 2^53 is carried out exactly in integer arithmetic instead,
 //! element by element, and rounded from there.
 
+use std::borrow::Cow;
 use std::mem::MaybeUninit;
 
 use crate::{
@@ -183,44 +184,114 @@ pub(crate) fn rounded_once(
             })?
         };
     }
-    macro_rules! pairs {
-        ($(($target:ty, $lhs:ident, $lhs_slice:ident, $rhs:ident, $rhs_slice:ident)),* $(,)?) => {
-            match (result, lhs.dtype(), rhs.dtype()) {
-                $(
-                    (<$target as TensorElement>::DTYPE, DataType::$lhs, DataType::$rhs) => {
-                        run::<$target, _, _>(
-                            lhs,
-                            rhs,
-                            slice!(lhs, $lhs_slice),
-                            slice!(rhs, $rhs_slice),
-                            op,
-                            output_shape,
-                        )
-                    }
-                )*
-                (result, left, right) => Err(MinitensorError::internal_error(format!(
-                    "{left:?} {op:?} {right:?} into {result:?} has no exactly rounded kernel"
-                ))),
-            }
-        };
+    // An int32 beside a float32 is the pairing that turns up, so it has
+    // kernels of its own, read in place with the operation fixed.
+    match (result, lhs.dtype(), rhs.dtype()) {
+        (DataType::Float32, DataType::Int32, DataType::Float32) => {
+            let (left, right) = (slice!(lhs, as_i32_slice), slice!(rhs, as_f32_slice));
+            return run::<f32, _, _>(lhs, rhs, left, right, op, output_shape);
+        }
+        (DataType::Float32, DataType::Float32, DataType::Int32) => {
+            let (left, right) = (slice!(lhs, as_f32_slice), slice!(rhs, as_i32_slice));
+            return run::<f32, _, _>(lhs, rhs, left, right, op, output_shape);
+        }
+        _ => {}
     }
-    pairs!(
-        (f32, Int32, as_i32_slice, Float32, as_f32_slice),
-        (f32, Float32, as_f32_slice, Int32, as_i32_slice),
-        (f32, Int64, as_i64_slice, Float32, as_f32_slice),
-        (f32, Float32, as_f32_slice, Int64, as_i64_slice),
-        // Integer pairs reach a float result only by true division.
-        (f32, Int32, as_i32_slice, Int32, as_i32_slice),
-        (f32, Int32, as_i32_slice, Bool, as_bool_slice),
-        (f32, Bool, as_bool_slice, Int32, as_i32_slice),
-        (f64, Int64, as_i64_slice, Float64, as_f64_slice),
-        (f64, Float64, as_f64_slice, Int64, as_i64_slice),
-        (f64, Int64, as_i64_slice, Int64, as_i64_slice),
-        (f64, Int64, as_i64_slice, Int32, as_i32_slice),
-        (f64, Int32, as_i32_slice, Int64, as_i64_slice),
-        (f64, Int64, as_i64_slice, Bool, as_bool_slice),
-        (f64, Bool, as_bool_slice, Int64, as_i64_slice),
-    )
+    // Every other pairing is read as int64 where an operand is one and as
+    // float64 where it is not -- exact either way -- so that a few kernels
+    // serve them all. One per dtype pair and operation was a megabyte of the
+    // extension, nearly all of it for pairings that are rare.
+    let (lhs, rhs) = (wide_operand(lhs)?, wide_operand(rhs)?);
+    let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
+    match (result, lhs.dtype(), rhs.dtype()) {
+        // Integers, and an integer beside a bool, reach a float32 only by
+        // dividing, so this pairing has the one kernel.
+        (DataType::Float32, DataType::Float64, DataType::Float64) if op == Arith::Div => {
+            let (left, right) = (slice!(lhs, as_f64_slice), slice!(rhs, as_f64_slice));
+            broadcast_binary_data(lhs, rhs, left, right, output_shape, |a: f64, b: f64| {
+                once::<f32, f64, f64>(Arith::Div, a, b)
+            })
+        }
+        (DataType::Float32, DataType::Int64, DataType::Float64) => {
+            let (left, right) = (slice!(lhs, as_i64_slice), slice!(rhs, as_f64_slice));
+            run_any::<f32, _, _>(lhs, rhs, left, right, op, output_shape)
+        }
+        (DataType::Float32, DataType::Float64, DataType::Int64) => {
+            let (left, right) = (slice!(lhs, as_f64_slice), slice!(rhs, as_i64_slice));
+            run_any::<f32, _, _>(lhs, rhs, left, right, op, output_shape)
+        }
+        (DataType::Float64, DataType::Int64, DataType::Float64) => {
+            let (left, right) = (slice!(lhs, as_i64_slice), slice!(rhs, as_f64_slice));
+            run_any::<f64, _, _>(lhs, rhs, left, right, op, output_shape)
+        }
+        (DataType::Float64, DataType::Float64, DataType::Int64) => {
+            let (left, right) = (slice!(lhs, as_f64_slice), slice!(rhs, as_i64_slice));
+            run_any::<f64, _, _>(lhs, rhs, left, right, op, output_shape)
+        }
+        (DataType::Float64, DataType::Int64, DataType::Int64) => {
+            let (left, right) = (slice!(lhs, as_i64_slice), slice!(rhs, as_i64_slice));
+            run_any::<f64, _, _>(lhs, rhs, left, right, op, output_shape)
+        }
+        (result, left, right) => Err(MinitensorError::internal_error(format!(
+            "{left:?} {op:?} {right:?} into {result:?} has no exactly rounded kernel"
+        ))),
+    }
+}
+
+/// An operand as the shared kernels read it: an int64 or a float64 as it is,
+/// and anything else -- an int32, a float32, a bool -- in float64, which
+/// holds each exactly.
+fn wide_operand(tensor: &Tensor) -> Result<Cow<'_, Tensor>> {
+    Ok(match tensor.dtype() {
+        DataType::Int64 | DataType::Float64 => Cow::Borrowed(tensor),
+        _ => Cow::Owned(tensor.astype(DataType::Float64)?),
+    })
+}
+
+/// [`run`] with the operation chosen per element, for the pairings beside an
+/// int64, whose loops branch on each element's size in any case. One plain
+/// loop over blocks serves them: the vectorized builds the element-wise maps
+/// keep for every closure would buy a branching loop nothing.
+fn run_any<T: Target, A: Operand, B: Operand>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    left: &[A],
+    right: &[B],
+    op: Arith,
+    output_shape: &Shape,
+) -> Result<TensorData> {
+    scalar_blocks(lhs, rhs, left, right, output_shape, move |a: A, b: B| {
+        once::<T, A, B>(op, a, b)
+    })
+}
+
+/// `element` over the broadcast operands, block by block, in one plain loop.
+fn scalar_blocks<T: Target, A: Operand, B: Operand>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    left: &[A],
+    right: &[B],
+    output_shape: &Shape,
+    element: impl Fn(A, B) -> T + Send + Sync,
+) -> Result<TensorData> {
+    // SAFETY: the block closure writes every element of the block it is
+    // handed.
+    let out = unsafe {
+        broadcast_binary_blocks(
+            left,
+            right,
+            lhs.shape(),
+            rhs.shape(),
+            output_shape,
+            BINARY_PAR_THRESHOLD,
+            |a: &[A], b: &[B], out: &mut [MaybeUninit<T>]| {
+                for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+                    slot.write(element(x, y));
+                }
+            },
+        )
+    };
+    Ok(TensorData::from_vec(out, T::DTYPE, lhs.device()))
 }
 
 /// The kernel for one pair of element types, with the operation fixed at
@@ -684,47 +755,68 @@ pub(crate) fn modulus_once(
             })?
         };
     }
-    macro_rules! pairs {
-        ($(($target:ty, $lhs:ident, $lhs_slice:ident, $rhs:ident, $rhs_slice:ident)),* $(,)?) => {
-            match (result, lhs.dtype(), rhs.dtype()) {
-                $(
-                    (<$target as TensorElement>::DTYPE, DataType::$lhs, DataType::$rhs) => {
-                        run_modulus::<$target, _, _>(
-                            lhs,
-                            rhs,
-                            slice!(lhs, $lhs_slice),
-                            slice!(rhs, $rhs_slice),
-                            kind,
-                            output_shape,
-                        )
-                    }
-                )*
-                (result, left, right) => Err(MinitensorError::internal_error(format!(
-                    "{left:?} {kind:?} {right:?} into {result:?} has no exactly rounded kernel"
-                ))),
-            }
-        };
+    // As for the arithmetic: an int32 beside a float32 has kernels of its
+    // own, and every other pairing is read as int64 and float64.
+    match (result, lhs.dtype(), rhs.dtype()) {
+        (DataType::Float32, DataType::Int32, DataType::Float32) => {
+            let (left, right) = (slice!(lhs, as_i32_slice), slice!(rhs, as_f32_slice));
+            return run_modulus::<f32, _, _>(lhs, rhs, left, right, kind, output_shape);
+        }
+        (DataType::Float32, DataType::Float32, DataType::Int32) => {
+            let (left, right) = (slice!(lhs, as_f32_slice), slice!(rhs, as_i32_slice));
+            return run_modulus::<f32, _, _>(lhs, rhs, left, right, kind, output_shape);
+        }
+        _ => {}
     }
-    // An integer pair keeps an integer result here, so only an integer
-    // beside a float arrives.
-    pairs!(
-        (f32, Int32, as_i32_slice, Float32, as_f32_slice),
-        (f32, Float32, as_f32_slice, Int32, as_i32_slice),
-        (f32, Int64, as_i64_slice, Float32, as_f32_slice),
-        (f32, Float32, as_f32_slice, Int64, as_i64_slice),
-        (f64, Int64, as_i64_slice, Float64, as_f64_slice),
-        (f64, Float64, as_f64_slice, Int64, as_i64_slice),
-    )
+    // An integer pair keeps an integer result here, so only an int64 beside
+    // a float arrives.
+    let (lhs, rhs) = (wide_operand(lhs)?, wide_operand(rhs)?);
+    let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
+    match (result, lhs.dtype(), rhs.dtype()) {
+        (DataType::Float32, DataType::Int64, DataType::Float64) => {
+            let (left, right) = (slice!(lhs, as_i64_slice), slice!(rhs, as_f64_slice));
+            run_modulus_any::<f32, _, _>(lhs, rhs, left, right, kind, output_shape)
+        }
+        (DataType::Float32, DataType::Float64, DataType::Int64) => {
+            let (left, right) = (slice!(lhs, as_f64_slice), slice!(rhs, as_i64_slice));
+            run_modulus_any::<f32, _, _>(lhs, rhs, left, right, kind, output_shape)
+        }
+        (DataType::Float64, DataType::Int64, DataType::Float64) => {
+            let (left, right) = (slice!(lhs, as_i64_slice), slice!(rhs, as_f64_slice));
+            run_modulus_any::<f64, _, _>(lhs, rhs, left, right, kind, output_shape)
+        }
+        (DataType::Float64, DataType::Float64, DataType::Int64) => {
+            let (left, right) = (slice!(lhs, as_f64_slice), slice!(rhs, as_i64_slice));
+            run_modulus_any::<f64, _, _>(lhs, rhs, left, right, kind, output_shape)
+        }
+        (result, left, right) => Err(MinitensorError::internal_error(format!(
+            "{left:?} {kind:?} {right:?} into {result:?} has no exactly rounded kernel"
+        ))),
+    }
+}
+
+/// [`run_modulus`] element by element, for the pairings beside an int64: one
+/// past 2^53 always takes the exact path, so each element takes whichever
+/// path it needs.
+fn run_modulus_any<T: Target, A: Operand, B: Operand>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    left: &[A],
+    right: &[B],
+    kind: Modulus,
+    output_shape: &Shape,
+) -> Result<TensorData> {
+    scalar_blocks(lhs, rhs, left, right, output_shape, move |a: A, b: B| {
+        modulus_element::<T, A, B>(kind, a, b)
+    })
 }
 
 /// [`run`] for floor division and the remainders.
 ///
-/// The exact path is a call, and a call in the loop keeps the loop scalar.
-/// Where float64 holds every value of both element types it is not taken
-/// element by element: each block is filled from float64 without a branch,
-/// and only a block in which some element could not be is gone over again
-/// for those. An int64 past 2^53 always takes the exact path, so beside one
-/// each element takes whichever path it needs.
+/// The exact path is a call, and a call in the loop keeps the loop scalar, so
+/// it is not taken element by element: each block is filled from float64
+/// without a branch, and only a block in which some element could not be is
+/// gone over again for those.
 fn run_modulus<T: Target, A: Operand, B: Operand>(
     lhs: &Tensor,
     rhs: &Tensor,
@@ -733,20 +825,6 @@ fn run_modulus<T: Target, A: Operand, B: Operand>(
     kind: Modulus,
     output_shape: &Shape,
 ) -> Result<TensorData> {
-    if !(A::WIDE && B::WIDE) {
-        macro_rules! with {
-            ($kind:expr) => {
-                broadcast_binary_data(lhs, rhs, left, right, output_shape, |a: A, b: B| {
-                    modulus_element::<T, A, B>($kind, a, b)
-                })
-            };
-        }
-        return match kind {
-            Modulus::FloorDiv => with!(Modulus::FloorDiv),
-            Modulus::Floored => with!(Modulus::Floored),
-            Modulus::Truncated => with!(Modulus::Truncated),
-        };
-    }
     macro_rules! with {
         ($kind:expr) => {
             // SAFETY: `modulus_block` writes every element of the block it

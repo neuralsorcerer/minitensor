@@ -70,16 +70,18 @@ jobs:
         if: matrix.python-version == '3.12'
         shell: bash
         env:
-          # Measured at 12.27 MiB on rustc 1.98 / cp312: 10.64 on 1.94 before
-          # the NumPy provider, the gemv path and the newer vector kernels,
-          # 11.78 before the element-wise map cores gained an AVX2 build,
-          # 12.17 before the narrowing ones gained an AVX-512 build.
+          # Measured at 14.2 MiB on rustc 1.99 / cp312: 13.79 before the
+          # exactly rounded kernels for an integer beside a float, 12.27 on
+          # 1.98, 10.64 on 1.94 before the NumPy provider, the gemv path and
+          # the newer vector kernels, 11.78 before the element-wise map cores
+          # gained an AVX2 build, 12.17 before the narrowing ones gained an
+          # AVX-512 build.
           # The budget is set to catch a step change -- a dependency that does not get stripped, a
           # generic instantiated across every dtype -- and not to ration the
           # ordinary growth of the engine, so there is real headroom and a
           # change that legitimately needs more should raise this number with
           # the reason in its commit message.
-          MAX_EXTENSION_MIB: 14
+          MAX_EXTENSION_MIB: 15
         run: |
           source .venv/bin/activate
           maturin build --release --out /tmp/wheel-size
