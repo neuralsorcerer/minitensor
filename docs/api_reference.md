@@ -2164,7 +2164,14 @@ assert row_std.shape == (2, 3)
 
 ### Elementwise math & activation
 
-- `softmax`, `log_softmax`
+- `softmax`, `log_softmax`. The total of `exp(x - max)` is carried in float64,
+  and `log_softmax` is `(x - max) - log1p(rest)` with `rest` the total less the
+  maximum's own term, which is exactly one: taking the logarithm of the whole
+  total and subtracting `max + log(total)` cancelled the small part of a
+  confident prediction away, and the float32 log-probability of the logits
+  `[20, 0 x 999]` came out 7% off -- and `cross_entropy` with it. `logsumexp`
+  is `max + log1p(rest)` the same way, so `logsumexp([0, -20])` is `2.06e-9`
+  rather than 0. Both are within about an ulp; `softmax` within two.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors

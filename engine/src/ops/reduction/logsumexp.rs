@@ -80,8 +80,24 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     let shifted = arithmetic::sub(&input, &shift)?;
     let exp_shifted = activation::exp(&shifted)?;
     let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
-    let sum_exp = sum(&exp_shifted, Some(dims_isize), true)?;
-    let log_sum = activation::log(&sum_exp)?;
+    // The terms at the maximum, each `exp(0) = 1`, are summed apart from the
+    // rest and come back through `log1p`, as the fused path takes them; see
+    // `ExpTotal`. `units - 1` is exact, and keeps the maximum's own term in
+    // the graph, so its gradient is the softmax as before.
+    let at_max = crate::ops::comparison::eq(&input, &shift)?;
+    let zero = crate::ops::util::create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?;
+    let one = crate::ops::util::create_scalar_tensor(1.0, tensor.dtype(), tensor.device())?;
+    let units = sum(
+        &crate::ops::selection::where_op(&at_max, &exp_shifted, &zero)?,
+        Some(dims_isize.clone()),
+        true,
+    )?;
+    let rest = sum(
+        &crate::ops::selection::where_op(&at_max, &zero, &exp_shifted)?,
+        Some(dims_isize),
+        true,
+    )?;
+    let log_sum = activation::log1p(&arithmetic::add(&arithmetic::sub(&units, &one)?, &rest)?)?;
     let mut result = arithmetic::add(&shift, &log_sum)?;
 
     // A non-finite row max poisons the shifted sum with `inf - inf = NaN`.
@@ -321,20 +337,60 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
         rest.iter().fold(best, |m, &v| nan_max(m, v))
     }
 
-    fn chunk_sum<T: ShiftedExp>(chunk: &[T], top: T) -> T {
-        let mut buffer = [T::zero(); PIECE];
-        let mut sums = [T::zero(); LANES];
-        for piece in chunk.chunks(PIECE) {
+    // The sum of `exp(x - top)` over the chunk, less the term at `skip`, in
+    // float64; see `ShiftedExp::wide_sum`.
+    fn chunk_sum<T: ShiftedExp>(chunk: &[T], top: T, skip: Option<usize>) -> f64 {
+        // Built with AVX2 where the CPU has it: the float64 lanes are half the
+        // float32 ones' width on the baseline.
+        //
+        // A short run takes a short buffer: zeroing the full piece for a row
+        // of 64 cost more than the row's arithmetic.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn avx2<T: ShiftedExp, const P: usize>(chunk: &[T], top: T, skip: Option<usize>) -> f64 {
+            chunk_body::<T, P>(chunk, top, skip)
+        }
+        let short = chunk.len() <= SHORT_PIECE;
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe {
+                if short {
+                    avx2::<T, SHORT_PIECE>(chunk, top, skip)
+                } else {
+                    avx2::<T, PIECE>(chunk, top, skip)
+                }
+            };
+        }
+        if short {
+            chunk_body::<T, SHORT_PIECE>(chunk, top, skip)
+        } else {
+            chunk_body::<T, PIECE>(chunk, top, skip)
+        }
+    }
+
+    const SHORT_PIECE: usize = 128;
+
+    #[inline(always)]
+    fn chunk_body<T: ShiftedExp, const P: usize>(chunk: &[T], top: T, skip: Option<usize>) -> f64 {
+        let mut buffer = [T::zero(); P];
+        let mut sums = [0.0f64; LANES];
+        for (index, piece) in chunk.chunks(P).enumerate() {
             let terms = &mut buffer[..piece.len()];
             T::exp_shifted_into(piece, top, terms);
+            if let Some(at) = skip.and_then(|at| at.checked_sub(index * P))
+                && at < terms.len()
+            {
+                terms[at] = T::zero();
+            }
             let (blocks, rest) = terms.as_chunks::<LANES>();
             for block in blocks {
                 for lane in 0..LANES {
-                    sums[lane] = sums[lane] + block[lane];
+                    sums[lane] += block[lane].wide();
                 }
             }
             for (lane, &v) in rest.iter().enumerate() {
-                sums[lane] = sums[lane] + v;
+                sums[lane] += v.wide();
             }
         }
         crate::ops::simd::pairwise_lanes(&mut sums)
@@ -343,14 +399,18 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
     let chunks = run.len().div_ceil(RUN_SUM_CHUNK).max(1);
     let chunk =
         |index: usize| &run[index * RUN_SUM_CHUNK..((index + 1) * RUN_SUM_CHUNK).min(run.len())];
-    let over_chunks = |work: &(dyn Fn(usize) -> T + Sync)| -> Vec<T> {
+    fn over_chunks<U: Send>(
+        chunks: usize,
+        spread: bool,
+        work: &(dyn Fn(usize) -> U + Sync),
+    ) -> Vec<U> {
         if spread && chunks > 1 {
             par_map_indexed(chunks, work)
         } else {
             (0..chunks).map(work).collect()
         }
-    };
-    let top = over_chunks(&|index| chunk_max(chunk(index)))
+    }
+    let top = over_chunks(chunks, spread, &|index| chunk_max(chunk(index)))
         .into_iter()
         .fold(T::neg_infinity(), nan_max);
     if !top.is_finite() {
@@ -358,12 +418,20 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
         // propagates.
         return top;
     }
-    let total = pairwise_fold(
-        over_chunks(&|index| chunk_sum(chunk(index), top)),
-        T::zero(),
+    // The maximum's own term, `exp(0) = 1` exactly, is left out of the sum
+    // and comes back through `log1p`: `logsumexp([0, -20])` is
+    // `log1p(2e-9)`, and the logarithm of the whole total gave 0 in float32.
+    // See `ExpTotal`.
+    let at = crate::ops::activation::first_position(run, top);
+    let rest = pairwise_fold(
+        over_chunks(chunks, spread, &|index| {
+            let skip = at.and_then(|at| at.checked_sub(index * RUN_SUM_CHUNK));
+            chunk_sum(chunk(index), top, skip.filter(|&s| s < RUN_SUM_CHUNK))
+        }),
+        0.0,
         |a, b| a + b,
     );
-    top + total.ln()
+    T::narrow(top.wide() + crate::ops::activation::log1p_of_rest(rest))
 }
 
 /// Log-sum-exp down each column of a row-major `(rows, cols)` slab; a single
@@ -398,13 +466,17 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
     let bands = rows.div_ceil(band_rows).max(1);
     let band =
         |index: usize| &slab[index * band_rows * cols..((index + 1) * band_rows).min(rows) * cols];
-    let over_bands = |work: &(dyn Fn(usize) -> Vec<T> + Sync)| -> Vec<Vec<T>> {
+    fn over_bands<U: Send>(
+        bands: usize,
+        spread: bool,
+        work: &(dyn Fn(usize) -> Vec<U> + Sync),
+    ) -> Vec<Vec<U>> {
         if spread && bands > 1 {
             par_map_indexed(bands, work)
         } else {
             (0..bands).map(work).collect()
         }
-    };
+    }
     // Both passes take rows a group at a time, `per_group` of them, into
     // `group` lanes; lane `j` belongs to column `j % cols`.
     let per_group = EXP_GROUP.div_ceil(cols);
@@ -413,7 +485,7 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
     // A NaN is recorded beside the lane rather than branched on, which is what
     // lets the comparison loop vectorize.
     let maxima = pairwise_fold_vectors(
-        over_bands(&|index| {
+        over_bands(bands, spread, &|index| {
             let mut top = vec![T::neg_infinity(); group];
             let mut nan = vec![false; group];
             for part in band(index).chunks(group) {
@@ -434,15 +506,25 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
         nan_max,
     );
 
-    let sums = pairwise_fold_vectors(
-        over_bands(&|index| exp_columns_into(band(index), None, &maxima, cols)),
+    let totals = pairwise_fold_vectors(
+        over_bands(bands, spread, &|index| {
+            exp_columns_into::<T, true>(band(index), None, &maxima, cols)
+        }),
         |a, b| a + b,
     );
 
+    // The logarithm of each total split as `ExpTotal` splits it, so a total
+    // near one keeps its small part.
     maxima
         .iter()
-        .zip(&sums)
-        .map(|(&m, &s)| if m.is_finite() { m + s.ln() } else { m })
+        .zip(&totals)
+        .map(|(&m, &t)| {
+            if m.is_finite() {
+                T::narrow(m.wide() + t.ln())
+            } else {
+                m
+            }
+        })
         .collect()
 }
 

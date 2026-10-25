@@ -48,6 +48,17 @@ pub(crate) trait ShiftedExp: Float {
     /// non-last axis needs, where each column has its own maximum. `scratch`
     /// is working space; all four are the same length.
     fn exp_diff_into(input: &[Self], shift: &[Self], scratch: &mut [Self], out: &mut [Self]);
+
+    /// The value in float64, where a softmax's total is carried.
+    fn wide(self) -> f64;
+
+    /// A float64 result rounded to this type, once.
+    fn narrow(value: f64) -> Self;
+
+    /// The sum of `terms` in float64, as a softmax's total is taken: summed
+    /// in float32, 999 equal terms ran 125 to a lane and their total, and the
+    /// log-probability over it, came out 2e-6 off.
+    fn wide_sum(terms: &[Self]) -> f64;
 }
 
 impl ShiftedExp for f32 {
@@ -75,6 +86,20 @@ impl ShiftedExp for f32 {
         };
         crate::ops::simd::F32Kernel::select().exp(scratch, uninit);
     }
+
+    #[inline(always)]
+    fn wide(self) -> f64 {
+        f64::from(self)
+    }
+
+    #[inline(always)]
+    fn narrow(value: f64) -> f32 {
+        value as f32
+    }
+
+    fn wide_sum(terms: &[f32]) -> f64 {
+        crate::ops::simd::simd_sum_f32_wide(terms)
+    }
 }
 
 impl ShiftedExp for f64 {
@@ -90,6 +115,20 @@ impl ShiftedExp for f64 {
         for ((o, &x), &m) in out.iter_mut().zip(input).zip(shift) {
             *o = (x - m).exp();
         }
+    }
+
+    #[inline(always)]
+    fn wide(self) -> f64 {
+        self
+    }
+
+    #[inline(always)]
+    fn narrow(value: f64) -> f64 {
+        value
+    }
+
+    fn wide_sum(terms: &[f64]) -> f64 {
+        accurate_indexed_sum(terms.len(), 0.0, |k| terms[k])
     }
 }
 
@@ -586,6 +625,118 @@ fn settle_infinite_columns<T: Float, const LOG: bool>(
     }
 }
 
+/// The total of a slice's `exp(x - max)`, split for its logarithm: how many
+/// of the terms are exactly one -- the maximum's own always is -- and the sum
+/// of the rest.
+///
+/// A log-softmax is `x - max - log(total)`, and the total of a slice with one
+/// dominant entry is `1 + rest` for a small `rest`. Taken whole, its logarithm
+/// keeps only the digits of `rest` that survived being added to one, and
+/// `x - (max + log(total))` cancels the rest away for the maximum's own entry:
+/// the float32 log-probability of a confident prediction was 7% off, and every
+/// cross-entropy built on it, and the float64 one 5e-9. `log1p(rest)` keeps
+/// them, and `(x - max) - log1p(rest)` subtracts nothing that cancels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExpTotal<T> {
+    /// How many terms are exactly one.
+    pub(crate) ones: T,
+    /// The sum of the others.
+    pub(crate) rest: T,
+}
+
+impl<T: Float> ExpTotal<T> {
+    pub(crate) fn zero() -> Self {
+        Self {
+            ones: T::zero(),
+            rest: T::zero(),
+        }
+    }
+
+    /// One term, filed under `ones` or `rest`.
+    #[inline(always)]
+    pub(crate) fn of(term: T) -> Self {
+        let unit = term == T::one();
+        Self {
+            ones: if unit { T::one() } else { T::zero() },
+            rest: if unit { T::zero() } else { term },
+        }
+    }
+
+    /// The whole total.
+    pub(crate) fn sum(self) -> T {
+        self.ones + self.rest
+    }
+
+    /// `log` of the whole total: `log1p(rest)` over a single unit term, the
+    /// case where taking the total first loses digits. Over several the total
+    /// is at least two and its logarithm loses nothing.
+    pub(crate) fn ln(self) -> T {
+        if self.ones == T::one() {
+            log1p_of_rest(self.rest)
+        } else {
+            self.sum().ln()
+        }
+    }
+}
+
+/// The first position of `target` in `values`, found a block at a time: each
+/// block is tested whole, which vectorizes, and only the one that holds it is
+/// searched. Element by element, the early exit kept the test scalar, and on
+/// rows of 64 it cost a fifth of a `logsumexp`.
+#[inline]
+pub(crate) fn first_position<T: Float>(values: &[T], target: T) -> Option<usize> {
+    const BLOCK: usize = 16;
+    for (index, block) in values.chunks(BLOCK).enumerate() {
+        if block.iter().fold(false, |found, &v| found | (v == target)) {
+            return block
+                .iter()
+                .position(|&v| v == target)
+                .map(|at| index * BLOCK + at);
+        }
+    }
+    None
+}
+
+/// `log(1 + rest)`, through `log1p` where that keeps digits -- a `rest` below
+/// one, where `1 + rest` rounds part of it away -- and as the logarithm of the
+/// sum above, where the sum is at least two and a logarithm of it is at least
+/// `log 2`: the rounding of `1 + rest` moves it by under an ulp, and the call
+/// costs half of `log1p`'s, once a row.
+#[inline]
+pub(crate) fn log1p_of_rest<T: Float>(rest: T) -> T {
+    if rest < T::one() {
+        rest.ln_1p()
+    } else {
+        (T::one() + rest).ln()
+    }
+}
+
+impl<T: Float> std::ops::Add for ExpTotal<T> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            ones: self.ones + other.ones,
+            rest: self.rest + other.rest,
+        }
+    }
+}
+
+/// The [`ExpTotal`] of a run of terms, in float64; with `SPLIT` false every
+/// term counts as `rest`, which is the plain sum.
+fn run_total<T: ShiftedExp, const SPLIT: bool>(terms: &[T]) -> ExpTotal<f64> {
+    if SPLIT {
+        accurate_indexed_sum(terms.len(), ExpTotal::zero(), |k| {
+            ExpTotal::of(terms[k].wide())
+        })
+    } else {
+        ExpTotal {
+            ones: 0.0,
+            rest: T::wide_sum(terms),
+        }
+    }
+}
+
 fn block_col_max<T: Float>(in_block: &[T], after: usize) -> Vec<T> {
     let mut col_max = vec![T::neg_infinity(); after];
     for row in in_block.chunks_exact(after) {
@@ -638,12 +789,39 @@ pub(crate) fn lanes_to_columns<T: Copy>(
 ///
 /// This replaced a scalar `exp` per element in the column paths of `softmax`,
 /// `log_softmax` and `logsumexp`.
-pub(crate) fn exp_columns_into<T: ShiftedExp>(
+pub(crate) fn exp_columns_into<T: ShiftedExp, const SPLIT: bool>(
+    input: &[T],
+    out: Option<&mut [T]>,
+    shift: &[T],
+    cols: usize,
+) -> Vec<ExpTotal<f64>> {
+    // The float64 lanes are half the width of the float32 ones; built with
+    // AVX2 they are as wide again, as `last_axis_rows` is built.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn avx2<T: ShiftedExp, const SPLIT: bool>(
+        input: &[T],
+        out: Option<&mut [T]>,
+        shift: &[T],
+        cols: usize,
+    ) -> Vec<ExpTotal<f64>> {
+        exp_columns_body::<T, SPLIT>(input, out, shift, cols)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { avx2::<T, SPLIT>(input, out, shift, cols) };
+    }
+    exp_columns_body::<T, SPLIT>(input, out, shift, cols)
+}
+
+#[inline(always)]
+fn exp_columns_body<T: ShiftedExp, const SPLIT: bool>(
     input: &[T],
     mut out: Option<&mut [T]>,
     shift: &[T],
     cols: usize,
-) -> Vec<T> {
+) -> Vec<ExpTotal<f64>> {
     let group = EXP_GROUP.div_ceil(cols) * cols;
     let tiled: Vec<T> = shift.iter().copied().cycle().take(group).collect();
     let dead: Vec<usize> = (0..cols)
@@ -656,11 +834,16 @@ pub(crate) fn exp_columns_into<T: ShiftedExp>(
         Vec::new()
     };
     let block_len = group * EXP_BLOCK_ROWS;
-    let blocks: Vec<Vec<T>> = input
+    // The lanes are float64 whatever the input, as every softmax total is;
+    // see `ShiftedExp::wide_sum`.
+    let blocks: Vec<Vec<ExpTotal<f64>>> = input
         .chunks(block_len)
         .enumerate()
         .map(|(b, block)| {
-            let mut lanes = vec![T::zero(); group];
+            let mut lanes = vec![0.0f64; group];
+            // Counted in the input's dtype, where the selects stay as wide as
+            // the terms; a block's count is at most `EXP_BLOCK_ROWS`.
+            let mut units = vec![T::zero(); if SPLIT { group } else { 0 }];
             for (g, part) in block.chunks(group).enumerate() {
                 let n = part.len();
                 let at = b * block_len + g * group;
@@ -676,15 +859,35 @@ pub(crate) fn exp_columns_into<T: ShiftedExp>(
                         }
                     }
                 }
-                for (lane, &t) in lanes.iter_mut().zip(terms.iter()) {
-                    *lane = *lane + t;
+                if SPLIT {
+                    for ((lane, unit), &t) in lanes.iter_mut().zip(units.iter_mut()).zip(&*terms) {
+                        let one = t == T::one();
+                        *lane += (if one { T::zero() } else { t }).wide();
+                        *unit = *unit + if one { T::one() } else { T::zero() };
+                    }
+                } else {
+                    for (lane, &t) in lanes.iter_mut().zip(terms.iter()) {
+                        *lane += t.wide();
+                    }
                 }
             }
-            lanes_to_columns(&lanes, cols, |a, b| a + b)
+            let rest = lanes_to_columns(&lanes, cols, |a, b| a + b);
+            let ones = if SPLIT {
+                lanes_to_columns(&units, cols, |a, b| a + b)
+                    .into_iter()
+                    .map(T::wide)
+                    .collect()
+            } else {
+                vec![0.0; cols]
+            };
+            ones.into_iter()
+                .zip(rest)
+                .map(|(ones, rest)| ExpTotal { ones, rest })
+                .collect()
         })
         .collect();
     if blocks.is_empty() {
-        vec![T::zero(); cols]
+        vec![ExpTotal::zero(); cols]
     } else {
         pairwise_fold_vectors(blocks, |a, b| a + b)
     }
@@ -696,7 +899,11 @@ pub(crate) fn exp_columns_into<T: ShiftedExp>(
 /// its rows: maxima, then exponentials and their sums, then the division.
 fn softmax_block_columnwise<T: ShiftedExp>(in_block: &[T], out_block: &mut [T], after: usize) {
     let col_max = block_col_max(in_block, after);
-    let col_sum = exp_columns_into(in_block, Some(out_block), &col_max, after);
+    let col_sum: Vec<f64> =
+        exp_columns_into::<T, false>(in_block, Some(out_block), &col_max, after)
+            .into_iter()
+            .map(ExpTotal::sum)
+            .collect();
     divide_columns(out_block, &col_sum, after);
     settle_infinite_columns::<T, false>(in_block, out_block, &col_max, after);
 }
@@ -709,38 +916,52 @@ fn softmax_block_columnwise<T: ShiftedExp>(in_block: &[T], out_block: &mut [T], 
 /// it undivided returns the raw exponentials instead, which look like an answer
 /// and are not. `softmax([[1, 1], [nan, 2]], dim=0)` used to come back with
 /// 1.0 in the poisoned column -- a column summing to 1 that means nothing.
-fn divide_columns<T: Float>(out_block: &mut [T], col_sum: &[T], after: usize) {
+///
+/// The quotient is formed in float64 against the float64 total, and rounded
+/// once.
+fn divide_columns<T: ShiftedExp>(out_block: &mut [T], col_sum: &[f64], after: usize) {
     for out_row in out_block.chunks_exact_mut(after) {
         for (o, &s) in out_row.iter_mut().zip(col_sum) {
-            if s != T::zero() {
-                *o = *o / s;
+            if s != 0.0 {
+                *o = T::narrow(o.wide() / s);
             }
         }
     }
 }
 
-/// Fold each column's max into `log(sum) + max`, in place.
-///
-/// A column whose max is `-inf` has nothing to take the log of and stays
-/// `-inf`, which makes every one of its outputs `-inf` in turn.
-fn log_totals<T: Float>(col_max: &mut [T], col_sum: &[T]) {
-    let neg_inf = T::neg_infinity();
-    for (m, &s) in col_max.iter_mut().zip(col_sum) {
-        if *m != neg_inf {
-            *m = s.ln() + *m;
-        }
-    }
+/// Each column's `log(total)`, to come off `x - max`; a column whose max is
+/// `-inf` has no total and its outputs are all `-inf`.
+fn log_offsets<T: Float>(col_max: &[T], totals: &[ExpTotal<f64>]) -> Vec<f64> {
+    col_max
+        .iter()
+        .zip(totals)
+        .map(|(&m, &t)| {
+            if m == T::neg_infinity() {
+                f64::NEG_INFINITY
+            } else {
+                t.ln()
+            }
+        })
+        .collect()
 }
 
-/// Every row of a `[dim_size, after]` block, less its column total.
-fn subtract_columns<T: Float>(in_block: &[T], out_block: &mut [T], col_logsum: &[T], after: usize) {
+/// Every row of a `[dim_size, after]` block, as `(x - max) - log(total)`; see
+/// [`ExpTotal`].
+fn subtract_columns<T: ShiftedExp>(
+    in_block: &[T],
+    out_block: &mut [T],
+    col_max: &[T],
+    offsets: &[f64],
+    after: usize,
+) {
     let neg_inf = T::neg_infinity();
+    let offsets: Vec<T> = offsets.iter().map(|&l| T::narrow(l)).collect();
     for (in_row, out_row) in in_block
         .chunks_exact(after)
         .zip(out_block.chunks_exact_mut(after))
     {
-        for ((o, &v), &ls) in out_row.iter_mut().zip(in_row).zip(col_logsum) {
-            *o = if ls == neg_inf { neg_inf } else { v - ls };
+        for (((o, &v), &m), &l) in out_row.iter_mut().zip(in_row).zip(col_max).zip(&offsets) {
+            *o = if m == neg_inf { neg_inf } else { (v - m) - l };
         }
     }
 }
@@ -795,12 +1016,12 @@ fn banded_col_max<T: Float + Send + Sync>(
 /// `softmax` and `log_softmax` share everything up to the last pass: the column
 /// maxima and the column sums of `exp(x - max)`, with the exponentials left in
 /// the output.
-fn banded_columns<T: ShiftedExp + Send + Sync>(
+fn banded_columns<T: ShiftedExp + Send + Sync, const SPLIT: bool>(
     in_block: &[T],
     out_block: &mut [T],
     after: usize,
     band_rows: usize,
-) -> (Vec<T>, Vec<T>) {
+) -> (Vec<T>, Vec<ExpTotal<f64>>) {
     let col_max = banded_col_max(in_block, after, band_rows);
     let stride = band_rows * after;
     let partials = par_out_chunks_mapped(out_block, stride, &|start, out_band| {
@@ -811,14 +1032,12 @@ fn banded_columns<T: ShiftedExp + Send + Sync>(
             let max_val = col_max[0];
             if max_val == T::neg_infinity() {
                 out_band.fill(T::zero());
-                return vec![T::zero()];
+                return vec![ExpTotal::zero()];
             }
             T::exp_shifted_into(in_band, max_val, out_band);
-            vec![accurate_indexed_sum(out_band.len(), T::zero(), |k| {
-                out_band[k]
-            })]
+            vec![run_total::<T, SPLIT>(out_band)]
         } else {
-            exp_columns_into(in_band, Some(out_band), &col_max, after)
+            exp_columns_into::<T, SPLIT>(in_band, Some(out_band), &col_max, after)
         }
     });
     let col_sum = pairwise_fold_vectors(partials, |a, b| a + b);
@@ -870,7 +1089,9 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
     // and the bands cost a set of column accumulators each.
     let band_rows = dim_size.div_ceil(softmax_bands(dim_size, after));
     if output_slice.len() == group && band_rows < dim_size {
-        let (col_max, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
+        let (col_max, totals) =
+            banded_columns::<T, false>(input_data, output_slice, after, band_rows);
+        let col_sum: Vec<f64> = totals.into_iter().map(ExpTotal::sum).collect();
         par_out_chunks(output_slice, band_rows * after, &|_, out_band| {
             divide_columns(out_band, &col_sum, after);
         });
@@ -955,15 +1176,31 @@ fn last_axis_rows<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], le
             // and every term here but the largest *is* small. Over a 250k-class
             // vocabulary the probabilities came back summing to 1.0004 rather
             // than 1, a relative error of 4.2e-4; blocked, it is 1.0e-7.
-            let sum = accurate_indexed_sum(len, T::zero(), |k| out_row[k]);
             if LOG {
-                let logsum = sum.ln() + max_val;
+                // The maximum's own term is `exp(0) = 1` exactly; taken out
+                // of the sum, the rest is what `log1p` wants, and the max
+                // comes off each value before the logarithm does. See
+                // `ExpTotal`. One position of the maximum is enough: any
+                // other term that is one stays in the rest, where `log1p`
+                // loses nothing over it.
+                let top = first_position(in_row, max_val);
+                if let Some(top) = top {
+                    out_row[top] = T::zero();
+                }
+                // The total in float64 lanes, inline: a call to the widened
+                // kernel per row of 64 cost more than the row.
+                let rest = accurate_indexed_sum(len, 0.0f64, |k| out_row[k].wide());
+                let offset = T::narrow(log1p_of_rest(rest));
                 for (o, &v) in out_row.iter_mut().zip(in_row) {
-                    *o = v - logsum;
+                    *o = (v - max_val) - offset;
                 }
             } else {
+                // Each term times the float64 reciprocal of the float64 total,
+                // rounded once: as near the quotient as dividing, at the cost
+                // of a multiply.
+                let scale = accurate_indexed_sum(len, 0.0f64, |k| out_row[k].wide()).recip();
                 for o in out_row.iter_mut() {
-                    *o = *o / sum;
+                    *o = T::narrow(o.wide() * scale);
                 }
             }
         }
@@ -1054,12 +1291,15 @@ fn masked_softmax_core<T: Float + Send + Sync>(
                         (in_block[idx] - max_val).exp()
                     };
                 }
+                // Totalled and divided in float64, rounded once; see
+                // `ShiftedExp::wide_sum`.
+                let wide = |v: T| v.to_f64().unwrap_or(f64::NAN);
                 let sum =
-                    accurate_indexed_sum(dim_size, T::zero(), |k| out_block[base + k * after]);
-                if sum != T::zero() {
+                    accurate_indexed_sum(dim_size, 0.0f64, |k| wide(out_block[base + k * after]));
+                if sum != 0.0 {
                     for k in 0..dim_size {
                         let idx = base + k * after;
-                        out_block[idx] = out_block[idx] / sum;
+                        out_block[idx] = T::from(wide(out_block[idx]) / sum).unwrap_or_else(T::nan);
                     }
                 }
             }
@@ -1151,12 +1391,12 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         // The exponentials land in the output on the way to their sums; the
         // final pass overwrites them from the input, so lending the buffer out
         // costs nothing.
-        let (mut col_logsum, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
-        let col_max = col_logsum.clone();
-        log_totals(&mut col_logsum, &col_sum);
+        let (col_max, totals) =
+            banded_columns::<T, true>(input_data, output_slice, after, band_rows);
+        let offsets = log_offsets(&col_max, &totals);
         par_out_chunks(output_slice, band_rows * after, &|start, out_band| {
             let in_band = &input_data[start..start + out_band.len()];
-            subtract_columns(in_band, out_band, &col_logsum, after);
+            subtract_columns(in_band, out_band, &col_max, &offsets, after);
         });
         settle_infinite_columns::<T, true>(input_data, output_slice, &col_max, after);
         return Ok(());
@@ -1194,27 +1434,11 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
                     }
                 }
             }
-            let col_sum = exp_columns_into(in_block, None, &col_logsum, after);
-            let col_max = col_logsum.clone();
-            // Fold each column's max into log(sum) + max; -inf columns stay
-            // -inf so their outputs are all -inf.
-            for a in 0..after {
-                if col_logsum[a] != neg_inf {
-                    col_logsum[a] = col_sum[a].ln() + col_logsum[a];
-                }
-            }
-            for k in 0..dim_size {
-                let in_row = &in_block[k * after..k * after + after];
-                let out_row = &mut out_block[k * after..k * after + after];
-                for a in 0..after {
-                    let ls = col_logsum[a];
-                    out_row[a] = if ls == neg_inf {
-                        neg_inf
-                    } else {
-                        in_row[a] - ls
-                    };
-                }
-            }
+            let col_max = col_logsum;
+            let totals = exp_columns_into::<T, true>(in_block, None, &col_max, after);
+            // A `-inf` column stays `-inf`, so all its outputs are `-inf`.
+            let offsets = log_offsets(&col_max, &totals);
+            subtract_columns(in_block, out_block, &col_max, &offsets, after);
             settle_infinite_columns::<T, true>(in_block, out_block, &col_max, after);
         },
     );
@@ -1288,20 +1512,23 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
                     }
                     continue;
                 }
-                let sum = accurate_indexed_sum(dim_size, T::zero(), |k| {
+                let offset = accurate_indexed_sum(dim_size, ExpTotal::zero(), |k| {
                     if walk.masked(row, k) {
-                        T::zero()
+                        ExpTotal::zero()
                     } else {
-                        (in_block[base + k * after] - max_val).exp()
+                        let term = (in_block[base + k * after] - max_val).exp();
+                        ExpTotal::of(term.to_f64().unwrap_or(f64::NAN))
                     }
-                });
-                let logsum = sum.ln() + max_val;
+                })
+                .ln();
+                let top = max_val.to_f64().unwrap_or(f64::NAN);
                 for k in 0..dim_size {
                     let idx = base + k * after;
                     out_block[idx] = if walk.masked(row, k) {
                         neg_inf
                     } else {
-                        in_block[idx] - logsum
+                        let v = in_block[idx].to_f64().unwrap_or(f64::NAN);
+                        T::from((v - top) - offset).unwrap_or_else(T::nan)
                     };
                 }
             }
