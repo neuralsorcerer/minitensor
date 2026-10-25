@@ -970,6 +970,22 @@ real answer does -- `int32 / int32` is `float32` and `int64 / int64` is
 `hypot`, `atan2` and the other binary maths that answer in reals follow `/`.
 A `bool` operand promotes to whatever it is paired with.
 
+Whatever width the result takes, an integer operand is not rounded to it
+first. `+`, `-`, `*`, `/`, `//`, `%` and `fmod` between an integer and a float,
+and `/` between two integers, compute the exact result and round it once to the
+result's dtype. Rounding the integer first and the result again was each time
+within half an ulp and together not: `16777217 + 16777218.0` in float32 came out
+`33554432.0` where the exact sum rounds to `33554436.0`, a third of int32
+quotients were an ulp off, and an int64 nanosecond timestamp past 2^53 lost its
+last digits to `% 1e9`. A Python int beside a float tensor is read the same
+way when the tensor's dtype cannot hold it, so `float32_x + 16777217` adds
+`16777217`, as `float32_x == 16777217` compares with it; an int the dtype holds
+reads the same either way. A Python float beside a float tensor is still read at
+that tensor's width, as below. Int32s, float32s, and int64s within 2^53 are
+exact in float64, where the operation's exact error rounds the result to odd and
+the one narrowing to float32 is then correct; an int64 past 2^53 is carried in
+integer arithmetic.
+
 Comparisons do not promote. They answer in booleans, so there is no result
 width to keep narrow, and an integer against a float is compared exactly: an
 int32 `20_000_001` is not equal to `20_000_000.0`, though the two are the same
@@ -2428,7 +2444,8 @@ assert row_std.shape == (2, 3)
 - `softmin(input, dim=None)` — `softmax` of the negated input
 - `floor_divide` / `//` — Python floor division (rounds toward negative
   infinity; integer operands stay integral, integer zero divisors raise,
-  not differentiable)
+  not differentiable). Beside a float, an integer is divided exactly and the
+  floor rounded once, and a zero integer divisor divides as a float zero does.
 - `remainder` / `%` — Python-style remainder (takes the divisor's sign;
   `a == (a // b) * b + a % b` holds for every dtype; differentiable for
   float dtypes)

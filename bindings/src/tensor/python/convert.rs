@@ -780,22 +780,90 @@ pub(crate) fn comparison_pair_from_py(
     Ok((operand_from_py(lhs)?, operand_from_py(rhs)?))
 }
 
+/// The operands of an arithmetic operator, `reference` and the Python value
+/// read beside it, in the order they are written and in their own dtypes.
+///
+/// The engine's arithmetic promotes them itself, and promoted here first an
+/// integer operand reached it already rounded to the float dtype of the
+/// result: the engine's kernels for an integer beside a float, which round
+/// the exact result once, never saw one from Python. A Python int beside a
+/// float tensor is read the same way when the tensor's dtype cannot hold it;
+/// see [`exact_integers_beside_float`].
+pub(crate) fn arithmetic_operands_from_py(
+    reference: &Tensor,
+    other: &Bound<PyAny>,
+    reverse: bool,
+) -> PyResult<(Tensor, Tensor)> {
+    let other = match exact_integers_beside_float(reference, other)? {
+        Some(integers) => integers,
+        None => tensor_from_py_value(reference, other)?,
+    };
+    Ok(if reverse {
+        (other, reference.clone())
+    } else {
+        (reference.clone(), other)
+    })
+}
+
+/// A Python int, or a list of them, beside a float tensor whose dtype does
+/// not hold every one, as the int64 tensor it is; `None` for anything else,
+/// which is read at the tensor's width as usual.
+///
+/// Read at the tensor's width, such an int was rounded before the operation
+/// rounded again: `float32_x + 16777217` added `16777216`, and a float64 `x +
+/// (2**53 + 1)` added `2**53`. As an int64 it is carried exactly and the
+/// result rounded once, in the tensor's dtype all the same, as a comparison
+/// already reads it. An int the dtype holds reads the same either way, and is
+/// read at the tensor's width, which keeps `x * 2` on the float kernel. One
+/// past int64 is left to the usual reading.
+fn exact_integers_beside_float(
+    reference: &Tensor,
+    value: &Bound<PyAny>,
+) -> PyResult<Option<Tensor>> {
+    let dtype = reference.dtype();
+    if !dtype.is_float() {
+        return Ok(None);
+    }
+    let held = |integer: i64| match dtype {
+        DataType::Float32 => i128::from(integer) == integer as f32 as i128,
+        _ => i128::from(integer) == integer as f64 as i128,
+    };
+    if value.is_exact_instance_of::<PyInt>() {
+        match value.extract::<i64>() {
+            Ok(integer) if !held(integer) => {}
+            _ => return Ok(None),
+        }
+    } else if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
+        if infer_python_value_dtype(value) != Some(DataType::Int64) {
+            return Ok(None);
+        }
+        let Ok(integers) =
+            convert_python_data_to_tensor(value, DataType::Int64, reference.device(), false)
+        else {
+            return Ok(None);
+        };
+        let all_held = integers
+            .data()
+            .as_i64_slice()
+            .is_none_or(|values| values.iter().all(|&integer| held(integer)));
+        return Ok((!all_held).then_some(integers));
+    } else {
+        return Ok(None);
+    }
+    convert_python_data_to_tensor(value, DataType::Int64, reference.device(), false).map(Some)
+}
+
 pub(crate) fn prepare_binary_operands_from_py(
     reference: &Tensor,
     other: &Bound<PyAny>,
     reverse: bool,
     kind: BinaryOpKind,
 ) -> PyResult<(Tensor, Tensor)> {
-    let lhs_input = if reverse {
-        tensor_from_py_value(reference, other)?
+    let other = tensor_from_py_value(reference, other)?;
+    let (lhs_input, rhs_input) = if reverse {
+        (other, reference.clone())
     } else {
-        reference.clone()
-    };
-
-    let rhs_input = if reverse {
-        reference.clone()
-    } else {
-        tensor_from_py_value(reference, other)?
+        (reference.clone(), other)
     };
 
     // Both `Cow`s are taken apart before either input is moved out, which is

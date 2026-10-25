@@ -364,7 +364,7 @@ macro_rules! floored_quotient {
         // `&&` or an early return: those are branches, and on data whose
         // quotients land either way they kept the float64 loop scalar.
         #[inline(always)]
-        fn $name(a: $ty, b: $ty) -> $ty {
+        pub(crate) fn $name(a: $ty, b: $ty) -> $ty {
             let q = (a / b).floor();
             let p = q * b;
             // The exact sign of `a - q * b`, as argued above.
@@ -717,9 +717,9 @@ impl RowCursor<'_> {
 /// # Safety
 ///
 /// `block` must initialize every element of the output block it is handed.
-pub(crate) unsafe fn broadcast_binary_blocks<T, U, F>(
-    lhs_data: &[T],
-    rhs_data: &[T],
+pub(crate) unsafe fn broadcast_binary_blocks<A, B, U, F>(
+    lhs_data: &[A],
+    rhs_data: &[B],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     output_shape: &Shape,
@@ -727,9 +727,10 @@ pub(crate) unsafe fn broadcast_binary_blocks<T, U, F>(
     block: F,
 ) -> Vec<U>
 where
-    T: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    B: Copy + Send + Sync,
     U: Copy + Send + Sync,
-    F: Fn(&[T], &[T], &mut [std::mem::MaybeUninit<U>]) + Send + Sync,
+    F: Fn(&[A], &[B], &mut [std::mem::MaybeUninit<U>]) + Send + Sync,
 {
     let numel = output_shape.numel();
     if numel == 0 {
@@ -743,13 +744,13 @@ where
     }
 
     let runs = BroadcastRuns::new(lhs_shape, rhs_shape, output_shape);
-    let gather = |dst: &mut Vec<T>, src: &[T], base: usize, step: usize, len: usize| {
+    fn gather<E: Copy>(dst: &mut Vec<E>, src: &[E], base: usize, step: usize, len: usize) {
         if step == 1 {
             dst.extend_from_slice(&src[base..base + len]);
         } else {
             dst.resize(dst.len() + len, src[base]);
         }
-    };
+    }
     // An operand already the output's shape is read in place: its stretch of
     // a block is the same stretch of its own buffer.
     let (lhs_whole, rhs_whole) = (

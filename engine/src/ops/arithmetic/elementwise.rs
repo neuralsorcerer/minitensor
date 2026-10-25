@@ -20,6 +20,27 @@ pub(crate) use crate::ops::map::PAR_THRESHOLD;
 use crate::ops::map::par_out_chunks;
 use crate::ops::map::unary_map;
 
+use super::rounded_once::{Arith, Modulus, modulus_once, rounded_once, rounds_twice};
+use crate::ops::binary::result_dtype_for_binary_op;
+use std::borrow::Cow;
+
+/// The operands of `lhs op rhs` as its kernel takes them, its dtype, and
+/// whether the kernel is [`rounded_once`]: an integer that promotion would
+/// round to the result's float dtype before the operation rounds again is
+/// left as it is for that kernel, and every other pair is promoted.
+fn operands<'a>(
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+    kind: BinaryOpKind,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>, DataType, bool)> {
+    let dtype = result_dtype_for_binary_op(lhs.dtype(), rhs.dtype(), kind)?;
+    if rounds_twice(lhs.dtype(), rhs.dtype(), dtype) {
+        return Ok((Cow::Borrowed(lhs), Cow::Borrowed(rhs), dtype, true));
+    }
+    let (lhs, rhs, dtype) = coerce_binary_operands(lhs, rhs, kind)?;
+    Ok((lhs, rhs, dtype, false))
+}
+
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Check device compatibility
@@ -31,7 +52,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::Add)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -63,6 +84,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Perform element-wise addition based on data type; the kernel produces
     // the output buffer directly (no zero-init pass).
     let output_data = match result_dtype {
+        _ if exact => rounded_once(lhs_ref, rhs_ref, Arith::Add, result_dtype, &output_shape)?,
         DataType::Float32 => add_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => add_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 => add_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
@@ -208,7 +230,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Sub)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::Sub)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -239,6 +261,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Perform element-wise subtraction based on data type
     let output_data = match result_dtype {
+        _ if exact => rounded_once(lhs_ref, rhs_ref, Arith::Sub, result_dtype, &output_shape)?,
         DataType::Float32 => sub_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => sub_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 => sub_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
@@ -280,7 +303,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::Mul)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -312,6 +335,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Perform element-wise multiplication based on data type
     let output_data = match result_dtype {
+        _ if exact => rounded_once(lhs_ref, rhs_ref, Arith::Mul, result_dtype, &output_shape)?,
         DataType::Float32 => mul_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => mul_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 => mul_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
@@ -354,7 +378,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Div)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::Div)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -386,6 +410,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Perform element-wise division based on data type
     let output_data = match result_dtype {
+        _ if exact => rounded_once(lhs_ref, rhs_ref, Arith::Div, result_dtype, &output_shape)?,
         DataType::Float32 => div_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => div_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 | DataType::Int64 | DataType::Bool => {
@@ -510,8 +535,7 @@ pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    let (lhs_cast, rhs_cast, result_dtype) =
-        coerce_binary_operands(lhs, rhs, BinaryOpKind::FloorDiv)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::FloorDiv)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -527,9 +551,19 @@ pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    ensure_no_integer_zero_divisor(rhs_ref)?;
+    // A float result divides by a zero as floats do.
+    if !result_dtype.is_float() {
+        ensure_no_integer_zero_divisor(rhs_ref)?;
+    }
 
     let output_data = match result_dtype {
+        _ if exact => modulus_once(
+            lhs_ref,
+            rhs_ref,
+            Modulus::FloorDiv,
+            result_dtype,
+            &output_shape,
+        )?,
         DataType::Float32 => floordiv_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => floordiv_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 => floordiv_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
@@ -560,6 +594,14 @@ enum ModulusConvention {
 }
 
 impl ModulusConvention {
+    /// The convention as [`modulus_once`] names it.
+    fn exactly(self) -> Modulus {
+        match self {
+            Self::Floored => Modulus::Floored,
+            Self::Truncated => Modulus::Truncated,
+        }
+    }
+
     /// The four dtype kernels this convention dispatches to.
     fn kernels(self) -> [BinaryKernel; 4] {
         match self {
@@ -641,7 +683,7 @@ fn modulus(lhs: &Tensor, rhs: &Tensor, convention: ModulusConvention) -> Result<
         ));
     }
 
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Rem)?;
+    let (lhs_cast, rhs_cast, result_dtype, exact) = operands(lhs, rhs, BinaryOpKind::Rem)?;
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
@@ -671,10 +713,20 @@ fn modulus(lhs: &Tensor, rhs: &Tensor, convention: ModulusConvention) -> Result<
         };
     }
 
-    ensure_no_integer_zero_divisor(rhs_ref)?;
+    // A float result divides by a zero as floats do.
+    if !result_dtype.is_float() {
+        ensure_no_integer_zero_divisor(rhs_ref)?;
+    }
 
     let kernels = convention.kernels();
     let output_data = match result_dtype {
+        _ if exact => modulus_once(
+            lhs_ref,
+            rhs_ref,
+            convention.exactly(),
+            result_dtype,
+            &output_shape,
+        )?,
         DataType::Float32 => kernels[0](lhs_ref, rhs_ref, &output_shape)?,
         DataType::Float64 => match convention.offer(lhs_ref, rhs_ref, output_shape.numel()) {
             Some(out) => TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()),

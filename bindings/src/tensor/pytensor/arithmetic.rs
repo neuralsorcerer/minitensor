@@ -15,95 +15,83 @@ impl PyTensor {
     }
 
     fn __add__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.add(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __radd__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Add)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = lhs.add(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __sub__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::sub;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Sub)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = sub(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __rsub__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::sub;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Sub)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = sub(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub fn __mul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::mul;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Mul)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = mul(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub fn __rmul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::mul;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Mul)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = mul(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __truediv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::div;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __rtruediv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::div;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __floordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::floor_div;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::FloorDiv)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __rfloordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::floor_div;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::FloorDiv)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __mod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::remainder;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Rem)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     fn __rmod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::remainder;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Rem)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, true)?;
         let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -121,8 +109,7 @@ impl PyTensor {
     /// Element-wise modulo taking the sign of the dividend, matching C's `fmod`.
     pub fn fmod(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         use engine::ops::arithmetic::fmod;
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Rem)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = fmod(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

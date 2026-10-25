@@ -75,7 +75,11 @@ fn cast_tensor_to_dtype<'a>(tensor: &'a Tensor, dtype: DataType) -> Result<Cow<'
     }
 }
 
-fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) -> Result<DataType> {
+pub(crate) fn result_dtype_for_binary_op(
+    lhs: DataType,
+    rhs: DataType,
+    op: BinaryOpKind,
+) -> Result<DataType> {
     use BinaryOpKind::*;
     match op {
         Add | Mul | Maximum | Minimum | Pow => Ok(promote_arithmetic_dtype(lhs, rhs)),
