@@ -28,7 +28,7 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     // already follows: a variance, a norm and a log-sum-exp of integers are
     // all real numbers. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return logsumexp(&widened, dim, keepdim);
+        return crate::ops::util::narrowed(tensor, logsumexp(&widened, dim, keepdim));
     }
     match tensor.dtype() {
         DataType::Float32 | DataType::Float64 => {}

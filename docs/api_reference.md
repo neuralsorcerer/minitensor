@@ -1991,7 +1991,16 @@ answer is an integer:
   transcendentals, and `erf`, `lgamma`, `digamma`, `logit`, `sigmoid` and the
   other special functions, take an integer argument by widening it to
   `float32` for `int32` and `float64` for `int64` — the width `mean` widens
-  to.
+  to. That is the result's width: the function sees the exact integer,
+  evaluated in float64, which holds every int32, and the result is rounded to
+  float32 once. Widened to float32 first, an int32 past 2^24 was rounded
+  before the function saw it, and for a periodic function that is not an ulp
+  but the wrong answer: `sin(16777217)` is `0.106`, and came out
+  `sin(16777216)`, `-0.779`. The binary functions with a real answer
+  (`hypot`, `atan2`, `logaddexp`, `logaddexp2`, `copysign`, `xlogy`,
+  `heaviside`) and `**` with an integer beside a float do the same.
+  `nextafter` is the exception: its answer is a neighbour in the result
+  dtype's own grid, so an integer is converted to that dtype first.
 - **An integer answer keeps its dtype.** `floor`, `ceil`, `trunc` and `round`
   are the identity on an integer, `frac` is zero on one, and `relu`, `abs` and
   `sign` were already integer-valued. `round` with a negative `decimals`

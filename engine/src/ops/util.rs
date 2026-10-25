@@ -594,26 +594,69 @@ pub(crate) fn broadcast_mask_index(
     mask_index
 }
 
-/// The float tensor an integer input widens to, or `None` if it is already a
-/// float (or a boolean, which has no width to take).
+/// The float tensor an integer input is evaluated in, or `None` if it is
+/// already a float (or a boolean, which has no width to take).
 ///
 /// `sqrt(4)` is 2 and `sin(1)` is 0.841…; neither has an integer answer, so an
 /// op whose value is a real number takes an integer argument by widening it.
-/// The width follows the rule `mean`
-/// already documents -- `int32` to `float32`, `int64` to `float64` -- so a
-/// tensor widened by one of these ops lands where the same tensor averaged
-/// would.
+/// The result's width follows the rule `mean` already documents -- `int32` to
+/// `float32`, `int64` to `float64` -- so a tensor widened by one of these ops
+/// lands where the same tensor averaged would. [`narrowed`] gives the result
+/// that width.
+///
+/// Both evaluate in float64, which holds every int32 exactly. Widened to
+/// float32 first, an int32 past 2^24 was rounded before the op saw it, and
+/// for a periodic function that is not an ulp but the wrong answer:
+/// `sin(16777217)` is 0.106, and came out `sin(16777216)`, -0.779. From the
+/// exact argument, the result is rounded to float32 once.
 ///
 /// A boolean is left alone. What a mask should mean to a reduction is a
 /// question this library has deliberately declined to answer, and answering it
 /// here for `sqrt` and nowhere else would be worse than not answering it.
 pub(crate) fn widen_integer_input(tensor: &Tensor) -> Result<Option<Tensor>> {
-    let widened = match tensor.dtype() {
-        DataType::Int32 => DataType::Float32,
-        DataType::Int64 => DataType::Float64,
-        _ => return Ok(None),
-    };
-    Ok(Some(tensor.astype(widened)?))
+    match tensor.dtype() {
+        DataType::Int32 | DataType::Int64 => Ok(Some(tensor.astype(DataType::Float64)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Both operands of a real-valued binary op in float64, when one is an integer
+/// and the result `kind` promotes them to is float32; `None` for any other
+/// pair.
+///
+/// Promoted to float32 first, the integer was rounded before the op saw it,
+/// so `hypot(16777217, 1)` came out `16777216` where the exact value rounds to
+/// `16777218`. In float64 the integer is exact, and the caller rounds the
+/// result to float32 once. An int64 beside a float32 is within half a
+/// float64 ulp there, far below where float32 rounds.
+pub(crate) fn widened_pair(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    kind: crate::ops::binary::BinaryOpKind,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let integral = |dtype: DataType| matches!(dtype, DataType::Int32 | DataType::Int64);
+    if !(integral(lhs.dtype()) || integral(rhs.dtype()))
+        || crate::ops::binary::result_dtype_for_binary_op(lhs.dtype(), rhs.dtype(), kind)?
+            != DataType::Float32
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        lhs.astype(DataType::Float64)?,
+        rhs.astype(DataType::Float64)?,
+    )))
+}
+
+/// `result`, of an op on `input` as [`widen_integer_input`] widened it, at
+/// the width that input's result takes: an int32's float64 result rounded
+/// once to float32. Any other result is as given.
+pub(crate) fn narrowed(input: &Tensor, result: Result<Tensor>) -> Result<Tensor> {
+    let result = result?;
+    if input.dtype() == DataType::Int32 && result.dtype() == DataType::Float64 {
+        result.astype(DataType::Float32)
+    } else {
+        Ok(result)
+    }
 }
 
 /// A 0-d float tensor holding `value`, for the scalar coefficients the loss

@@ -34,7 +34,7 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return exp(&widened);
+        return crate::ops::util::narrowed(tensor, exp(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -77,7 +77,7 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return log(&widened);
+        return crate::ops::util::narrowed(tensor, log(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -120,7 +120,7 @@ pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return log1p(&widened);
+        return crate::ops::util::narrowed(tensor, log1p(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => log1p_f32(tensor)?,
@@ -157,7 +157,7 @@ pub fn log2(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return log2(&widened);
+        return crate::ops::util::narrowed(tensor, log2(&widened));
     }
     log_base(tensor, log2_f32, log2_f64, std::f64::consts::LN_2, "log2")
 }
@@ -167,7 +167,7 @@ pub fn log10(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return log10(&widened);
+        return crate::ops::util::narrowed(tensor, log10(&widened));
     }
     log_base(
         tensor,
@@ -223,7 +223,7 @@ pub fn erf(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return erf(&widened);
+        return crate::ops::util::narrowed(tensor, erf(&widened));
     }
     erf_family(tensor, false)
 }
@@ -237,7 +237,7 @@ pub fn erfc(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return erfc(&widened);
+        return crate::ops::util::narrowed(tensor, erfc(&widened));
     }
     erf_family(tensor, true)
 }
@@ -282,7 +282,7 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return expm1(&widened);
+        return crate::ops::util::narrowed(tensor, expm1(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => expm1_f32(tensor)?,
@@ -319,7 +319,7 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return sin(&widened);
+        return crate::ops::util::narrowed(tensor, sin(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -362,7 +362,7 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return cos(&widened);
+        return crate::ops::util::narrowed(tensor, cos(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -405,7 +405,7 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return tan(&widened);
+        return crate::ops::util::narrowed(tensor, tan(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -448,7 +448,7 @@ pub fn asin(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return asin(&widened);
+        return crate::ops::util::narrowed(tensor, asin(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => asin_f32(tensor)?,
@@ -485,7 +485,7 @@ pub fn acos(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return acos(&widened);
+        return crate::ops::util::narrowed(tensor, acos(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => acos_f32(tensor)?,
@@ -522,7 +522,7 @@ pub fn atan(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return atan(&widened);
+        return crate::ops::util::narrowed(tensor, atan(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => atan_f32(tensor)?,
@@ -559,7 +559,7 @@ pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return sinh(&widened);
+        return crate::ops::util::narrowed(tensor, sinh(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => sinh_f32(tensor)?,
@@ -596,7 +596,7 @@ pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return cosh(&widened);
+        return crate::ops::util::narrowed(tensor, cosh(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => cosh_f32(tensor)?,
@@ -633,7 +633,7 @@ pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return asinh(&widened);
+        return crate::ops::util::narrowed(tensor, asinh(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => asinh_f32(tensor)?,
@@ -670,7 +670,7 @@ pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return acosh(&widened);
+        return crate::ops::util::narrowed(tensor, acosh(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => acosh_f32(tensor)?,
@@ -707,7 +707,7 @@ pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return atanh(&widened);
+        return crate::ops::util::narrowed(tensor, atanh(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => atanh_f32(tensor)?,
@@ -744,7 +744,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return tanh(&widened);
+        return crate::ops::util::narrowed(tensor, tanh(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -787,7 +787,7 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return sigmoid(&widened);
+        return crate::ops::util::narrowed(tensor, sigmoid(&widened));
     }
     // Create output tensor data
     let output_data = match tensor.dtype() {
@@ -835,7 +835,7 @@ pub fn glu(input: &Tensor, dim: isize) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(input)? {
-        return glu(&widened, dim);
+        return crate::ops::util::narrowed(input, glu(&widened, dim));
     }
     if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
         return Err(MinitensorError::invalid_operation(

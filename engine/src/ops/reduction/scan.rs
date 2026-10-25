@@ -243,7 +243,7 @@ pub fn logcumsumexp(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     // already follows: a variance, a norm and a log-sum-exp of integers are
     // all real numbers. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return logcumsumexp(&widened, dim);
+        return crate::ops::util::narrowed(tensor, logcumsumexp(&widened, dim));
     }
     let dim = normalize_dim(dim, tensor.ndim())?;
     if !tensor.dtype().is_float() {

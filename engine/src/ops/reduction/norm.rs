@@ -532,7 +532,7 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
     // already follows: a variance, a norm and a log-sum-exp of integers are
     // all real numbers. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return norm(&widened, p, dim, keepdim);
+        return crate::ops::util::narrowed(tensor, norm(&widened, p, dim, keepdim));
     }
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(

@@ -400,8 +400,7 @@ impl PyTensor {
 
     /// `log(exp(a) + exp(b))`, shifted so neither term overflows.
     pub fn logaddexp(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.logaddexp(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

@@ -30,7 +30,7 @@ pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Res
     // The values widen if they are integers, as they do for `softmax`; the
     // mask stays boolean. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return masked_softmax(&widened, mask, dim);
+        return crate::ops::util::narrowed(tensor, masked_softmax(&widened, mask, dim));
     }
 
     if tensor.device() != mask.device() {
@@ -155,7 +155,7 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
     // The values widen if they are integers, as they do for `softmax`; the
     // mask stays boolean. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return masked_log_softmax(&widened, mask, dim);
+        return crate::ops::util::narrowed(tensor, masked_log_softmax(&widened, mask, dim));
     }
 
     if tensor.device() != mask.device() {

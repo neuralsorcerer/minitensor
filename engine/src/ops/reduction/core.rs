@@ -535,7 +535,10 @@ pub fn quantile(
     // already follows: a quantile of integers is an interpolated real number,
     // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return quantile(&widened, q, dim, keepdim, interpolation);
+        return crate::ops::util::narrowed(
+            tensor,
+            quantile(&widened, q, dim, keepdim, interpolation),
+        );
     }
     reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
         quantile_axis(t, q, axis, keep, interpolation)
@@ -554,7 +557,10 @@ pub fn quantiles(
     // already follows: a quantile of integers is an interpolated real number,
     // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return quantiles(&widened, qs, dim, keepdim, interpolation);
+        return crate::ops::util::narrowed(
+            tensor,
+            quantiles(&widened, qs, dim, keepdim, interpolation),
+        );
     }
     if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, false)? {
         return Ok(stacked);
@@ -618,7 +624,10 @@ pub fn nanquantile(
     // already follows: a quantile of integers is an interpolated real number,
     // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return nanquantile(&widened, q, dim, keepdim, interpolation);
+        return crate::ops::util::narrowed(
+            tensor,
+            nanquantile(&widened, q, dim, keepdim, interpolation),
+        );
     }
     reduce_over_dims(tensor, dim, keepdim, |t, axis, keep| {
         nanquantile_axis(t, q, axis, keep, interpolation)
@@ -637,7 +646,10 @@ pub fn nanquantiles(
     // already follows: a quantile of integers is an interpolated real number,
     // not a truncated integer. See `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return nanquantiles(&widened, qs, dim, keepdim, interpolation);
+        return crate::ops::util::narrowed(
+            tensor,
+            nanquantiles(&widened, qs, dim, keepdim, interpolation),
+        );
     }
     if let Some(stacked) = quantiles_with_grad(tensor, qs, &dim, keepdim, interpolation, true)? {
         return Ok(stacked);

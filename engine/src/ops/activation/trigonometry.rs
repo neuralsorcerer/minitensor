@@ -228,6 +228,13 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         ));
     }
 
+    // An integer beside a float32 result is evaluated with it in float64;
+    // see `ops::util::widened_pair`. Two integers keep an integer power.
+    if let Some((base, exponent)) =
+        crate::ops::util::widened_pair(base, exponent, BinaryOpKind::Pow)?
+    {
+        return pow(&base, &exponent)?.astype(DataType::Float32);
+    }
     // Mixed dtypes promote here as they do for `+`, `*` and the rest: `**` is
     // arithmetic and the documented rule covers all of it. Refusing the pair
     // instead made `x ** y` the one operator that would not take an integer
@@ -505,6 +512,11 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
 
 /// Numerically stable logaddexp with gradient support
 pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    // An integer beside a float32 result is evaluated with it in float64;
+    // see `ops::util::widened_pair`.
+    if let Some((lhs, rhs)) = crate::ops::util::widened_pair(lhs, rhs, BinaryOpKind::Div)? {
+        return logaddexp(&lhs, &rhs)?.astype(DataType::Float32);
+    }
     if lhs.device() != rhs.device() {
         return Err(MinitensorError::device_mismatch(
             format!("{:?}", lhs.device()),
@@ -581,7 +593,7 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return softplus(&widened, beta, threshold);
+        return crate::ops::util::narrowed(tensor, softplus(&widened, beta, threshold));
     }
 
     let output_data = match tensor.dtype() {
@@ -622,7 +634,7 @@ pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return gelu(&widened, approximate);
+        return crate::ops::util::narrowed(tensor, gelu(&widened, approximate));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => gelu_f32(tensor, approximate)?,
@@ -667,7 +679,7 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return elu(&widened, alpha);
+        return crate::ops::util::narrowed(tensor, elu(&widened, alpha));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => elu_f32(tensor, alpha)?,
@@ -705,7 +717,7 @@ pub fn selu(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and the widening is the one `mean` documents.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return selu(&widened);
+        return crate::ops::util::narrowed(tensor, selu(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => selu_f32(tensor)?,
@@ -742,7 +754,7 @@ pub fn silu(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and the widening is the one `mean` documents.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return silu(&widened);
+        return crate::ops::util::narrowed(tensor, silu(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => silu_f32(tensor)?,
@@ -779,7 +791,7 @@ pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and the widening is the one `mean` documents.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return softsign(&widened);
+        return crate::ops::util::narrowed(tensor, softsign(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => softsign_f32(tensor)?,
@@ -872,7 +884,7 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return hardshrink(&widened, lambd);
+        return crate::ops::util::narrowed(tensor, hardshrink(&widened, lambd));
     }
 
     // Gate the mask on the same condition `Tensor::new` uses for
@@ -927,7 +939,7 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return leaky_relu(&widened, negative_slope);
+        return crate::ops::util::narrowed(tensor, leaky_relu(&widened, negative_slope));
     }
 
     // As with `relu`, only materialize the backward mask when a gradient
@@ -981,7 +993,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return softmax(&widened, dim);
+        return crate::ops::util::narrowed(tensor, softmax(&widened, dim));
     }
     if tensor.ndim() == 0 {
         let mut output_data =
@@ -1082,7 +1094,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return log_softmax(&widened, dim);
+        return crate::ops::util::narrowed(tensor, log_softmax(&widened, dim));
     }
     if tensor.ndim() == 0 {
         let mut output_data =

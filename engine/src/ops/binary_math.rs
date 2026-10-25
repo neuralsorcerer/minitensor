@@ -954,11 +954,16 @@ pub(crate) fn float_binary_tensor(
     ))
 }
 
-/// Declares one public op from its forward kernel and its two partials.
+/// Declares one public op from its forward kernel and its two partials. An
+/// integer beside a float32 result is evaluated with it in float64; see
+/// [`crate::ops::util::widened_pair`].
 macro_rules! float_binary_op {
     ($name:ident, $narrow:ident, $wide:ident, $d_lhs:ident, $d_rhs:ident, $doc:literal) => {
         #[doc = $doc]
         pub fn $name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+            if let Some((lhs, rhs)) = crate::ops::util::widened_pair(lhs, rhs, BinaryOpKind::Div)? {
+                return $name(&lhs, &rhs)?.astype(DataType::Float32);
+            }
             float_binary_mono(lhs, rhs, $narrow, $wide, [$d_lhs, $d_rhs])
         }
     };
@@ -972,6 +977,9 @@ macro_rules! float_binary_op {
 /// million elements where the `atan` kernel it is one division away from costs
 /// 0.32.
 pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if let Some((lhs, rhs)) = crate::ops::util::widened_pair(lhs, rhs, BinaryOpKind::Div)? {
+        return atan2(&lhs, &rhs)?.astype(DataType::Float32);
+    }
     let kernel = crate::ops::simd::F32Kernel::select();
     // SAFETY: the block closure is one `F32Kernel` method call.
     unsafe {
@@ -991,6 +999,9 @@ pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// Float32 goes through `ops::simd::transcendental`, which computes it in
 /// float64 and rounds once; float64 is [`logaddexp2_f64`].
 pub fn logaddexp2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if let Some((lhs, rhs)) = crate::ops::util::widened_pair(lhs, rhs, BinaryOpKind::Div)? {
+        return logaddexp2(&lhs, &rhs)?.astype(DataType::Float32);
+    }
     let kernel = crate::ops::simd::F32Kernel::select();
     // SAFETY: the block closure is one `F32Kernel` method call.
     unsafe {
@@ -1061,14 +1072,21 @@ float_binary_op!(
     HEAVISIDE_D_AT_ZERO,
     "The unit step of `input`, taking the value `other` at exactly zero."
 );
-float_binary_op!(
-    nextafter,
-    next_after_f32,
-    next_after_f64,
-    NEXTAFTER_D_FROM,
-    NEXTAFTER_D_TOWARDS,
-    "The next representable value after `input` in the direction of `other`."
-);
+/// The next representable value after `input` in the direction of `other`.
+///
+/// Unlike the rest of this family, an integer is converted to the result's
+/// dtype first rather than carried in float64: the answer is a neighbour in
+/// that dtype's own grid, which a step taken in float64 and then rounded back
+/// would undo.
+pub fn nextafter(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    float_binary_mono(
+        lhs,
+        rhs,
+        next_after_f32,
+        next_after_f64,
+        [NEXTAFTER_D_FROM, NEXTAFTER_D_TOWARDS],
+    )
+}
 
 #[cfg(test)]
 mod tests {

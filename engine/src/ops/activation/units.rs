@@ -516,7 +516,7 @@ macro_rules! plain_unit {
         #[doc = $doc]
         pub fn $name(tensor: &Tensor) -> Result<Tensor> {
             if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-                return $name(&widened);
+                return crate::ops::util::narrowed(tensor, $name(&widened));
             }
             unary_unit!(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
         }
@@ -549,7 +549,7 @@ plain_unit!(
 /// the gradient is the unit one, attached the way every other unit attaches it.
 pub fn mish(tensor: &Tensor) -> Result<Tensor> {
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return mish(&widened);
+        return crate::ops::util::narrowed(tensor, mish(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => mish_f32(tensor)?,
@@ -582,7 +582,7 @@ pub fn logsigmoid(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and the widening is the one `mean` documents.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return logsigmoid(&widened);
+        return crate::ops::util::narrowed(tensor, logsigmoid(&widened));
     }
     let output_data = match tensor.dtype() {
         // SAFETY: `neg_log_sigmoid` writes every element of `dst`, so the
@@ -641,7 +641,7 @@ pub fn hardtanh(tensor: &Tensor, min_val: f64, max_val: f64) -> Result<Tensor> {
         }
         let widened =
             crate::ops::util::widen_integer_input(tensor)?.expect("an integer dtype always widens");
-        return hardtanh(&widened, min_val, max_val);
+        return crate::ops::util::narrowed(tensor, hardtanh(&widened, min_val, max_val));
     }
     unary_unit!(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
 }
@@ -666,7 +666,7 @@ pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> 
     // An integer argument widens: `value` is not an integer, so neither is
     // the answer.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return self::threshold(&widened, threshold, value);
+        return crate::ops::util::narrowed(tensor, self::threshold(&widened, threshold, value));
     }
     unary_unit!(
         tensor,
@@ -682,7 +682,7 @@ pub fn softshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
     // An integer argument widens: `|x| - lambd` is not an integer, so neither is
     // the answer.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return softshrink(&widened, lambd);
+        return crate::ops::util::narrowed(tensor, softshrink(&widened, lambd));
     }
     if lambd.is_nan() || lambd < 0.0 {
         return Err(MinitensorError::invalid_argument(format!(
@@ -698,7 +698,7 @@ pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
     // An integer argument widens: `alpha * expm1(x / alpha)` is not an integer, so neither is
     // the answer.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return celu(&widened, alpha);
+        return crate::ops::util::narrowed(tensor, celu(&widened, alpha));
     }
     // An infinite alpha is refused too: `alpha * expm1(x / alpha)` is then
     // `inf * 0` on every negative input.
@@ -717,7 +717,7 @@ pub fn softmin(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     // the rest of this family: none of these has an integer answer. See
     // `ops::util::widen_integer_input`.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return softmin(&widened, dim);
+        return crate::ops::util::narrowed(tensor, softmin(&widened, dim));
     }
     // Composed rather than given its own kernel: negation is exact in floating
     // point, so this is the same distribution to the last bit, and it inherits

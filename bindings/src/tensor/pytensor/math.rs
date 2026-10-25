@@ -52,8 +52,14 @@ impl PyTensor {
         // is what makes `x ** 2` and `x * 2` agree about the answer's dtype.
         // Extracting an `f64` first looked equivalent -- but a Python `int`
         // extracts as one, so `int_tensor ** 2` lost the fact that `2` was an
-        // integer before the promotion rules ever saw it.
-        let exp_tensor = tensor_from_py_value(&self.inner, exponent)?;
+        // integer before the promotion rules ever saw it. An int the tensor's
+        // float dtype cannot hold is read as the int64 it is, as `*` reads
+        // it: rounded to float32, `16777217` was the even `16777216`, and
+        // `-1.0 ** 16777217` came out `1.0`.
+        let exp_tensor = match exact_integers_beside_float(&self.inner, exponent)? {
+            Some(integers) => integers,
+            None => tensor_from_py_value(&self.inner, exponent)?,
+        };
         let result = self.inner.pow(&exp_tensor).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -253,8 +259,7 @@ impl PyTensor {
 
     /// The angle of the point `(other, input)` from the positive x-axis, in `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses.
     pub fn atan2(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.atan2(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -307,24 +312,21 @@ impl PyTensor {
 
     /// `log2(2**input + 2**other)`, shifted so neither power overflows, and in float64 for a float32 pair so the answer rounds once.
     pub fn logaddexp2(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.logaddexp2(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// `sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.
     pub fn hypot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.hypot(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// The unit step of `input`: 0 below zero, 1 above it, and `other` at exactly zero.
     pub fn heaviside(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.heaviside(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -339,16 +341,14 @@ impl PyTensor {
 
     /// The magnitude of `input` with the sign of `other`, signed zeros included.
     pub fn copysign(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.copysign(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// `input * log(other)`, taken as `0` wherever `input` is zero rather than as the `0 * -inf` the plain product would give.
     pub fn xlogy(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        let (lhs, rhs) =
-            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let (lhs, rhs) = arithmetic_operands_from_py(&self.inner, other, false)?;
         let result = lhs.xlogy(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -383,7 +383,10 @@ impl PyTensor {
     }
 
     fn __rpow__(&self, base: &Bound<PyAny>, _mod: Option<&Bound<PyAny>>) -> PyResult<Self> {
-        let base_tensor = tensor_from_py_value(&self.inner, base)?;
+        let base_tensor = match exact_integers_beside_float(&self.inner, base)? {
+            Some(integers) => integers,
+            None => tensor_from_py_value(&self.inner, base)?,
+        };
         let result = base_tensor.pow(&self.inner).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

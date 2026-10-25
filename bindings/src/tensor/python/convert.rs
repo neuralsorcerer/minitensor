@@ -816,7 +816,7 @@ pub(crate) fn arithmetic_operands_from_py(
 /// already reads it. An int the dtype holds reads the same either way, and is
 /// read at the tensor's width, which keeps `x * 2` on the float kernel. One
 /// past int64 is left to the usual reading.
-fn exact_integers_beside_float(
+pub(crate) fn exact_integers_beside_float(
     reference: &Tensor,
     value: &Bound<PyAny>,
 ) -> PyResult<Option<Tensor>> {

@@ -96,7 +96,7 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return sqrt(&widened);
+        return crate::ops::util::narrowed(tensor, sqrt(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => sqrt_f32(tensor)?,
@@ -136,7 +136,7 @@ pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return rsqrt(&widened);
+        return crate::ops::util::narrowed(tensor, rsqrt(&widened));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => rsqrt_f32(tensor)?,
@@ -174,7 +174,7 @@ pub fn reciprocal(tensor: &Tensor) -> Result<Tensor> {
     // magnitude above 1, a result nobody asking for a reciprocal wants; the
     // rest of this family widens too.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return reciprocal(&widened);
+        return crate::ops::util::narrowed(tensor, reciprocal(&widened));
     }
     match tensor.dtype() {
         DataType::Float32 | DataType::Float64 => powf(tensor, -1.0),
@@ -197,7 +197,7 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     {
         let widened =
             crate::ops::util::widen_integer_input(tensor)?.expect("an integer dtype always widens");
-        return clip(&widened, min_val, max_val);
+        return crate::ops::util::narrowed(tensor, clip(&widened, min_val, max_val));
     }
     let output_data = match tensor.dtype() {
         DataType::Float32 => clip_f32(tensor, min_val, max_val)?,

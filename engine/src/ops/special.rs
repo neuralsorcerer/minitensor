@@ -118,7 +118,7 @@ pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return cbrt(&widened);
+        return crate::ops::util::narrowed(tensor, cbrt(&widened));
     }
     if let Some(values) = offered(tensor, Ufunc::Cbrt) {
         return unary_unit_from_data!(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
@@ -180,7 +180,7 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return exp2(&widened);
+        return crate::ops::util::narrowed(tensor, exp2(&widened));
     }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::exp2_f32(tensor)?;
@@ -275,7 +275,7 @@ pub fn logit(tensor: &Tensor, eps: Option<f64>) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return logit(&widened, eps);
+        return crate::ops::util::narrowed(tensor, logit(&widened, eps));
     }
     let clamp = match eps {
         None => f64::NAN,
@@ -440,7 +440,7 @@ pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return sinc(&widened);
+        return crate::ops::util::narrowed(tensor, sinc(&widened));
     }
     let values = sinc_values(tensor)?;
     unary_unit_from_data!(tensor, "sinc", values, SINC_D, [PI, 0.0])
@@ -878,7 +878,7 @@ pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return lgamma(&widened);
+        return crate::ops::util::narrowed(tensor, lgamma(&widened));
     }
     unary_unit!(tensor, "lgamma", LGAMMA, LGAMMA_D, [0.0; 2])
 }
@@ -888,7 +888,7 @@ pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return digamma(&widened);
+        return crate::ops::util::narrowed(tensor, digamma(&widened));
     }
     unary_unit!(tensor, "digamma", DIGAMMA, DIGAMMA_D, [0.0; 2])
 }
@@ -1373,7 +1373,7 @@ pub fn i0(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return i0(&widened);
+        return crate::ops::util::narrowed(tensor, i0(&widened));
     }
     unary_unit!(tensor, "i0", I0, I0_D, [0.0; 2])
 }
@@ -1383,7 +1383,7 @@ pub fn i1(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return i1(&widened);
+        return crate::ops::util::narrowed(tensor, i1(&widened));
     }
     unary_unit!(tensor, "i1", I1, I1_D, [0.0; 2])
 }
@@ -1393,7 +1393,7 @@ pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return i0e(&widened);
+        return crate::ops::util::narrowed(tensor, i0e(&widened));
     }
     unary_unit!(tensor, "i0e", I0E, I0E_D, [0.0; 2])
 }
@@ -1403,7 +1403,7 @@ pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return i1e(&widened);
+        return crate::ops::util::narrowed(tensor, i1e(&widened));
     }
     unary_unit!(tensor, "i1e", I1E, I1E_D, [0.0; 2])
 }
@@ -1545,7 +1545,7 @@ pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return erfcx(&widened);
+        return crate::ops::util::narrowed(tensor, erfcx(&widened));
     }
     unary_unit!(tensor, "erfcx", ERFCX, ERFCX_D, [0.0; 2])
 }
@@ -1608,7 +1608,7 @@ pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
-        return erfinv(&widened);
+        return crate::ops::util::narrowed(tensor, erfinv(&widened));
     }
     unary_unit!(tensor, "erfinv", ERFINV, ERFINV_D, [0.0; 2])
 }
