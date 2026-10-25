@@ -1094,23 +1094,52 @@ impl SquareSummable for f64 {
 ///
 /// Sixteen float64 lanes compiled a second time with `avx`, the shape of
 /// [`simd_sum_f32_wide`]; four lanes left each add waiting on the last.
+///
+/// A third build fuses each multiply into its add where the CPU has `fma`.
+/// The product of two float32s is exact in float64, so rounding the fused
+/// sum once is rounding the separate product's sum, and the three builds
+/// agree to the bit.
 pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
     #[cfg(target_arch = "x86_64")]
-    if simd_capabilities().avx {
-        // SAFETY: `detect` confirmed avx on this CPU.
-        return unsafe { wide_dot_avx(a, b) };
+    {
+        let capabilities = simd_capabilities();
+        if capabilities.avx2_fma {
+            // SAFETY: `detect` confirmed avx2 and fma on this CPU.
+            return unsafe { wide_dot_fma(a, b) };
+        }
+        if capabilities.avx {
+            // SAFETY: `detect` confirmed avx on this CPU.
+            return unsafe { wide_dot_avx(a, b) };
+        }
     }
-    wide_dot_body(a, b)
+    wide_dot_body::<false>(a, b)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 fn wide_dot_avx(a: &[f32], b: &[f32]) -> f64 {
-    wide_dot_body(a, b)
+    wide_dot_body::<false>(a, b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn wide_dot_fma(a: &[f32], b: &[f32]) -> f64 {
+    wide_dot_body::<true>(a, b)
+}
+
+/// `sum + x * y` for float32 factors in float64, fused or not; the product is
+/// exact, so the two are the same number.
+#[inline(always)]
+fn exact_product_add<const FUSED: bool>(x: f32, y: f32, sum: f64) -> f64 {
+    if FUSED {
+        f64::from(x).mul_add(f64::from(y), sum)
+    } else {
+        sum + f64::from(x) * f64::from(y)
+    }
 }
 
 #[inline(always)]
-fn wide_dot_body(a: &[f32], b: &[f32]) -> f64 {
+fn wide_dot_body<const FUSED: bool>(a: &[f32], b: &[f32]) -> f64 {
     const LANES: usize = 16;
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
@@ -1118,7 +1147,7 @@ fn wide_dot_body(a: &[f32], b: &[f32]) -> f64 {
     let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<LANES>(), b.as_chunks::<LANES>());
     for (x, y) in a_chunks.iter().zip(b_chunks) {
         for lane in 0..LANES {
-            sums[lane] += f64::from(x[lane]) * f64::from(y[lane]);
+            sums[lane] = exact_product_add::<FUSED>(x[lane], y[lane], sums[lane]);
         }
     }
     // The tail is padded with zeros, whose products are zero, and folded in as
@@ -1128,7 +1157,7 @@ fn wide_dot_body(a: &[f32], b: &[f32]) -> f64 {
         x[..a_rest.len()].copy_from_slice(a_rest);
         y[..b_rest.len()].copy_from_slice(b_rest);
         for lane in 0..LANES {
-            sums[lane] += f64::from(x[lane]) * f64::from(y[lane]);
+            sums[lane] = exact_product_add::<FUSED>(x[lane], y[lane], sums[lane]);
         }
     }
     pairwise_lanes(&mut sums)
@@ -1624,6 +1653,27 @@ mod tests {
                 fresh32 <= replaced32 * 2.0 + f64::EPSILON,
                 "f32 len {len}: {fresh32:e} is more than twice {replaced32:e}"
             );
+        }
+    }
+
+    #[test]
+    fn the_fused_wide_dot_is_the_unfused_one() {
+        // Each float32 product is exact in float64, so fusing it into its add
+        // cannot change a bit; checked across lengths that leave every tail.
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            f32::from_bits((state as u32 & 0x8fff_ffff) | 0x3000_0000)
+        };
+        for len in [1, 15, 16, 17, 100, 1000, 4097] {
+            let a: Vec<f32> = (0..len).map(|_| next()).collect();
+            let b: Vec<f32> = (0..len).map(|_| next()).collect();
+            let plain = wide_dot_body::<false>(&a, &b);
+            let fused = wide_dot_body::<true>(&a, &b);
+            assert_eq!(plain.to_bits(), fused.to_bits(), "length {len}");
+            assert_eq!(simd_dot_f32_wide(&a, &b).to_bits(), plain.to_bits());
         }
     }
 }

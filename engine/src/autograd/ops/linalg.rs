@@ -69,13 +69,17 @@ impl GradientFunction for VecdotBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
 
+        // A side that was one vector shared by every run gets the gradient of
+        // all of them, summed back to its own shape.
         let spread = crate::ops::shape_ops::unsqueeze(grad_output, self.dim as isize)?;
         if self.lhs_requires_grad {
             let grad = crate::ops::arithmetic::mul(&self.rhs, &spread)?;
+            let grad = reduce_gradient_for_broadcasting(&grad, self.lhs.shape())?;
             accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
         }
         if self.rhs_requires_grad {
             let grad = crate::ops::arithmetic::mul(&self.lhs, &spread)?;
+            let grad = reduce_gradient_for_broadcasting(&grad, self.rhs.shape())?;
             accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
         }
 

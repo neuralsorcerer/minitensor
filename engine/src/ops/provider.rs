@@ -233,15 +233,25 @@ pub(crate) fn provider() -> Option<&'static dyn Provider> {
 /// The two of these are what a call site uses. They read as one condition --
 /// "unless somebody else did it" -- which is what a GEMM call site wants
 /// wrapped around it, rather than three lines of plumbing repeated at each.
+///
+/// A product with a single row or column is never offered. It is a set of dot
+/// products, which the library computes as `dot` does -- for float32, carried
+/// in float64 and rounded once -- so that `a @ b` of two vectors is `dot(a,
+/// b)` and a matrix times a vector is correctly rounded; another library's
+/// kernel would fold each one its own way.
 #[inline]
 pub(crate) fn offer_gemm_f32(request: Gemm<'_, f32>) -> bool {
-    provider().is_some_and(|provider| provider.gemm_f32(request))
+    request.m != 1
+        && request.n != 1
+        && provider().is_some_and(|provider| provider.gemm_f32(request))
 }
 
 /// Offer one `f64` product; see [`offer_gemm_f32`].
 #[inline]
 pub(crate) fn offer_gemm_f64(request: Gemm<'_, f64>) -> bool {
-    provider().is_some_and(|provider| provider.gemm_f64(request))
+    request.m != 1
+        && request.n != 1
+        && provider().is_some_and(|provider| provider.gemm_f64(request))
 }
 
 /// How many threads a provider may spread one piece of work over: the size of

@@ -21,10 +21,9 @@ use cblas::{Layout, Transpose};
 
 pub(crate) use crate::ops::map::PAR_THRESHOLD;
 use crate::ops::map::try_par_out_chunks;
-#[cfg(not(feature = "blas"))]
 use crate::ops::simd::{DOT_LANES, pairwise_lanes};
-use crate::ops::simd::{simd_dot_f32, simd_dot_f32_wide, simd_dot_f64};
-use crate::ops::util::accurate_pair_sum;
+use crate::ops::simd::{simd_dot_f32_wide, simd_dot_f64};
+use crate::ops::util::{Accumulate, accurate_pair_sum};
 // The hand-written GEMM banding is the fallback for builds without BLAS; with
 // the `blas` feature the library does the blocking itself.
 #[cfg(not(feature = "blas"))]
@@ -215,6 +214,11 @@ pub(crate) unsafe fn gemm_f32(
     b: *const f32,
     c: *mut f32,
 ) {
+    // A single row or column is `dot` per element; see `gemv`.
+    // SAFETY: the contract above covers what `gemv` reads and writes.
+    if unsafe { gemv::<f32>(m, k, n, a, k, 1, b, n, 1, c, n) } {
+        return;
+    }
     // `cblas` takes slices, not the raw pointers this signature carries for the
     // `matrixmultiply` path. Passing the pointers straight through did not
     // compile, so `--features blas` has never built; the lengths come from the
@@ -261,6 +265,11 @@ pub(crate) unsafe fn gemm_f64(
     b: *const f64,
     c: *mut f64,
 ) {
+    // A single row or column is `dot` per element; see `gemv`.
+    // SAFETY: the contract above covers what `gemv` reads and writes.
+    if unsafe { gemv::<f64>(m, k, n, a, k, 1, b, n, 1, c, n) } {
+        return;
+    }
     // `cblas` takes slices, not the raw pointers this signature carries for the
     // `matrixmultiply` path. Passing the pointers straight through did not
     // compile, so `--features blas` has never built; the lengths come from the
@@ -322,6 +331,12 @@ macro_rules! blas_transposed_gemm {
             b: *const $ty,
             c: *mut $ty,
         ) {
+            // A single row or column is `dot` per element; see `gemv`. `b`
+            // is `(n, k)`, so a logical column is one of its rows.
+            // SAFETY: the contract above covers what `gemv` reads and writes.
+            if unsafe { gemv::<$ty>(m, k, n, a, k, 1, b, 1, k, c, n) } {
+                return;
+            }
             let (a, b, c) = unsafe {
                 (
                     std::slice::from_raw_parts(a, m * k),
@@ -366,6 +381,12 @@ macro_rules! blas_transposed_gemm {
             b: *const $ty,
             c: *mut $ty,
         ) {
+            // As in `$nt`; `a` is `(k, m)`, so a logical row is one of its
+            // columns.
+            // SAFETY: the contract above covers what `gemv` reads and writes.
+            if unsafe { gemv::<$ty>(m, k, n, a, 1, m, b, n, 1, c, n) } {
+                return;
+            }
             let (a, b, c) = unsafe {
                 (
                     std::slice::from_raw_parts(a, k * m),
@@ -477,6 +498,14 @@ fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
     if threads < 2 || m.saturating_mul(k).saturating_mul(n) < min_macs {
         return GemmSplit::Whole;
     }
+    // A single row or column runs as dot products (see `gemv`), with nothing
+    // to pack per task, so it is cut finer than the packed kernel: a share per
+    // thread left the whole product waiting on the slowest of them.
+    let threads = if m == 1 || n == 1 {
+        threads * 8
+    } else {
+        threads
+    };
 
     // Whichever output axis is longer. A column split makes every task read all
     // of `a`, a row split makes every task read all of `b`, and dividing the
@@ -497,27 +526,131 @@ fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
     }
 }
 
-/// A dense element type as the matrix-vector path sees it: the dot kernel its
-/// every answer must agree with, which accumulates in `DOT_LANES` lanes.
-#[cfg(not(feature = "blas"))]
-trait GemvElement:
-    Copy + Default + std::ops::AddAssign + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
-{
-    fn dot(a: &[Self], b: &[Self]) -> Self;
+/// A dense element type as the matrix-vector path sees it: how `dot` folds it.
+///
+/// Every output of a single-row or single-column product is `dot` of its row
+/// and column to the bit, so the path forms the products `dot` forms, in the
+/// accumulator it uses -- float64 for float32, which holds each product
+/// exactly -- over the same `DOT_LANES` lanes and `RUN_SUM_CHUNK` blocks.
+trait GemvElement: Copy + Default + Sync {
+    type Wide: Copy + Default + Send + std::ops::Add<Output = Self::Wide> + Accumulate;
+    /// Whether a product may be fused into its add: only where the product is
+    /// exact, so that fusing it changes nothing -- `dot` keeps a float64
+    /// product and its add apart.
+    const FUSES: bool;
+    /// The product of two elements in the accumulator.
+    fn product(a: Self, b: Self) -> Self::Wide;
+    /// `sum + product(a, b)` with the multiply fused into the add.
+    fn fused(a: Self, b: Self, sum: Self::Wide) -> Self::Wide;
+    /// One block of `dot`, the kernel `accurate_pair_sum` folds.
+    fn block(a: &[Self], b: &[Self]) -> Self::Wide;
+    /// The total, rounded to the element type.
+    fn narrow(total: Self::Wide) -> Self;
 }
 
-#[cfg(not(feature = "blas"))]
 impl GemvElement for f32 {
-    fn dot(a: &[f32], b: &[f32]) -> f32 {
-        simd_dot_f32(a, b)
+    type Wide = f64;
+    const FUSES: bool = true;
+    #[inline(always)]
+    fn product(a: f32, b: f32) -> f64 {
+        f64::from(a) * f64::from(b)
+    }
+    #[inline(always)]
+    fn fused(a: f32, b: f32, sum: f64) -> f64 {
+        f64::from(a).mul_add(f64::from(b), sum)
+    }
+    fn block(a: &[f32], b: &[f32]) -> f64 {
+        simd_dot_f32_wide(a, b)
+    }
+    #[inline(always)]
+    fn narrow(total: f64) -> f32 {
+        total as f32
     }
 }
 
-#[cfg(not(feature = "blas"))]
 impl GemvElement for f64 {
-    fn dot(a: &[f64], b: &[f64]) -> f64 {
+    type Wide = f64;
+    const FUSES: bool = false;
+    #[inline(always)]
+    fn product(a: f64, b: f64) -> f64 {
+        a * b
+    }
+    #[inline(always)]
+    fn fused(a: f64, b: f64, sum: f64) -> f64 {
+        sum + a * b
+    }
+    fn block(a: &[f64], b: &[f64]) -> f64 {
         simd_dot_f64(a, b)
     }
+    #[inline(always)]
+    fn narrow(total: f64) -> f64 {
+        total
+    }
+}
+
+/// `dot` of two runs, as `dot` itself computes it.
+fn run_dot<T: GemvElement>(a: &[T], b: &[T]) -> T {
+    T::narrow(accurate_pair_sum(a, b, T::Wide::default(), T::block))
+}
+
+/// `lane[j] += product(scales[s], rows[s][j])` for each of the given steps
+/// in turn, at every column -- the inner step of [`gemv`]'s row path, for
+/// up to four steps that share a lane. Taking them in one pass loads and
+/// stores each total once rather than once a step, and adds the products in
+/// the order the steps come, so the bits are those of taking them one by
+/// one. Compiled again for AVX and -- where the products are exact -- once
+/// more with each fused into its add, all three to the same bits.
+fn add_products<T: GemvElement>(lane: &mut [T::Wide], scales: &[T], rows: &[&[T]]) {
+    #[inline(always)]
+    fn body<T: GemvElement, const FUSED: bool>(lane: &mut [T::Wide], scales: &[T], rows: &[&[T]]) {
+        let add = |sum: T::Wide, scale: T, value: T| {
+            if FUSED {
+                T::fused(scale, value, sum)
+            } else {
+                sum + T::product(scale, value)
+            }
+        };
+        match (scales, rows) {
+            ([s0, s1, s2, s3], [r0, r1, r2, r3]) => {
+                let width = lane.len();
+                let (r0, r1, r2, r3) = (&r0[..width], &r1[..width], &r2[..width], &r3[..width]);
+                for j in 0..width {
+                    let total = add(add(lane[j], *s0, r0[j]), *s1, r1[j]);
+                    lane[j] = add(add(total, *s2, r2[j]), *s3, r3[j]);
+                }
+            }
+            _ => {
+                for (&scale, row) in scales.iter().zip(rows) {
+                    for (slot, &value) in lane.iter_mut().zip(row.iter()) {
+                        *slot = add(*slot, scale, value);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx")]
+    fn body_avx<T: GemvElement>(lane: &mut [T::Wide], scales: &[T], rows: &[&[T]]) {
+        body::<T, false>(lane, scales, rows)
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn body_fma<T: GemvElement>(lane: &mut [T::Wide], scales: &[T], rows: &[&[T]]) {
+        body::<T, true>(lane, scales, rows)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let capabilities = crate::ops::simd::simd_capabilities();
+        if T::FUSES && capabilities.avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { body_fma(lane, scales, rows) };
+        }
+        if capabilities.avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { body_avx(lane, scales, rows) };
+        }
+    }
+    body::<T, false>(lane, scales, rows)
 }
 
 /// `c = a * b` when the output is a single row or column, or `false` to leave
@@ -529,19 +662,23 @@ impl GemvElement for f64 {
 /// takes 3. Measured against it on `1 x k x n` and `m x k x 1` up to 1024
 /// wide, this was 1.8-45x faster at every shape.
 ///
-/// Every output element is `T::dot` of its row of `a` and column of `b`, bit
-/// for bit, however the operands are stored -- `linear` consumes its weight
-/// transposed where `matmul` has it upright, and the two have to agree. A
-/// strided run is gathered first; one row over an upright `b`, where a column
-/// is strided and gathering each would read `b` `n` times, instead adds one
-/// scaled row of `b` per step of `k` into `LANES` accumulator rows, which is
-/// exactly the per-lane arithmetic of the dot, finished the way it finishes.
+/// Every output element is `dot` of its row of `a` and column of `b`, bit for
+/// bit, however the operands are stored -- `linear` consumes its weight
+/// transposed where `matmul` has it upright, and the two have to agree -- and
+/// so, for float32, carried in float64 and rounded once. Accumulated in
+/// float32, a matrix times a vector was correctly rounded in one entry of
+/// twenty, and `a @ b` of two vectors disagreed with `dot(a, b)` six times in
+/// seven. A strided run is gathered first; one row over an upright `b`, where
+/// a column is strided and gathering each would read `b` `n` times, instead
+/// adds one scaled row of `b` per step of `k` into `DOT_LANES` accumulator
+/// rows, a tile of columns at a time, which is exactly the per-lane
+/// arithmetic of the dot over each of its blocks, finished the way it
+/// finishes.
 ///
 /// # Safety
 ///
 /// As `matrixmultiply`'s: the strides address only readable elements of `a`
 /// and `b`, and `c` is writable at `rsc` per row with unit column stride.
-#[cfg(not(feature = "blas"))]
 #[allow(clippy::too_many_arguments)]
 unsafe fn gemv<T: GemvElement>(
     m: usize,
@@ -556,6 +693,7 @@ unsafe fn gemv<T: GemvElement>(
     c: *mut T,
     rsc: usize,
 ) -> bool {
+    use crate::ops::util::{RUN_SUM_CHUNK, pairwise_fold};
     if (m != 1 && n != 1) || k == 0 {
         return false;
     }
@@ -572,42 +710,84 @@ unsafe fn gemv<T: GemvElement>(
         }
     };
     if m == 1 && n > 1 && csb == 1 {
+        // Sixteen lanes of a tile's columns stay in cache while every row of
+        // `b` passes through them.
+        const TILE: usize = 256;
         let lanes = DOT_LANES;
-        let whole = k - k % lanes;
-        let mut acc = vec![T::default(); lanes * n];
-        for step in 0..whole {
-            // SAFETY: row `step` of `b` is `n` contiguous elements.
-            let (scale, row) = unsafe {
-                (
-                    *a.add(step * csa),
-                    std::slice::from_raw_parts(b.add(step * rsb), n),
-                )
-            };
-            let lane = &mut acc[(step % lanes) * n..][..n];
-            for (slot, &value) in lane.iter_mut().zip(row) {
-                *slot += scale * value;
-            }
-        }
-        let mut sums = vec![T::default(); lanes];
-        for j in 0..n {
-            for (lane, sum) in sums.iter_mut().enumerate() {
-                *sum = acc[lane * n + j];
-            }
-            // The dot pads its tail to a whole block with zeros, so every lane
-            // past the tail gains `0 * 0`: a `+0.0`, which turns a `-0.0` lane
-            // positive. Padding `b` here would multiply by what is really
-            // there, so the lanes get the product the dot would form.
-            if whole < k {
-                for (lane, sum) in sums.iter_mut().enumerate() {
-                    *sum += match whole + lane {
-                        // SAFETY: as above.
-                        step if step < k => unsafe { *a.add(step * csa) * *b.add(step * rsb + j) },
-                        _ => T::default() * T::default(),
-                    };
+        let blocks = k.div_ceil(RUN_SUM_CHUNK);
+        let mut acc = vec![T::Wide::default(); lanes * TILE];
+        let mut sums = vec![T::Wide::default(); lanes];
+        let mut totals = vec![T::Wide::default(); blocks * TILE];
+        for first in (0..n).step_by(TILE) {
+            let width = TILE.min(n - first);
+            for block in 0..blocks {
+                let (lo, hi) = (
+                    block * RUN_SUM_CHUNK,
+                    (block * RUN_SUM_CHUNK + RUN_SUM_CHUNK).min(k),
+                );
+                let whole = lo + (hi - lo) / lanes * lanes;
+                acc[..lanes * width].fill(T::Wide::default());
+                // Each lane takes every `lanes`-th step, in order, four to a
+                // pass.
+                for lane in 0..lanes {
+                    let steps: Vec<usize> = (lo + lane..whole).step_by(lanes).collect();
+                    for group in steps.chunks(4) {
+                        let mut scales = [T::default(); 4];
+                        let mut rows: [&[T]; 4] = [&[]; 4];
+                        for (slot, &step) in group.iter().enumerate() {
+                            // SAFETY: row `step` of `b` holds this tile's
+                            // columns.
+                            unsafe {
+                                scales[slot] = *a.add(step * csa);
+                                rows[slot] =
+                                    std::slice::from_raw_parts(b.add(step * rsb + first), width);
+                            }
+                        }
+                        let count = group.len();
+                        add_products(
+                            &mut acc[lane * width..][..width],
+                            &scales[..count],
+                            &rows[..count],
+                        );
+                    }
+                }
+                for j in 0..width {
+                    for (lane, sum) in sums.iter_mut().enumerate() {
+                        *sum = acc[lane * width + j];
+                    }
+                    // The dot pads its tail to a whole block with zeros, so
+                    // every lane past the tail gains `0 * 0`: a `+0.0`, which
+                    // turns a `-0.0` lane positive. Padding `b` here would
+                    // multiply by what is really there, so the lanes get the
+                    // product the dot would form.
+                    if whole < hi {
+                        for (lane, sum) in sums.iter_mut().enumerate() {
+                            *sum = *sum
+                                + match whole + lane {
+                                    // SAFETY: as above.
+                                    step if step < hi => unsafe {
+                                        T::product(
+                                            *a.add(step * csa),
+                                            *b.add(step * rsb + first + j),
+                                        )
+                                    },
+                                    _ => T::product(T::default(), T::default()),
+                                };
+                        }
+                    }
+                    totals[block * width + j] = pairwise_lanes(&mut sums);
                 }
             }
-            // SAFETY: `c` is one row of `n`.
-            unsafe { *c.add(j) = pairwise_lanes(&mut sums) };
+            for j in 0..width {
+                let total = if blocks == 1 {
+                    totals[j]
+                } else {
+                    let partials = (0..blocks).map(|block| totals[block * width + j]).collect();
+                    pairwise_fold(partials, T::Wide::default(), |p, q| p.acc_add(q))
+                };
+                // SAFETY: `c` is one row of `n`.
+                unsafe { *c.add(first + j) = T::narrow(total) };
+            }
         }
         return true;
     }
@@ -616,7 +796,7 @@ unsafe fn gemv<T: GemvElement>(
         for j in 0..n {
             let column = run(b.wrapping_add(j * csb), rsb);
             // SAFETY: element `(i, j)` of `c`.
-            unsafe { *c.add(i * rsc + j) = T::dot(&row, &column) };
+            unsafe { *c.add(i * rsc + j) = run_dot(&row, &column) };
         }
     }
     true
@@ -1768,10 +1948,25 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
     };
 
     // The fused walk wants one contiguous run per output element on both
-    // sides, which is exactly: same shape, contracted axis last.
-    if lhs.shape().dims() != rhs.shape().dims() || axis + 1 != rank {
+    // sides: the contracted axis last, and either the same shape or one side
+    // a single vector that every run of the other meets -- a matrix's rows
+    // against one vector, which composed meant a product of the matrix's size
+    // rounded entry by entry before it was summed.
+    let (lhs_dims, rhs_dims) = (lhs.shape().dims(), rhs.shape().dims());
+    let run_of = |dims: &[usize]| dims.last().copied();
+    let shared = if lhs_dims == rhs_dims {
+        Some(None)
+    } else if rhs_dims.len() == 1 && run_of(lhs_dims) == run_of(rhs_dims) {
+        Some(Some(false))
+    } else if lhs_dims.len() == 1 && run_of(lhs_dims) == run_of(rhs_dims) {
+        Some(Some(true))
+    } else {
+        None
+    };
+    // `Some(vector_on_left)` names the side that is one shared vector.
+    let (Some(broadcast), true) = (shared, axis + 1 == rank) else {
         return composed();
-    }
+    };
 
     let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
     if result_dtype == DataType::Bool {
@@ -1780,25 +1975,39 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
     let lhs_view = lhs_cast.as_ref().contiguous()?;
     let rhs_view = rhs_cast.as_ref().contiguous()?;
 
-    let dims = lhs.shape().dims();
+    let dims = if broadcast == Some(true) {
+        rhs_dims
+    } else {
+        lhs_dims
+    };
     let run = dims[axis];
     let outer: usize = dims[..axis].iter().product();
     let output_shape = Shape::new(dims[..axis].to_vec());
     let device = lhs.device();
+    // Where each output's run starts on either side: a shared vector's always
+    // at zero.
+    let (lhs_step, rhs_step) = match broadcast {
+        None => (run, run),
+        Some(false) => (run, 0),
+        Some(true) => (0, run),
+    };
 
+    // `$narrow` takes the fold's total to the output's type: float32 is
+    // folded in float64, as `dot` folds it, and rounded once.
     macro_rules! vecdot_of {
-        ($accessor:ident, $from_vec:ident, $zero:expr, $fold:expr, $ty:ty) => {{
+        ($accessor:ident, $from_vec:ident, $zero:expr, $fold:expr, $ty:ty, $narrow:expr) => {{
             let left = lhs_view.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
             })?;
             let right = rhs_view.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
             })?;
+            let narrow = $narrow;
             let mut out = vec![<$ty>::default(); outer];
             if outer == 1 {
                 // One run over everything, which `accurate_pair_sum` spreads
                 // across the pool itself.
-                out[0] = accurate_pair_sum(left, right, $zero, $fold);
+                out[0] = narrow(accurate_pair_sum(&left[..run], &right[..run], $zero, $fold));
             } else {
                 // Many independent runs, so the batch is what to split; each
                 // run then folds on one thread.
@@ -1807,13 +2016,13 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
                     crate::ops::map::PAR_CHUNK,
                     &|start, block| {
                         for (offset, slot) in block.iter_mut().enumerate() {
-                            let base = (start + offset) * run;
-                            *slot = accurate_pair_sum(
-                                &left[base..base + run],
-                                &right[base..base + run],
+                            let (l, r) = ((start + offset) * lhs_step, (start + offset) * rhs_step);
+                            *slot = narrow(accurate_pair_sum(
+                                &left[l..l + run],
+                                &right[r..r + run],
                                 $zero,
                                 $fold,
-                            );
+                            ));
                         }
                     },
                 );
@@ -1823,8 +2032,22 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
     }
 
     let output_data = match result_dtype {
-        DataType::Float32 => vecdot_of!(as_f32_slice, from_vec_f32, 0.0_f32, simd_dot_f32, f32),
-        DataType::Float64 => vecdot_of!(as_f64_slice, from_vec_f64, 0.0_f64, simd_dot_f64, f64),
+        DataType::Float32 => vecdot_of!(
+            as_f32_slice,
+            from_vec_f32,
+            0.0_f64,
+            simd_dot_f32_wide,
+            f32,
+            |total: f64| total as f32
+        ),
+        DataType::Float64 => vecdot_of!(
+            as_f64_slice,
+            from_vec_f64,
+            0.0_f64,
+            simd_dot_f64,
+            f64,
+            |total: f64| total
+        ),
         DataType::Int32 => vecdot_of!(
             as_i32_slice,
             from_vec_i32,
@@ -1833,7 +2056,8 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
                 .iter()
                 .zip(b)
                 .fold(0_i32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
-            i32
+            i32,
+            |total: i32| total
         ),
         DataType::Int64 => vecdot_of!(
             as_i64_slice,
@@ -1843,7 +2067,8 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
                 .iter()
                 .zip(b)
                 .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
-            i64
+            i64,
+            |total: i64| total
         ),
         DataType::Bool => unreachable!("bool falls back above"),
     };
@@ -2002,10 +2227,21 @@ mod split_gemm_tests {
     /// A product with one output row or column is a dot product per element,
     /// and has to be that dot however each operand is stored: upright,
     /// transposed, or as a strided view. `k` runs past a multiple of the lane
-    /// count so the tail is covered.
+    /// count so the tail is covered, and past two of `dot`'s blocks so their
+    /// fold is; `n` runs past one tile of columns.
     #[test]
     fn a_vector_shaped_product_is_the_dot_in_every_layout() {
-        for (m, k, n) in [(1, 37, 1), (1, 37, 9), (7, 37, 1), (1, 1, 5), (5, 1, 1)] {
+        let long = 2 * crate::ops::util::RUN_SUM_CHUNK + 37;
+        for (m, k, n) in [
+            (1, 37, 1),
+            (1, 37, 9),
+            (7, 37, 1),
+            (1, 1, 5),
+            (5, 1, 1),
+            (1, 37, 300),
+            (1, long, 3),
+            (3, long, 1),
+        ] {
             let a: Vec<f32> = fill(m * k, 0x51).iter().map(|&x| x as f32).collect();
             let b: Vec<f32> = fill(k * n, 0x52).iter().map(|&x| x as f32).collect();
             let want: Vec<f32> = (0..m * n)
@@ -2013,7 +2249,7 @@ mod split_gemm_tests {
                     let (i, j) = (at / n, at % n);
                     let row: Vec<f32> = (0..k).map(|t| a[i * k + t]).collect();
                     let column: Vec<f32> = (0..k).map(|t| b[t * n + j]).collect();
-                    simd_dot_f32(&row, &column)
+                    run_dot::<f32>(&row, &column)
                 })
                 .collect();
             // Every storage of each operand: `a` upright or as its transpose,

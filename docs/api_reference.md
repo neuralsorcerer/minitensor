@@ -1618,6 +1618,19 @@ times float32's own and an SVD's small singular values three orders less
 accurate; now each factor is as near the exact one as float32 holds. The
 gradient comes back float32.
 
+A float32 `dot` and `vecdot` are carried in float64 and rounded once too, and
+so is a float32 product with a single row or a single column: a matrix times a
+vector, a vector times a matrix, and `a @ b` of two vectors, which is `dot(a,
+b)` to the bit. Such a product is a set of dot products and costs what reading
+the matrix costs, so the wide accumulation is cheap there; accumulated in
+float32 a matrix times a vector was correctly rounded in one entry of twenty.
+A float32 `matmul`, `mm` or `bmm` with more than one row and column is not: it
+accumulates in float32, as a float32 matrix product conventionally does, which
+leaves a few ulps of error in a typical entry and more where the sum cancels.
+Carried in float64 it would cost two to three times as long on the operation
+that dominates a training step. Where such a product has to be correctly
+rounded, give it float64 operands and round the result.
+
 - `matmul`, `dot`, `bmm`
 - `solve`, `inv`, `det`, `slogdet`
 - `diagonal`, `trace`, `diag`, `diag_embed`
