@@ -1355,6 +1355,12 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let (lhs, rhs) = product_operands(lhs, rhs)?;
     let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
 
+    // Carried in float64; see `Narrow`.
+    if lhs.dtype() == DataType::Float32 {
+        use crate::ops::linalg::widened;
+        return crate::ops::linalg::Narrow::narrowed(solve(&widened(lhs)?, &widened(rhs)?)?);
+    }
+
     let lhs_ndim = lhs.ndim();
     if lhs_ndim < 2 {
         return Err(MinitensorError::invalid_operation(

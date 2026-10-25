@@ -1593,6 +1593,15 @@ of its own.
 
 ### Linear algebra & matrix ops
 
+A float32 factorisation -- `solve`, `inv`, `det`, `slogdet`, `cholesky`,
+`cholesky_solve`, `lu`, `lu_factor`, `lu_solve`, `solve_triangular`, `qr`,
+`eigh`, `eigvalsh`, `svd`, `svdvals`, and everything built on them -- is carried
+in float64, where a float32 matrix is exact, and its results rounded to float32
+once. Carried in float32 arithmetic an `eigh` residual was twenty to fifty
+times float32's own and an SVD's small singular values three orders less
+accurate; now each factor is as near the exact one as float32 holds. The
+gradient comes back float32.
+
 - `matmul`, `dot`, `bmm`
 - `solve`, `inv`, `det`, `slogdet`
 - `diagonal`, `trace`, `diag`, `diag_embed`

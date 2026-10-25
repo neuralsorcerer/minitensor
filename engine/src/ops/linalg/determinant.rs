@@ -183,6 +183,10 @@ fn batch_tensor(
 /// Prefer [`slogdet`] for anything larger than a few dozen rows -- see the
 /// module note on overflow.
 pub fn det(tensor: &Tensor) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(det(&crate::ops::linalg::widened(tensor)?)?);
+    }
     let (batch_dims, n) = square_layout(tensor, "det")?;
     let batch = batch_dims.iter().product::<usize>().max(1);
 
@@ -218,6 +222,12 @@ pub fn det(tensor: &Tensor) -> Result<Tensor> {
 /// `0` and `-inf`. Only the log part carries a gradient -- the sign is locally
 /// constant wherever it is defined.
 pub fn slogdet(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(slogdet(&crate::ops::linalg::widened(
+            tensor,
+        )?)?);
+    }
     let (batch_dims, n) = square_layout(tensor, "slogdet")?;
     let batch = batch_dims.iter().product::<usize>().max(1);
     let dtype = tensor.dtype();
@@ -254,6 +264,10 @@ pub fn slogdet(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
 /// `A @ X = I` through [`solve`], so the pivoting, the batching, the singular
 /// check and the gradient are all the ones that were already there.
 pub fn inv(tensor: &Tensor) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(inv(&crate::ops::linalg::widened(tensor)?)?);
+    }
     let (batch_dims, n) = square_layout(tensor, "inv")?;
     let identity = {
         // Built without grad: it is a constant, and `solve` would otherwise

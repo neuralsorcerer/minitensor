@@ -420,6 +420,10 @@ fn decompose(tensor: &Tensor, want_vectors: bool, op: &str) -> Result<(Tensor, T
 /// definition, and nothing here picks between them. Compare `|V|`, or compare
 /// what `V` does, rather than `V` itself.
 pub fn eigh(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(eigh(&crate::ops::linalg::widened(tensor)?)?);
+    }
     let (mut values, mut vectors) = decompose(tensor, true, "eigh")?;
 
     if tensor.requires_grad() {
@@ -449,6 +453,12 @@ pub fn eigh(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
 /// `n^3` part. Worth having as its own entry point rather than as `eigh(a)[0]`
 /// for exactly that reason.
 pub fn eigvalsh(tensor: &Tensor) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(eigvalsh(&crate::ops::linalg::widened(
+            tensor,
+        )?)?);
+    }
     // The gradient needs the eigenvectors even though the caller did not ask
     // for them, so a differentiable call computes them anyway and this becomes
     // the first half of `eigh`. Nothing is lost: it is the same work `eigh`

@@ -806,6 +806,13 @@ fn decompose(
 /// repeated singular value's subspace only up to a rotation. Compare what they
 /// do rather than what they are.
 pub fn svd(tensor: &Tensor, full_matrices: bool) -> Result<(Tensor, Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(svd(
+            &crate::ops::linalg::widened(tensor)?,
+            full_matrices,
+        )?);
+    }
     let requires_grad = tensor.requires_grad();
     let (mut u, mut s, mut vt) = decompose(tensor, full_matrices, true, requires_grad, "svd")?;
 
@@ -859,6 +866,12 @@ pub fn svd(tensor: &Tensor, full_matrices: bool) -> Result<(Tensor, Tensor, Tens
 /// Measured on a 400-by-400 matrix, that is 36ms against 189. What is left is
 /// the reduction, which is the part that really is unavoidable.
 pub fn svdvals(tensor: &Tensor) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(svdvals(&crate::ops::linalg::widened(
+            tensor,
+        )?)?);
+    }
     if tensor.requires_grad() {
         return Ok(svd(tensor, false)?.1);
     }

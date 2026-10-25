@@ -411,6 +411,13 @@ fn factor_batched<T: Factorable>(input: &[T], out: &mut [T], n: usize, batch: us
 /// caller's assumption about the matrix was wrong, and the row where the
 /// assumption broke is worth reporting.
 pub fn cholesky(tensor: &Tensor, upper: bool) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(cholesky(
+            &crate::ops::linalg::widened(tensor)?,
+            upper,
+        )?);
+    }
     let (batch_dims, n) = square_layout(tensor, "cholesky")?;
     let batch = batch_dims.iter().product::<usize>().max(1);
 

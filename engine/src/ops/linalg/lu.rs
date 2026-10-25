@@ -515,6 +515,12 @@ fn swaps_tensor(packed: &Packed, device: crate::device::Device) -> Result<Tensor
 /// are `solve`, `det`, `slogdet` and `inv`, which carry their own gradients and
 /// share this very factorisation.
 pub fn lu_factor(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`. The pivots are integers either way.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(lu_factor(&crate::ops::linalg::widened(
+            tensor,
+        )?)?);
+    }
     let packed = packed_lu(tensor, "lu_factor")?;
     let pivots = swaps_tensor(&packed, tensor.device())?;
     Ok((packed.factors, pivots))
@@ -526,6 +532,10 @@ pub fn lu_factor(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
 /// this is for a caller who wants to look at the factors, and it is built from
 /// that form rather than computed separately.
 pub fn lu(tensor: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(lu(&crate::ops::linalg::widened(tensor)?)?);
+    }
     let packed = packed_lu(tensor, "lu")?;
     let (n, batch) = (packed.n, packed.batch);
     let device = tensor.device();
@@ -749,6 +759,17 @@ pub fn solve_triangular(
     left: bool,
     unitriangular: bool,
 ) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if a.dtype() == DataType::Float32 && b.dtype() == DataType::Float32 {
+        use crate::ops::linalg::widened;
+        return crate::ops::linalg::Narrow::narrowed(solve_triangular(
+            &widened(a)?,
+            &widened(b)?,
+            upper,
+            left,
+            unitriangular,
+        )?);
+    }
     if !left {
         let flipped = solve_triangular(
             &transpose(a, -2, -1)?,
@@ -861,6 +882,15 @@ fn substitute_batched<T: Factorable>(
 /// nothing upstream for a gradient to reach. `solve` is the differentiable way
 /// to ask this question, and it runs the same factorisation.
 pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if factors.dtype() == DataType::Float32 && b.dtype() == DataType::Float32 {
+        use crate::ops::linalg::widened;
+        return crate::ops::linalg::Narrow::narrowed(lu_solve(
+            &widened(factors)?,
+            pivots,
+            &widened(b)?,
+        )?);
+    }
     agree(factors, b)?;
     let (given_batch, n) = square_layout(factors, "lu_solve")?;
     if pivots.dtype() != DataType::Int64 {
@@ -974,6 +1004,15 @@ pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor>
 /// kernel of its own and no gradient of its own -- both come from
 /// [`solve_triangular`].
 pub fn cholesky_solve(b: &Tensor, factor: &Tensor, upper: bool) -> Result<Tensor> {
+    // Carried in float64; see `Narrow`.
+    if factor.dtype() == DataType::Float32 && b.dtype() == DataType::Float32 {
+        use crate::ops::linalg::widened;
+        return crate::ops::linalg::Narrow::narrowed(cholesky_solve(
+            &widened(b)?,
+            &widened(factor)?,
+            upper,
+        )?);
+    }
     // The lower triangle is solved against first, whichever way the caller
     // holds the factor: `A = L L^T` inverts as `L^-T L^-1` and `A = U^T U` as
     // `U^-1 U^-T`, and in both of those the lower factor is applied to `B`

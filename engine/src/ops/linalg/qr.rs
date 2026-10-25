@@ -315,6 +315,13 @@ fn qr_batched<T: Factorable>(
 /// The factorisation itself never fails; a rank-deficient matrix simply has a
 /// zero on `R`'s diagonal. The gradient is the part that needs `R` invertible.
 pub fn qr(tensor: &Tensor, mode: QrMode) -> Result<(Tensor, Tensor)> {
+    // Carried in float64; see `Narrow`.
+    if tensor.dtype() == DataType::Float32 {
+        return crate::ops::linalg::Narrow::narrowed(qr(
+            &crate::ops::linalg::widened(tensor)?,
+            mode,
+        )?);
+    }
     let (batch_dims, m, n) = matrix_layout(tensor, "qr")?;
     // A tensor with no batch dimensions holds one matrix; a batch dimension of
     // zero holds none. `product().max(1)` cannot tell those apart and answers
