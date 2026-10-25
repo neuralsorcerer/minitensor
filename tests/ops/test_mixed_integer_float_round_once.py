@@ -274,3 +274,16 @@ def test_python_ints_float32_cannot_hold():
     # An int the dtype holds is read at its width, as before.
     assert (x * 2).tolist() == [2.0, 1.0]
     assert (x + [1, 2]).tolist() == [2.0, 2.5]
+
+
+def test_differences_of_integers_beside_float_ends():
+    big = mt.tensor([16777217, 16777219, 16777222], dtype="int32")
+    prepended = mt.diff(big, prepend=mt.tensor([0.5]))
+    assert prepended.tolist() == [16777216.0, 2.0, 3.0]
+    assert str(prepended.dtype) == "float32"
+    assert mt.diff(big, n=2, append=mt.tensor([16777226.0])).tolist() == [1.0, 1.0]
+    assert mt.ediff1d(big, to_end=mt.tensor([0.5])).tolist() == [2.0, 3.0, 0.5]
+    # An int32 difference past the int32 range is taken exactly.
+    extremes = mt.tensor([2**31 - 1, -(2**31)], dtype="int32")
+    assert mt.ediff1d(extremes, to_begin=0.5).tolist() == [0.5, -4294967296.0]
+    assert str(mt.ediff1d(big, to_end=7).dtype) == "int32"

@@ -416,6 +416,7 @@ def diff(
         raise ValueError(f"diff requires a non-negative order, got {order}")
 
     axis = _normalize_axis(dim, tensor.ndim(), "diff")
+    result = None
     if prepend is not None or append is not None:
         # The ends promote with the tensor rather than being cast onto its
         # dtype, so a fractional end against an integer tensor keeps its value.
@@ -427,14 +428,33 @@ def diff(
             )
             if end is not None
         ]
+        promoted = tensor
         for block, _ in ends:
-            tensor, _ = _promote_pair(tensor, block)
-        pieces = [block.astype(str(tensor.dtype)) for block, first in ends if first]
-        pieces.append(tensor)
-        pieces += [
-            block.astype(str(tensor.dtype)) for block, first in ends if not first
-        ]
+            promoted, _ = _promote_pair(promoted, block)
+        working = str(promoted.dtype)
+        # A float32 result beside integers is worked in float64, which holds
+        # every int32 and float32 exactly, and rounded to float32 once at the
+        # end. Joined at float32, two large integers were each rounded before
+        # their difference was taken: `diff([16777217, 16777219], append=0.5)`
+        # began from 4 rather than 2.
+        pieces = [tensor] + [block for block, _ in ends]
+        if working == "float32" and any(_is_integral(piece) for piece in pieces):
+            result, working = working, "float64"
+        pieces = [block.astype(working) for block, first in ends if first]
+        pieces.append(tensor.astype(working))
+        pieces += [block.astype(working) for block, first in ends if not first]
         tensor = _F.cat(pieces, axis)
+    tensor = _nth_difference(tensor, order, axis)
+    return tensor if result is None else tensor.astype(result)
+
+
+def _is_integral(tensor: Tensor) -> bool:
+    return str(tensor.dtype) in ("int32", "int64")
+
+
+def _nth_difference(tensor: Tensor, order: int, axis: int) -> Tensor:
+    """`order` first differences of `tensor` along `axis`."""
+
     if order and not tensor.requires_grad and str(tensor.dtype) != "bool":
         # Nothing to record, so each pass is the engine's first difference:
         # one parallel subtraction of the shifted rows from the unshifted
@@ -1174,19 +1194,28 @@ def ediff1d(
         None if value is None else _beside(value, flat).reshape(-1)
         for value in (to_begin, to_end)
     )
+    promoted = flat
     for block in (begin, end):
         if block is not None:
-            flat, _ = _promote_pair(flat, block)
+            promoted, _ = _promote_pair(promoted, block)
+    result = str(promoted.dtype)
     length = flat.shape[0]
     pieces = []
     if begin is not None:
-        pieces.append(begin.astype(str(flat.dtype)))
+        pieces.append(begin.astype(result))
     if length > 1:
-        pieces.append(diff(flat))
+        # An integer input's differences are taken exactly -- in int64, where
+        # no int32 difference wraps -- and given the result's dtype once.
+        # Promoted first, two large integers were each rounded before their
+        # difference was taken.
+        if _is_integral(flat) and result.startswith("float"):
+            pieces.append(diff(flat.astype("int64")).astype(result))
+        else:
+            pieces.append(diff(flat.astype(result)))
     elif not pieces and end is None:
-        return _F.narrow(flat, 0, 0, 0)
+        return _F.narrow(flat.astype(result), 0, 0, 0)
     if end is not None:
-        pieces.append(end.astype(str(flat.dtype)))
+        pieces.append(end.astype(result))
     if not pieces:
-        return _F.narrow(flat, 0, 0, 0)
+        return _F.narrow(flat.astype(result), 0, 0, 0)
     return pieces[0] if len(pieces) == 1 else _F.cat(pieces)
