@@ -23,7 +23,7 @@ pub(crate) use crate::ops::map::PAR_THRESHOLD;
 use crate::ops::map::try_par_out_chunks;
 #[cfg(not(feature = "blas"))]
 use crate::ops::simd::{DOT_LANES, pairwise_lanes};
-use crate::ops::simd::{simd_dot_f32, simd_dot_f64};
+use crate::ops::simd::{simd_dot_f32, simd_dot_f32_wide, simd_dot_f64};
 use crate::ops::util::accurate_pair_sum;
 // The hand-written GEMM banding is the fallback for builds without BLAS; with
 // the `blas` feature the library does the blocking itself.
@@ -1669,7 +1669,19 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Integer accumulation wraps and is exact, so blocking cannot change what
     // it produces -- it only buys the same parallelism the floats get.
     let output_data = match result_dtype {
-        DataType::Float32 => dot_of!(as_f32_slice, from_vec_f32, 0.0_f32, simd_dot_f32),
+        // Carried in float64 and rounded once; see `simd_dot_f32_wide`.
+        DataType::Float32 => {
+            let lhs_slice = lhs_view
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("dot: f32 input"))?;
+            let rhs_slice = rhs_view
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("dot: f32 input"))?;
+            let dot = accurate_pair_sum(lhs_slice, rhs_slice, 0.0_f64, simd_dot_f32_wide);
+            TensorData::from_vec_f32(vec![dot as f32], device)
+        }
         DataType::Float64 => dot_of!(as_f64_slice, from_vec_f64, 0.0_f64, simd_dot_f64),
         DataType::Int32 => dot_of!(as_i32_slice, from_vec_i32, 0_i32, |a: &[i32], b: &[i32]| {
             a.iter()

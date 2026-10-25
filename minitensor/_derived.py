@@ -31,6 +31,7 @@ from ._shape import (
     _normalize_axis_tuple,
     _operand_pair,
     _promote_pair,
+    _promoted_dtype,
 )
 
 Tensor = _C.Tensor
@@ -811,7 +812,7 @@ def average(
                 f"got {tuple(weight.shape)} for {tuple(tensor.shape)}"
             )
         total = _F.sum(weight)
-        result = _F.sum(tensor * weight) / total
+        result = _weighted_sum(tensor, weight, None, False, total)
         if keepdim:
             kept = [1] * tensor.ndim()
             result, total = result.reshape(kept), total.reshape(kept)
@@ -843,9 +844,36 @@ def average(
             f"{tuple(tensor.shape)}"
         )
 
-    total = _F.sum(tensor * weight, axes, keepdim)
     divisor = _F.sum(weight.expand(list(tensor.shape)), axes, keepdim)
-    return (total / divisor, divisor) if returned else total / divisor
+    result = _weighted_sum(tensor, weight, axes, keepdim, divisor)
+    return (result, divisor) if returned else result
+
+
+def _weighted_sum(
+    tensor: Tensor, weight: Tensor, axes: list | None, keepdim: bool, divisor: Tensor
+) -> Tensor:
+    """`sum(tensor * weight) / divisor` over `axes`, every axis for `None`.
+
+    A float32 pair is multiplied and summed in float64, where the product of
+    two float32s is exact, its weights totalled there too, and the quotient
+    rounds to float32 once: formed in float32, each product rounded on its own
+    and the weighted mean landed several ulps from the exact one.
+    """
+
+    if _promoted_dtype(tensor, weight) == "float32":
+        # The weight total too: the float32 one is rounded already.
+        wide_weight = weight.astype("float64")
+        wide = tensor.astype("float64") * wide_weight
+        if axes is None:
+            total, divisor = _F.sum(wide), _F.sum(wide_weight)
+        else:
+            spread = wide_weight.expand(list(tensor.shape))
+            total = _F.sum(wide, axes, keepdim)
+            divisor = _F.sum(spread, axes, keepdim)
+        return (total / divisor).astype("float32")
+    product = tensor * weight
+    total = _F.sum(product) if axes is None else _F.sum(product, axes, keepdim)
+    return total / divisor
 
 
 def percentile(

@@ -1082,30 +1082,56 @@ impl SquareSummable for f64 {
 ///
 /// The product of two `f32`s is exact in `f64`, so every rounding this kernel
 /// performs is in the sum -- and the sum is the half that matters, because it
-/// is the one that grows with the length. It costs the lanes: four of `f64`
-/// where the single-precision version has eight.
+/// is the one that grows with the length. A float32 `dot` rounds this once:
+/// accumulated in float32, it landed up to 90 ulps from the exact inner
+/// product of offset data.
 ///
-/// This is what a factorisation wants. A Cholesky entry is one inner product
-/// over the row so far, and carrying a single-precision factorisation entirely
-/// in single precision measured 1.1 to 2.0 times LAPACK's reconstruction error;
-/// carrying the panel wide brings it to 1.0-1.8, and to parity outright below
-/// `n = 128`.
+/// This is what a factorisation wants too. A Cholesky entry is one inner
+/// product over the row so far, and carrying a single-precision factorisation
+/// entirely in single precision measured 1.1 to 2.0 times LAPACK's
+/// reconstruction error; carrying the panel wide brings it to 1.0-1.8, and to
+/// parity outright below `n = 128`.
+///
+/// Sixteen float64 lanes compiled a second time with `avx`, the shape of
+/// [`simd_sum_f32_wide`]; four lanes left each add waiting on the last.
 pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
-    let mut sums = [0f64; 4];
+    #[cfg(target_arch = "x86_64")]
+    if simd_capabilities().avx {
+        // SAFETY: `detect` confirmed avx on this CPU.
+        return unsafe { wide_dot_avx(a, b) };
+    }
+    wide_dot_body(a, b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn wide_dot_avx(a: &[f32], b: &[f32]) -> f64 {
+    wide_dot_body(a, b)
+}
+
+#[inline(always)]
+fn wide_dot_body(a: &[f32], b: &[f32]) -> f64 {
+    const LANES: usize = 16;
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<4>(), b.as_chunks::<4>());
+    let mut sums = [0f64; LANES];
+    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<LANES>(), b.as_chunks::<LANES>());
     for (x, y) in a_chunks.iter().zip(b_chunks) {
-        sums[0] += x[0] as f64 * y[0] as f64;
-        sums[1] += x[1] as f64 * y[1] as f64;
-        sums[2] += x[2] as f64 * y[2] as f64;
-        sums[3] += x[3] as f64 * y[3] as f64;
+        for lane in 0..LANES {
+            sums[lane] += f64::from(x[lane]) * f64::from(y[lane]);
+        }
     }
-    let mut total: f64 = sums.iter().sum();
-    for (x, y) in a_rest.iter().zip(b_rest) {
-        total += *x as f64 * *y as f64;
+    // The tail is padded with zeros, whose products are zero, and folded in as
+    // one more block; see `square_sum_body`.
+    if !a_rest.is_empty() {
+        let (mut x, mut y) = ([0f32; LANES], [0f32; LANES]);
+        x[..a_rest.len()].copy_from_slice(a_rest);
+        y[..b_rest.len()].copy_from_slice(b_rest);
+        for lane in 0..LANES {
+            sums[lane] += f64::from(x[lane]) * f64::from(y[lane]);
+        }
     }
-    total
+    pairwise_lanes(&mut sums)
 }
 
 /// Sum an i32 slice into an i64 accumulator.

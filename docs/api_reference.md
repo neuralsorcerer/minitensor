@@ -106,7 +106,7 @@ of convenience aliases.
 | `histogramdd(input, bins=10, range=None, weight=None, density=False)` | The joint histogram of a `(points, dimensions)` sample, as `(counts, edges)`. `histogram` counts along a line; this counts in a box. `bins` is one count for every dimension, one count each, or the edges themselves; `range` bounds each dimension, as a sequence of pairs or the flat `2 * dimensions` form. The axes are bucketed separately and folded into one flat position, so nothing iterates over cells -- the cost is the samples, not the grid, which is the part that grows exponentially. A point outside any dimension is dropped and each last bin holds its own right edge, as in `histogram`. |
 | `histogram2d(x, y, bins=10, range=None, weights=None, density=False)` | The joint histogram of two sequences, as `(counts, x_edges, y_edges)`. `histogramdd` over the pair, with the edges handed back separately rather than as a list. |
 | `histogram_bin_edges(input, bins=10, range=None, weights=None)` | The edges `histogram` would use, without counting anything -- for choosing one set of edges and reusing it across several tensors, which is the only way two histograms are comparable. `weights` is accepted and ignored: no edge rule depends on them. |
-| `average(input, dim=None, weights=None, keepdim=False, returned=False)` | The mean, or `sum(a * w) / sum(w)` when `weights` is given -- the divisor is the weight total, so weights that do not sum to one still give an average rather than a scaled one. `weights` may have the tensor's shape or be 1-D and as long as the reduced axis. `returned=True` also gives the weight total, which a caller combining averages needs and cannot recover afterwards. |
+| `average(input, dim=None, weights=None, keepdim=False, returned=False)` | The mean, or `sum(a * w) / sum(w)` when `weights` is given -- the divisor is the weight total, so weights that do not sum to one still give an average rather than a scaled one. `weights` may have the tensor's shape or be 1-D and as long as the reduced axis. `returned=True` also gives the weight total, which a caller combining averages needs and cannot recover afterwards. A float32 pair is multiplied, summed and divided in float64 -- the product of two float32s is exact there -- and rounded once. |
 | `ptp(input, dim=None, keepdim=False)` | The peak-to-peak span: `amax` less `amin`. |
 | `percentile(input, q, dim=None, keepdim=False, interpolation='linear')` | `quantile` with `q` in `[0, 100]` rather than `[0, 1]` -- the same computation, so the two cannot drift apart. `q` may be a scalar or a tensor of them. |
 | `nanpercentile(input, q, dim=None, keepdim=False, interpolation='linear')` | `percentile` ignoring NaN, as `nanquantile` is to `quantile`. |
@@ -1812,6 +1812,9 @@ True
 - `isclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
+
+A float32 `dot` is accumulated in float64, where each product of two float32s
+is exact, and rounded once.
 
 A float32 `sum` or `nansum` is carried in float64 and rounded once, over one
 axis or several, so it is the float32 nearest the exact sum, where float32
