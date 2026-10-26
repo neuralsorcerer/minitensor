@@ -22,7 +22,7 @@ once_cell = "1.21"
 
 # Memory management
 arc-swap = "1.9"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # SIMD and performance
 rayon = "1.12"
