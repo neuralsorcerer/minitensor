@@ -25,6 +25,8 @@ for that here because this is where it was found.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
@@ -53,12 +55,21 @@ def _t(values):
     ],
 )
 def test_linspace_ends_exactly_where_it_was_told_to(start, stop, steps):
-    """`a + (n-1) * step` is a few ulps off, and comparisons against it fail."""
+    """`a + (n-1) * step` is a few ulps off, and comparisons against it fail.
+
+    Every point between is the exact one rounded once.
+    """
 
     values = mt.Tensor.linspace(start, stop, steps, dtype="float64").numpy()
     assert values[0] == start
     assert values[-1] == stop
-    np.testing.assert_allclose(values, np.linspace(start, stop, steps), rtol=0, atol=0)
+    if steps > 1:
+        intervals = steps - 1
+        exact = [
+            float((Fraction(start) * (intervals - i) + Fraction(stop) * i) / intervals)
+            for i in range(steps)
+        ]
+        assert values.tolist() == exact
 
 
 def test_logspace_ends_exactly_where_it_was_told_to():

@@ -751,23 +751,11 @@ pub(crate) fn arange_count(start: f64, end: f64, step: f64) -> PyResult<usize> {
     Ok(count)
 }
 
-/// The `i`-th of `steps` values evenly spaced from `start` to `end`.
+/// `steps` points evenly spaced from `start` to `end`, each the exact point
+/// rounded once to `dtype`; see [`engine::ops::evenly_spaced_data`].
 ///
-/// The endpoint is written rather than computed. `start + (steps - 1) * step`
-/// lands a few ulps from `end` for most spacings, and a `linspace` whose last
-/// element is not its stop value quietly breaks anything that compares against
-/// it -- a histogram's closing bin edge, an interpolation's right boundary, a
-/// grid's far corner. `numpy` writes the endpoint for the same reason.
-fn evenly_spaced(start: f64, end: f64, step: f64, steps: usize, i: usize) -> f64 {
-    if steps == 1 {
-        start
-    } else if i + 1 == steps {
-        end
-    } else {
-        start + i as f64 * step
-    }
-}
-
+/// An integer dtype takes the nearest integer to the point, a half away
+/// from zero, rather than the one below it.
 pub(crate) fn create_linspace_tensor(
     start: f64,
     end: f64,
@@ -776,20 +764,10 @@ pub(crate) fn create_linspace_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    let step = if steps > 1 {
-        (end - start) / (steps - 1) as f64
-    } else {
-        0.0
-    };
-    // An integer dtype takes the nearest point rather than the one below it,
-    // which is what the five hand-written arms did; rounding in the closure
-    // leaves the conversion itself with nothing to decide.
-    let rounds = matches!(dtype, DataType::Int32 | DataType::Int64);
     Ok(Tensor::new(
-        Arc::new(TensorData::from_index(steps, dtype, device, |index| {
-            let value = evenly_spaced(start, end, step, steps, index);
-            if rounds { value.round() } else { value }
-        })),
+        Arc::new(engine::ops::evenly_spaced_data(
+            start, end, steps, dtype, device,
+        )),
         Shape::new(vec![steps]),
         dtype,
         device,
@@ -806,15 +784,12 @@ pub(crate) fn create_logspace_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    let step = if steps > 1 {
-        (end - start) / (steps - 1) as f64
-    } else {
-        0.0
-    };
+    let intervals = steps.saturating_sub(1);
     let rounds = matches!(dtype, DataType::Int32 | DataType::Int64);
     Ok(Tensor::new(
         Arc::new(TensorData::from_index(steps, dtype, device, |index| {
-            let value = base.powf(evenly_spaced(start, end, step, steps, index));
+            let exponent = engine::ops::evenly_spaced_point(start, end, index, intervals);
+            let value = base.powf(exponent);
             if rounds { value.round() } else { value }
         })),
         Shape::new(vec![steps]),

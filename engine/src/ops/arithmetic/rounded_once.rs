@@ -129,7 +129,7 @@ fn sum_of_three(a: f64, b: f64, c: f64) -> f64 {
 
 /// `x + y` and its exact rounding error.
 #[inline(always)]
-fn two_sum(x: f64, y: f64) -> (f64, f64) {
+pub(super) fn two_sum(x: f64, y: f64) -> (f64, f64) {
     let sum = x + y;
     let virtual_y = sum - x;
     let virtual_x = sum - virtual_y;
@@ -139,7 +139,7 @@ fn two_sum(x: f64, y: f64) -> (f64, f64) {
 /// The exact error of `product`, the float64 nearest `x * y`, from both
 /// operands split into halves whose products float64 holds exactly.
 #[inline(always)]
-fn product_error(x: f64, y: f64, product: f64) -> f64 {
+pub(super) fn product_error(x: f64, y: f64, product: f64) -> f64 {
     let split = |value: f64| {
         let scaled = 134_217_729.0 * value;
         let high = scaled - (scaled - value);
@@ -338,10 +338,10 @@ fn once<T: Target, A: Operand, B: Operand>(op: Arith, a: A, b: B) -> T {
 
 /// A finite value as `±magnitude · 2^exponent`.
 #[derive(Clone, Copy, Debug)]
-struct Exact {
-    negative: bool,
-    magnitude: u64,
-    exponent: i32,
+pub(super) struct Exact {
+    pub(super) negative: bool,
+    pub(super) magnitude: u64,
+    pub(super) exponent: i32,
 }
 
 impl Exact {
@@ -353,7 +353,7 @@ impl Exact {
         }
     }
 
-    fn float(value: f64) -> Option<Self> {
+    pub(super) fn float(value: f64) -> Option<Self> {
         if !value.is_finite() {
             return None;
         }
@@ -469,7 +469,7 @@ impl Operand for f64 {
 }
 
 /// A float dtype a result is rounded to.
-trait Target: TensorElement {
+pub(super) trait Target: TensorElement {
     /// Significand bits, the leading one included.
     const DIGITS: i32;
     /// The exponent of the smallest subnormal.
@@ -632,21 +632,25 @@ fn exactly<T: Target>(op: Arith, a: Option<Exact>, b: Option<Exact>, plain: f64)
 
 /// `a + b` for two nonzero values as `±magnitude · 2^exponent`, or `None`
 /// when they cancel exactly.
-///
-/// Each significand is moved up to bit 125, which leaves at least 62 zero
-/// bits beneath it, so the two line up exactly unless their leading bits are
-/// more than 62 apart. Then the smaller lies far below where the result
-/// rounds, and all that matters of the bits shifted out is that some were:
-/// that is marked in the last bit kept, which leaves the sum on the same side
-/// of every halfway point as the exact sum.
 fn sum(a: Exact, b: Exact) -> Option<(bool, u128, i32)> {
-    let lift = |value: Exact| {
-        let shift = value.magnitude.leading_zeros() + 62;
-        (
-            value.negative,
-            u128::from(value.magnitude) << shift,
-            value.exponent - shift as i32,
-        )
+    let wide = |value: Exact| (value.negative, u128::from(value.magnitude), value.exponent);
+    sum_wide(wide(a), wide(b))
+}
+
+/// [`sum`] for two nonzero `±magnitude · 2^exponent` of up to 117 bits each.
+///
+/// Each magnitude is moved up to bit 125, which leaves at least nine zero
+/// bits beneath it -- 62 for a float64's -- so the two line up exactly unless
+/// the smaller has to move further down than that. Then it lies at least ten
+/// places below the larger's leading bit, and all that matters of the bits
+/// shifted out is that some were: that is marked in the last bit kept, where
+/// the larger has a zero. An inexact sum is so odd, of at least 125 bits,
+/// and on the same side of every halfway point of a coarser rounding as the
+/// exact sum.
+pub(super) fn sum_wide(a: (bool, u128, i32), b: (bool, u128, i32)) -> Option<(bool, u128, i32)> {
+    let lift = |(negative, magnitude, exponent): (bool, u128, i32)| {
+        let shift = magnitude.leading_zeros() - 2;
+        (negative, magnitude << shift, exponent - shift as i32)
     };
     let (a, b) = (lift(a), lift(b));
     let ((negative, larger, exponent), (other_negative, smaller, other_exponent)) =
@@ -672,7 +676,7 @@ fn sum(a: Exact, b: Exact) -> Option<(bool, u128, i32)> {
 
 /// `±magnitude · 2^exponent`, nonzero, rounded to the nearest `T`, ties to
 /// even.
-fn rounded<T: Target>(negative: bool, magnitude: u128, exponent: i32) -> T {
+pub(super) fn rounded<T: Target>(negative: bool, magnitude: u128, exponent: i32) -> T {
     let zeros = magnitude.leading_zeros();
     let leading = exponent + 127 - zeros as i32;
     if (T::LEAST_NORMAL..T::GREATEST).contains(&leading) {

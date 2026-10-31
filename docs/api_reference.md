@@ -689,10 +689,18 @@ its values, so nothing flows back to the source through it.
 - `logspace`
 
 `linspace`, `logspace` and `geomspace` with `steps=0` give an empty tensor, as
-`arange(1, 0)` does; with no `dtype` they give the default one. At an integer
-`dtype` each point is rounded to the nearest integer, a half away from zero --
-`linspace(0, 10, 5, dtype="int64")` is `[0, 3, 5, 8, 10]` -- where `astype`
-of the float points would truncate them to `[0, 2, 5, 7, 10]`.
+`arange(1, 0)` does; with no `dtype` they give the default one. Point `i` of a
+`linspace` is the exact `(start * (steps - 1 - i) + end * i) / (steps - 1)`
+rounded once to the `dtype`: `linspace(0, 1, 11)` holds `0.3`, not the
+`0.30000000000000004` that `start + i * step` rounds to, and the points are in
+order, symmetric wherever the exact ones are -- the middle of `linspace(-1, 1,
+3)` is `0.0` -- and finite between finite ends whose difference overflows. The
+two ends are the given ones. `logspace` raises `base` to those points. At an
+integer `dtype` each point is the exact one rounded to the nearest integer, a
+half away from zero -- `linspace(0, 10, 5, dtype="int64")` is `[0, 3, 5, 8,
+10]` -- where `astype` of the float points would truncate them to `[0, 2, 5,
+7, 10]`, and an int64 point past 2^53 is the integer itself rather than the
+float64 nearest it.
 
 `arange` and `full` are typed by what they are given unless `dtype=` names
 one, as the constructors are: `arange(5)` counts in `int64`, and only a float
@@ -1522,7 +1530,8 @@ A value's bin is the last edge at or below it, decided exactly: an int64 past
 taken from int64 data is widened outward to the floats that enclose it, so
 the largest value is never left out. A range whose ends are finite but whose
 span is not, such as `(-1e308, 1e308)`, still gives finite, evenly spaced
-edges. Equal-width bins are found by arithmetic and checked against the edges,
+edges; each edge is the exact one rounded once, as a `linspace` point is.
+Equal-width bins are found by arithmetic and checked against the edges,
 so their cost does not grow with the number of bins.
 
 Two conventions worth stating because they are easy to get backwards. Values

@@ -1205,25 +1205,11 @@ fn bin_edges(input: &Tensor, bins: Bins<'_>, range: Option<(f64, f64)>) -> Resul
                     "histogram: the range must be finite and increasing",
                 ));
             }
-            let width = (high - low) / count as f64;
-            let mut edges: Vec<f64> = if width.is_finite() {
-                (0..=count)
-                    .map(|index| low + index as f64 * width)
-                    .collect()
-            } else {
-                // Both ends finite and the span between them not: halved, the
-                // span fits, and doubling an edge back is exact. Spaced the
-                // ordinary way the step was infinite and the first edge
-                // `low + 0 * inf`, a NaN.
-                let half_width = (high / 2.0 - low / 2.0) / count as f64;
-                (0..=count)
-                    .map(|index| 2.0 * (low / 2.0 + index as f64 * half_width))
-                    .collect()
-            };
-            // The arithmetic above can miss the top edge by a rounding, and the
-            // top edge is the one the closed last bin depends on.
-            edges[count] = high;
-            Ok(edges)
+            // Each edge is the exact one rounded once, the two ends the given
+            // ones, and a span past the float range is no different.
+            Ok((0..=count)
+                .map(|index| crate::ops::evenly_spaced_point(low, high, index, count))
+                .collect())
         }
     }
 }
