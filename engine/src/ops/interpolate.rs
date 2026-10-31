@@ -121,36 +121,44 @@ pub(crate) fn axis_map(
     }
     let last = in_size - 1;
 
+    // Each source position is a fraction of whole numbers, so its whole part
+    // is an exact quotient and its weight a remainder over the denominator,
+    // rounded once. Taken from a position in floats, the weight carried the
+    // position's rounding, an ulp of the index rather than of the weight:
+    // a few thousand samples in, a weight was good to twelve digits.
+    let (in_wide, out_wide) = (in_size as u128, out_size as u128);
     for index in 0..out_size {
-        let source = match mode {
+        let index_wide = index as u128;
+        let (numerator, denominator) = match mode {
             // Nearest takes the cell the output position falls in, which is the
             // floor of the uniform mapping and needs no convention: there is no
             // interpolation for the endpoints to be preserved by.
             InterpolateMode::Nearest => {
-                let scaled = index as f64 * in_size as f64 / out_size as f64;
-                lower[index] = (scaled as usize).min(last);
+                let cell = index_wide * in_wide / out_wide;
+                lower[index] = (cell.min(last as u128)) as usize;
                 upper[index] = lower[index];
                 continue;
             }
             InterpolateMode::Linear if align_corners => {
                 if out_size == 1 {
-                    0.0
+                    (0, 1)
                 } else {
-                    index as f64 * last as f64 / (out_size - 1) as f64
+                    (index_wide * last as u128, out_wide - 1)
                 }
             }
-            InterpolateMode::Linear => {
-                let scaled = (index as f64 + 0.5) * in_size as f64 / out_size as f64 - 0.5;
-                // A position left of the first sample has nothing to its left,
-                // so it reads the first sample rather than extrapolating.
-                scaled.max(0.0)
-            }
+            // `(index + 0.5) * in / out - 0.5`, over `2 * out`. A position left
+            // of the first sample has nothing to its left, so it reads the
+            // first sample rather than extrapolating.
+            InterpolateMode::Linear => (
+                ((2 * index_wide + 1) * in_wide).saturating_sub(out_wide),
+                2 * out_wide,
+            ),
         };
-        let floor = source.floor();
-        let base = (floor as usize).min(last);
+        let whole = numerator / denominator;
+        let base = whole.min(last as u128) as usize;
         lower[index] = base;
         upper[index] = (base + 1).min(last);
-        weight[index] = source - floor;
+        weight[index] = (numerator % denominator) as f64 / denominator as f64;
     }
 
     AxisMap {
