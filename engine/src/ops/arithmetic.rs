@@ -15,4 +15,6 @@ mod evenly_spaced;
 pub(crate) mod rounded_once;
 
 pub use self::elementwise_impl::*;
-pub use self::evenly_spaced::{evenly_spaced_data, evenly_spaced_point};
+pub use self::evenly_spaced::{
+    evenly_spaced_data, evenly_spaced_point, stepped_data, stepped_point,
+};

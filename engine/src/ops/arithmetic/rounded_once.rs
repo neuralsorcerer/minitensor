@@ -96,7 +96,7 @@ impl Arith {
 /// `value` rounded to odd, given a number whose sign is that of the exact
 /// result less `value`: zero when `value` is exact, and NaN to leave it be.
 #[inline(always)]
-fn odd(value: f64, rest: f64) -> f64 {
+pub(super) fn odd(value: f64, rest: f64) -> f64 {
     let bits = value.to_bits();
     // Towards the exact result: a larger magnitude when it lies beyond the
     // value, a smaller one when it lies between the value and zero.

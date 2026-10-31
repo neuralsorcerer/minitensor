@@ -709,7 +709,12 @@ bound or step gives the default float; `full(shape, 7)` is `int64`,
 default float `arange(2**24 + 1)` could not hold its own last value. The stop
 is never part of an `arange`, however the step rounds: `arange(1, 1.3, 0.1)`
 is `[1.0, 1.1, 1.2]`, and integer bounds are counted exactly, so
-`arange(2**62, 2**62 + 2)` has its two values at any dtype.
+`arange(2**62, 2**62 + 2)` has its two values at any dtype. With a float
+bound or step, value `i` is the exact `start + i * step` rounded once to the
+dtype -- truncated towards zero at an integer one, as a float converted to an
+integer is -- where the product rounded first and then the sum, and a fifth
+of the values of an ordinary `arange` were an ulp off; the stop is excluded
+against those same values.
 
 ### NumPy interop
 

@@ -22,7 +22,7 @@
 
 use std::mem::MaybeUninit;
 
-use super::rounded_once::{Exact, Target, product_error, rounded, sum_wide, two_sum};
+use super::rounded_once::{Exact, Target, odd, product_error, rounded, sum_wide, two_sum};
 use crate::{
     device::Device,
     ops::map::{PAR_CHUNK, build_vec, par_out_chunks},
@@ -39,7 +39,7 @@ const HUGE: f64 = f64::from_bits((1023 + 900) << 52);
 /// its own rounding.
 const SHY_OF_HALF: f64 = 0.5 - 1.0 / (1u64 << 40) as f64;
 
-/// A point in float64, as [`Spacing::near`] finds it.
+/// A point in float64, as [`Points::near`] finds it.
 #[derive(Clone, Copy)]
 struct Near {
     value: f64,
@@ -49,6 +49,13 @@ struct Near {
     /// Whether `value` is the point itself, which a halfway point between two
     /// narrower values can be.
     exact: bool,
+}
+
+/// A run of points float64 arithmetic can settle, one index at a time.
+trait Points: Copy + Send + Sync {
+    /// Point `index` rounded to the nearest float64, and whether it surely
+    /// is. No branch is taken, so a block of points vectorizes.
+    fn near<const FUSED: bool>(self, index: usize) -> Near;
 }
 
 /// What the points of one spacing share, when float64 arithmetic can settle
@@ -72,10 +79,9 @@ impl Spacing {
             inverse: 1.0 / intervals as f64,
         })
     }
+}
 
-    /// Point `index` rounded to the nearest float64, and whether it surely
-    /// is.
-    ///
+impl Points for Spacing {
     /// The numerator `start · (count - index) + end · index` is four exact
     /// floats: two products and their errors. Its leading float times the
     /// reciprocal is a quotient, and what that quotient leaves of the
@@ -84,8 +90,7 @@ impl Spacing {
     /// count` of the point, for the unit roundoff `u` and the products'
     /// magnitude `M`, and `bound` doubles and triples those. The value is the
     /// point itself when the numerator is its leading float alone and the
-    /// value times the count is exactly that. No branch is taken, so a block
-    /// of points vectorizes.
+    /// value times the count is exactly that.
     #[inline(always)]
     fn near<const FUSED: bool>(self, index: usize) -> Near {
         let right = whole(index);
@@ -254,21 +259,35 @@ fn on_halfway(wide: f64, narrow: f32) -> bool {
     (wide == (back + f64::from(other)) / 2.0) | narrow.is_infinite()
 }
 
+/// 1.5 · 2^52: added to a float64 below 2^51 in magnitude, it leaves the
+/// nearest integer, ties to even, in the low bits of the sum.
+const SHIFTER: f64 = 6_755_399_441_055_744.0;
+
+/// `wide` rounded to the nearest integer, ties to even, as an integer and
+/// as a float64, for `wide` below 2^51 in magnitude; anything at all
+/// otherwise. No conversion instruction is needed, so a block vectorizes.
+#[inline(always)]
+fn nearest_even(wide: f64) -> (i64, f64) {
+    let shifted = wide + SHIFTER;
+    let integer = (shifted.to_bits() as i64).wrapping_sub(SHIFTER.to_bits() as i64);
+    (integer, shifted - SHIFTER)
+}
+
 /// `wide` rounded to the nearest integer, a half away from zero, and whether
-/// that is surely the exact point's: below 2^52, where every half-integer is
+/// that is surely the exact point's: below 2^51, where every half-integer is
 /// a float64 and so `wide` is on the same side of each as the exact point,
 /// and only when it is not one itself -- unless `exact` says the point is
 /// `wide`.
 #[inline(always)]
 fn nearest_integer(wide: f64, exact: bool) -> (i64, bool) {
-    let truncated = wide as i64;
-    let fraction = wide - truncated as f64;
-    // Wrapping, since a saturated `truncated` is never settled.
-    let rounded = truncated
-        .wrapping_add(i64::from(fraction >= 0.5))
-        .wrapping_sub(i64::from(fraction <= -0.5));
-    let settled = (wide.abs() < 2f64.powi(52)) & (exact | (fraction.abs() != 0.5));
-    (rounded, settled)
+    let (even, rounded) = nearest_even(wide);
+    let fraction = wide - rounded;
+    // A tie went to even; away from zero is one further out when that was
+    // towards zero.
+    let away =
+        i64::from((fraction == 0.5) & (wide > 0.0)) - i64::from((fraction == -0.5) & (wide < 0.0));
+    let settled = (wide.abs() < 2f64.powi(51)) & (exact | (fraction.abs() != 0.5));
+    (even.wrapping_add(away), settled)
 }
 
 /// The point rounded to the nearest integer, a half away from zero, and
@@ -347,13 +366,14 @@ const BLOCK: usize = 256;
 /// float64 to the element and says whether that is surely right, and `slow`
 /// gives an element the long way.
 #[inline(always)]
-fn fill<U, F, S, const FUSED: bool>(
-    spacing: Spacing,
+fn fill<P, U, F, S, const FUSED: bool>(
+    points: P,
     first: usize,
     out: &mut [MaybeUninit<U>],
     finish: F,
     slow: S,
 ) where
+    P: Points,
     F: Fn(Near) -> (U, bool),
     S: Fn(usize) -> U,
 {
@@ -362,7 +382,7 @@ fn fill<U, F, S, const FUSED: bool>(
         let mut unsettled = [false; BLOCK];
         let mut pending = false;
         for (offset, (slot, mark)) in block.iter_mut().zip(&mut unsettled).enumerate() {
-            let (value, settled) = finish(spacing.near::<FUSED>(base + offset));
+            let (value, settled) = finish(points.near::<FUSED>(base + offset));
             slot.write(value);
             *mark = !settled;
             pending |= !settled;
@@ -380,31 +400,33 @@ fn fill<U, F, S, const FUSED: bool>(
 /// [`fill`] compiled with fused multiply-adds, for a CPU that has them.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn fill_fma<U, F, S>(spacing: Spacing, first: usize, out: &mut [MaybeUninit<U>], finish: F, slow: S)
+fn fill_fma<P, U, F, S>(points: P, first: usize, out: &mut [MaybeUninit<U>], finish: F, slow: S)
 where
+    P: Points,
     F: Fn(Near) -> (U, bool),
     S: Fn(usize) -> U,
 {
-    fill::<U, F, S, true>(spacing, first, out, finish, slow)
+    fill::<P, U, F, S, true>(points, first, out, finish, slow)
 }
 
-/// `steps` elements, point by point: settled in float64 blocks where the
-/// spacing allows, and by `slow` otherwise.
-fn build<U, F, S>(
+/// `steps` elements, point by point: settled in float64 blocks where
+/// `points` allows, and by `slow` otherwise.
+fn build<P, U, F, S>(
     steps: usize,
     dtype: DataType,
     device: Device,
-    spacing: Option<Spacing>,
+    points: Option<P>,
     finish: F,
     slow: S,
 ) -> TensorData
 where
+    P: Points,
     U: Copy + Send + 'static,
     F: Fn(Near) -> (U, bool) + Copy + Sync,
     S: Fn(usize) -> U + Copy + Sync,
 {
     let chunk_of = |first: usize, chunk: &mut [MaybeUninit<U>]| {
-        let Some(spacing) = spacing else {
+        let Some(points) = points else {
             for (offset, slot) in chunk.iter_mut().enumerate() {
                 slot.write(slow(first + offset));
             }
@@ -413,9 +435,9 @@ where
         #[cfg(target_arch = "x86_64")]
         if crate::ops::simd::simd_capabilities().avx2_fma {
             // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { fill_fma(spacing, first, chunk, finish, slow) };
+            return unsafe { fill_fma(points, first, chunk, finish, slow) };
         }
-        fill::<U, F, S, false>(spacing, first, chunk, finish, slow)
+        fill::<P, U, F, S, false>(points, first, chunk, finish, slow)
     };
     // SAFETY: the chunks tile the buffer and each writes every one of its
     // elements, so all `steps` are initialized.
@@ -492,6 +514,237 @@ pub fn evenly_spaced_data(
             spacing,
             |near| (near.value != 0.0, near.settled),
             |index| point_nonzero(start, end, index, intervals),
+        ),
+    }
+}
+
+/// What the points of one `arange` share, when float64 arithmetic settles
+/// them: a finite start and step of ordinary size, and at most 2^52 points.
+#[derive(Clone, Copy)]
+struct Stepping {
+    start: f64,
+    step: f64,
+}
+
+impl Stepping {
+    fn new(start: f64, step: f64, count: usize) -> Option<Self> {
+        let fits = count as u64 <= 1 << 52;
+        let ordinary = start.abs() <= HUGE && (TINY..=HUGE).contains(&step.abs());
+        (fits && ordinary).then_some(Self { start, step })
+    }
+}
+
+impl Points for Stepping {
+    /// `start + index · step` is three floats exactly: the start, and the
+    /// product and its error. Two-sums take that apart into a leading float
+    /// and two smaller ones, whose sum rounded to odd keeps, two places below
+    /// the leading float's last bit, whether anything lies beyond it -- so
+    /// adding it rounds as the exact sum does. It is the exact sum when the
+    /// two smaller floats are both zero. Point `0` is the start itself, a
+    /// `-0.0` included.
+    #[inline(always)]
+    fn near<const FUSED: bool>(self, index: usize) -> Near {
+        let (product, product_error) = exact_product::<FUSED>(whole(index), self.step);
+        let (total, total_error) = two_sum(self.start, product);
+        let (rest, rest_error) = two_sum(total_error, product_error);
+        let first = index == 0;
+        let value = if first {
+            self.start
+        } else {
+            total + odd(rest, rest_error)
+        };
+        let exact = first | ((rest == 0.0) & (rest_error == 0.0));
+        Near {
+            value,
+            settled: true,
+            exact,
+        }
+    }
+}
+
+/// Value `index` of an `arange` from `start` by `step`: `start + index ·
+/// step` rounded once to the nearest float64, and `start` itself for index
+/// `0`.
+///
+/// Computed as `start + index * step` it rounded twice, and a fifth of the
+/// values of an ordinary `arange` were an ulp off the exact one rounded.
+pub fn stepped_point(start: f64, step: f64, index: usize) -> f64 {
+    if index == 0 {
+        return start;
+    }
+    if !(start.is_finite() && step.is_finite()) {
+        return start + index as f64 * step;
+    }
+    match Stepping::new(start, step, index + 1) {
+        Some(stepping) => stepping.near::<false>(index).value,
+        None => stepped_exactly(start, step, index),
+    }
+}
+
+/// `start + index · step` as `±magnitude · 2^exponent`, exact or rounded to
+/// odd at 125 bits or more: see [`sum_wide`]. A zero that cancels is `+0`.
+fn stepped_sum(start: f64, step: f64, index: usize) -> (bool, u128, i32) {
+    let start = Exact::float(start).expect("the start is finite");
+    let step = Exact::float(step).expect("the step is finite");
+    let product = (
+        step.negative,
+        u128::from(step.magnitude) * index as u128,
+        step.exponent,
+    );
+    let start = (start.negative, u128::from(start.magnitude), start.exponent);
+    match (start.1, product.1) {
+        (0, 0) => (start.0 && product.0, 0, 0),
+        (0, _) => product,
+        (_, 0) => start,
+        _ => sum_wide(start, product).unwrap_or((false, 0, 0)),
+    }
+}
+
+/// `start + index · step` rounded once to `T`, from the exact sum, for a
+/// finite start and step and an index past `0`.
+#[cold]
+#[inline(never)]
+fn stepped_exactly<T: Target>(start: f64, step: f64, index: usize) -> T {
+    let (negative, magnitude, exponent) = stepped_sum(start, step, index);
+    if magnitude == 0 {
+        return T::assemble(negative, 0, 0);
+    }
+    rounded(negative, magnitude, exponent)
+}
+
+/// Value `index` rounded once to float32; see [`point_f32`].
+fn stepped_f32(start: f64, step: f64, index: usize) -> f32 {
+    let wide = stepped_point(start, step, index);
+    let narrow = wide as f32;
+    let finite = start.is_finite() && step.is_finite();
+    if index != 0 && finite && on_halfway(wide, narrow) {
+        stepped_exactly(start, step, index)
+    } else {
+        narrow
+    }
+}
+
+/// `wide` truncated towards zero, and whether that is surely the exact
+/// value's: below 2^51, where every integer is a float64 and so `wide` is on
+/// the same side of each as the exact value, and only when it is not one
+/// itself -- unless `exact` says the value is `wide`.
+#[inline(always)]
+fn truncated_integer(wide: f64, exact: bool) -> (i64, bool) {
+    let (even, rounded) = nearest_even(wide);
+    // The nearest integer is one past the truncation when it is further
+    // from zero than `wide`.
+    let past =
+        i64::from((wide >= 0.0) & (rounded > wide)) - i64::from((wide < 0.0) & (rounded < wide));
+    let settled = (wide.abs() < 2f64.powi(51)) & (exact | (rounded != wide));
+    (even.wrapping_sub(past), settled)
+}
+
+/// Value `index` truncated towards zero and saturated to the int64 range.
+fn stepped_integer(start: f64, step: f64, index: usize) -> i64 {
+    let wide = stepped_point(start, step, index);
+    let (truncated, settled) = truncated_integer(wide, index == 0);
+    if settled {
+        truncated
+    } else if index == 0 || !(start.is_finite() && step.is_finite()) {
+        // The start itself, or no exact sum to take.
+        wide as i64
+    } else {
+        stepped_integer_exactly(start, step, index)
+    }
+}
+
+/// Value `index` truncated towards zero, from the exact sum.
+///
+/// Rounded to odd, the sum is on the same side of every integer as the
+/// exact one wherever an integer is two of its units or more; where its
+/// units are whole, it is exact or past 2^124 and saturates.
+#[cold]
+#[inline(never)]
+fn stepped_integer_exactly(start: f64, step: f64, index: usize) -> i64 {
+    let (negative, magnitude, exponent) = stepped_sum(start, step, index);
+    let whole = if exponent >= 0 {
+        if 128 - magnitude.leading_zeros() as i32 + exponent > 64 {
+            u128::from(u64::MAX)
+        } else {
+            magnitude << exponent
+        }
+    } else if exponent <= -128 {
+        0
+    } else {
+        magnitude >> -exponent
+    };
+    let signed = if negative {
+        -(whole as i128)
+    } else {
+        whole as i128
+    };
+    signed.clamp(i64::MIN.into(), i64::MAX.into()) as i64
+}
+
+/// The `count` values of an `arange` from `start` by `step`, each `start +
+/// index · step` rounded once to `dtype`: truncated towards zero and
+/// saturated for an integer one, and to whether it is nonzero for a bool.
+pub fn stepped_data(
+    start: f64,
+    step: f64,
+    count: usize,
+    dtype: DataType,
+    device: Device,
+) -> TensorData {
+    let finite = start.is_finite() && step.is_finite();
+    let stepping = finite.then(|| Stepping::new(start, step, count)).flatten();
+    match dtype {
+        DataType::Float32 => build(
+            count,
+            dtype,
+            device,
+            stepping,
+            |near| {
+                let narrow = near.value as f32;
+                let twice = !near.exact & on_halfway(near.value, narrow);
+                (narrow, !twice)
+            },
+            |index| stepped_f32(start, step, index),
+        ),
+        DataType::Float64 => build(
+            count,
+            dtype,
+            device,
+            stepping,
+            |near| (near.value, near.settled),
+            |index| stepped_point(start, step, index),
+        ),
+        DataType::Int32 => {
+            let narrow = |value: i64| value.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            build(
+                count,
+                dtype,
+                device,
+                stepping,
+                |near| {
+                    let (value, settled) = truncated_integer(near.value, near.exact);
+                    (narrow(value), settled)
+                },
+                |index| narrow(stepped_integer(start, step, index)),
+            )
+        }
+        DataType::Int64 => build(
+            count,
+            dtype,
+            device,
+            stepping,
+            |near| truncated_integer(near.value, near.exact),
+            |index| stepped_integer(start, step, index),
+        ),
+        DataType::Bool => build(
+            count,
+            dtype,
+            device,
+            stepping,
+            // A sum of multiples of the least subnormal rounds to zero only
+            // when it is zero.
+            |near| (near.value != 0.0, true),
+            |index| stepped_point(start, step, index) != 0.0,
         ),
     }
 }
@@ -661,6 +914,111 @@ mod tests {
                     let nonzero = point_nonzero(start, end, index, intervals);
                     assert_eq!(bool.as_bool_slice().unwrap()[index], nonzero, "{at}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_is_rounded_once() {
+        let mut next = generator(0x1f83_d9ab_fb41_bd6b);
+        let mut exacts = 0;
+        for round in 0..300_000 {
+            let step = f64::from_bits(next() >> (1 + next() % 2));
+            let step = if next().is_multiple_of(2) {
+                step
+            } else {
+                -step
+            };
+            let index = 1 + (next() % 100_000) as usize;
+            // Starts of any size, near the negated product, and a few ulps
+            // from it.
+            let product = index as f64 * step;
+            let start = match round % 3 {
+                0 => f64::from_bits(next() >> (1 + next() % 2)),
+                1 => -product * (1.0 + (next() % 1000) as f64 * f64::EPSILON),
+                _ => -product + (next() % 64) as f64 * product.abs() * f64::EPSILON,
+            };
+            if !(start.is_finite() && step.is_finite() && product.is_finite()) {
+                continue;
+            }
+            let exact: f64 = stepped_exactly(start, step, index);
+            let at = format!("{start:e} + {index} * {step:e}");
+            if let Some(stepping) = Stepping::new(start, step, index + 1) {
+                for near in [stepping.near::<false>(index), stepping.near::<true>(index)] {
+                    assert_eq!(near.value.to_bits(), exact.to_bits(), "{at}");
+                    if near.exact {
+                        // The exact sum is the value, compared with trailing
+                        // zeros taken off both.
+                        let reduced = |(magnitude, exponent): (u128, i32)| {
+                            let zeros = magnitude.trailing_zeros().min(127);
+                            (magnitude >> zeros, exponent + zeros as i32)
+                        };
+                        let (negative, magnitude, exponent) = stepped_sum(start, step, index);
+                        let value = Exact::float(near.value).unwrap();
+                        if magnitude == 0 {
+                            assert_eq!(value.magnitude, 0, "{at}");
+                        } else {
+                            assert_eq!(negative, value.negative, "{at}");
+                            assert_eq!(
+                                reduced((magnitude, exponent)),
+                                reduced((u128::from(value.magnitude), value.exponent)),
+                                "{at}"
+                            );
+                        }
+                        exacts += 1;
+                    }
+                }
+            }
+            let narrow: f32 = stepped_exactly(start, step, index);
+            assert_eq!(
+                stepped_f32(start, step, index).to_bits(),
+                narrow.to_bits(),
+                "{at}"
+            );
+        }
+        assert!(exacts > 100, "{exacts}");
+        assert_eq!(stepped_point(-0.0, 1.0, 0).to_bits(), (-0.0f64).to_bits());
+        // `0.1 * 3` rounds up to the float after `0.3`, and so does the sum.
+        assert_eq!(stepped_point(0.0, 0.1, 3), 0.30000000000000004);
+        assert_eq!(stepped_point(1.0, 0.1, 3), 1.3);
+        // Truncation of a value just short of a whole number.
+        let below = f64::from_bits(3.0f64.to_bits() - 1);
+        assert_eq!(stepped_integer(below, 2f64.powi(-60), 1), 2);
+        assert_eq!(stepped_integer(-below, -(2f64.powi(-60)), 1), -2);
+        assert_eq!(stepped_integer(2f64.powi(62), 0.5, 3), (1 << 62) + 1);
+        assert_eq!(stepped_integer(1e300, 1.0, 1), i64::MAX);
+    }
+
+    #[test]
+    fn the_blocks_give_each_stepped_value_as_it_is_given_alone() {
+        let cases = [
+            (0.0, 0.1, 1000),
+            (-89.62934926018048, 0.3, 700),
+            (-0.0, 1.0, 5),
+            (0.5, 0.25, 3000),
+            (2f64.powi(62), 0.5, 300),
+            (3.0, -1.0 / 3.0, 999),
+            (1e300, 1e290, 50),
+            (0.0, 5e-324, 20),
+        ];
+        for (start, step, count) in cases {
+            let data = |dtype| stepped_data(start, step, count, dtype, Device::cpu());
+            let (float64, float32) = (data(DataType::Float64), data(DataType::Float32));
+            let (int64, int32) = (data(DataType::Int64), data(DataType::Int32));
+            let bool = data(DataType::Bool);
+            for index in 0..count {
+                let at = format!("{start:e} + {index} * {step:e}");
+                let point = stepped_point(start, step, index);
+                let float64 = float64.as_f64_slice().unwrap()[index];
+                assert_eq!(float64.to_bits(), point.to_bits(), "{at}");
+                let narrow = stepped_f32(start, step, index);
+                let float32 = float32.as_f32_slice().unwrap()[index];
+                assert_eq!(float32.to_bits(), narrow.to_bits(), "{at}");
+                let integer = stepped_integer(start, step, index);
+                assert_eq!(int64.as_i64_slice().unwrap()[index], integer, "{at}");
+                let clamped = integer.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+                assert_eq!(int32.as_i32_slice().unwrap()[index], clamped, "{at}");
+                assert_eq!(bool.as_bool_slice().unwrap()[index], point != 0.0, "{at}");
             }
         }
     }

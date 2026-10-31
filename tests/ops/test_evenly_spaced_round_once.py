@@ -151,3 +151,38 @@ def test_histogram_edges_and_logspace_use_the_exact_points():
     assert mt.logspace(0.0, 1.0, 11, dtype="float64").tolist() == [
         10.0**exponent for exponent in exponents
     ]
+
+
+def _truncated(value: Fraction) -> int:
+    whole = abs(value.numerator) // value.denominator
+    return whole if value >= 0 else -whole
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32", "int64"])
+def test_arange_values_are_the_exact_ones_rounded_once(dtype):
+    # `start + i * step` rounded once: computed as `i * step` and then the
+    # sum, a fifth of the values were an ulp off.
+    rng = random.Random(1213)
+    for _ in range(150):
+        start = rng.uniform(-100, 100)
+        step = rng.choice([0.1, 0.01, 0.3, 1 / 3, rng.uniform(0.001, 1)])
+        stop = start + step * rng.randint(1, 400)
+        got = mt.arange(start, stop, step, dtype=dtype).tolist()
+        exact = [Fraction(start) + i * Fraction(step) for i in range(len(got))]
+        if dtype == "float64":
+            expected = [float(value) for value in exact]
+        elif dtype == "float32":
+            expected = [_float32(value) for value in exact]
+        else:
+            expected = [_truncated(value) for value in exact]
+        assert got == expected, (start, stop, step)
+
+
+def test_arange_stops_short_of_its_stop_and_keeps_its_start():
+    # `1 + 3 * 0.1` rounds to `1.3` itself, which the range excludes.
+    assert mt.arange(1.0, 1.3, 0.1, dtype="float64").tolist() == [1.0, 1.1, 1.2]
+    assert str(mt.arange(-0.0, 1.0, 0.5, dtype="float64").tolist()[0]) == "-0.0"
+    # `0.5 + (0.5 - 2**-54)` is halfway below 1.0 and rounds to it, but the
+    # exact value truncates to 0.
+    step = float(Fraction(1, 2) - Fraction(1, 2**54))
+    assert mt.arange(0.5, 2.0, step, dtype="int64").tolist() == [0, 0, 1, 1]

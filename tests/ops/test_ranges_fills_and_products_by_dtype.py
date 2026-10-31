@@ -20,6 +20,8 @@ width to protect, and now takes the other's dtype as it does in arithmetic.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
@@ -36,10 +38,11 @@ def test_the_stop_is_never_part_of_the_range():
         stop = round(start + step * int(rng.integers(0, 30)), 6)
         values = mt.arange(start, stop, step, dtype="float64").tolist()
         count = len(values)
-        # Every value strictly before the stop, and the next one not.
+        # Every value strictly before the stop, and the next one not: each is
+        # `start + i * step` rounded once.
         before = (lambda v: v < stop) if step > 0 else (lambda v: v > stop)
-        assert all(before(start + i * step) for i in range(count))
-        assert not before(start + count * step)
+        assert all(before(value) for value in values)
+        assert not before(float(Fraction(start) + count * Fraction(step)))
 
 
 def test_integer_bounds_are_counted_exactly_at_any_dtype():

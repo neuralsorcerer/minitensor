@@ -694,14 +694,15 @@ pub(crate) fn create_arange_tensor(
     }
 
     let num_elements = arange_count(start, end, step)?;
-    // One parallel fill with the dtype conversion written once, rather than
-    // five serial loops -- see `TensorData::from_index`.
+    // Each value is `start + index * step` rounded once to the dtype; see
+    // `engine::ops::stepped_data`.
     Ok(Tensor::new(
-        Arc::new(TensorData::from_index(
+        Arc::new(engine::ops::stepped_data(
+            start,
+            step,
             num_elements,
             dtype,
             device,
-            |index| start + index as f64 * step,
         )),
         Shape::new(vec![num_elements]),
         dtype,
@@ -725,7 +726,7 @@ pub(crate) fn create_arange_tensor(
 /// allocate.
 pub(crate) fn arange_count(start: f64, end: f64, step: f64) -> PyResult<usize> {
     let before = |index: usize| {
-        let value = start + index as f64 * step;
+        let value = engine::ops::stepped_point(start, step, index);
         if step > 0.0 { value < end } else { value > end }
     };
     let estimate = ((end - start) / step).ceil();
