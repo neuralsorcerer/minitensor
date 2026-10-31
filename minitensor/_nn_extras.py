@@ -1071,10 +1071,13 @@ def affine_grid(theta: object, size: object, align_corners: bool = False) -> Ten
 
     # One axis at a time: with the corners aligned the ends are exactly -1 and
     # 1, and without them each sample sits at the centre of its own cell.
+    # Either way a coordinate is a whole number over the length, divided once:
+    # `(2i + 1) / L - 1` rounded the quotient and then the difference.
     def _coordinates(length: int) -> "_np.ndarray":
+        steps = 2.0 * _np.arange(length)
         if align_corners:
-            return _np.linspace(-1.0, 1.0, length) if length > 1 else _np.zeros(1)
-        return (2.0 * _np.arange(length) + 1.0) / length - 1.0
+            return (steps - (length - 1)) / (length - 1) if length > 1 else _np.zeros(1)
+        return (steps + (1 - length)) / length
 
     # `grid_sample` reads coordinates in `x, y (, z)` order, which is the
     # reverse of the axes they index, so the spatial sizes are reversed here.

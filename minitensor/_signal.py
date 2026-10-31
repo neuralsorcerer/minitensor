@@ -65,6 +65,19 @@ def _window_positions(length: int, periodic: bool, name: str) -> tuple[Tensor, f
     return positions, divisor
 
 
+def _reflected(positions: Tensor, divisor: float) -> Tensor:
+    """Each position's distance from the nearer end of the period.
+
+    A window is symmetric -- sample `k` and sample `divisor - k` are the same
+    number -- and a cosine of `k * (2 * pi / divisor)` is not quite: the angle
+    to the far sample rounds differently from the near one, and seven pairs
+    in ten came out an ulp or more apart. Both samples are taken from the
+    same whole number here, which is exact.
+    """
+
+    return _F.minimum(positions, divisor - positions)
+
+
 def _degenerate(length: int) -> Tensor | None:
     """A window of one sample or none, which has no shape to speak of.
 
@@ -80,6 +93,36 @@ def _degenerate(length: int) -> Tensor | None:
     return None
 
 
+def _sine_squared(positions: Tensor, divisor: float) -> Tensor:
+    """`sin(pi * k / N) ** 2`, which is `(1 - cos(2 * pi * k / N)) / 2`.
+
+    The angle is measured from whichever of the end, the quarter and the
+    middle is nearest, in whole numbers, before pi is applied: `N - 4k` and
+    `N - 2k` are exact, so the rounding of pi and of the product is relative
+    to a small angle and not to `pi / 2`. Up to an eighth of the period it
+    is `sin(pi k / N) ** 2`, to three eighths `(1 - sin(pi (N - 4k) / 2N)) / 2`
+    and past that `cos(pi (N - 2k) / 2N) ** 2`. A cosine near one less one
+    kept a handful of correct digits -- a sample a millionth from zero was
+    off in its sixth -- and the quarter, whose angle rounded short of
+    `pi / 2`, came out `0.49999999999999994` rather than `0.5`.
+    """
+
+    reflected = _reflected(positions, divisor)
+    unit = _math.pi / divisor
+    half_unit = _math.pi / (2.0 * divisor)
+    sine = _F.sin(reflected * unit)
+    end = sine * sine
+    quarter = 0.5 - 0.5 * _F.sin((divisor - 4.0 * reflected) * half_unit)
+    cosine = _F.cos((divisor - 2.0 * reflected) * half_unit)
+    middle = cosine * cosine
+    eighths = reflected * 8.0
+    return _F.where(
+        eighths <= divisor,
+        end,
+        _F.where(eighths <= 3.0 * divisor, quarter, middle),
+    )
+
+
 def hann_window(length: int, periodic: bool = True) -> Tensor:
     """The raised cosine window: `0.5 - 0.5 * cos(2 * pi * k / N)`."""
 
@@ -87,7 +130,7 @@ def hann_window(length: int, periodic: bool = True) -> Tensor:
     if degenerate is not None:
         return degenerate
     positions, divisor = _window_positions(length, periodic, "hann_window")
-    return 0.5 - 0.5 * _F.cos(positions * (2.0 * _math.pi / divisor))
+    return _sine_squared(positions, divisor)
 
 
 def hamming_window(
@@ -104,28 +147,40 @@ def hamming_window(
     if degenerate is not None:
         return degenerate
     positions, divisor = _window_positions(length, periodic, "hamming_window")
-    return alpha - beta * _F.cos(positions * (2.0 * _math.pi / divisor))
+    # `cos(2 pi k / N)` is `1 - 2 sin(pi k / N) ** 2`.
+    return alpha - beta * (1.0 - 2.0 * _sine_squared(positions, divisor))
 
 
 def blackman_window(length: int, periodic: bool = True) -> Tensor:
-    """The Blackman window: two cosine terms, for lower side lobes."""
+    """The Blackman window: two cosine terms, for lower side lobes.
+
+    `0.42 - 0.5 * cos(t) + 0.08 * cos(2t)` is `s * (0.36 + 0.64 * s)` for
+    `s = sin(t / 2) ** 2`, with the coefficients the decimals they are. The
+    three terms cancel at the ends, where the window is zero, and summed as
+    floats they left -1.4e-17 there and few correct digits beside it.
+    """
 
     degenerate = _degenerate(length)
     if degenerate is not None:
         return degenerate
     positions, divisor = _window_positions(length, periodic, "blackman_window")
-    angle = positions * (2.0 * _math.pi / divisor)
-    return 0.42 - 0.5 * _F.cos(angle) + 0.08 * _F.cos(angle * 2.0)
+    square = _sine_squared(positions, divisor)
+    return square * (0.36 + 0.64 * square)
 
 
 def bartlett_window(length: int, periodic: bool = True) -> Tensor:
-    """The triangular window: up to one at the middle and back down."""
+    """The triangular window: up to one at the middle and back down.
+
+    Sample `k` is `(N - |2k - N|) / N`, whose numerator is a whole number, so
+    it is rounded once. `1 - |k * (2 / N) - 1|` rounded up to four times, and
+    half the samples were off.
+    """
 
     degenerate = _degenerate(length)
     if degenerate is not None:
         return degenerate
     positions, divisor = _window_positions(length, periodic, "bartlett_window")
-    return 1.0 - _F.abs(positions * (2.0 / divisor) - 1.0)
+    return (divisor - _F.abs(2.0 * positions - divisor)) / divisor
 
 
 def kaiser_window(length: int, periodic: bool = True, beta: float = 12.0) -> Tensor:
@@ -139,8 +194,11 @@ def kaiser_window(length: int, periodic: bool = True, beta: float = 12.0) -> Ten
     if degenerate is not None:
         return degenerate
     positions, divisor = _window_positions(length, periodic, "kaiser_window")
-    offset = positions * (2.0 / divisor) - 1.0
-    inside = _F.sqrt(_F.clamp(1.0 - offset * offset, 0.0, None))
+    # `sqrt(1 - x**2)` for the offset `x = (2k - N) / N` from the middle is
+    # `2 * sqrt(k * (N - k)) / N`, from a product of whole numbers. Near the
+    # ends `1 - x**2` cancelled to a few correct digits, and the rounded
+    # offsets of mirrored samples were not each other's negation.
+    inside = 2.0 * _F.sqrt(positions * (divisor - positions)) / divisor
     # The normaliser is built at double precision: `i0` of a float32 `beta`
     # differs from `i0` of the double in the seventh digit, which is visible in
     # the window's peak.
