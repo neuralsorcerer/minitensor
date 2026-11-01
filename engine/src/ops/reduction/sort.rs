@@ -1391,11 +1391,8 @@ pub(crate) fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let sum: f64 = if data.len() >= 1024 {
-        deterministic_par_sum(data, 8192, simd_sum_f64)
-    } else {
-        simd_sum_f64(data)
-    };
+    // The float64 nearest the exact sum; see `arithmetic::exact_sum`.
+    let sum = crate::ops::arithmetic::exact_sum::sum_f64(data);
 
     let result_slice = result_data
         .as_f64_slice_mut()

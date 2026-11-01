@@ -393,6 +393,9 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();
 
+    // A reduction over every axis is the whole sum, rounded once, rather
+    // than one axis at a time, each rounding its own partial sums.
+    let dim = dim.filter(|dims| dims.is_empty() || dims.len() < tensor.ndim());
     let result = match dim {
         None => {
             // Sum all elements

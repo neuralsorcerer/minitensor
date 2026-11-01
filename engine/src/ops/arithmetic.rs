@@ -13,6 +13,8 @@ pub(crate) mod close;
 mod elementwise_impl;
 #[path = "arithmetic/evenly_spaced.rs"]
 mod evenly_spaced;
+#[path = "arithmetic/exact_sum.rs"]
+pub(crate) mod exact_sum;
 #[path = "arithmetic/rounded_once.rs"]
 pub(crate) mod rounded_once;
 

@@ -824,7 +824,53 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
             )?;
             let value = super::sort_impl::divide_by_count(&total, num_elements)?
                 .astype(DataType::Float32)?;
-            if !tensor.requires_grad() {
+            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+                return Ok(value);
+            }
+            let grad_fn = Arc::new(crate::autograd::MeanBackward {
+                input_id: tensor.id(),
+                input_shape: tensor.shape().dims().to_vec(),
+                dims: normalized,
+                keepdim,
+                count: num_elements,
+            });
+            with_grad_fn(value.requires_grad_(true), grad_fn)
+        }
+        // Over every axis, the exact sum over the count rounded once, where
+        // the rounded sum divided rounded twice; see `arithmetic::exact_sum`.
+        DataType::Float64 | DataType::Int64
+            if normalized
+                .as_ref()
+                .is_none_or(|dims| dims.len() == tensor.ndim()) =>
+        {
+            let value = match tensor.dtype() {
+                DataType::Float64 => crate::ops::arithmetic::exact_sum::mean_f64(
+                    tensor.data().as_f64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("mean: failed to get the f64 slice")
+                    })?,
+                ),
+                _ => crate::ops::arithmetic::exact_sum::mean_i64(
+                    tensor.data().as_i64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("mean: failed to get the i64 slice")
+                    })?,
+                ),
+            };
+            let shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+            let mut data = TensorData::zeros_on_device(1, DataType::Float64, tensor.device());
+            data.as_f64_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("mean: no f64 output"))?[0] = value;
+            let value = Tensor::new(
+                Arc::new(data),
+                shape,
+                DataType::Float64,
+                tensor.device(),
+                false,
+            );
+            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
                 return Ok(value);
             }
             let grad_fn = Arc::new(crate::autograd::MeanBackward {

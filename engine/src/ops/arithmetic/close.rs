@@ -125,8 +125,9 @@ fn sign_of_sum(terms: &[(bool, u128, i32)]) -> Ordering {
     positive.iter().rev().cmp(negative.iter().rev())
 }
 
-/// `total += magnitude << shift`, in little-endian 64-bit limbs.
-fn add_shifted(total: &mut [u64], magnitude: u128, shift: usize) {
+/// `total += magnitude << shift`, in little-endian 64-bit limbs with room
+/// for the carry.
+pub(super) fn add_shifted(total: &mut [u64], magnitude: u128, shift: usize) {
     let (word, bit) = (shift / 64, (shift % 64) as u32);
     let shifted = magnitude << bit;
     let spill = if bit == 0 {
