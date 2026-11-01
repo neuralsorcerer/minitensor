@@ -2823,12 +2823,18 @@ tensor, while `array_equal` and `allclose` return Python `bool` values.
 
 Behavior and validation:
 
-- `isclose` broadcasts compatible shapes, promotes compatible numeric dtypes,
-  and returns a boolean tensor mask with the broadcasted shape.
+- `isclose` broadcasts compatible shapes and returns a boolean tensor mask
+  with the broadcasted shape; `allclose` is whether every element of it is,
+  broadcast the same way, and raises for shapes that cannot be broadcast.
 - `array_equal` requires equal shapes, promotes compatible numeric dtypes, and
   returns a Python `bool` indicating exact element equality after promotion.
-- `isclose` and `allclose` promote compatible numeric dtypes and apply
-  `abs(a - b) <= atol + rtol * abs(b)` for finite unequal floating-point values.
+- `isclose` and `allclose` decide `abs(a - b) <= atol + rtol * abs(b)` for
+  finite unequal values exactly: each operand is the number it holds, whatever
+  the pair of dtypes, and the tolerances are the floats given. Two integers
+  are measured against the tolerances like anything else -- `100000` is close
+  to `100001` -- an int64 past 2^53 is not close to the float64 beside it with
+  no tolerance, and float32 operands meet the tolerance asked for rather than
+  one narrowed to float32.
 - Exact equality is accepted before tolerance checks, so signed zeros and
   matching infinities compare as close. Opposite infinities and finite/non-finite
   mismatches compare as not close.

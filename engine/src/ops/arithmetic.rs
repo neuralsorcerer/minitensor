@@ -7,6 +7,8 @@
 //! Element-wise arithmetic ops. The dtype-specialized kernel bodies these
 //! delegate to live in [`crate::ops::kernels`].
 
+#[path = "arithmetic/close.rs"]
+pub(crate) mod close;
 #[path = "arithmetic/elementwise.rs"]
 mod elementwise_impl;
 #[path = "arithmetic/evenly_spaced.rs"]

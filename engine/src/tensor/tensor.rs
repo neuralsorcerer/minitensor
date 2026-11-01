@@ -15,8 +15,8 @@ pub use crate::tensor::shape::{Shape, Strides};
 pub use crate::tensor::storage::{DataMut, TensorData};
 
 use crate::ops::map::{
-    BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, par_all_chunks,
-    par_any_chunk, par_out_chunks, unary_map, unary_map_threshold,
+    BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, par_any_chunk,
+    par_out_chunks, unary_map, unary_map_threshold,
 };
 use crate::{
     autograd::{self, GradientFunction, IdentityBackward, TensorId},
@@ -2813,36 +2813,6 @@ impl Tensor {
 }
 
 // ===== dtype cast, comparison helpers, and conversions =====
-#[inline(always)]
-fn allclose_f32(a: f32, b: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
-    if a == b {
-        return true;
-    }
-    if equal_nan && a.is_nan() && b.is_nan() {
-        return true;
-    }
-    if !a.is_finite() || !b.is_finite() {
-        return false;
-    }
-    let diff = (a - b).abs();
-    diff <= atol + rtol * b.abs()
-}
-
-#[inline(always)]
-fn allclose_f64(a: f64, b: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool {
-    if a == b {
-        return true;
-    }
-    if equal_nan && a.is_nan() && b.is_nan() {
-        return true;
-    }
-    if !a.is_finite() || !b.is_finite() {
-        return false;
-    }
-    let diff = (a - b).abs();
-    diff <= atol + rtol * b.abs()
-}
-
 impl Tensor {
     /// Solve a linear system `AX = B` for `X` where `self` provides `A`.
     pub fn solve(&self, rhs: &Self) -> Result<Self> {
@@ -3695,8 +3665,9 @@ impl Tensor {
     }
 
     /// Check if tensors are approximately equal, optionally treating NaNs at
-    /// matching positions as equal.
-    #[inline(always)]
+    /// matching positions as equal: whether every element of
+    /// [`crate::ops::comparison::isclose`] is, broadcast as it broadcasts.
+    /// Tensors that cannot be broadcast together are not close.
     pub fn allclose_with_equal_nan(
         &self,
         other: &Tensor,
@@ -3704,49 +3675,7 @@ impl Tensor {
         atol: f64,
         equal_nan: bool,
     ) -> bool {
-        if self.shape != other.shape || self.dtype != other.dtype {
-            return false;
-        }
-
-        // Fast path: byte-for-byte equality check for contiguous CPU tensors
-        if (equal_nan || !self.dtype.is_float())
-            && self.device.is_cpu()
-            && other.device.is_cpu()
-            && self.is_contiguous()
-            && other.is_contiguous()
-            && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes())
-            && a == b
-        {
-            return true;
-        }
-
-        let numel = self.numel();
-        macro_rules! arm {
-            ($accessor:ident, $close:ident, $rtol:expr, $atol:expr) => {{
-                let (Some(mine), Some(theirs)) = (self.data.$accessor(), other.data.$accessor())
-                else {
-                    return false;
-                };
-                // The comparison itself is the work here, unlike `array_equal`,
-                // so it is worth splitting -- but by chunk, so the tolerance
-                // test stays a concrete type inside a vectorizable loop.
-                let close = |a: &[_], b: &[_]| {
-                    a.iter()
-                        .zip(b)
-                        .all(|(&a, &b)| $close(a, b, $rtol, $atol, equal_nan))
-                };
-                if numel >= 1024 {
-                    par_all_chunks(mine, theirs, PAR_CHUNK, &close)
-                } else {
-                    close(mine, theirs)
-                }
-            }};
-        }
-        match self.dtype {
-            DataType::Float32 => arm!(as_f32_slice, allclose_f32, rtol as f32, atol as f32),
-            DataType::Float64 => arm!(as_f64_slice, allclose_f64, rtol, atol),
-            _ => self.array_equal(other),
-        }
+        crate::ops::comparison::allclose(self, other, rtol, atol, equal_nan).unwrap_or(false)
     }
 
     /// Check if tensors are exactly equal

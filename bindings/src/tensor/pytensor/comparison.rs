@@ -100,16 +100,9 @@ impl PyTensor {
                 "rtol and atol must be non-negative, finite values",
             ));
         }
-        // An integer against a float is measured in float64, which holds every
-        // int32 and float32 exactly, rather than at their common dtype.
-        if mixes_integer_and_float(lhs, rhs) {
-            let lhs = lhs.astype(DataType::Float64).map_err(_convert_error)?;
-            let rhs = rhs.astype(DataType::Float64).map_err(_convert_error)?;
-            return Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan));
-        }
-        let (lhs, rhs, _) =
-            coerce_binary_operands(lhs, rhs, BinaryOpKind::Add).map_err(_convert_error)?;
-        Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
+        // Every element of `isclose`, which compares the numbers each operand
+        // holds and broadcasts the two as it does.
+        engine::ops::comparison::allclose(lhs, rhs, rtol, atol, equal_nan).map_err(_convert_error)
     }
 }
 

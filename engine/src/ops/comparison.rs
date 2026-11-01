@@ -533,34 +533,6 @@ macro_rules! cmp_op {
     };
 }
 
-#[inline(always)]
-fn isclose_f32(a: f32, b: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
-    if a == b {
-        return true;
-    }
-    if equal_nan && a.is_nan() && b.is_nan() {
-        return true;
-    }
-    if !a.is_finite() || !b.is_finite() {
-        return false;
-    }
-    (a - b).abs() <= atol + rtol * b.abs()
-}
-
-#[inline(always)]
-fn isclose_f64(a: f64, b: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool {
-    if a == b {
-        return true;
-    }
-    if equal_nan && a.is_nan() && b.is_nan() {
-        return true;
-    }
-    if !a.is_finite() || !b.is_finite() {
-        return false;
-    }
-    (a - b).abs() <= atol + rtol * b.abs()
-}
-
 pub fn isclose(
     lhs: &Tensor,
     rhs: &Tensor,
@@ -580,46 +552,16 @@ pub fn isclose(
         ));
     }
 
-    // An integer against a float is measured in float64, which holds every
-    // int32 and every float32 exactly. Their common dtype is the float's, and
-    // in float32 an int32 `20_000_001` was within no tolerance at all of
-    // `20_000_000.0` -- it had become it.
-    let integer = |t: &Tensor| matches!(t.dtype(), DataType::Int32 | DataType::Int64);
-    let float = |t: &Tensor| matches!(t.dtype(), DataType::Float32 | DataType::Float64);
-    if (integer(lhs) && float(rhs)) || (float(lhs) && integer(rhs)) {
-        return isclose(
-            &lhs.astype(DataType::Float64)?,
-            &rhs.astype(DataType::Float64)?,
-            rtol,
-            atol,
-            equal_nan,
-        );
-    }
-    let (lhs_cast, rhs_cast, common_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
-    let lhs_ref = lhs_cast.as_ref();
-    let rhs_ref = rhs_cast.as_ref();
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
-    // `rtol`/`atol` only mean anything for the float dtypes; an exact-integer or
-    // boolean comparison is what "close" reduces to elsewhere.
-    let output_data = match common_dtype {
-        DataType::Float32 => broadcast_binary_arm!(
-            lhs_ref,
-            rhs_ref,
-            &output_shape,
-            as_f32_slice,
-            "f32",
-            |a, b| isclose_f32(a, b, rtol as f32, atol as f32, equal_nan)
-        ),
-        DataType::Float64 => broadcast_binary_arm!(
-            lhs_ref,
-            rhs_ref,
-            &output_shape,
-            as_f64_slice,
-            "f64",
-            |a, b| isclose_f64(a, b, rtol, atol, equal_nan)
-        ),
-        dtype => cmp_dispatch!(lhs_ref, rhs_ref, dtype, &output_shape, |a, b| a == b),
+    // Each operand is the number it holds, whatever the pair of dtypes, and
+    // the tolerances the float64s given; see `arithmetic::close`.
+    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let tolerance = crate::ops::arithmetic::close::Tolerance {
+        rtol,
+        atol,
+        equal_nan,
     };
+    let output_data =
+        crate::ops::arithmetic::close::isclose_data(lhs, rhs, tolerance, &output_shape)?;
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -628,6 +570,20 @@ pub fn isclose(
         lhs.device(),
         false,
     ))
+}
+
+/// Whether every element of [`isclose`] is, broadcast as it broadcasts.
+pub fn allclose(lhs: &Tensor, rhs: &Tensor, rtol: f64, atol: f64, equal_nan: bool) -> Result<bool> {
+    let mask = isclose(lhs, rhs, rtol, atol, equal_nan)?;
+    let values = mask
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("allclose: isclose gave no booleans"))?;
+    // In blocks, so that each block's test vectorizes and a false one ends
+    // the scan.
+    Ok(values
+        .chunks(4096)
+        .all(|block| block.iter().fold(true, |all, &value| all & value)))
 }
 
 cmp_op!(eq, ==, Relation::Eq);

@@ -241,7 +241,7 @@ pub(crate) fn rounded_once(
 /// An operand as the shared kernels read it: an int64 or a float64 as it is,
 /// and anything else -- an int32, a float32, a bool -- in float64, which
 /// holds each exactly.
-fn wide_operand(tensor: &Tensor) -> Result<Cow<'_, Tensor>> {
+pub(super) fn wide_operand(tensor: &Tensor) -> Result<Cow<'_, Tensor>> {
     Ok(match tensor.dtype() {
         DataType::Int64 | DataType::Float64 => Cow::Borrowed(tensor),
         _ => Cow::Owned(tensor.astype(DataType::Float64)?),
@@ -381,7 +381,7 @@ impl Exact {
 }
 
 /// An element type an operand can have.
-trait Operand: Copy + Send + Sync {
+pub(super) trait Operand: Copy + Send + Sync {
     /// Whether float64 holds every value of the type.
     const WIDE: bool;
     /// The value in float64.

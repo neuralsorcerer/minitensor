@@ -900,47 +900,6 @@ pub(crate) fn par_all_chunk<T: Sync>(
 /// before handing the rest to the pool.
 const PROBE_CHUNKS: usize = 4;
 
-/// True when `test` holds for every matching pair of chunks.
-///
-/// Short-circuits, but at chunk granularity rather than per element: rayon's
-/// `all` over a zipped `par_iter` hands out one item per element and evaluates
-/// the predicate behind an opaque closure, so nothing vectorizes. Here the
-/// predicate sees a whole chunk and inlines.
-pub(crate) fn par_all_chunks<T>(
-    a: &[T],
-    b: &[T],
-    chunk: usize,
-    test: &(dyn Fn(&[T], &[T]) -> bool + Sync),
-) -> bool
-where
-    T: Sync,
-{
-    debug_assert_eq!(a.len(), b.len());
-    if std::mem::size_of_val(a) < FOLD_PAR_BYTES {
-        return a
-            .chunks(chunk.max(1))
-            .zip(b.chunks(chunk.max(1)))
-            .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk));
-    }
-    let chunk = chunk.max(1);
-    if !splits(a.len(), chunk) {
-        return test(a, b);
-    }
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let failed = AtomicBool::new(false);
-    let len = a.len();
-    crate::parallel::for_each_task(len.div_ceil(chunk), &|nth| {
-        if failed.load(Ordering::Relaxed) {
-            return;
-        }
-        let span = nth * chunk..(nth * chunk + chunk).min(len);
-        if !test(&a[span.clone()], &b[span]) {
-            failed.store(true, Ordering::Relaxed);
-        }
-    });
-    !failed.into_inner()
-}
-
 /// Run `work(0..count)` in parallel for its effects.
 ///
 /// The erased form of `(0..count).into_par_iter().for_each(..)`, for kernels
