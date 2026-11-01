@@ -1370,12 +1370,8 @@ pub(crate) fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    // Carried in float64 and rounded once; see `sum_along_dim_f32`.
-    let sum = if data.len() >= 1024 {
-        deterministic_par_sum(data, 8192, simd_sum_f32_wide)
-    } else {
-        simd_sum_f32_wide(data)
-    } as f32;
+    // The float32 nearest the exact sum; see `arithmetic::exact_sum`.
+    let sum: f32 = crate::ops::arithmetic::exact_sum::sum_to(data);
 
     let result_slice = result_data
         .as_f32_slice_mut()

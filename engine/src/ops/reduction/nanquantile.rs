@@ -431,22 +431,28 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
                 // in the graph. Recording a node for it made the input its own
                 // output -- a cycle backward refused.
                 return Ok(tensor.clone());
-            } else if tensor.dtype() == DataType::Float32 && dims.len() > 1 {
-                // In float64 from the first axis to the last, and rounded
-                // once; through `sum_along_dim` each axis rounded its own.
-                narrowed(
-                    &widened_sum(tensor, Some(&dims), keepdim, false)?,
-                    tensor.requires_grad(),
-                )?
-            } else if tensor.dtype() == DataType::Float64 && dims.len() > 1 {
-                // Each output's values summed as one run and rounded once.
-                super::sum_prod_impl::reduce_dims_f64(
-                    tensor,
-                    &dims,
-                    keepdim,
-                    crate::ops::arithmetic::exact_sum::Reduction::Sum,
-                    tensor.requires_grad(),
-                )?
+            } else if tensor.dtype().is_float() && dims.len() > 1 {
+                // Each output's values summed as one run and rounded once;
+                // through `sum_along_dim` each axis rounded its own.
+                let sum = crate::ops::arithmetic::exact_sum::Reduction::Sum;
+                let requires_grad = tensor.requires_grad();
+                if tensor.dtype() == DataType::Float32 {
+                    super::sum_prod_impl::reduce_dims_exactly::<f32>(
+                        tensor,
+                        &dims,
+                        keepdim,
+                        sum,
+                        requires_grad,
+                    )?
+                } else {
+                    super::sum_prod_impl::reduce_dims_exactly::<f64>(
+                        tensor,
+                        &dims,
+                        keepdim,
+                        sum,
+                        requires_grad,
+                    )?
+                }
             } else {
                 let mut result = tensor.clone();
                 if keepdim {

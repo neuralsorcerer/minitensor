@@ -1868,10 +1868,17 @@ True
 A float32 `dot` is accumulated in float64, where each product of two float32s
 is exact, and rounded once.
 
-A float32 `sum` or `nansum` is carried in float64 and rounded once, over one
-axis or several, so it is the float32 nearest the exact sum, where float32
-additions had put offset data tens of ulps out. `nansum` skips the input's own
-NaN entries; a NaN made of `inf + -inf` on the way is the answer and stays.
+A float32 `sum` and `mean`, over every element, one axis or several, are the
+float32 nearest the exact sum and the exact mean, where float32 additions had
+put offset data tens of ulps out. They are added in float64 with a bound on
+that sum's rounding, which settles the float32 answer unless the bound
+reaches a halfway point between two float32s; then the float64 path below
+decides. Narrowed from a plain float64 sum, a float32 sum whose values
+cancelled across a wide range lost what lay below float64's last bit, and
+one whose float64 sum fell on a float32 halfway point rounded twice --
+`1 + 2^-24 + 2^-60` came out `1`. A float32 `nansum` is carried in float64
+and rounded once; it skips the input's own NaN entries, and a NaN made of
+`inf + -inf` on the way is the answer and stays.
 
 A float64 `sum` and `mean` -- over every element, along one axis, or over
 several -- are the float64 nearest the exact sum and the exact mean: each lane

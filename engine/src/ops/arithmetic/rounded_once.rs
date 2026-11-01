@@ -469,7 +469,7 @@ impl Operand for f64 {
 }
 
 /// A float dtype a result is rounded to.
-pub(super) trait Target: TensorElement {
+pub(crate) trait Target: TensorElement {
     /// Significand bits, the leading one included.
     const DIGITS: i32;
     /// The exponent of the smallest subnormal.

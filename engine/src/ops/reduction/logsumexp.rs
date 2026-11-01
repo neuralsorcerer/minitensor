@@ -809,125 +809,34 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
     };
 
     match tensor.dtype() {
-        // Summed in float64 and rounded once, which makes a float32 mean as
-        // good as correctly rounded: summed in float32 it carried a rounding
-        // per addition against a growing total, tens of ulps on offset data,
-        // and the mean of a constant run came back off the constant. The
-        // value is the same whether or not a gradient is asked for; the
-        // gradient is the mean's own, the output's over the count.
-        DataType::Float32 => {
-            let total = super::nanquantile_impl::widened_sum(
-                tensor,
-                normalized.as_deref(),
-                keepdim,
-                false,
-            )?;
-            let value = super::sort_impl::divide_by_count(&total, num_elements)?
-                .astype(DataType::Float32)?;
-            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
-                return Ok(value);
-            }
-            let grad_fn = Arc::new(crate::autograd::MeanBackward {
-                input_id: tensor.id(),
-                input_shape: tensor.shape().dims().to_vec(),
-                dims: normalized,
-                keepdim,
-                count: num_elements,
-            });
-            with_grad_fn(value.requires_grad_(true), grad_fn)
+        // The exact sum over the count rounded once to the tensor's own
+        // dtype: over every axis from the whole run, along one axis in place,
+        // over several with those axes moved into one run. Summed and then
+        // divided it rounded twice, and a float32 mean carried in float64
+        // rounded a third time where the float64 mean fell on a float32
+        // halfway point. The gradient is the mean's own, the output's over
+        // the count.
+        DataType::Float32 | DataType::Float64 => {
+            let value = if tensor.dtype() == DataType::Float32 {
+                exact_mean::<f32>(tensor, normalized.as_deref(), keepdim)?
+            } else {
+                exact_mean::<f64>(tensor, normalized.as_deref(), keepdim)?
+            };
+            with_mean_gradient(tensor, value, normalized, keepdim, num_elements)
         }
-        // Over every axis, the exact sum over the count rounded once, where
-        // the rounded sum divided rounded twice; see `arithmetic::exact_sum`.
-        DataType::Float64 | DataType::Int64
+        // Over every axis, the exact 128-bit sum divided once.
+        DataType::Int64
             if normalized
                 .as_ref()
                 .is_none_or(|dims| dims.len() == tensor.ndim()) =>
         {
-            let value = match tensor.dtype() {
-                DataType::Float64 => crate::ops::arithmetic::exact_sum::mean_f64(
-                    tensor.data().as_f64_slice().ok_or_else(|| {
-                        MinitensorError::internal_error("mean: failed to get the f64 slice")
-                    })?,
-                ),
-                _ => crate::ops::arithmetic::exact_sum::mean_i64(
-                    tensor.data().as_i64_slice().ok_or_else(|| {
-                        MinitensorError::internal_error("mean: failed to get the i64 slice")
-                    })?,
-                ),
-            };
-            let shape = if keepdim {
-                Shape::new(vec![1; tensor.ndim()])
-            } else {
-                Shape::scalar()
-            };
-            let mut data = TensorData::zeros_on_device(1, DataType::Float64, tensor.device());
-            data.as_f64_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("mean: no f64 output"))?[0] = value;
-            let value = Tensor::new(
-                Arc::new(data),
-                shape,
-                DataType::Float64,
-                tensor.device(),
-                false,
+            let value = crate::ops::arithmetic::exact_sum::mean_i64(
+                tensor.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("mean: failed to get the i64 slice")
+                })?,
             );
-            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
-                return Ok(value);
-            }
-            let grad_fn = Arc::new(crate::autograd::MeanBackward {
-                input_id: tensor.id(),
-                input_shape: tensor.shape().dims().to_vec(),
-                dims: normalized,
-                keepdim,
-                count: num_elements,
-            });
-            with_grad_fn(value.requires_grad_(true), grad_fn)
-        }
-        // Over some axes, each output's exact sum over the count rounded
-        // once: along one axis in place, over several with those axes moved
-        // into one run.
-        DataType::Float64 => {
-            let dims = normalized.clone().unwrap_or_default();
-            let reduction = crate::ops::arithmetic::exact_sum::Reduction::Mean;
-            let value = if let [dim] = dims[..] {
-                let shape = tensor.shape().dims();
-                let outputs: usize = (0..tensor.ndim())
-                    .filter(|&d| d != dim)
-                    .map(|d| shape[d])
-                    .product();
-                let mut data =
-                    TensorData::zeros_on_device(outputs, DataType::Float64, tensor.device());
-                super::sum_prod_impl::mean_along_dim_f64(tensor, &mut data, dim)?;
-                let result_shape: Vec<usize> = if keepdim {
-                    (0..tensor.ndim())
-                        .map(|d| if d == dim { 1 } else { shape[d] })
-                        .collect()
-                } else {
-                    (0..tensor.ndim())
-                        .filter(|&d| d != dim)
-                        .map(|d| shape[d])
-                        .collect()
-                };
-                Tensor::new(
-                    Arc::new(data),
-                    Shape::new(result_shape),
-                    DataType::Float64,
-                    tensor.device(),
-                    false,
-                )
-            } else {
-                super::sum_prod_impl::reduce_dims_f64(tensor, &dims, keepdim, reduction, false)?
-            };
-            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
-                return Ok(value);
-            }
-            let grad_fn = Arc::new(crate::autograd::MeanBackward {
-                input_id: tensor.id(),
-                input_shape: tensor.shape().dims().to_vec(),
-                dims: normalized,
-                keepdim,
-                count: num_elements,
-            });
-            with_grad_fn(value.requires_grad_(true), grad_fn)
+            let value = scalar_result::<f64>(tensor, value, keepdim)?;
+            with_mean_gradient(tensor, value, normalized, keepdim, num_elements)
         }
         // An int64 sum wraps past 2^63 though the mean it feeds is always in
         // range: the mean of [2^62, 2^62] came back as -2^62. The result is
@@ -955,6 +864,98 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
             "Mean not supported for boolean tensors",
         )),
     }
+}
+
+/// The mean of a float tensor over `dims` (every axis for `None`), each output
+/// the exact sum over the count rounded once to the tensor's dtype.
+fn exact_mean<T: super::sum_prod_impl::ExactFloat>(
+    tensor: &Tensor,
+    dims: Option<&[usize]>,
+    keepdim: bool,
+) -> Result<Tensor> {
+    let reduction = crate::ops::arithmetic::exact_sum::Reduction::Mean;
+    match dims {
+        Some(dims) if dims.len() < tensor.ndim() => {
+            if let [dim] = dims[..] {
+                let shape = tensor.shape().dims();
+                let kept = |d: &usize| *d != dim;
+                let outputs: usize = (0..tensor.ndim()).filter(kept).map(|d| shape[d]).product();
+                let mut data = TensorData::zeros_on_device(outputs, T::DTYPE, tensor.device());
+                super::sum_prod_impl::reduce_along_dim_exactly::<T>(
+                    tensor, &mut data, dim, reduction,
+                )?;
+                let result_shape: Vec<usize> = if keepdim {
+                    (0..tensor.ndim())
+                        .map(|d| if d == dim { 1 } else { shape[d] })
+                        .collect()
+                } else {
+                    (0..tensor.ndim()).filter(kept).map(|d| shape[d]).collect()
+                };
+                Ok(Tensor::new(
+                    Arc::new(data),
+                    Shape::new(result_shape),
+                    T::DTYPE,
+                    tensor.device(),
+                    false,
+                ))
+            } else {
+                super::sum_prod_impl::reduce_dims_exactly::<T>(
+                    tensor, dims, keepdim, reduction, false,
+                )
+            }
+        }
+        _ => {
+            let values = T::values(tensor.data())
+                .ok_or_else(|| MinitensorError::internal_error("mean: failed to get the slice"))?;
+            let value: T = crate::ops::arithmetic::exact_sum::mean_to(values);
+            scalar_result(tensor, value, keepdim)
+        }
+    }
+}
+
+/// A one-element result of a reduction over every axis of `tensor`.
+fn scalar_result<T: super::sum_prod_impl::ExactFloat>(
+    tensor: &Tensor,
+    value: T,
+    keepdim: bool,
+) -> Result<Tensor> {
+    let shape = if keepdim {
+        Shape::new(vec![1; tensor.ndim()])
+    } else {
+        Shape::scalar()
+    };
+    let mut data = TensorData::zeros_on_device(1, T::DTYPE, tensor.device());
+    T::values_mut(&mut data)
+        .ok_or_else(|| MinitensorError::internal_error("mean: no output slice"))?[0] = value;
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        T::DTYPE,
+        tensor.device(),
+        false,
+    ))
+}
+
+/// `value`, the mean of `tensor`, with the mean's gradient when one is
+/// wanted.
+fn with_mean_gradient(
+    tensor: &Tensor,
+    value: Tensor,
+    dims: Option<Vec<usize>>,
+    keepdim: bool,
+    count: f64,
+) -> Result<Tensor> {
+    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+        return Ok(value);
+    }
+    let grad_fn = Arc::new(crate::autograd::MeanBackward {
+        input_id: tensor.id(),
+        input_shape: tensor.shape().dims().to_vec(),
+        dims,
+        keepdim,
+        count,
+    });
+    with_grad_fn(value.requires_grad_(true), grad_fn)
 }
 
 /// How many elements a reduction over `dims` takes into each result, every

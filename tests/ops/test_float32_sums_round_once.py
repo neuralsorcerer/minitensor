@@ -93,3 +93,49 @@ def test_nanmean_keeps_the_nan_an_infinity_makes(dtype):
     assert math.isnan(kept.reshape([2]).tolist()[0])
     traced = mt.Tensor(values, dtype=dtype, requires_grad=True).nanmean(dim=[0, 1])
     assert math.isnan(traced.tolist()[0])
+
+
+def _float32(value: Fraction) -> float:
+    """The float32 nearest `value`, ties to even."""
+
+    if value == 0:
+        return 0.0
+    sign = -1.0 if value < 0 else 1.0
+    magnitude = abs(value)
+    exponent = magnitude.numerator.bit_length() - magnitude.denominator.bit_length()
+    if Fraction(2) ** exponent > magnitude:
+        exponent -= 1
+    unit = Fraction(2) ** max(exponent - 23, -149)
+    rounded = round(magnitude / unit) * unit
+    return sign * (math.inf if rounded >= Fraction(2) ** 128 else float(rounded))
+
+
+def test_cancellation_and_halfway_points_are_rounded_once():
+    """Narrowed from float64, a sum lost what fell below float64's last bit
+    where the values cancelled, and rounded twice where the float64 sum fell
+    on a float32 halfway point: `1 + 2^-24 + 2^-60` came out `1`."""
+
+    def tensor(values):
+        return mt.Tensor(np.asarray(values, dtype=np.float32), dtype="float32")
+
+    assert tensor([1.0, 2.0**-24, 2.0**-60]).sum().item() == 1.0 + 2.0**-23
+    assert tensor([1.0, 2.0**-24]).sum().item() == 1.0
+    assert tensor([1e30, 1e-10, -1e30]).sum().item() == float(np.float32(1e-10))
+    rng = np.random.default_rng(1601)
+    for round_ in range(120):
+        n = int(rng.integers(2, 2000))
+        if round_ % 2:
+            scales = 2.0 ** rng.integers(-60, 60, size=n)
+            values = (rng.normal(size=n) * scales).astype(np.float32)
+            values = np.append(values, -values[:-1]).astype(np.float32)
+        else:
+            big = (rng.normal(size=n) * 1e30).astype(np.float32)
+            small = (rng.normal(size=3) * 1e-10).astype(np.float32)
+            values = np.concatenate([big, small, -big]).astype(np.float32)
+        total = sum(Fraction(float(v)) for v in values)
+        t = tensor(values)
+        assert t.sum().item() == _float32(total)
+        assert t.mean().item() == _float32(total / len(values))
+        rows = tensor(np.stack([values, values[::-1]]))
+        assert rows.sum(dim=1).tolist() == [_float32(total)] * 2
+        assert rows.T.contiguous().sum(dim=0).tolist() == [_float32(total)] * 2
