@@ -532,7 +532,7 @@ fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
 /// and column to the bit, so the path forms the products `dot` forms, in the
 /// accumulator it uses -- float64 for float32, which holds each product
 /// exactly -- over the same `DOT_LANES` lanes and `RUN_SUM_CHUNK` blocks.
-trait GemvElement: Copy + Default + Sync {
+trait GemvElement: Copy + Default + Send + Sync {
     type Wide: Copy + Default + Send + std::ops::Add<Output = Self::Wide> + Accumulate;
     /// Whether a product may be fused into its add: only where the product is
     /// exact, so that fusing it changes nothing -- `dot` keeps a float64
@@ -546,6 +546,22 @@ trait GemvElement: Copy + Default + Sync {
     fn block(a: &[Self], b: &[Self]) -> Self::Wide;
     /// The total, rounded to the element type.
     fn narrow(total: Self::Wide) -> Self;
+    /// `|a * b|` in the accumulator.
+    fn magnitude(a: Self, b: Self) -> Self::Wide;
+    /// Whether [`GemvElement::dot`] is the exact dot rounded once, so that a
+    /// total the matrix-vector path forms is kept only where its bound
+    /// settles it.
+    const EXACT: bool;
+    /// `dot` of two runs.
+    fn dot(a: &[Self], b: &[Self]) -> Self {
+        Self::narrow(accurate_pair_sum(a, b, Self::Wide::default(), Self::block))
+    }
+    /// `total`, within `depth` roundings over a sum of products of
+    /// magnitude `magnitude` of the exact dot, as the element the dot rounds
+    /// to, when the bound says which it is.
+    fn settle(total: Self::Wide, _magnitude: Self::Wide, _depth: usize) -> Option<Self> {
+        Some(Self::narrow(total))
+    }
 }
 
 impl GemvElement for f32 {
@@ -565,6 +581,21 @@ impl GemvElement for f32 {
     #[inline(always)]
     fn narrow(total: f64) -> f32 {
         total as f32
+    }
+    #[inline(always)]
+    fn magnitude(a: f32, b: f32) -> f64 {
+        (f64::from(a) * f64::from(b)).abs()
+    }
+    const EXACT: bool = true;
+    /// The float32 nearest the exact dot; see `arithmetic::exact_sum`.
+    fn dot(a: &[f32], b: &[f32]) -> f32 {
+        crate::ops::arithmetic::exact_sum::dot_f32(a, b)
+    }
+    fn settle(total: f64, magnitude: f64, depth: usize) -> Option<f32> {
+        // The recursive-summation bound `γ_depth · Σ|ab|`, doubled to cover
+        // the rounding of the magnitude's own sum.
+        let bound = magnitude * depth as f64 * 2f64.powi(-52);
+        crate::ops::arithmetic::exact_sum::settle_f32(total, bound)
     }
 }
 
@@ -586,11 +617,16 @@ impl GemvElement for f64 {
     fn narrow(total: f64) -> f64 {
         total
     }
+    #[inline(always)]
+    fn magnitude(a: f64, b: f64) -> f64 {
+        (a * b).abs()
+    }
+    const EXACT: bool = false;
 }
 
 /// `dot` of two runs, as `dot` itself computes it.
 fn run_dot<T: GemvElement>(a: &[T], b: &[T]) -> T {
-    T::narrow(accurate_pair_sum(a, b, T::Wide::default(), T::block))
+    T::dot(a, b)
 }
 
 /// `lane[j] += product(scales[s], rows[s][j])` for each of the given steps
@@ -653,6 +689,88 @@ fn add_products<T: GemvElement>(lane: &mut [T::Wide], scales: &[T], rows: &[&[T]
     body::<T, false>(lane, scales, rows)
 }
 
+/// [`add_products`] with each product's magnitude added beside it into
+/// `magnitudes`, in the same pass: what a float32 total's bound is measured
+/// against. The totals are those `add_products` gives, to the bit.
+fn add_products_tracked<T: GemvElement>(
+    lane: &mut [T::Wide],
+    magnitudes: &mut [T::Wide],
+    scales: &[T],
+    rows: &[&[T]],
+) {
+    #[inline(always)]
+    fn body<T: GemvElement, const FUSED: bool>(
+        lane: &mut [T::Wide],
+        magnitudes: &mut [T::Wide],
+        scales: &[T],
+        rows: &[&[T]],
+    ) {
+        let add = |sum: T::Wide, scale: T, value: T| {
+            if FUSED {
+                T::fused(scale, value, sum)
+            } else {
+                sum + T::product(scale, value)
+            }
+        };
+        match (scales, rows) {
+            ([s0, s1, s2, s3], [r0, r1, r2, r3]) => {
+                let width = lane.len();
+                let (r0, r1, r2, r3) = (&r0[..width], &r1[..width], &r2[..width], &r3[..width]);
+                let magnitudes = &mut magnitudes[..width];
+                for j in 0..width {
+                    let total = add(add(lane[j], *s0, r0[j]), *s1, r1[j]);
+                    lane[j] = add(add(total, *s2, r2[j]), *s3, r3[j]);
+                    let size = magnitudes[j] + T::magnitude(*s0, r0[j]) + T::magnitude(*s1, r1[j]);
+                    magnitudes[j] = size + T::magnitude(*s2, r2[j]) + T::magnitude(*s3, r3[j]);
+                }
+            }
+            _ => {
+                for (&scale, row) in scales.iter().zip(rows) {
+                    for ((slot, magnitude), &value) in
+                        lane.iter_mut().zip(magnitudes.iter_mut()).zip(row.iter())
+                    {
+                        *slot = add(*slot, scale, value);
+                        *magnitude = *magnitude + T::magnitude(scale, value);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx")]
+    fn body_avx<T: GemvElement>(
+        lane: &mut [T::Wide],
+        magnitudes: &mut [T::Wide],
+        scales: &[T],
+        rows: &[&[T]],
+    ) {
+        body::<T, false>(lane, magnitudes, scales, rows)
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn body_fma<T: GemvElement>(
+        lane: &mut [T::Wide],
+        magnitudes: &mut [T::Wide],
+        scales: &[T],
+        rows: &[&[T]],
+    ) {
+        body::<T, true>(lane, magnitudes, scales, rows)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let capabilities = crate::ops::simd::simd_capabilities();
+        if T::FUSES && capabilities.avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { body_fma(lane, magnitudes, scales, rows) };
+        }
+        if capabilities.avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { body_avx(lane, magnitudes, scales, rows) };
+        }
+    }
+    body::<T, false>(lane, magnitudes, scales, rows)
+}
+
 /// `c = a * b` when the output is a single row or column, or `false` to leave
 /// it to the packed kernel.
 ///
@@ -711,39 +829,51 @@ unsafe fn gemv<T: GemvElement>(
     };
     if m == 1 && n > 1 && csb == 1 {
         // Sixteen lanes of a tile's columns stay in cache while every row of
-        // `b` passes through them.
+        // `b` in a block passes through them. Each block of each tile is a
+        // task, and a column's blocks are folded in order once all are done,
+        // so the totals are the same however the tasks ran.
         const TILE: usize = 256;
         let lanes = DOT_LANES;
         let blocks = k.div_ceil(RUN_SUM_CHUNK);
-        let mut acc = vec![T::Wide::default(); lanes * TILE];
-        let mut sums = vec![T::Wide::default(); lanes];
-        let mut totals = vec![T::Wide::default(); blocks * TILE];
-        for first in (0..n).step_by(TILE) {
+        let (a_address, b_address) = (a as usize, b as usize);
+        // One block of one tile: each column's total over the block and,
+        // for an exact dot, the sum of the products' magnitudes beside it,
+        // which bounds that total's rounding.
+        let part = |task: usize| -> (Vec<T::Wide>, Vec<T::Wide>) {
+            let (a, b) = (a_address as *const T, b_address as *const T);
+            let (first, block) = (task / blocks * TILE, task % blocks);
             let width = TILE.min(n - first);
-            for block in 0..blocks {
-                let (lo, hi) = (
-                    block * RUN_SUM_CHUNK,
-                    (block * RUN_SUM_CHUNK + RUN_SUM_CHUNK).min(k),
-                );
-                let whole = lo + (hi - lo) / lanes * lanes;
-                acc[..lanes * width].fill(T::Wide::default());
-                // Each lane takes every `lanes`-th step, in order, four to a
-                // pass.
-                for lane in 0..lanes {
-                    let steps: Vec<usize> = (lo + lane..whole).step_by(lanes).collect();
-                    for group in steps.chunks(4) {
-                        let mut scales = [T::default(); 4];
-                        let mut rows: [&[T]; 4] = [&[]; 4];
-                        for (slot, &step) in group.iter().enumerate() {
-                            // SAFETY: row `step` of `b` holds this tile's
-                            // columns.
-                            unsafe {
-                                scales[slot] = *a.add(step * csa);
-                                rows[slot] =
-                                    std::slice::from_raw_parts(b.add(step * rsb + first), width);
-                            }
+            let (lo, hi) = (
+                block * RUN_SUM_CHUNK,
+                (block * RUN_SUM_CHUNK + RUN_SUM_CHUNK).min(k),
+            );
+            let whole = lo + (hi - lo) / lanes * lanes;
+            let mut acc = vec![T::Wide::default(); lanes * width];
+            let mut magnitude_acc =
+                vec![T::Wide::default(); if T::EXACT { lanes * width } else { 0 }];
+            // Each lane takes every `lanes`-th step, in order, four to a pass.
+            for lane in 0..lanes {
+                let steps: Vec<usize> = (lo + lane..whole).step_by(lanes).collect();
+                for group in steps.chunks(4) {
+                    let mut scales = [T::default(); 4];
+                    let mut rows: [&[T]; 4] = [&[]; 4];
+                    for (slot, &step) in group.iter().enumerate() {
+                        // SAFETY: row `step` of `b` holds this tile's columns.
+                        unsafe {
+                            scales[slot] = *a.add(step * csa);
+                            rows[slot] =
+                                std::slice::from_raw_parts(b.add(step * rsb + first), width);
                         }
-                        let count = group.len();
+                    }
+                    let count = group.len();
+                    if T::EXACT {
+                        add_products_tracked(
+                            &mut acc[lane * width..][..width],
+                            &mut magnitude_acc[lane * width..][..width],
+                            &scales[..count],
+                            &rows[..count],
+                        );
+                    } else {
                         add_products(
                             &mut acc[lane * width..][..width],
                             &scales[..count],
@@ -751,43 +881,105 @@ unsafe fn gemv<T: GemvElement>(
                         );
                     }
                 }
-                for j in 0..width {
+            }
+            let mut sums = vec![T::Wide::default(); lanes];
+            let mut totals = Vec::with_capacity(width);
+            let mut magnitudes = Vec::with_capacity(if T::EXACT { width } else { 0 });
+            for j in 0..width {
+                for (lane, sum) in sums.iter_mut().enumerate() {
+                    *sum = acc[lane * width + j];
+                }
+                // The dot pads its tail to a whole block with zeros, so every
+                // lane past the tail gains `0 * 0`: a `+0.0`, which turns a
+                // `-0.0` lane positive. Padding `b` here would multiply by
+                // what is really there, so the lanes get the product the dot
+                // would form.
+                if whole < hi {
                     for (lane, sum) in sums.iter_mut().enumerate() {
-                        *sum = acc[lane * width + j];
+                        *sum = *sum
+                            + match whole + lane {
+                                // SAFETY: as above.
+                                step if step < hi => unsafe {
+                                    T::product(*a.add(step * csa), *b.add(step * rsb + first + j))
+                                },
+                                _ => T::product(T::default(), T::default()),
+                            };
                     }
-                    // The dot pads its tail to a whole block with zeros, so
-                    // every lane past the tail gains `0 * 0`: a `+0.0`, which
-                    // turns a `-0.0` lane positive. Padding `b` here would
-                    // multiply by what is really there, so the lanes get the
-                    // product the dot would form.
-                    if whole < hi {
-                        for (lane, sum) in sums.iter_mut().enumerate() {
+                }
+                totals.push(pairwise_lanes(&mut sums));
+                if T::EXACT {
+                    for (lane, sum) in sums.iter_mut().enumerate() {
+                        *sum = magnitude_acc[lane * width + j];
+                        let step = whole + lane;
+                        if whole < hi && step < hi {
+                            // SAFETY: as above.
                             *sum = *sum
-                                + match whole + lane {
-                                    // SAFETY: as above.
-                                    step if step < hi => unsafe {
-                                        T::product(
-                                            *a.add(step * csa),
-                                            *b.add(step * rsb + first + j),
-                                        )
-                                    },
-                                    _ => T::product(T::default(), T::default()),
+                                + unsafe {
+                                    T::magnitude(*a.add(step * csa), *b.add(step * rsb + first + j))
                                 };
                         }
                     }
-                    totals[block * width + j] = pairwise_lanes(&mut sums);
+                    magnitudes.push(pairwise_lanes(&mut sums));
                 }
             }
-            for j in 0..width {
-                let total = if blocks == 1 {
-                    totals[j]
+            (totals, magnitudes)
+        };
+        let tasks = n.div_ceil(TILE) * blocks;
+        let parts = if tasks > 1 && k * n >= crate::ops::map::PAR_THRESHOLD {
+            crate::parallel::map_tasks(tasks, &part)
+        } else {
+            (0..tasks).map(&part).collect()
+        };
+        for (tile, parts) in parts.chunks(blocks).enumerate() {
+            let first = tile * TILE;
+            for j in 0..parts[0].0.len() {
+                let fold = |magnitude: bool| {
+                    let value = |part: &(Vec<T::Wide>, Vec<T::Wide>)| {
+                        if magnitude { part.1[j] } else { part.0[j] }
+                    };
+                    if blocks == 1 {
+                        value(&parts[0])
+                    } else {
+                        let partials = parts.iter().map(value).collect();
+                        pairwise_fold(partials, T::Wide::default(), |p, q| p.acc_add(q))
+                    }
+                };
+                let value = if T::EXACT {
+                    // A product passes through its lane's steps in a block, the
+                    // tail, the lanes' merge and the blocks'.
+                    let depth = RUN_SUM_CHUNK / lanes + 80;
+                    T::settle(fold(false), fold(true), depth).unwrap_or_else(|| {
+                        // SAFETY: as above, for row `0` of `a` and column
+                        // `first + j` of `b`.
+                        let (row, column) = unsafe { (run(a, csa), run(b.add(first + j), rsb)) };
+                        T::dot(&row, &column)
+                    })
                 } else {
-                    let partials = (0..blocks).map(|block| totals[block * width + j]).collect();
-                    pairwise_fold(partials, T::Wide::default(), |p, q| p.acc_add(q))
+                    T::narrow(fold(false))
                 };
                 // SAFETY: `c` is one row of `n`.
-                unsafe { *c.add(first + j) = T::narrow(total) };
+                unsafe { *c.add(first + j) = value };
             }
+        }
+        return true;
+    }
+    if n == 1 && m > 1 && m * k >= crate::ops::map::PAR_THRESHOLD {
+        // A matrix times a vector: the vector gathered once and the rows'
+        // dots spread across the pool, a band of rows a task.
+        let column = run(b, rsb);
+        let rows_per_task = (RUN_SUM_CHUNK / k).max(1);
+        let a_address = a as usize;
+        let bands = crate::parallel::map_tasks(m.div_ceil(rows_per_task), &|task| {
+            let rows = task * rows_per_task..((task + 1) * rows_per_task).min(m);
+            rows.map(|i| {
+                let row = run((a_address as *const T).wrapping_add(i * rsa), csa);
+                run_dot(&row, &column)
+            })
+            .collect::<Vec<T>>()
+        });
+        for (i, value) in bands.into_iter().flatten().enumerate() {
+            // SAFETY: element `(i, 0)` of `c`.
+            unsafe { *c.add(i * rsc) = value };
         }
         return true;
     }
@@ -1855,7 +2047,7 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Integer accumulation wraps and is exact, so blocking cannot change what
     // it produces -- it only buys the same parallelism the floats get.
     let output_data = match result_dtype {
-        // Carried in float64 and rounded once; see `simd_dot_f32_wide`.
+        // The float32 nearest the exact dot; see `arithmetic::exact_sum`.
         DataType::Float32 => {
             let lhs_slice = lhs_view
                 .data()
@@ -1865,8 +2057,8 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 .data()
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("dot: f32 input"))?;
-            let dot = accurate_pair_sum(lhs_slice, rhs_slice, 0.0_f64, simd_dot_f32_wide);
-            TensorData::from_vec_f32(vec![dot as f32], device)
+            let dot = crate::ops::arithmetic::exact_sum::dot_f32(lhs_slice, rhs_slice);
+            TensorData::from_vec_f32(vec![dot], device)
         }
         DataType::Float64 => dot_of!(as_f64_slice, from_vec_f64, 0.0_f64, simd_dot_f64),
         DataType::Int32 => dot_of!(as_i32_slice, from_vec_i32, 0_i32, |a: &[i32], b: &[i32]| {
@@ -1992,22 +2184,22 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
         Some(true) => (0, run),
     };
 
-    // `$narrow` takes the fold's total to the output's type: float32 is
-    // folded in float64, as `dot` folds it, and rounded once.
+    // `$dot` is each run's dot, as `dot` itself takes it: float32's is the
+    // exact dot rounded once.
     macro_rules! vecdot_of {
-        ($accessor:ident, $from_vec:ident, $zero:expr, $fold:expr, $ty:ty, $narrow:expr) => {{
+        ($accessor:ident, $from_vec:ident, $ty:ty, $dot:expr) => {{
             let left = lhs_view.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
             })?;
             let right = rhs_view.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("vecdot: tensor data did not match its dtype")
             })?;
-            let narrow = $narrow;
+            let dot = $dot;
             let mut out = vec![<$ty>::default(); outer];
             if outer == 1 {
-                // One run over everything, which `accurate_pair_sum` spreads
-                // across the pool itself.
-                out[0] = narrow(accurate_pair_sum(&left[..run], &right[..run], $zero, $fold));
+                // One run over everything, which the dot spreads across the
+                // pool itself.
+                out[0] = dot(&left[..run], &right[..run]);
             } else {
                 // Many independent runs, so the batch is what to split; each
                 // run then folds on one thread.
@@ -2017,12 +2209,7 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
                     &|start, block| {
                         for (offset, slot) in block.iter_mut().enumerate() {
                             let (l, r) = ((start + offset) * lhs_step, (start + offset) * rhs_step);
-                            *slot = narrow(accurate_pair_sum(
-                                &left[l..l + run],
-                                &right[r..r + run],
-                                $zero,
-                                $fold,
-                            ));
+                            *slot = dot(&left[l..l + run], &right[r..r + run]);
                         }
                     },
                 );
@@ -2035,41 +2222,28 @@ pub fn vecdot(lhs: &Tensor, rhs: &Tensor, dim: isize) -> Result<Tensor> {
         DataType::Float32 => vecdot_of!(
             as_f32_slice,
             from_vec_f32,
-            0.0_f64,
-            simd_dot_f32_wide,
             f32,
-            |total: f64| total as f32
+            crate::ops::arithmetic::exact_sum::dot_f32
         ),
-        DataType::Float64 => vecdot_of!(
-            as_f64_slice,
-            from_vec_f64,
-            0.0_f64,
-            simd_dot_f64,
-            f64,
-            |total: f64| total
-        ),
-        DataType::Int32 => vecdot_of!(
-            as_i32_slice,
-            from_vec_i32,
-            0_i32,
-            |a: &[i32], b: &[i32]| a
-                .iter()
-                .zip(b)
-                .fold(0_i32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
-            i32,
-            |total: i32| total
-        ),
-        DataType::Int64 => vecdot_of!(
-            as_i64_slice,
-            from_vec_i64,
-            0_i64,
-            |a: &[i64], b: &[i64]| a
-                .iter()
-                .zip(b)
-                .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y))),
-            i64,
-            |total: i64| total
-        ),
+        DataType::Float64 => vecdot_of!(as_f64_slice, from_vec_f64, f64, |a: &[f64], b: &[f64]| {
+            accurate_pair_sum(a, b, 0.0_f64, simd_dot_f64)
+        }),
+        DataType::Int32 => vecdot_of!(as_i32_slice, from_vec_i32, i32, |a: &[i32], b: &[i32]| {
+            let fold = |a: &[i32], b: &[i32]| {
+                a.iter()
+                    .zip(b)
+                    .fold(0_i32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+            };
+            accurate_pair_sum(a, b, 0_i32, fold)
+        }),
+        DataType::Int64 => vecdot_of!(as_i64_slice, from_vec_i64, i64, |a: &[i64], b: &[i64]| {
+            let fold = |a: &[i64], b: &[i64]| {
+                a.iter()
+                    .zip(b)
+                    .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+            };
+            accurate_pair_sum(a, b, 0_i64, fold)
+        }),
         DataType::Bool => unreachable!("bool falls back above"),
     };
 

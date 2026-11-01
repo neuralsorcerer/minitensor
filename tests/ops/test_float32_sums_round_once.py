@@ -24,8 +24,8 @@ import pytest
 import minitensor as mt
 
 
-def _exact(values) -> float:
-    return float(sum(Fraction(float(v)) for v in values if not math.isnan(v)))
+def _exact(values) -> Fraction:
+    return sum(Fraction(float(v)) for v in values if not math.isnan(v))
 
 
 def _samples(seed, nan=False):
@@ -43,7 +43,7 @@ def _samples(seed, nan=False):
 @pytest.mark.parametrize("name", ["sum", "nansum"])
 def test_sums_are_correctly_rounded(layout, name):
     for values in _samples(271, nan=name == "nansum"):
-        want = float(np.float32(_exact(values)))
+        want = _float32(_exact(values))
         if layout == "flat":
             tensor, dim = mt.Tensor(values), None
         elif layout == "row":
@@ -61,10 +61,17 @@ def test_sums_are_correctly_rounded(layout, name):
 def test_several_axes_round_once(dims, keepdim):
     rng = np.random.default_rng(277)
     values = (1e4 + rng.normal(0, 1, (37, 53, 11))).astype(np.float32)
-    want = values.astype(np.float64).sum(axis=tuple(dims), keepdims=keepdim)
+    moved = np.moveaxis(values, dims, list(range(-len(dims), 0)))
+    runs = moved.reshape(-1, int(np.prod([values.shape[d] for d in dims])))
+    want = [_float32(_exact(run.tolist())) for run in runs]
     tensor = mt.Tensor(values, requires_grad=True)
     total = tensor.sum(dim=dims, keepdim=keepdim)
-    np.testing.assert_array_equal(total.detach().numpy(), want.astype(np.float32))
+    assert total.detach().numpy().ravel().tolist() == want
+    assert total.shape == tuple(
+        1 if d in dims else n
+        for d, n in enumerate(values.shape)
+        if keepdim or d not in dims
+    )
     total.sum().backward()
     np.testing.assert_array_equal(tensor.grad.numpy(), np.ones_like(values))
     with_nan = values.copy()

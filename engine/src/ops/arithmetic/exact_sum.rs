@@ -213,22 +213,28 @@ fn block_lanes<I: Element>(values: &[I]) -> Carried {
             magnitudes[lane] += error.abs();
         }
     }
-    finish(sums, errors, magnitudes, rest, values.len())
+    finish(
+        sums,
+        errors,
+        magnitudes,
+        rest.iter().map(|value| value.wide()),
+        values.len(),
+    )
 }
 
 /// A block's lanes, with the values left over added to lane 0, merged into
 /// one carried total.
 #[inline(always)]
-fn finish<I: Element>(
+fn finish(
     mut sums: [f64; LANES],
     mut errors: [f64; LANES],
     mut magnitudes: [f64; LANES],
-    rest: &[I],
+    rest: impl Iterator<Item = f64>,
     len: usize,
 ) -> Carried {
     // The few left over go to lane 0.
-    for &value in rest {
-        let (sum, error) = two_sum(sums[0], value.wide());
+    for value in rest {
+        let (sum, error) = two_sum(sums[0], value);
         sums[0] = sum;
         errors[0] += error;
         magnitudes[0] += error.abs();
@@ -315,7 +321,7 @@ fn block_avx_with<I: Element>(
         unpack(sums),
         unpack(errors),
         unpack(magnitudes),
-        rest,
+        rest.iter().map(|value| value.wide()),
         values.len(),
     )
 }
@@ -336,17 +342,16 @@ fn plain_lanes<I: Element>(values: &[I]) -> (f64, f64) {
             magnitudes[lane] += value.abs();
         }
     }
-    plain_finish(sums, magnitudes, rest)
+    plain_finish(sums, magnitudes, rest.iter().map(|value| value.wide()))
 }
 
 #[inline(always)]
-fn plain_finish<I: Element>(
+fn plain_finish(
     mut sums: [f64; LANES],
     mut magnitudes: [f64; LANES],
-    rest: &[I],
+    rest: impl Iterator<Item = f64>,
 ) -> (f64, f64) {
-    for &value in rest {
-        let value = value.wide();
+    for value in rest {
         sums[0] += value;
         magnitudes[0] += value.abs();
     }
@@ -386,7 +391,11 @@ fn plain_avx_f32(values: &[f32]) -> (f64, f64) {
         }
         lanes
     };
-    plain_finish(unpack(sums), unpack(magnitudes), rest)
+    plain_finish(
+        unpack(sums),
+        unpack(magnitudes),
+        rest.iter().map(|value| value.wide()),
+    )
 }
 
 /// The plain float64 sum of `values` and of their magnitudes, block by block
@@ -794,6 +803,229 @@ fn accumulate_columns<I: Element, const PLAIN: bool>(
     }
 }
 
+/// One block of `a[i] · b[i]`, each product of two float32s exact in
+/// float64, added plainly in [`LANES`] lanes with their magnitudes; as
+/// [`plain_lanes`] is.
+#[inline(always)]
+fn plain_dot_lanes(a: &[f32], b: &[f32]) -> (f64, f64) {
+    let (mut sums, mut magnitudes) = ([0f64; LANES], [0f64; LANES]);
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for lane in 0..LANES {
+            let product = f64::from(x[lane]) * f64::from(y[lane]);
+            sums[lane] += product;
+            magnitudes[lane] += product.abs();
+        }
+    }
+    let rest = left_rest
+        .iter()
+        .zip(right_rest)
+        .map(|(&x, &y)| f64::from(x) * f64::from(y));
+    plain_finish(sums, magnitudes, rest)
+}
+
+/// One block of `a[i] · b[i]` carried as [`block_lanes`] carries values.
+#[inline(always)]
+fn carried_dot_lanes(a: &[f32], b: &[f32]) -> Carried {
+    let (mut sums, mut errors, mut magnitudes) = ([0f64; LANES], [0f64; LANES], [0f64; LANES]);
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for lane in 0..LANES {
+            let (sum, error) = two_sum(sums[lane], f64::from(x[lane]) * f64::from(y[lane]));
+            sums[lane] = sum;
+            errors[lane] += error;
+            magnitudes[lane] += error.abs();
+        }
+    }
+    let rest = left_rest
+        .iter()
+        .zip(right_rest)
+        .map(|(&x, &y)| f64::from(x) * f64::from(y));
+    finish(sums, errors, magnitudes, rest, a.len())
+}
+
+/// [`plain_dot_lanes`] in 256-bit registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn plain_dot_avx(a: &[f32], b: &[f32]) -> (f64, f64) {
+    use std::arch::x86_64::{
+        __m256d, _mm_loadu_ps, _mm256_add_pd, _mm256_andnot_pd, _mm256_cvtps_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+    };
+    let sign = _mm256_set1_pd(-0.0);
+    let (mut sums, mut magnitudes) = ([_mm256_setzero_pd(); 2], [_mm256_setzero_pd(); 2]);
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (x, y) = unsafe {
+                (
+                    _mm256_cvtps_pd(_mm_loadu_ps(x.as_ptr().add(4 * half))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(y.as_ptr().add(4 * half))),
+                )
+            };
+            let product = _mm256_mul_pd(x, y);
+            sums[half] = _mm256_add_pd(sums[half], product);
+            magnitudes[half] = _mm256_add_pd(magnitudes[half], _mm256_andnot_pd(sign, product));
+        }
+    }
+    let unpack = |vectors: [__m256d; 2]| {
+        let mut lanes = [0f64; LANES];
+        for (half, vector) in vectors.into_iter().enumerate() {
+            // SAFETY: four lanes from `4 * half` lie inside the array.
+            unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+        }
+        lanes
+    };
+    let rest = left_rest
+        .iter()
+        .zip(right_rest)
+        .map(|(&x, &y)| f64::from(x) * f64::from(y));
+    plain_finish(unpack(sums), unpack(magnitudes), rest)
+}
+
+/// [`carried_dot_lanes`] in 256-bit registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn carried_dot_avx(a: &[f32], b: &[f32]) -> Carried {
+    use std::arch::x86_64::{
+        __m256d, _mm_loadu_ps, _mm256_add_pd, _mm256_andnot_pd, _mm256_cvtps_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    };
+    let sign = _mm256_set1_pd(-0.0);
+    let (mut sums, mut errors, mut magnitudes) = (
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+    );
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let value = unsafe {
+                _mm256_mul_pd(
+                    _mm256_cvtps_pd(_mm_loadu_ps(x.as_ptr().add(4 * half))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(y.as_ptr().add(4 * half))),
+                )
+            };
+            let sum = _mm256_add_pd(sums[half], value);
+            let virtual_value = _mm256_sub_pd(sum, sums[half]);
+            let virtual_sum = _mm256_sub_pd(sum, virtual_value);
+            let error = _mm256_add_pd(
+                _mm256_sub_pd(sums[half], virtual_sum),
+                _mm256_sub_pd(value, virtual_value),
+            );
+            sums[half] = sum;
+            errors[half] = _mm256_add_pd(errors[half], error);
+            magnitudes[half] = _mm256_add_pd(magnitudes[half], _mm256_andnot_pd(sign, error));
+        }
+    }
+    let unpack = |vectors: [__m256d; 2]| {
+        let mut lanes = [0f64; LANES];
+        for (half, vector) in vectors.into_iter().enumerate() {
+            // SAFETY: four lanes from `4 * half` lie inside the array.
+            unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+        }
+        lanes
+    };
+    let rest = left_rest
+        .iter()
+        .zip(right_rest)
+        .map(|(&x, &y)| f64::from(x) * f64::from(y));
+    finish(
+        unpack(sums),
+        unpack(errors),
+        unpack(magnitudes),
+        rest,
+        a.len(),
+    )
+}
+
+/// `block` over aligned blocks of `a` and `b`, across the pool for a long
+/// run, in block order either way.
+fn dot_blocks<R: Send>(a: &[f32], b: &[f32], block: impl Fn(&[f32], &[f32]) -> R + Sync) -> Vec<R> {
+    let len = a.len();
+    if len <= BLOCK {
+        return vec![block(a, b)];
+    }
+    let span = |nth: usize| nth * BLOCK..(nth * BLOCK + BLOCK).min(len);
+    if len >= crate::ops::map::PAR_THRESHOLD {
+        crate::parallel::map_tasks(len.div_ceil(BLOCK), &|nth| {
+            block(&a[span(nth)], &b[span(nth)])
+        })
+    } else {
+        (0..len.div_ceil(BLOCK))
+            .map(|nth| block(&a[span(nth)], &b[span(nth)]))
+            .collect()
+    }
+}
+
+/// The float32 nearest `Σ a[i] · b[i]`.
+///
+/// Each product of two float32s is exact in float64, so this is a sum of
+/// float64s, settled as a float32 sum is: plainly with a bound, carried
+/// where the bound reaches a halfway point, and exactly where that does.
+/// Products of an infinity and a zero, and NaNs, make NaN as they would
+/// added up one by one.
+pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let avx = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::ops::simd::simd_capabilities().avx
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    };
+    let plain_block = |x: &[f32], y: &[f32]| {
+        #[cfg(target_arch = "x86_64")]
+        if avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { plain_dot_avx(x, y) };
+        }
+        plain_dot_lanes(x, y)
+    };
+    let (sum, magnitude) = if a.len() <= BLOCK {
+        plain_block(a, b)
+    } else {
+        let plain = dot_blocks(a, b, plain_block);
+        pairwise_fold(plain, (0.0, 0.0), |p, q| (p.0 + q.0, p.1 + q.1))
+    };
+    let depth = (a.len().min(BLOCK) / LANES + 2 * LANES + 64) as f64;
+    if let Some(value) = f32::settle(sum, 0.0, magnitude * depth * 2f64.powi(-52)) {
+        return value;
+    }
+    let carried = dot_blocks(a, b, |x, y| {
+        #[cfg(target_arch = "x86_64")]
+        if avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { carried_dot_avx(x, y) };
+        }
+        carried_dot_lanes(x, y)
+    });
+    pairwise_fold(carried, Carried::default(), Carried::merge)
+        .rounded()
+        .unwrap_or_else(|| {
+            let products = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y));
+            match Total::of_wide(products) {
+                Err(special) => special as f32,
+                Ok(total) => total.rounded(),
+            }
+        })
+}
+
+/// The float32 nearest every number within `bound` of `value`, when that is
+/// one float32.
+pub(crate) fn settle_f32(value: f64, bound: f64) -> Option<f32> {
+    f32::settle(value, 0.0, bound)
+}
+
 /// The float64 nearest the mean of `values`, from their exact sum in 128
 /// bits divided once; NaN for no values.
 ///
@@ -835,8 +1067,15 @@ impl Total {
     #[cold]
     #[inline(never)]
     fn of<I: Element>(values: &[I]) -> Result<Self, f64> {
+        Self::of_wide(values.iter().map(|value| value.wide()))
+    }
+
+    /// [`Total::of`] for values already in float64, each exact.
+    #[cold]
+    #[inline(never)]
+    fn of_wide(values: impl Iterator<Item = f64> + Clone) -> Result<Self, f64> {
         let (mut nan, mut up, mut down) = (false, false, false);
-        for value in values.iter().map(|value| value.wide()) {
+        for value in values.clone() {
             nan |= value.is_nan();
             up |= value == f64::INFINITY;
             down |= value == f64::NEG_INFINITY;
@@ -854,7 +1093,7 @@ impl Total {
             positive: vec![0; limbs],
             negative: vec![0; limbs],
         };
-        for value in values.iter().map(|value| value.wide()) {
+        for value in values {
             let exact = Exact::float(value).expect("finite");
             if exact.magnitude != 0 {
                 let limbs = if exact.negative {

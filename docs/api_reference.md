@@ -1632,12 +1632,20 @@ times float32's own and an SVD's small singular values three orders less
 accurate; now each factor is as near the exact one as float32 holds. The
 gradient comes back float32.
 
-A float32 `dot` and `vecdot` are carried in float64 and rounded once too, and
-so is a float32 product with a single row or a single column: a matrix times a
-vector, a vector times a matrix, and `a @ b` of two vectors, which is `dot(a,
-b)` to the bit. Such a product is a set of dot products and costs what reading
-the matrix costs, so the wide accumulation is cheap there; accumulated in
-float32 a matrix times a vector was correctly rounded in one entry of twenty.
+A float32 `dot` and `vecdot` are the float32 nearest the exact sum of the
+products, and so is each entry of a float32 product with a single row or a
+single column: a matrix times a vector, a vector times a matrix, and `a @ b` of
+two vectors, which is `dot(a, b)` to the bit. The product of two float32s is
+exact in float64, so the products are added there with a bound on that sum's
+rounding, which settles the float32 answer unless the bound reaches a halfway
+point between two float32s; then the sum is carried with its additions' exact
+errors, and taken exactly where that cannot decide either. Such a product is a
+set of dot products and costs what reading the matrix costs, so the wide
+accumulation is cheap there. Accumulated in float32, a matrix times a vector
+was correctly rounded in one entry of twenty; added in float64 and narrowed,
+products that cancelled lost what lay below float64's last bit, and a float64
+sum on a float32 halfway point was rounded twice -- `1 + 2^-24 + 2^-60` came
+out `1`.
 A float32 `matmul`, `mm` or `bmm` with more than one row and column is not: it
 accumulates in float32, as a float32 matrix product conventionally does, which
 leaves a few ulps of error in a typical entry and more where the sum cancels.
@@ -1865,8 +1873,8 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
-A float32 `dot` is accumulated in float64, where each product of two float32s
-is exact, and rounded once.
+A float32 `dot` is the float32 nearest the exact sum of the products; see
+*Linear algebra & matrix ops*.
 
 A float32 `sum` and `mean`, over every element, one axis or several, are the
 float32 nearest the exact sum and the exact mean, where float32 additions had
