@@ -1873,14 +1873,16 @@ axis or several, so it is the float32 nearest the exact sum, where float32
 additions had put offset data tens of ulps out. `nansum` skips the input's own
 NaN entries; a NaN made of `inf + -inf` on the way is the answer and stays.
 
-A float64 `sum` and `mean` over every element -- `dim=None`, or every axis
-named -- are the float64 nearest the exact sum and the exact mean: each lane
+A float64 `sum` and `mean` -- over every element, along one axis, or over
+several -- are the float64 nearest the exact sum and the exact mean: each lane
 carries its additions' exact errors beside its sum, with a bound on what
 adding those leaves out, and where the bound cannot place the result against
 a halfway point the values are summed exactly. Pairwise float64 additions had
 about half the sums of ordinary data off, by tens of ulps where the values
-cancel, and the mean divided that and rounded again. The result does not
-depend on the order of the additions, a sum whose running total overflows is
+cancel, and the mean divided that and rounded again; over several axes each
+axis rounded its partial sums before the next added them, where now each
+output's values are summed as one run. The result does not depend on the
+order of the additions, a sum whose running total overflows is
 still the exact one when that is in range -- `[max, max, -max]` sums to `max`
 -- and an int64 `mean` divides the exact integer sum once.
 

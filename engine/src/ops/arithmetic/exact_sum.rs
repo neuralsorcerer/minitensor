@@ -53,6 +53,32 @@ impl Carried {
         Self { sum, error, slack }
     }
 
+    /// The float64 nearest the exact total over `count`, when the bound says
+    /// which it is.
+    ///
+    /// Divided as `evenly_spaced` divides a numerator: the quotient, its
+    /// exact remainder, and the tail with the error added in.
+    fn divided(self, count: usize) -> Option<f64> {
+        if self.sum == 0.0 && self.error == 0.0 && self.slack == 0.0 {
+            // The values cancel exactly, or are all zeros.
+            return Some(0.0);
+        }
+        let count = count as f64;
+        let quotient = self.sum / count;
+        let product = quotient * count;
+        // `product` is within a rounding of `sum`, so the first difference
+        // is exact and the remainder rounds once.
+        let remainder = (self.sum - product) - product_error(quotient, count, product);
+        let tail = (remainder + self.error) / count;
+        let (value, rest) = two_sum(quotient, tail);
+        let bound = self.slack / count * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50);
+        let inward = (value - f64::from_bits(value.to_bits().wrapping_sub(1))).abs();
+        // Clear of underflow in the product's split, and of a zero or a value
+        // that is not finite.
+        let ordinary = value.abs() >= 2f64.powi(-900) && value.abs() <= 2f64.powi(900);
+        (ordinary && rest.abs() + bound < inward * SHY_OF_HALF).then_some(value)
+    }
+
     /// The float64 nearest the exact total, when the bound says which it is.
     fn rounded(self) -> Option<f64> {
         let (value, rest) = two_sum(self.sum, self.error);
@@ -180,10 +206,16 @@ fn block(values: &[f64]) -> Carried {
 /// The carried total of `values`, block by block, the blocks merged
 /// pairwise: in parallel for a long run, with the same blocks either way.
 fn carried(values: &[f64]) -> Carried {
+    carried_with(values, true)
+}
+
+/// [`carried`], across the pool only when `parallel`, for a caller already
+/// inside one of its tasks. The blocks and their merging are the same.
+fn carried_with(values: &[f64], parallel: bool) -> Carried {
     if values.len() <= BLOCK {
         return block(values);
     }
-    let partials: Vec<Carried> = if values.len() >= crate::ops::map::PAR_THRESHOLD {
+    let partials: Vec<Carried> = if parallel && values.len() >= crate::ops::map::PAR_THRESHOLD {
         let len = values.len();
         crate::parallel::map_tasks(len.div_ceil(BLOCK), &|nth| {
             block(&values[nth * BLOCK..(nth * BLOCK + BLOCK).min(len)])
@@ -200,44 +232,273 @@ fn carried(values: &[f64]) -> Carried {
 /// to that infinity; finite values to the float64 nearest their exact sum,
 /// an infinity past the largest. A sum that cancels to zero is `+0`.
 pub(crate) fn sum_f64(values: &[f64]) -> f64 {
-    carried(values).rounded().unwrap_or_else(|| {
-        Total::of(values).map_or_else(|special| special, |total| total.rounded())
-    })
+    Reduction::Sum.of(values, carried(values))
 }
 
 /// The float64 nearest the mean of `values`, the exact sum over the count;
 /// NaN for no values.
-///
-/// The carried total is divided as `evenly_spaced` divides a numerator: the
-/// quotient, its exact remainder, and the tail with the error added in.
 pub(crate) fn mean_f64(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
+    Reduction::Mean.of(values, carried(values))
+}
+
+/// What a reduction makes of its values' total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reduction {
+    Sum,
+    Mean,
+}
+
+impl Reduction {
+    /// The answer from `values`' carried `total`, or from their exact sum
+    /// where the bound cannot place it.
+    fn of(self, values: &[f64], total: Carried) -> f64 {
+        let fast = match self {
+            Self::Sum => total.rounded(),
+            Self::Mean if values.is_empty() => return f64::NAN,
+            Self::Mean => total.divided(values.len()),
+        };
+        fast.unwrap_or_else(|| self.exactly(values))
     }
-    let count = values.len() as f64;
-    let total = carried(values);
-    if total.sum == 0.0 && total.error == 0.0 && total.slack == 0.0 {
-        // The values cancel exactly, or are all zeros.
-        return 0.0;
+
+    /// The answer from the exact sum of `values`.
+    #[cold]
+    #[inline(never)]
+    fn exactly(self, values: &[f64]) -> f64 {
+        if self == Self::Mean && values.is_empty() {
+            return f64::NAN;
+        }
+        match Total::of(values) {
+            Err(special) => special,
+            Ok(total) => match self {
+                Self::Sum => total.rounded(),
+                Self::Mean => total.divided(values.len() as u64),
+            },
+        }
     }
-    let quotient = total.sum / count;
-    let product = quotient * count;
-    // `product` is within a rounding of `sum`, so the first difference is
-    // exact and the remainder rounds once.
-    let remainder = (total.sum - product) - product_error(quotient, count, product);
-    let tail = (remainder + total.error) / count;
-    let (value, rest) = two_sum(quotient, tail);
-    let bound = total.slack / count * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50);
-    let inward = (value - f64::from_bits(value.to_bits().wrapping_sub(1))).abs();
-    // Clear of underflow in the product's split, and of a zero or a value
-    // that is not finite.
-    let ordinary = value.abs() >= 2f64.powi(-900) && value.abs() <= 2f64.powi(900);
-    if ordinary && rest.abs() + bound < inward * SHY_OF_HALF {
-        return value;
+}
+
+/// Columns a task takes of a strided axis.
+const COLUMNS: usize = 512;
+
+/// Below this many tasks across the outputs, a long axis is cut into parts
+/// as well. A count fixed by the shape, so the parts, and the answer, do not
+/// depend on the threads there are.
+const SPREAD: usize = 64;
+
+/// The sum or mean of `input`, laid out `[outer, len, inner]`, along its
+/// middle axis into `out` (`outer * inner`), each the float64 nearest the
+/// exact one.
+///
+/// A run along the axis that is contiguous is carried as [`sum_f64`] carries
+/// one. Strided, the values of a band of columns are added row by row into a
+/// sum, an error and a magnitude per column, a loop of independent columns;
+/// a long axis with few outputs is cut into parts merged afterwards, as
+/// blocks are. Each output is rounded from its carried total, or from the
+/// exact sum of its own values where the bound cannot decide.
+pub(crate) fn reduce_axis_f64(
+    input: &[f64],
+    out: &mut [f64],
+    len: usize,
+    inner: usize,
+    reduction: Reduction,
+) {
+    if out.is_empty() {
+        return;
     }
-    match Total::of(values) {
-        Err(special) => special,
-        Ok(total) => total.divided(values.len() as u64),
+    if len == 0 {
+        out.fill(match reduction {
+            Reduction::Sum => 0.0,
+            Reduction::Mean => f64::NAN,
+        });
+        return;
+    }
+    let parallel = input.len() >= crate::ops::map::PAR_THRESHOLD;
+    if inner == 1 {
+        // A few long runs each spread across the pool; many runs each take
+        // one task. The answer is the same either way.
+        if out.len() < 4 {
+            for (index, slot) in out.iter_mut().enumerate() {
+                let run = &input[index * len..(index + 1) * len];
+                *slot = reduction.of(run, carried_with(run, true));
+            }
+            return;
+        }
+        let row = |index: usize| {
+            let run = &input[index * len..(index + 1) * len];
+            reduction.of(run, carried_with(run, false))
+        };
+        let per_task = (BLOCK / len).max(1);
+        if parallel {
+            crate::ops::map::par_out_chunks(out, per_task, &|first, chunk| {
+                for (offset, slot) in chunk.iter_mut().enumerate() {
+                    *slot = row(first + offset);
+                }
+            });
+        } else {
+            for (index, slot) in out.iter_mut().enumerate() {
+                *slot = row(index);
+            }
+        }
+        return;
+    }
+    let outer = out.len() / inner;
+    let slab = len * inner;
+    let bands = inner.div_ceil(COLUMNS);
+    let parts = if outer * bands >= SPREAD {
+        1
+    } else {
+        let rows = (BLOCK / inner.min(COLUMNS)).max(64);
+        len.div_ceil(rows)
+    };
+    let rows_per_part = len.div_ceil(parts);
+    let task = |nth: usize| {
+        let (o, rest) = (nth / (bands * parts), nth % (bands * parts));
+        let (band, part) = (rest / parts, rest % parts);
+        let columns = band * COLUMNS..((band + 1) * COLUMNS).min(inner);
+        let rows = part * rows_per_part..((part + 1) * rows_per_part).min(len);
+        columns_part(&input[o * slab..(o + 1) * slab], inner, rows, columns)
+    };
+    let tasks = outer * bands * parts;
+    let partials: Vec<Vec<Carried>> = if parallel {
+        crate::parallel::map_tasks(tasks, &task)
+    } else {
+        (0..tasks).map(task).collect()
+    };
+    let output = |index: usize| {
+        let (o, column) = (index / inner, index % inner);
+        let (band, offset) = (column / COLUMNS, column % COLUMNS);
+        let first = (o * bands + band) * parts;
+        let total = partials[first..first + parts]
+            .iter()
+            .map(|part| part[offset])
+            .fold(Carried::default(), Carried::merge);
+        let fast = match reduction {
+            Reduction::Sum => total.rounded(),
+            Reduction::Mean => total.divided(len),
+        };
+        fast.unwrap_or_else(|| {
+            let values: Vec<f64> = (0..len)
+                .map(|row| input[o * slab + row * inner + column])
+                .collect();
+            reduction.exactly(&values)
+        })
+    };
+    if parallel {
+        crate::ops::map::par_out_chunks(out, crate::ops::map::PAR_CHUNK, &|first, chunk| {
+            for (offset, slot) in chunk.iter_mut().enumerate() {
+                *slot = output(first + offset);
+            }
+        });
+    } else {
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = output(index);
+        }
+    }
+}
+
+/// The carried totals of `columns` over `rows` of a `[len, inner]` slab, in
+/// the widest build the CPU runs.
+fn columns_part(
+    slab: &[f64],
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    columns: std::ops::Range<usize>,
+) -> Vec<Carried> {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx {
+        // SAFETY: avx was detected on this CPU.
+        return unsafe { columns_part_avx(slab, inner, rows, columns) };
+    }
+    columns_part_body(slab, inner, rows, columns)
+}
+
+/// [`columns_part_body`] compiled for 256-bit registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn columns_part_avx(
+    slab: &[f64],
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    columns: std::ops::Range<usize>,
+) -> Vec<Carried> {
+    columns_part_body(slab, inner, rows, columns)
+}
+
+/// The rows added into their columns' sums, errors and magnitudes.
+///
+/// A band of a few columns that is every column takes several rows at a
+/// time, so that each pass is a run long enough to vectorize: lane `l` holds
+/// column `l % width`, and the lanes of a column merge at the end. Rows left
+/// over go to the first lanes.
+#[inline(always)]
+fn columns_part_body(
+    slab: &[f64],
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    columns: std::ops::Range<usize>,
+) -> Vec<Carried> {
+    let width = columns.len();
+    let group = if width == inner {
+        (64 / width).max(1)
+    } else {
+        1
+    };
+    let lanes = width * group;
+    let (mut sums, mut errors, mut magnitudes) =
+        (vec![0f64; lanes], vec![0f64; lanes], vec![0f64; lanes]);
+    let mut row = rows.start;
+    while row + group <= rows.end {
+        let start = row * inner + columns.start;
+        accumulate_columns(
+            &mut sums,
+            &mut errors,
+            &mut magnitudes,
+            &slab[start..start + lanes],
+        );
+        row += group;
+    }
+    while row < rows.end {
+        let start = row * inner + columns.start;
+        accumulate_columns(
+            &mut sums[..width],
+            &mut errors[..width],
+            &mut magnitudes[..width],
+            &slab[start..start + width],
+        );
+        row += 1;
+    }
+    // No lane takes more than this many additions.
+    let additions = (rows.len() / group + group) as f64;
+    (0..width)
+        .map(|column| {
+            (0..group)
+                .map(|nth| {
+                    let lane = nth * width + column;
+                    Carried {
+                        sum: sums[lane],
+                        error: errors[lane],
+                        slack: magnitudes[lane] * additions * 2f64.powi(-52),
+                    }
+                })
+                .fold(Carried::default(), Carried::merge)
+        })
+        .collect()
+}
+
+/// Each column's value added to its sum by a two-sum, the error and its
+/// magnitude beside it: the columns are independent, so the loop vectorizes.
+#[inline(always)]
+fn accumulate_columns(sums: &mut [f64], errors: &mut [f64], magnitudes: &mut [f64], row: &[f64]) {
+    for (((sum, error), magnitude), &value) in sums
+        .iter_mut()
+        .zip(errors.iter_mut())
+        .zip(magnitudes.iter_mut())
+        .zip(row)
+    {
+        let (total, rounding) = two_sum(*sum, value);
+        *sum = total;
+        *error += rounding;
+        *magnitude += rounding.abs();
     }
 }
 
@@ -467,6 +728,44 @@ mod tests {
                 assert_eq!(plain.slack.to_bits(), wide.slack.to_bits(), "{len}");
             }
             let _ = plain;
+        }
+    }
+
+    #[test]
+    fn every_output_of_an_axis_is_rounded_once() {
+        let mut next = generator(0x1b87_3593_cc9e_2d51);
+        // Rows, a band, several bands, and a long axis cut into parts.
+        for (outer, len, inner) in [
+            (5, 3000, 1),
+            (2, 300, 7),
+            (1, 50, 1500),
+            (1, 200_000, 3),
+            (3, 0, 4),
+        ] {
+            let values: Vec<f64> = (0..outer * len * inner)
+                .map(|_| {
+                    let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                    unit * 2f64.powi((next() % 40) as i32 - 20)
+                })
+                .collect();
+            for reduction in [Reduction::Sum, Reduction::Mean] {
+                let mut out = vec![0.0; outer * inner];
+                reduce_axis_f64(&values, &mut out, len, inner, reduction);
+                for o in 0..outer {
+                    for column in 0..inner {
+                        let run: Vec<f64> = (0..len)
+                            .map(|row| values[o * len * inner + row * inner + column])
+                            .collect();
+                        let expected = reduction.exactly(&run);
+                        let got = out[o * inner + column];
+                        assert!(
+                            got.to_bits() == expected.to_bits()
+                                || (got.is_nan() && expected.is_nan()),
+                            "{outer}x{len}x{inner} {reduction:?} at {o},{column}: {got:e} against {expected:e}"
+                        );
+                    }
+                }
+            }
         }
     }
 

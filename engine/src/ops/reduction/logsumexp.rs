@@ -882,9 +882,52 @@ fn mean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
             });
             with_grad_fn(value.requires_grad_(true), grad_fn)
         }
+        // Over some axes, each output's exact sum over the count rounded
+        // once: along one axis in place, over several with those axes moved
+        // into one run.
         DataType::Float64 => {
-            let total = sum(tensor, as_isize(&normalized), keepdim)?;
-            super::sort_impl::divide_by_count(&total, num_elements)
+            let dims = normalized.clone().unwrap_or_default();
+            let reduction = crate::ops::arithmetic::exact_sum::Reduction::Mean;
+            let value = if let [dim] = dims[..] {
+                let shape = tensor.shape().dims();
+                let outputs: usize = (0..tensor.ndim())
+                    .filter(|&d| d != dim)
+                    .map(|d| shape[d])
+                    .product();
+                let mut data =
+                    TensorData::zeros_on_device(outputs, DataType::Float64, tensor.device());
+                super::sum_prod_impl::mean_along_dim_f64(tensor, &mut data, dim)?;
+                let result_shape: Vec<usize> = if keepdim {
+                    (0..tensor.ndim())
+                        .map(|d| if d == dim { 1 } else { shape[d] })
+                        .collect()
+                } else {
+                    (0..tensor.ndim())
+                        .filter(|&d| d != dim)
+                        .map(|d| shape[d])
+                        .collect()
+                };
+                Tensor::new(
+                    Arc::new(data),
+                    Shape::new(result_shape),
+                    DataType::Float64,
+                    tensor.device(),
+                    false,
+                )
+            } else {
+                super::sum_prod_impl::reduce_dims_f64(tensor, &dims, keepdim, reduction, false)?
+            };
+            if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+                return Ok(value);
+            }
+            let grad_fn = Arc::new(crate::autograd::MeanBackward {
+                input_id: tensor.id(),
+                input_shape: tensor.shape().dims().to_vec(),
+                dims: normalized,
+                keepdim,
+                count: num_elements,
+            });
+            with_grad_fn(value.requires_grad_(true), grad_fn)
         }
         // An int64 sum wraps past 2^63 though the mean it feeds is always in
         // range: the mean of [2^62, 2^62] came back as -2^62. The result is

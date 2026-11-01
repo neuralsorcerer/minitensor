@@ -438,6 +438,15 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
                     &widened_sum(tensor, Some(&dims), keepdim, false)?,
                     tensor.requires_grad(),
                 )?
+            } else if tensor.dtype() == DataType::Float64 && dims.len() > 1 {
+                // Each output's values summed as one run and rounded once.
+                super::sum_prod_impl::reduce_dims_f64(
+                    tensor,
+                    &dims,
+                    keepdim,
+                    crate::ops::arithmetic::exact_sum::Reduction::Sum,
+                    tensor.requires_grad(),
+                )?
             } else {
                 let mut result = tensor.clone();
                 if keepdim {

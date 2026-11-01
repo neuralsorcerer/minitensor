@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::arithmetic::exact_sum::{Reduction, reduce_axis_f64};
 use crate::ops::map::{
     FOLD_PAR_BYTES, PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks,
     par_map_indexed, par_out_chunks, par_out_chunks_sized, reduction_band,
@@ -578,15 +579,93 @@ sum_along_dim_kernel!(
     simd_sum_f32_wide
 );
 
-sum_along_dim_kernel!(
-    sum_along_dim_f64,
-    as_f64_slice,
-    as_f64_slice_mut,
-    "f64",
-    f64,
-    0f64,
-    simd_sum_f64
-);
+/// The float64 axis sum, each the float64 nearest the exact sum; see
+/// `arithmetic::exact_sum`.
+pub(crate) fn sum_along_dim_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    reduce_along_dim_f64(tensor, result_data, dim, Reduction::Sum)
+}
+
+/// The float64 axis mean, each the exact sum over the count rounded once.
+pub(crate) fn mean_along_dim_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    reduce_along_dim_f64(tensor, result_data, dim, Reduction::Mean)
+}
+
+/// The float64 sum or mean of `tensor` over `dims`, each output the exact
+/// one rounded once, as a tensor that `requires_grad` as asked.
+///
+/// The axes kept are moved first and the ones reduced last, so each output's
+/// values are one contiguous run, summed once; one axis at a time rounded each
+/// axis's partial sums before the next added them.
+pub(crate) fn reduce_dims_f64(
+    tensor: &Tensor,
+    dims: &[usize],
+    keepdim: bool,
+    reduction: Reduction,
+    requires_grad: bool,
+) -> Result<Tensor> {
+    let shape = tensor.shape().dims();
+    let kept: Vec<usize> = (0..tensor.ndim()).filter(|d| !dims.contains(d)).collect();
+    let order: Vec<isize> = kept.iter().chain(dims).map(|&d| d as isize).collect();
+    let moved = tensor.detach().permute(order)?.contiguous()?;
+    let len: usize = dims.iter().map(|&d| shape[d]).product();
+    let outputs: usize = kept.iter().map(|&d| shape[d]).product();
+    let mut data = TensorData::zeros_on_device(outputs, DataType::Float64, tensor.device());
+    let input = moved
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+    let out = data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+    reduce_axis_f64(input, out, len, 1, reduction);
+    let result_shape: Vec<usize> = if keepdim {
+        (0..tensor.ndim())
+            .map(|d| if dims.contains(&d) { 1 } else { shape[d] })
+            .collect()
+    } else {
+        kept.iter().map(|&d| shape[d]).collect()
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(result_shape),
+        DataType::Float64,
+        tensor.device(),
+        requires_grad,
+    ))
+}
+
+fn reduce_along_dim_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+    reduction: Reduction,
+) -> Result<()> {
+    let input = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+    let out = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+    let shape = tensor.shape().dims();
+    let Some(&len) = shape.get(dim) else {
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
+    };
+    let inner = shape[dim + 1..].iter().product::<usize>();
+    reduce_axis_f64(input, out, len, inner, reduction);
+    Ok(())
+}
 
 nansum_along_dim_kernel!(
     nansum_along_dim_f64,
