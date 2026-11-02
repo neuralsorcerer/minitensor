@@ -4,7 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Float sums and means rounded once.
+//! Float sums, means and dots rounded once.
 //!
 //! A float64 sum added in lanes and folded pairwise is accurate, but it is not
 //! the float64 nearest the exact sum: on ordinary data about half the sums
@@ -26,6 +26,12 @@
 //! whose values cancel across a wide range lost what lay below float64's
 //! last bit, and one whose float64 total fell on a float32 halfway point
 //! rounded twice: `1 + 2^-24 + 2^-60` came out `1`.
+//!
+//! A dot is a sum of products. A product of two float32s is exact in
+//! float64, so a float32 dot is a float32 sum of those. A product of two
+//! float64s is split by a fused multiply-add into the float64 nearest it and
+//! the exact error of that, and both are carried as a sum's values are; the
+//! exact dot sums each product's 106 bits in limbs.
 
 use super::close::add_shifted;
 use super::rounded_once::{Exact, Target, product_error, rounded, two_sum};
@@ -240,15 +246,21 @@ fn finish(
         magnitudes[0] += error.abs();
     }
     let additions = (len / LANES + LANES) as f64;
-    let mut total = Carried::default();
-    for lane in 0..LANES {
-        total = total.merge(Carried {
-            sum: sums[lane],
-            error: errors[lane],
-            slack: magnitudes[lane] * additions * 2f64.powi(-52),
-        });
+    let mut lanes: [Carried; LANES] = std::array::from_fn(|lane| Carried {
+        sum: sums[lane],
+        error: errors[lane],
+        slack: magnitudes[lane] * additions * 2f64.powi(-52),
+    });
+    // Pairwise, so that a short block waits on three merges rather than
+    // eight.
+    let mut width = LANES;
+    while width > 1 {
+        width /= 2;
+        for lane in 0..width {
+            lanes[lane] = lanes[2 * lane].merge(lanes[2 * lane + 1]);
+        }
     }
-    total
+    lanes[0]
 }
 
 /// [`block_lanes`] in 256-bit registers, for a CPU that has them: the same
@@ -947,7 +959,11 @@ fn carried_dot_avx(a: &[f32], b: &[f32]) -> Carried {
 
 /// `block` over aligned blocks of `a` and `b`, across the pool for a long
 /// run, in block order either way.
-fn dot_blocks<R: Send>(a: &[f32], b: &[f32], block: impl Fn(&[f32], &[f32]) -> R + Sync) -> Vec<R> {
+fn dot_blocks<E: Sync, R: Send>(
+    a: &[E],
+    b: &[E],
+    block: impl Fn(&[E], &[E]) -> R + Sync,
+) -> Vec<R> {
     let len = a.len();
     if len <= BLOCK {
         return vec![block(a, b)];
@@ -1026,6 +1042,347 @@ pub(crate) fn settle_f32(value: f64, bound: f64) -> Option<f32> {
     f32::settle(value, 0.0, bound)
 }
 
+/// One float64 product `x · y` added into a lane: the product split by a
+/// fused multiply-add into the float64 nearest it and that rounding's
+/// error, the product added to the lane's sum by a two-sum, and both errors
+/// added beside it as one term.
+#[inline(always)]
+fn add_product(sum: &mut f64, error: &mut f64, magnitude: &mut f64, x: f64, y: f64) {
+    let product = x * y;
+    let product_error = x.mul_add(y, -product);
+    let (total, rounding) = two_sum(*sum, product);
+    *sum = total;
+    *error += rounding + product_error;
+    *magnitude += rounding.abs() + product_error.abs();
+}
+
+/// One block of `a[i] · b[i]` for float64, carried as [`block_lanes`]
+/// carries values, with [`add_product`] for each product: a lane's error
+/// terms pass through one more addition each, which `finish`'s count of
+/// `LANES` past the lane's length covers.
+#[inline(always)]
+fn carried_dot_f64_lanes(a: &[f64], b: &[f64]) -> Carried {
+    let (mut sums, mut errors, mut magnitudes) = ([0f64; LANES], [0f64; LANES], [0f64; LANES]);
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for lane in 0..LANES {
+            add_product(
+                &mut sums[lane],
+                &mut errors[lane],
+                &mut magnitudes[lane],
+                x[lane],
+                y[lane],
+            );
+        }
+    }
+    for (&x, &y) in left_rest.iter().zip(right_rest) {
+        add_product(&mut sums[0], &mut errors[0], &mut magnitudes[0], x, y);
+    }
+    finish(sums, errors, magnitudes, std::iter::empty(), a.len())
+}
+
+/// [`carried_dot_f64_lanes`] in 256-bit registers with fused multiply-adds:
+/// the same lanes, operations and order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn carried_dot_fma(a: &[f64], b: &[f64]) -> Carried {
+    use std::arch::x86_64::{
+        __m256d, _mm256_add_pd, _mm256_andnot_pd, _mm256_fmsub_pd, _mm256_loadu_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    };
+    let sign = _mm256_set1_pd(-0.0);
+    let (mut sums, mut errors, mut magnitudes) = (
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+    );
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (x, y) = unsafe {
+                (
+                    _mm256_loadu_pd(x.as_ptr().add(4 * half)),
+                    _mm256_loadu_pd(y.as_ptr().add(4 * half)),
+                )
+            };
+            let product = _mm256_mul_pd(x, y);
+            let product_error = _mm256_fmsub_pd(x, y, product);
+            let sum = _mm256_add_pd(sums[half], product);
+            let virtual_value = _mm256_sub_pd(sum, sums[half]);
+            let virtual_sum = _mm256_sub_pd(sum, virtual_value);
+            let rounding = _mm256_add_pd(
+                _mm256_sub_pd(sums[half], virtual_sum),
+                _mm256_sub_pd(product, virtual_value),
+            );
+            sums[half] = sum;
+            errors[half] = _mm256_add_pd(errors[half], _mm256_add_pd(rounding, product_error));
+            let size = _mm256_add_pd(
+                _mm256_andnot_pd(sign, rounding),
+                _mm256_andnot_pd(sign, product_error),
+            );
+            magnitudes[half] = _mm256_add_pd(magnitudes[half], size);
+        }
+    }
+    let unpack = |vectors: [__m256d; 2]| {
+        let mut lanes = [0f64; LANES];
+        for (half, vector) in vectors.into_iter().enumerate() {
+            // SAFETY: four lanes from `4 * half` lie inside the array.
+            unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+        }
+        lanes
+    };
+    let (mut sums, mut errors, mut magnitudes) = (unpack(sums), unpack(errors), unpack(magnitudes));
+    for (&x, &y) in left_rest.iter().zip(right_rest) {
+        add_product(&mut sums[0], &mut errors[0], &mut magnitudes[0], x, y);
+    }
+    finish(sums, errors, magnitudes, std::iter::empty(), a.len())
+}
+
+/// Whether the CPU has the fused multiply-add the float64 kernels use in
+/// hardware.
+fn fused() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::ops::simd::simd_capabilities().avx2_fma
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// The float64 nearest `Σ a[i] · b[i]`.
+///
+/// Each product is split into the float64 nearest it and the exact error of
+/// that, and the halves are carried as a sum's values are; the exact dot
+/// decides where the bound cannot. A NaN, a product of an infinity and a
+/// zero, or infinite products of both signs make NaN, and an infinite
+/// product of one sign that infinity, as they would added up one by one;
+/// finite operands give the value nearest their exact dot, an infinity past
+/// the largest, though a product on the way would overflow.
+pub(crate) fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let fused = fused();
+    let block = |x: &[f64], y: &[f64]| {
+        #[cfg(target_arch = "x86_64")]
+        if fused {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { carried_dot_fma(x, y) };
+        }
+        carried_dot_f64_lanes(x, y)
+    };
+    let carried = if a.len() <= BLOCK {
+        block(a, b)
+    } else {
+        pairwise_fold(dot_blocks(a, b, block), Carried::default(), Carried::merge)
+    };
+    settled_dot(carried, a.len(), a.iter().copied().zip(b.iter().copied()))
+}
+
+/// The float64 nearest the dot of the `count` `pairs` that `carried`
+/// carries, when the bound says which it is, and the exact one otherwise.
+///
+/// A product's error is exact unless the product lies within `2^-968` of
+/// zero, where the error may have been rounded to a subnormal -- by at most
+/// half the least subnormal a product, which is allowed for as the whole of
+/// it. That allowance settles every total but one that is zero or nearly;
+/// such a total is settled without it when no product of two nonzero
+/// operands is that small.
+fn settled_dot(
+    carried: Carried,
+    count: usize,
+    pairs: impl Iterator<Item = (f64, f64)> + Clone,
+) -> f64 {
+    let allowing = Carried {
+        slack: carried.slack + count as f64 * f64::from_bits(1),
+        ..carried
+    };
+    allowing
+        .rounded()
+        .or_else(|| {
+            let tiny = pairs
+                .clone()
+                .any(|(x, y)| x != 0.0 && y != 0.0 && (x * y).abs() < 2f64.powi(-968));
+            if tiny { None } else { carried.rounded() }
+        })
+        .unwrap_or_else(|| exact_dot_f64(pairs))
+}
+
+/// The float64 nearest the exact dot of `pairs`; see [`dot_f64`].
+#[cold]
+#[inline(never)]
+fn exact_dot_f64(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> f64 {
+    let (mut nan, mut up, mut down) = (false, false, false);
+    for (x, y) in pairs.clone() {
+        if !(x.is_finite() && y.is_finite()) {
+            let product = x * y;
+            nan |= product.is_nan();
+            up |= product == f64::INFINITY;
+            down |= product == f64::NEG_INFINITY;
+        }
+    }
+    if nan || (up && down) {
+        return f64::NAN;
+    }
+    if up || down {
+        return if up { f64::INFINITY } else { f64::NEG_INFINITY };
+    }
+    // Every product of two finite float64s is a whole multiple of `2^-2148`
+    // below `2^2048`, bit 4196 here; the carries of up to 2^64 products take
+    // 64 bits more.
+    let least = 2 * LEAST;
+    let mut total = Total::empty(least, (4196 + 64) / 64 + 2);
+    for (x, y) in pairs {
+        let (x, y) = (
+            Exact::float(x).expect("finite"),
+            Exact::float(y).expect("finite"),
+        );
+        let magnitude = u128::from(x.magnitude) * u128::from(y.magnitude);
+        if magnitude != 0 {
+            let limbs = if x.negative != y.negative {
+                &mut total.negative
+            } else {
+                &mut total.positive
+            };
+            add_shifted(limbs, magnitude, (x.exponent + y.exponent - least) as usize);
+        }
+    }
+    total.rounded()
+}
+
+/// Columns a task of [`dot_columns_f64`] carries at once.
+const DOT_COLUMNS: usize = 256;
+
+/// `out[j]`, the float64 nearest `Σ_s scales[s] · rows(s)[j]` for rows each
+/// as long as `out`: a row times an upright matrix, every entry its dot
+/// rounded once.
+///
+/// Each column is carried as [`dot_f64`] carries a dot, though in one chain
+/// a block of rows long rather than in lanes: the rows of a block pass once
+/// through a tile of columns, four at a time, and a column's blocks merge
+/// after. A task takes one block of one tile, so the totals do not depend on
+/// how the tasks ran.
+pub(crate) fn dot_columns_f64<'a>(
+    scales: &[f64],
+    rows: &(dyn Fn(usize) -> &'a [f64] + Sync),
+    out: &mut [f64],
+) {
+    let (k, n) = (scales.len(), out.len());
+    let blocks = k.div_ceil(BLOCK).max(1);
+    let fused = fused();
+    let part = |task: usize| -> Vec<Carried> {
+        let (first, block) = (task / blocks * DOT_COLUMNS, task % blocks);
+        let width = DOT_COLUMNS.min(n - first);
+        let steps = block * BLOCK..(block * BLOCK + BLOCK).min(k);
+        let mut lanes = Columns {
+            sums: vec![0.0; width],
+            errors: vec![0.0; width],
+            magnitudes: vec![0.0; width],
+        };
+        let mut start = steps.start;
+        while start < steps.end {
+            let count = (steps.end - start).min(4);
+            let mut picked = [(0.0, &[][..]); 4];
+            for (slot, step) in picked.iter_mut().zip(start..start + count) {
+                *slot = (scales[step], &rows(step)[first..first + width]);
+            }
+            start += count;
+            let picked = &picked[..count];
+            #[cfg(target_arch = "x86_64")]
+            if fused {
+                // SAFETY: avx2 and fma were detected on this CPU.
+                unsafe { add_column_products_fma(&mut lanes, picked) };
+                continue;
+            }
+            add_column_products(&mut lanes, picked);
+        }
+        // A column's error terms pass through a pairing and the chain.
+        let additions = (steps.len() + 2) as f64;
+        (0..width)
+            .map(|j| Carried {
+                sum: lanes.sums[j],
+                error: lanes.errors[j],
+                slack: lanes.magnitudes[j] * additions * 2f64.powi(-52),
+            })
+            .collect()
+    };
+    let tasks = n.div_ceil(DOT_COLUMNS) * blocks;
+    let parts: Vec<Vec<Carried>> = if tasks > 1 && k * n >= crate::ops::map::PAR_THRESHOLD {
+        crate::parallel::map_tasks(tasks, &part)
+    } else {
+        (0..tasks).map(&part).collect()
+    };
+    for (tile, parts) in parts.chunks(blocks).enumerate() {
+        let first = tile * DOT_COLUMNS;
+        for (j, slot) in out[first..first + parts[0].len()].iter_mut().enumerate() {
+            let carried = pairwise_fold(
+                parts.iter().map(|part| part[j]).collect(),
+                Carried::default(),
+                Carried::merge,
+            );
+            let column = (0..k).map(|step| (scales[step], rows(step)[first + j]));
+            *slot = settled_dot(carried, k, column);
+        }
+    }
+}
+
+/// A tile of columns' carried sums, each column's sum, error and magnitude
+/// at the same index of the three.
+struct Columns {
+    sums: Vec<f64>,
+    errors: Vec<f64>,
+    magnitudes: Vec<f64>,
+}
+
+/// [`add_product`] for each column of a tile, from each of a few rows in
+/// order.
+#[inline(always)]
+fn add_column_products(lanes: &mut Columns, rows: &[(f64, &[f64])]) {
+    let width = lanes.sums.len();
+    let (sums, errors, magnitudes) = (
+        &mut lanes.sums[..width],
+        &mut lanes.errors[..width],
+        &mut lanes.magnitudes[..width],
+    );
+    match rows {
+        [(s0, r0), (s1, r1), (s2, r2), (s3, r3)] => {
+            let (r0, r1, r2, r3) = (&r0[..width], &r1[..width], &r2[..width], &r3[..width]);
+            for j in 0..width {
+                let (mut sum, mut error, mut magnitude) = (sums[j], errors[j], magnitudes[j]);
+                add_product(&mut sum, &mut error, &mut magnitude, *s0, r0[j]);
+                add_product(&mut sum, &mut error, &mut magnitude, *s1, r1[j]);
+                add_product(&mut sum, &mut error, &mut magnitude, *s2, r2[j]);
+                add_product(&mut sum, &mut error, &mut magnitude, *s3, r3[j]);
+                (sums[j], errors[j], magnitudes[j]) = (sum, error, magnitude);
+            }
+        }
+        _ => {
+            for &(scale, row) in rows {
+                let row = &row[..width];
+                for j in 0..width {
+                    add_product(
+                        &mut sums[j],
+                        &mut errors[j],
+                        &mut magnitudes[j],
+                        scale,
+                        row[j],
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// [`add_column_products`] with fused multiply-adds in hardware.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn add_column_products_fma(lanes: &mut Columns, rows: &[(f64, &[f64])]) {
+    add_column_products(lanes, rows)
+}
+
 /// The float64 nearest the mean of `values`, from their exact sum in 128
 /// bits divided once; NaN for no values.
 ///
@@ -1056,12 +1413,24 @@ pub(crate) fn mean_i64(values: &[i64]) -> f64 {
 struct Total {
     positive: Vec<u64>,
     negative: Vec<u64>,
+    /// The exponent of the least significant bit of limb `0`.
+    least: i32,
 }
 
-/// The exponent of the least significant bit of limb `0`.
+/// The exponent of the least significant bit of a sum's limb `0`: the least
+/// subnormal's.
 const LEAST: i32 = -1074;
 
 impl Total {
+    /// Nothing yet, in `limbs` limbs from `2^least`.
+    fn empty(least: i32, limbs: usize) -> Self {
+        Self {
+            positive: vec![0; limbs],
+            negative: vec![0; limbs],
+            least,
+        }
+    }
+
     /// The exact sum of `values`, or the answer itself when one is not
     /// finite.
     #[cold]
@@ -1089,10 +1458,7 @@ impl Total {
         // Every finite float64 lies below 2^1024, which is bit 2098 here; the
         // carries of up to 2^64 values take 64 bits more.
         let limbs = (2098 + 64) / 64 + 2;
-        let mut total = Self {
-            positive: vec![0; limbs],
-            negative: vec![0; limbs],
-        };
+        let mut total = Self::empty(LEAST, limbs);
         for value in values {
             let exact = Exact::float(value).expect("finite");
             if exact.magnitude != 0 {
@@ -1111,8 +1477,9 @@ impl Total {
         Ok(total)
     }
 
-    /// The magnitude of the sum and whether it is negative.
-    fn difference(self) -> (bool, Vec<u64>) {
+    /// Whether the sum is negative, its magnitude, and the exponent of that
+    /// magnitude's least significant bit.
+    fn difference(self) -> (bool, Vec<u64>, i32) {
         let negative = self.negative.iter().rev().cmp(self.positive.iter().rev())
             == std::cmp::Ordering::Greater;
         let (mut larger, smaller) = if negative {
@@ -1127,20 +1494,20 @@ impl Total {
             *limb = value;
             borrow = first || second;
         }
-        (negative, larger)
+        (negative, larger, self.least)
     }
 
     /// The value nearest the sum; `+0` for a sum that cancels.
     fn rounded<T: Output>(self) -> T {
-        let (negative, limbs) = self.difference();
-        rounded_at(negative, &limbs, false, LEAST)
+        let (negative, limbs, least) = self.difference();
+        rounded_at(negative, &limbs, false, least)
     }
 
-    /// The float64 nearest the sum over `count`, by long division with a
-    /// limb of fraction below the least subnormal, so that a remainder left
-    /// over is far below where the quotient rounds.
+    /// The value nearest the sum over `count`, by long division with a limb
+    /// of fraction below the lowest bit, so that a remainder left over is far
+    /// below where the quotient rounds.
     fn divided<T: Output>(self, count: u64) -> T {
-        let (negative, mut limbs) = self.difference();
+        let (negative, mut limbs, least) = self.difference();
         limbs.insert(0, 0);
         let divisor = u128::from(count);
         let mut remainder = 0u128;
@@ -1150,7 +1517,7 @@ impl Total {
             remainder = current - quotient * divisor;
             *limb = quotient as u64;
         }
-        rounded_at(negative, &limbs, remainder != 0, LEAST - 64)
+        rounded_at(negative, &limbs, remainder != 0, least - 64)
     }
 }
 
@@ -1352,6 +1719,113 @@ mod tests {
                     assert_eq!(out[o * inner + column].to_bits(), expected.to_bits());
                 }
             }
+        }
+    }
+
+    fn exact_dot(a: &[f64], b: &[f64]) -> f64 {
+        exact_dot_f64(a.iter().copied().zip(b.iter().copied()))
+    }
+
+    #[test]
+    fn float64_dots_are_rounded_once() {
+        let tiny = 2f64.powi(-600);
+        let small = 2f64.powi(-475);
+        // Two products of half the least subnormal: each rounds to zero,
+        // together they are the least subnormal.
+        assert_eq!(dot_f64(&[tiny, tiny], &[small, small]), f64::from_bits(1));
+        assert_eq!(dot_f64(&[0.0; 5], &[1.0; 5]).to_bits(), 0);
+        assert_eq!(dot_f64(&[], &[]).to_bits(), 0);
+        // Products past the largest float64 that cancel.
+        assert_eq!(dot_f64(&[1e200, 1e200, 3.0], &[1e200, -1e200, 0.5]), 1.5);
+        assert_eq!(dot_f64(&[1e200], &[1e200]), f64::INFINITY);
+        assert!(dot_f64(&[f64::INFINITY, 1.0], &[0.0, 1.0]).is_nan());
+        assert!(dot_f64(&[f64::INFINITY, f64::INFINITY], &[1.0, -1.0]).is_nan());
+        assert_eq!(
+            dot_f64(&[f64::INFINITY, 1e200], &[1.0, -1e200]),
+            f64::INFINITY
+        );
+        assert!(dot_f64(&[f64::NAN, 1.0], &[1.0, 1.0]).is_nan());
+        // `0.1 · 0.1 + 0.2 · 0.2` is rounded once, not twice.
+        assert_eq!(
+            dot_f64(&[0.1, 0.2], &[0.1, 0.2]),
+            exact_dot(&[0.1, 0.2], &[0.1, 0.2])
+        );
+        // A float64 halfway point, and a hair past it.
+        let half = f64::EPSILON / 2.0;
+        assert_eq!(dot_f64(&[1.0, half], &[1.0, 1.0]), 1.0);
+        assert_eq!(
+            dot_f64(&[1.0, half, 1e-300], &[1.0, 1.0, 1.0]),
+            1.0 + f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn the_carried_dot_agrees_with_the_exact_one() {
+        let mut next = generator(0x9e37_79b9_7f4a_7c15);
+        let mut unit = move || {
+            let value = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            (value, next())
+        };
+        for round in 0..1500 {
+            let len = 1 + (unit().1 % 20_000) as usize;
+            let spread = 1 + unit().1 % 80;
+            let mut a = Vec::with_capacity(len);
+            let mut b = Vec::with_capacity(len);
+            for _ in 0..len {
+                let (x, bits) = unit();
+                a.push(x * 2f64.powi((bits % spread) as i32 - 40));
+                b.push(unit().0);
+            }
+            if round % 3 == 0 {
+                // Products cancelling in pairs, nearly.
+                let mirror: Vec<f64> = a.iter().map(|&v| -v).collect();
+                let near: Vec<f64> = b.iter().map(|&v| v * (1.0 + 2f64.powi(-30))).collect();
+                a.extend(&mirror[1..]);
+                b.extend(&near[1..]);
+            }
+            if round % 7 == 1 {
+                // Down where a product's error is a subnormal.
+                for value in a.iter_mut() {
+                    *value *= 2f64.powi(-1000);
+                }
+            }
+            let exact = exact_dot(&a, &b);
+            assert_eq!(dot_f64(&a, &b).to_bits(), exact.to_bits(), "{len} products");
+            if round % 50 == 0 {
+                // The same dots as columns of a matrix with three columns.
+                let k = a.len();
+                let matrix: Vec<f64> = (0..k).flat_map(|s| [b[s], -b[s], 2.0 * b[s]]).collect();
+                let rows = |step: usize| &matrix[step * 3..step * 3 + 3];
+                let mut out = [0.0; 3];
+                dot_columns_f64(&a, &rows, &mut out);
+                let doubled: Vec<f64> = b.iter().map(|&v| 2.0 * v).collect();
+                let negated: Vec<f64> = b.iter().map(|&v| -v).collect();
+                assert_eq!(out[0].to_bits(), exact.to_bits());
+                assert_eq!(out[1].to_bits(), exact_dot(&a, &negated).to_bits());
+                assert_eq!(out[2].to_bits(), exact_dot(&a, &doubled).to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn every_build_carries_the_same_products() {
+        let mut next = generator(0x2545_f491_4f6c_dd1d);
+        for len in [0, 1, 7, 8, 9, 100, 8191, 8192] {
+            let mut value = || ((next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 1e3;
+            let a: Vec<f64> = (0..len).map(|_| value()).collect();
+            let b: Vec<f64> = (0..len).map(|_| value()).collect();
+            let bits =
+                |carried: Carried| [carried.sum, carried.error, carried.slack].map(f64::to_bits);
+            let scalar = bits(carried_dot_f64_lanes(&a, &b));
+            #[cfg(target_arch = "x86_64")]
+            {
+                let capabilities = crate::ops::simd::simd_capabilities();
+                if capabilities.avx2_fma {
+                    // SAFETY: avx2 and fma were detected on this CPU.
+                    assert_eq!(bits(unsafe { carried_dot_fma(&a, &b) }), scalar, "{len}");
+                }
+            }
+            let _ = scalar;
         }
     }
 

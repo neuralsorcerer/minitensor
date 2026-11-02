@@ -198,10 +198,13 @@ release build. Ratios above 1 mean MiniTensor is slower:
 | 1024x1024 @ 1024x1024 | float64 | 1.80x | 1.13x |
 | 2048x2048 @ 2048x2048 | float64 | 1.85x | 1.09x |
 
-The largest wins are not in that table. A matrix-vector product is the shape a
-blocked kernel is worst at and the shape a BLAS has a routine written for:
-`1x1024 @ 1024x1024` goes from 874us to 109us, and `1024x1024 @ 1024x1` from
-2086us to 36us -- 8x and 58x.
+A product with a single row or column -- a matrix times a vector, or a vector
+times a matrix -- is not handed over. Each of its entries is a dot product,
+which the library rounds once from the exact sum of its products, as `dot`
+does; a BLAS `gemv` accumulates in the operands' own precision and does not.
+The library's own path for that shape reads the matrix once, as a `gemv`
+does, rather than through the blocked kernel, which is worst at it, and runs
+the rows, or blocks of the columns, across the pool.
 
 `nn.Linear` goes the same way. Its weight is stored `[out, in]` for a product
 that wants `[in, out]`, and it is handed over that way rather than transposed

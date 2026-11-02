@@ -12,7 +12,6 @@ use crate::tensor::{comparison_pair_from_py, operands_from_py};
 use engine::Device;
 use engine::TensorIndex;
 use engine::ops::arithmetic::{mul, sub};
-use engine::ops::reduction::sum as tensor_sum;
 use engine::ops::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
 use pyo3::Bound;
@@ -251,9 +250,10 @@ fn dot(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<PyTensor> {
         .try_into()
         .map_err(|_| PyValueError::new_err("dot takes two operands"))?;
     if a_tensor.ndim() == 1 && b_tensor.ndim() == 1 {
-        let product = mul(&a_tensor, &b_tensor).map_err(_convert_error)?;
-        let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
-        return Ok(PyTensor::from_tensor(summed));
+        // The dot itself, rounded once: multiplying first and summing the
+        // products rounded each product on its own.
+        let dot = engine::ops::linalg::dot(&a_tensor, &b_tensor).map_err(_convert_error)?;
+        return Ok(PyTensor::from_tensor(dot));
     }
     let result = a_tensor.matmul(&b_tensor).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

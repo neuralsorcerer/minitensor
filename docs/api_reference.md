@@ -1632,26 +1632,33 @@ times float32's own and an SVD's small singular values three orders less
 accurate; now each factor is as near the exact one as float32 holds. The
 gradient comes back float32.
 
-A float32 `dot` and `vecdot` are the float32 nearest the exact sum of the
-products, and so is each entry of a float32 product with a single row or a
+A `dot` and `vecdot`, float32 or float64, are the float nearest the exact sum
+of the products, and so is each entry of a product with a single row or a
 single column: a matrix times a vector, a vector times a matrix, and `a @ b` of
 two vectors, which is `dot(a, b)` to the bit. The product of two float32s is
-exact in float64, so the products are added there with a bound on that sum's
-rounding, which settles the float32 answer unless the bound reaches a halfway
-point between two float32s; then the sum is carried with its additions' exact
-errors, and taken exactly where that cannot decide either. Such a product is a
-set of dot products and costs what reading the matrix costs, so the wide
-accumulation is cheap there. Accumulated in float32, a matrix times a vector
-was correctly rounded in one entry of twenty; added in float64 and narrowed,
-products that cancelled lost what lay below float64's last bit, and a float64
-sum on a float32 halfway point was rounded twice -- `1 + 2^-24 + 2^-60` came
-out `1`.
-A float32 `matmul`, `mm` or `bmm` with more than one row and column is not: it
-accumulates in float32, as a float32 matrix product conventionally does, which
-leaves a few ulps of error in a typical entry and more where the sum cancels.
-Carried in float64 it would cost two to three times as long on the operation
-that dominates a training step. Where such a product has to be correctly
-rounded, give it float64 operands and round the result.
+exact in float64, so float32 products are added there with a bound on that
+sum's rounding, which settles the float32 answer unless the bound reaches a
+halfway point between two float32s; then the sum is carried with its
+additions' exact errors. A float64 product is split by a fused multiply-add
+into the float64 nearest it and that rounding's exact error, and both halves
+are carried that way from the start. Where the carried bound cannot decide
+either, the products are summed exactly. Accumulated in float32, a float32
+matrix times a vector was correctly rounded in one entry of twenty; added in
+float64 and narrowed, products that cancelled lost what lay below float64's
+last bit, and a float64 sum on a float32 halfway point was rounded twice --
+`1 + 2^-24 + 2^-60` came out `1`. A float64 dot added in lanes was not the
+float64 nearest the exact one in nine dots of ten of ordinary data, and
+`0.1 * 0.1 + 0.2 * 0.2` was rounded three times. Such a product is a set of
+dot products and costs what reading the matrix costs in float32; carried
+exactly, a float64 one costs two to three times a plain sum of its products.
+A `matmul`, `mm` or `bmm` with more than one row and column is not rounded
+once: it accumulates in the operands' own precision, as a matrix product
+conventionally does, which leaves a few ulps of error in a typical entry and
+more where the sum cancels. Carried as a dot is, it would cost two to three
+times as long on the operation that dominates a training step. Where a
+float32 product needs more, float64 operands take its error far below a
+float32 ulp, and where one entry has to be exact, it is the `dot` of its row
+and column.
 
 - `matmul`, `dot`, `bmm`
 - `solve`, `inv`, `det`, `slogdet`
@@ -1873,7 +1880,7 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
-A float32 `dot` is the float32 nearest the exact sum of the products; see
+A float `dot` is the float nearest the exact sum of the products; see
 *Linear algebra & matrix ops*.
 
 A float32 `sum` and `mean`, over every element, one axis or several, are the
@@ -4833,9 +4840,9 @@ maturin develop --release --features blas
 **The Python extension does not need it.** A single large `float32` or
 `float64` product already runs on the BLAS that `numpy` brought, on the
 engine's own buffers with nothing copied, which puts square matmul within
-1.1x-1.4x of NumPy and a matrix-vector product 8x-58x ahead of where the
-library's own kernel leaves it. `docs/performance.md` has the measurements and
-the rules for which products go which way.
+1.1x-1.4x of NumPy. A product with a single row or column stays with the
+library, which rounds each of its entries once. `docs/performance.md` has the
+measurements and the rules for which products go which way.
 
 What `--features blas` changes is that the engine calls a BLAS *itself*,
 without the interpreter in the way, and does so for every product rather than

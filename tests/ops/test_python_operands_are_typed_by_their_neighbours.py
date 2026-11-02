@@ -22,6 +22,8 @@ that was not an operator built such a value at the default float instead, so:
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
@@ -160,7 +162,8 @@ def test_a_search_reads_a_list_on_either_side_at_the_other_width(search):
 
 def test_products_and_selection_read_a_list_beside_the_tensor():
     tensor = _f64([DIGITS, 0.2, 0.3])
-    want = float(np.dot([DIGITS, 0.2, 0.3], [DIGITS, 0.2, 0.3]))
+    # The float64 nearest the exact dot of the float64 values.
+    want = float(sum(Fraction(v) * Fraction(v) for v in [DIGITS, 0.2, 0.3]))
     assert mt.einsum("i,i->", tensor, [DIGITS, 0.2, 0.3]).item() == want
     assert nc.dot([DIGITS, 0.2, 0.3], tensor).item() == want
     assert nc.matmul(tensor, [DIGITS, 0.2, 0.3]).item() == want
