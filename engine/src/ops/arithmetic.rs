@@ -9,6 +9,8 @@
 
 #[path = "arithmetic/close.rs"]
 pub(crate) mod close;
+#[path = "arithmetic/difference_of_products.rs"]
+mod difference_of_products;
 #[path = "arithmetic/elementwise.rs"]
 mod elementwise_impl;
 #[path = "arithmetic/evenly_spaced.rs"]
@@ -18,6 +20,7 @@ pub(crate) mod exact_sum;
 #[path = "arithmetic/rounded_once.rs"]
 pub(crate) mod rounded_once;
 
+pub use self::difference_of_products::difference_of_products;
 pub use self::elementwise_impl::*;
 pub use self::evenly_spaced::{
     evenly_spaced_data, evenly_spaced_point, stepped_data, stepped_point,

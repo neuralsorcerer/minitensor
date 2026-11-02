@@ -1660,6 +1660,17 @@ float32 product needs more, float64 operands take its error far below a
 float32 ulp, and where one entry has to be exact, it is the `dot` of its row
 and column.
 
+`cross(other, dim=None)` of two float tensors takes each component,
+`x * y - z * w`, rounded once, in the wider of the two dtypes. Each product
+rounded on its own and then subtracted left only rounding noise where the
+products nearly cancel -- the cross product of nearly parallel vectors --
+and nearly every such component was wrong. A float32 component is the exact
+difference of the exact float64 products, rounded to odd at float64's last
+bit and narrowed once; a float64 one splits each product by a fused
+multiply-add, settles the four parts with a bound, and takes the products
+exactly where the bound cannot say. Integer operands multiply and wrap as
+integer arithmetic does.
+
 - `matmul`, `dot`, `bmm`
 - `solve`, `inv`, `det`, `slogdet`
 - `diagonal`, `trace`, `diag`, `diag_embed`

@@ -365,27 +365,47 @@ pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyRes
     let b1 = extract(b, axis_b, 1)?;
     let b2 = extract(b, axis_b, 2)?;
 
-    let c0 = sub(
-        &mul(&a1, &b2).map_err(_convert_error)?,
-        &mul(&a2, &b1).map_err(_convert_error)?,
-    )
-    .map_err(_convert_error)?
-    .unsqueeze(axis_out)
-    .map_err(_convert_error)?;
-    let c1 = sub(
-        &mul(&a2, &b0).map_err(_convert_error)?,
-        &mul(&a0, &b2).map_err(_convert_error)?,
-    )
-    .map_err(_convert_error)?
-    .unsqueeze(axis_out)
-    .map_err(_convert_error)?;
-    let c2 = sub(
-        &mul(&a0, &b1).map_err(_convert_error)?,
-        &mul(&a1, &b0).map_err(_convert_error)?,
-    )
-    .map_err(_convert_error)?
-    .unsqueeze(axis_out)
-    .map_err(_convert_error)?;
+    // Two float operands give each component as `x · y - z · w` rounded
+    // once, in the wider of their dtypes, which holds the other's values
+    // exactly: subtracted after rounding, two products that nearly cancel
+    // left only their roundings' noise. Integer operands promote and wrap as
+    // arithmetic does.
+    let float = |dtype: engine::DataType| {
+        matches!(dtype, engine::DataType::Float32 | engine::DataType::Float64)
+    };
+    let (dtype_a, dtype_b) = (a.tensor().dtype(), b.tensor().dtype());
+    let component = |x: &engine::Tensor,
+                     y: &engine::Tensor,
+                     z: &engine::Tensor,
+                     w: &engine::Tensor|
+     -> PyResult<engine::Tensor> {
+        let difference = if float(dtype_a) && float(dtype_b) {
+            let wide = if dtype_a == engine::DataType::Float64 {
+                dtype_a
+            } else {
+                dtype_b
+            };
+            let read = |t: &engine::Tensor| t.astype(wide).map_err(_convert_error);
+            engine::ops::arithmetic::difference_of_products(
+                &read(x)?,
+                &read(y)?,
+                &read(z)?,
+                &read(w)?,
+            )
+        } else {
+            sub(
+                &mul(x, y).map_err(_convert_error)?,
+                &mul(z, w).map_err(_convert_error)?,
+            )
+        };
+        difference
+            .map_err(_convert_error)?
+            .unsqueeze(axis_out)
+            .map_err(_convert_error)
+    };
+    let c0 = component(&a1, &b2, &a2, &b1)?;
+    let c1 = component(&a2, &b0, &a0, &b2)?;
+    let c2 = component(&a0, &b1, &a1, &b0)?;
 
     let result = tensor_concatenate(&[&c0, &c1, &c2], axis_out).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

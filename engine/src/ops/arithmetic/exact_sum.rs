@@ -1693,6 +1693,68 @@ fn exact_root<T: Output>(values: impl Iterator<Item = f64> + Clone) -> T {
     }
 }
 
+/// The float32 nearest `a · b - c · d`.
+///
+/// Each product of two float32s is exact in float64, and their difference a
+/// two-sum's pair; rounded to odd at float64's last bit, which keeps whether
+/// anything lay below it, the pair narrows to float32 rounded once. An
+/// infinity or a NaN gives what float64 arithmetic gives.
+#[inline(always)]
+pub(crate) fn difference_of_products_f32(a: f32, b: f32, c: f32, d: f32) -> f32 {
+    let (left, right) = (f64::from(a) * f64::from(b), f64::from(c) * f64::from(d));
+    let (sum, rest) = two_sum(left, -right);
+    if rest == 0.0 || !sum.is_finite() {
+        return sum as f32;
+    }
+    // The exact value lies past `sum` towards `rest`, short of the next
+    // float64, so the odd one of the two is its rounding to odd.
+    let odd = if sum.to_bits() & 1 == 1 {
+        sum
+    } else if rest > 0.0 {
+        sum.next_up()
+    } else {
+        sum.next_down()
+    };
+    odd as f32
+}
+
+/// The float64 nearest `a · b - c · d`.
+///
+/// Each product is split by a fused multiply-add into the float64 nearest it
+/// and that rounding's error, and the four parts added with a bound on the
+/// two roundings that takes; where the bound reaches a halfway point, the
+/// two products are summed exactly. Where a product lies within `2^-968` of
+/// zero its error may itself have been rounded, by under half the least
+/// subnormal, and the bound allows for that.
+#[inline(always)]
+pub(crate) fn difference_of_products_f64(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    let (left, right) = (a * b, c * d);
+    let (left_error, right_error) = (a.mul_add(b, -left), c.mul_add(d, -right));
+    let (sum, rest) = two_sum(left, -right);
+    let errors = left_error - right_error;
+    let exact_errors =
+        |product: f64, x: f64, y: f64| product.abs() >= 2f64.powi(-968) || x == 0.0 || y == 0.0;
+    let exact = exact_errors(left, a, b) && exact_errors(right, c, d);
+    if sum == 0.0 && exact {
+        // The products are equal, so the difference is their errors'.
+        return errors;
+    }
+    let tail = rest + errors;
+    let allowance = if exact { 0.0 } else { f64::from_bits(2) };
+    let bound = (errors.abs() + tail.abs()) * 2f64.powi(-52) + allowance;
+    let (value, low) = two_sum(sum, tail);
+    f64::settle(value, low, bound).unwrap_or_else(|| exact_difference(a, b, c, d))
+}
+
+/// The float64 nearest the exact `a · b - c · d`; see
+/// [`difference_of_products_f64`].
+#[cold]
+#[inline(never)]
+fn exact_difference(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    Total::of_products([(a, b), (-c, d)].into_iter())
+        .map_or_else(|special| special, |total| total.rounded())
+}
+
 /// Columns a task of [`dot_columns_f64`] carries at once.
 const DOT_COLUMNS: usize = 256;
 
@@ -2623,6 +2685,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn differences_of_products_are_rounded_once() {
+        let mut next = generator(0xbb67_ae85_84ca_a73b);
+        let mut value = move |spread: u64| {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            unit * 2f64.powi((next() % spread) as i32 - (spread / 2) as i32)
+        };
+        for round in 0..200_000 {
+            let spread = [4, 60, 2000][round % 3];
+            let (a, b, c) = (value(spread), value(spread), value(spread));
+            // Every other case nearly cancels: `d` close to `a · b / c`.
+            let d = if round % 2 == 0 {
+                value(spread)
+            } else {
+                (a * b / c) * (1.0 + value(4) * 2f64.powi(-40))
+            };
+            // An exact zero takes the sign float arithmetic gives the
+            // expression; a value that rounds to zero keeps its own.
+            let signed = |want: f64, pairs: [(f64, f64); 2]| {
+                let zero = Total::of_products(pairs.into_iter())
+                    .is_ok_and(|total| total.positive == total.negative);
+                if zero {
+                    pairs[0].0 * pairs[0].1 + pairs[1].0 * pairs[1].1
+                } else {
+                    want
+                }
+            };
+            let want = signed(exact_difference(a, b, c, d), [(a, b), (-c, d)]);
+            let got = difference_of_products_f64(a, b, c, d);
+            assert!(
+                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                "{a:e} {b:e} {c:e} {d:e}: {got:e} against {want:e}"
+            );
+            let (a, b, c, d) = (a as f32, b as f32, c as f32, d as f32);
+            let pairs = [(f64::from(a), f64::from(b)), (-f64::from(c), f64::from(d))];
+            let want: f32 = Total::of_products(pairs.into_iter())
+                .map_or_else(|special| special as f32, |total| total.rounded());
+            let want = signed(f64::from(want), pairs) as f32;
+            let got = difference_of_products_f32(a, b, c, d);
+            assert!(
+                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                "{a:e} {b:e} {c:e} {d:e}: {got:e} against {want:e}"
+            );
+        }
+        assert_eq!(difference_of_products_f64(1e200, 1e200, 1e200, 1e200), 0.0);
+        assert_eq!(
+            difference_of_products_f64(1e200, 3e200, 1e200, 1e200),
+            f64::INFINITY
+        );
+        assert!(difference_of_products_f64(f64::INFINITY, 1.0, f64::INFINITY, 1.0).is_nan());
+        // Two products of half the least subnormal, each rounding to zero.
+        let (x, y) = (2f64.powi(-537), 2f64.powi(-538));
+        assert_eq!(difference_of_products_f64(x, y, -x, y), f64::from_bits(1));
     }
 
     #[test]
