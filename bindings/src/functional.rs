@@ -582,6 +582,29 @@ pub fn vecdot(input: &Bound<PyAny>, other: &Bound<PyAny>, dim: isize) -> PyResul
         .map_err(_convert_error)
 }
 
+/// Each weighted mean of `values` over `dim` -- every axis for `None` --
+/// with `weights` of the same shape: the exact `Σ values · weights /
+/// Σ weights`, rounded once to `dtype`, the operands' own by default.
+#[pyfunction]
+#[pyo3(signature = (values, weights, dim = None, keepdim = false, dtype = None))]
+pub fn weighted_mean(
+    values: &Bound<PyAny>,
+    weights: &Bound<PyAny>,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    dtype: Option<&str>,
+) -> PyResult<PyTensor> {
+    let values = borrow_tensor(values)?;
+    let weights = borrow_tensor(weights)?;
+    let dtype = match dtype {
+        Some(name) => crate::dtype::parse_dtype(name)?,
+        None => values.tensor().dtype(),
+    };
+    engine::ops::reduction::weighted_mean(values.tensor(), weights.tensor(), dim, keepdim, dtype)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2153,6 +2176,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(chunk, parent)?)?;
     parent.add_function(wrap_pyfunction!(split, parent)?)?;
     parent.add_function(wrap_pyfunction!(vecdot, parent)?)?;
+    parent.add_function(wrap_pyfunction!(weighted_mean, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;

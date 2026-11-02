@@ -33,6 +33,7 @@ from ._shape import (
     _promote_pair,
     _promoted_dtype,
 )
+from .autograd import Function as _Function
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -874,26 +875,68 @@ def _weighted_sum(
 ) -> Tensor:
     """`sum(tensor * weight) / divisor` over `axes`, every axis for `None`.
 
-    A float32 pair is multiplied and summed in float64, where the product of
-    two float32s is exact, its weights totalled there too, and the quotient
-    rounds to float32 once: formed in float32, each product rounded on its own
-    and the weighted mean landed several ulps from the exact one.
+    The exact weighted sum over the exact weight total, rounded once to the
+    float dtype the pair promotes to, and to float64 for two integer
+    operands. Formed in floats, each product, both sums and the quotient
+    were rounded on their own: a float32 pair landed several ulps from the
+    exact weighted mean, and carried in float64 and narrowed it was still
+    rounded twice. Two integer operands were multiplied in their own dtype,
+    where a product past it wrapped.
     """
 
-    if _promoted_dtype(tensor, weight) == "float32":
-        # The weight total too: the float32 one is rounded already.
-        wide_weight = weight.astype("float64")
-        wide = tensor.astype("float64") * wide_weight
-        if axes is None:
-            total, divisor = _F.sum(wide), _F.sum(wide_weight)
-        else:
-            spread = wide_weight.expand(list(tensor.shape))
-            total = _F.sum(wide, axes, keepdim)
-            divisor = _F.sum(spread, axes, keepdim)
-        return (total / divisor).astype("float32")
+    integral = ("bool", "int32", "int64")
+    if str(tensor.dtype) in integral and str(weight.dtype) in integral:
+        # Every product exact in 128 bits and both totals in whole limbs.
+        values = tensor.astype("int64")
+        weights = weight.astype("int64").expand(list(tensor.shape))
+        return _F.weighted_mean(values, weights, axes, keepdim, "float64")
+    dtype = _promoted_dtype(tensor, weight)
+    if dtype in ("float32", "float64") and _held_in_float64(tensor, weight):
+        # Read as they are when both are float32, and in float64 otherwise,
+        # which holds every value they can have.
+        both_single = str(tensor.dtype) == str(weight.dtype) == "float32"
+        read = "float32" if both_single else "float64"
+        values = tensor.astype(read)
+        weights = weight.astype(read).expand(list(tensor.shape))
+        if values.requires_grad or weights.requires_grad:
+            return _WeightedMean.apply(values, weights, axes, keepdim, dtype)
+        return _F.weighted_mean(values, weights, axes, keepdim, dtype)
     product = tensor * weight
     total = _F.sum(product) if axes is None else _F.sum(product, axes, keepdim)
     return total / divisor
+
+
+def _held_in_float64(*tensors: Tensor) -> bool:
+    """Whether float64 holds every value of each tensor: all but an int64
+    past 2^53."""
+
+    for tensor in tensors:
+        if str(tensor.dtype) == "int64" and tensor.numel() > 0:
+            if _F.amax(tensor).item() > 2**53 or _F.amin(tensor).item() < -(2**53):
+                return False
+    return True
+
+
+class _WeightedMean(_Function):
+    """The weighted mean rounded once, with the gradient of
+    `sum(values * weights) / sum(weights)`."""
+
+    @staticmethod
+    def forward(ctx, values, weights, axes, keepdim, dtype):
+        result = _F.weighted_mean(values, weights, axes, keepdim, dtype)
+        ctx.save_for_backward(values, weights)
+        ctx.axes, ctx.result = axes, result
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        values, weights = ctx.saved_tensors
+        axes = list(range(values.ndim())) if ctx.axes is None else list(ctx.axes)
+        kept = [1 if axis in axes else size for axis, size in enumerate(values.shape)]
+        grad = grad_output.reshape(kept)
+        total = _F.sum(weights, axes, True)
+        mean = ctx.result.reshape(kept)
+        return grad * weights / total, grad * (values - mean) / total
 
 
 def percentile(

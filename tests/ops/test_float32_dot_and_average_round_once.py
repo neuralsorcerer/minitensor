@@ -76,7 +76,7 @@ def test_dot_is_correctly_rounded():
 def test_weighted_average_is_correctly_rounded():
     for x, _, w in _samples(311):
         exact = _exact_dot(x, w) / sum(Fraction(float(v)) for v in w)
-        want = float(np.float32(float(exact)))
+        want = _float32(exact)
         assert mt.average(mt.Tensor(x), weights=mt.Tensor(w)).item() == want
         rows = mt.Tensor(np.stack([x, x]))
         got = mt.average(rows, dim=1, weights=mt.Tensor(w)).tolist()

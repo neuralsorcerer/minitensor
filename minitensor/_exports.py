@@ -394,6 +394,9 @@ _FUNCTIONAL_ONLY = (
     "poisson_nll_loss",
     "nll_loss",
     "grid_sample",
+    # The kernel `average` with weights runs on, over operands it has already
+    # promoted and laid out; `average` is the public name.
+    "weighted_mean",
     # Layer-shaped in the same way: `prelu` takes a learned weight,
     # `gumbel_softmax` a temperature, and the pixel shuffles a factor that
     # only means anything for an `(n, c, h, w)` feature map.

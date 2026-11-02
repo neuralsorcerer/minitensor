@@ -4,7 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::ops::arithmetic::exact_sum::{Element, Output, Reduction, reduce_axis_exactly};
+use crate::ops::arithmetic::exact_sum::{
+    Element, Output, Reduction, reduce_axis_exactly, weighted_mean_i64, weighted_mean_row,
+};
 use crate::ops::map::{
     FOLD_PAR_BYTES, PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks,
     par_map_indexed, par_out_chunks, par_out_chunks_sized, reduction_band,
@@ -677,6 +679,128 @@ pub(crate) fn reduce_along_dim_exactly<T: ExactFloat>(
     let inner = shape[dim + 1..].iter().product::<usize>();
     reduce_axis_exactly(input, out, len, inner, reduction);
     Ok(())
+}
+
+/// Each weighted mean of `values` over `dims` -- every axis for `None` --
+/// with `weights` of the same shape and dtype: `Σ values · weights /
+/// Σ weights`, the exact quotient rounded once to `dtype`.
+///
+/// What `average` with weights computes. Read in float32 or float64, which
+/// holds every float32, int32 and bool exactly; `dtype` may be float32 over
+/// float64 operands, and the quotient is still rounded once. The result
+/// carries no gradient, which the caller attaches.
+pub fn weighted_mean(
+    values: &Tensor,
+    weights: &Tensor,
+    dims: Option<Vec<isize>>,
+    keepdim: bool,
+    dtype: DataType,
+) -> Result<Tensor> {
+    if values.shape() != weights.shape() {
+        return Err(MinitensorError::shape_mismatch(
+            values.shape().dims().to_vec(),
+            weights.shape().dims().to_vec(),
+        ));
+    }
+    let ndim = values.ndim();
+    let mut axes = Vec::new();
+    for dim in dims.unwrap_or_else(|| (0..ndim as isize).collect()) {
+        let axis = if dim < 0 { dim + ndim as isize } else { dim };
+        if axis < 0 || axis as usize >= ndim {
+            return Err(MinitensorError::dim_out_of_range(dim, ndim));
+        }
+        if !axes.contains(&(axis as usize)) {
+            axes.push(axis as usize);
+        }
+    }
+    axes.sort_unstable();
+    match (values.dtype(), weights.dtype(), dtype) {
+        (DataType::Float32, DataType::Float32, DataType::Float32) => {
+            weighted_mean_of::<f32, f32>(values, weights, &axes, keepdim)
+        }
+        (DataType::Float64, DataType::Float64, DataType::Float64) => {
+            weighted_mean_of::<f64, f64>(values, weights, &axes, keepdim)
+        }
+        (DataType::Float64, DataType::Float64, DataType::Float32) => {
+            weighted_mean_of::<f64, f32>(values, weights, &axes, keepdim)
+        }
+        (DataType::Int64, DataType::Int64, DataType::Float64) => {
+            weighted_mean_of::<i64, f64>(values, weights, &axes, keepdim)
+        }
+        (left, right, out) => Err(MinitensorError::invalid_operation(format!(
+            "weighted_mean reads two float32s into float32, two float64s into either float, or two int64s into float64; got {left:?} and {right:?} into {out:?}"
+        ))),
+    }
+}
+
+/// An operand dtype [`weighted_mean`] reads, with its buffer's accessor and
+/// one row's weighted mean into `T`.
+trait WeightedOperand<T>: Copy + Send + Sync + Sized {
+    fn values(data: &TensorData) -> Option<&[Self]>;
+    fn mean(values: &[Self], weights: &[Self]) -> T;
+}
+
+impl<I: ExactFloat, T: ExactFloat> WeightedOperand<T> for I {
+    fn values(data: &TensorData) -> Option<&[Self]> {
+        <I as ExactFloat>::values(data)
+    }
+    fn mean(values: &[Self], weights: &[Self]) -> T {
+        weighted_mean_row(values, weights)
+    }
+}
+
+impl WeightedOperand<f64> for i64 {
+    fn values(data: &TensorData) -> Option<&[Self]> {
+        data.as_i64_slice()
+    }
+    fn mean(values: &[Self], weights: &[Self]) -> f64 {
+        weighted_mean_i64(values, weights)
+    }
+}
+
+/// [`weighted_mean`] of `I` operands into `T`.
+fn weighted_mean_of<I: WeightedOperand<T>, T: ExactFloat>(
+    values: &Tensor,
+    weights: &Tensor,
+    axes: &[usize],
+    keepdim: bool,
+) -> Result<Tensor> {
+    let shape = values.shape().dims();
+    let kept: Vec<usize> = (0..values.ndim()).filter(|d| !axes.contains(d)).collect();
+    let order: Vec<isize> = kept.iter().chain(axes).map(|&d| d as isize).collect();
+    let moved = |tensor: &Tensor| tensor.detach().permute(order.clone())?.contiguous();
+    let (values_moved, weights_moved) = (moved(values)?, moved(weights)?);
+    let len: usize = axes.iter().map(|&d| shape[d]).product();
+    let outputs: usize = kept.iter().map(|&d| shape[d]).product();
+    let mut data = TensorData::zeros_on_device(outputs, T::DTYPE, values.device());
+    let missing = || MinitensorError::internal_error("Failed to get an input slice");
+    let input = I::values(values_moved.data()).ok_or_else(missing)?;
+    let weight = I::values(weights_moved.data()).ok_or_else(missing)?;
+    let out = T::values_mut(&mut data)
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get the output slice"))?;
+    // A task takes rows enough for a block's work; a long row spreads its
+    // own blocks across the pool instead.
+    let rows_per_task = (65_536 / len.max(1)).max(1);
+    par_out_chunks(out, rows_per_task, &|start, block| {
+        for (offset, slot) in block.iter_mut().enumerate() {
+            let row = (start + offset) * len..(start + offset + 1) * len;
+            *slot = I::mean(&input[row.clone()], &weight[row]);
+        }
+    });
+    let result_shape: Vec<usize> = if keepdim {
+        (0..values.ndim())
+            .map(|d| if axes.contains(&d) { 1 } else { shape[d] })
+            .collect()
+    } else {
+        kept.iter().map(|&d| shape[d]).collect()
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(result_shape),
+        T::DTYPE,
+        values.device(),
+        false,
+    ))
 }
 
 nansum_along_dim_kernel!(

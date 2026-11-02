@@ -53,6 +53,9 @@ pub(crate) trait Element: Copy + Send + Sync + 'static {
     fn plain_block(values: &[Self]) -> (f64, f64) {
         plain_lanes(values)
     }
+    /// The carried total of `a[i] · b[i]`, block by block in the widest
+    /// build the CPU runs, the blocks merged pairwise.
+    fn carried_dot(a: &[Self], b: &[Self]) -> Carried;
 }
 
 impl Element for f64 {
@@ -68,6 +71,22 @@ impl Element for f64 {
             return unsafe { block_avx(values) };
         }
         block_lanes(values)
+    }
+
+    fn carried_dot(a: &[Self], b: &[Self]) -> Carried {
+        let fused = fused();
+        let block = |x: &[f64], y: &[f64]| {
+            #[cfg(target_arch = "x86_64")]
+            if fused {
+                // SAFETY: avx2 and fma were detected on this CPU.
+                return unsafe { carried_dot_fma(x, y) };
+            }
+            carried_dot_f64_lanes(x, y)
+        };
+        if a.len() <= BLOCK {
+            return block(a, b);
+        }
+        pairwise_fold(dot_blocks(a, b, block), Carried::default(), Carried::merge)
     }
 }
 
@@ -93,6 +112,21 @@ impl Element for f32 {
             return unsafe { plain_avx_f32(values) };
         }
         plain_lanes(values)
+    }
+
+    fn carried_dot(a: &[Self], b: &[Self]) -> Carried {
+        let block = |x: &[f32], y: &[f32]| {
+            #[cfg(target_arch = "x86_64")]
+            if crate::ops::simd::simd_capabilities().avx {
+                // SAFETY: avx was detected on this CPU.
+                return unsafe { carried_dot_avx(x, y) };
+            }
+            carried_dot_lanes(x, y)
+        };
+        if a.len() <= BLOCK {
+            return block(a, b);
+        }
+        pairwise_fold(dot_blocks(a, b, block), Carried::default(), Carried::merge)
     }
 }
 
@@ -1017,23 +1051,13 @@ pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     if let Some(value) = f32::settle(sum, 0.0, magnitude * depth * 2f64.powi(-52)) {
         return value;
     }
-    let carried = dot_blocks(a, b, |x, y| {
-        #[cfg(target_arch = "x86_64")]
-        if avx {
-            // SAFETY: avx was detected on this CPU.
-            return unsafe { carried_dot_avx(x, y) };
+    f32::carried_dot(a, b).rounded().unwrap_or_else(|| {
+        let products = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y));
+        match Total::of_wide(products) {
+            Err(special) => special as f32,
+            Ok(total) => total.rounded(),
         }
-        carried_dot_lanes(x, y)
-    });
-    pairwise_fold(carried, Carried::default(), Carried::merge)
-        .rounded()
-        .unwrap_or_else(|| {
-            let products = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y));
-            match Total::of_wide(products) {
-                Err(special) => special as f32,
-                Ok(total) => total.rounded(),
-            }
-        })
+    })
 }
 
 /// The float32 nearest every number within `bound` of `value`, when that is
@@ -1165,20 +1189,7 @@ fn fused() -> bool {
 /// the largest, though a product on the way would overflow.
 pub(crate) fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    let fused = fused();
-    let block = |x: &[f64], y: &[f64]| {
-        #[cfg(target_arch = "x86_64")]
-        if fused {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { carried_dot_fma(x, y) };
-        }
-        carried_dot_f64_lanes(x, y)
-    };
-    let carried = if a.len() <= BLOCK {
-        block(a, b)
-    } else {
-        pairwise_fold(dot_blocks(a, b, block), Carried::default(), Carried::merge)
-    };
+    let carried = f64::carried_dot(a, b);
     settled_dot(carried, a.len(), a.iter().copied().zip(b.iter().copied()))
 }
 
@@ -1215,42 +1226,146 @@ fn settled_dot(
 #[cold]
 #[inline(never)]
 fn exact_dot_f64(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> f64 {
-    let (mut nan, mut up, mut down) = (false, false, false);
-    for (x, y) in pairs.clone() {
-        if !(x.is_finite() && y.is_finite()) {
-            let product = x * y;
-            nan |= product.is_nan();
-            up |= product == f64::INFINITY;
-            down |= product == f64::NEG_INFINITY;
-        }
-    }
-    if nan || (up && down) {
-        return f64::NAN;
-    }
-    if up || down {
-        return if up { f64::INFINITY } else { f64::NEG_INFINITY };
-    }
-    // Every product of two finite float64s is a whole multiple of `2^-2148`
-    // below `2^2048`, bit 4196 here; the carries of up to 2^64 products take
-    // 64 bits more.
-    let least = 2 * LEAST;
-    let mut total = Total::empty(least, (4196 + 64) / 64 + 2);
-    for (x, y) in pairs {
-        let (x, y) = (
-            Exact::float(x).expect("finite"),
-            Exact::float(y).expect("finite"),
+    Total::of_products(pairs).map_or_else(|special| special, |total| total.rounded())
+}
+
+/// The value nearest `Σ values[i] · weights[i] / Σ weights[i]`.
+///
+/// The weighted sum and the weight total are carried as a dot and a sum
+/// are, and their quotient formed with its residual and a bound; where the
+/// bound cannot say which value is nearest, both totals are taken exactly
+/// and divided in whole limbs. A NaN, or an infinity on either side, gives
+/// what dividing the two sums in float64 gives; finite operands give the
+/// value nearest the exact quotient though either total is past the
+/// largest float64, an infinity of the numerator's sign over a weight total
+/// that is exactly zero, and NaN for zero over zero.
+pub(crate) fn weighted_mean_row<I: Element, T: Output>(values: &[I], weights: &[I]) -> T {
+    debug_assert_eq!(values.len(), weights.len());
+    let numerator = I::carried_dot(values, weights);
+    let denominator = carried_with(weights, true);
+    quotient_settled(numerator, denominator).unwrap_or_else(|| {
+        let pairs = values
+            .iter()
+            .zip(weights)
+            .map(|(&value, &weight)| (value.wide(), weight.wide()));
+        exact_quotient(pairs, weights.iter().map(|weight| weight.wide()))
+    })
+}
+
+/// The value nearest `Σ values[i] · weights[i] / Σ weights[i]` for int64
+/// operands: each product exact in 128 bits, the totals in 128 bits while
+/// they fit and in whole limbs past that, and their quotient rounded once.
+pub(crate) fn weighted_mean_i64<T: Output>(values: &[i64], weights: &[i64]) -> T {
+    let total = |magnitude: i128| {
+        let mut total = Total::empty(0, 5);
+        let limbs = if magnitude < 0 {
+            &mut total.negative
+        } else {
+            &mut total.positive
+        };
+        add_shifted(limbs, magnitude.unsigned_abs(), 0);
+        total
+    };
+    // Below 2^63 a weight, and so below 2^127 for any count of them.
+    let denominator = weights.iter().map(|&w| i128::from(w)).sum::<i128>();
+    let products = values
+        .iter()
+        .zip(weights)
+        .map(|(&v, &w)| i128::from(v) * i128::from(w));
+    let numerator = products
+        .clone()
+        .try_fold(0i128, |sum, product| sum.checked_add(product))
+        .map_or_else(
+            || {
+                // Past 2^127: each product, below 2^126, into limbs.
+                let mut sum = Total::empty(0, 5);
+                for product in products {
+                    let limbs = if product < 0 {
+                        &mut sum.negative
+                    } else {
+                        &mut sum.positive
+                    };
+                    add_shifted(limbs, product.unsigned_abs(), 0);
+                }
+                sum
+            },
+            total,
         );
-        let magnitude = u128::from(x.magnitude) * u128::from(y.magnitude);
-        if magnitude != 0 {
-            let limbs = if x.negative != y.negative {
-                &mut total.negative
-            } else {
-                &mut total.positive
+    numerator.quotient(total(denominator))
+}
+
+/// The value nearest `N / D` for the totals `numerator` and `denominator`
+/// carry, when the bound says which it is.
+///
+/// `q = n / d` of the two totals' leading parts, the residual `N - q · D`
+/// formed with the product `q · d` split exactly, and the quotient
+/// `q + residual / D` within a bound covering the totals' own slack, the
+/// residual's few roundings, and the divisor's low part and slack.
+fn quotient_settled<T: Output>(numerator: Carried, denominator: Carried) -> Option<T> {
+    let (n1, n2) = two_sum(numerator.sum, numerator.error);
+    let (d1, d2) = two_sum(denominator.sum, denominator.error);
+    let (sn, sd) = (numerator.slack, denominator.slack);
+    let spread = d2.abs() + sd;
+    // The divisor known to within a part in 2^30, which also turns away a
+    // NaN or an infinity anywhere in it.
+    let known = spread <= d1.abs() * 2f64.powi(-30);
+    if !known || d1 == 0.0 {
+        return None;
+    }
+    if n1 == 0.0 && n2 == 0.0 && sn == 0.0 {
+        // Exactly nothing over a divisor clear of zero.
+        return Some(T::narrow(0.0 / d1));
+    }
+    // Clear of underflow in the splits and of a quotient out of range.
+    let ordinary = |value: f64| (2f64.powi(-900)..=2f64.powi(900)).contains(&value.abs());
+    let quotient = n1 / d1;
+    if !(ordinary(n1) && ordinary(d1) && ordinary(quotient)) {
+        return None;
+    }
+    let product = quotient * d1;
+    let product_rounding = product_error(quotient, d1, product);
+    // Within two roundings of `n1`, so the difference is exact.
+    let leading = n1 - product;
+    let first = leading - product_rounding;
+    let second = first + n2;
+    let third = quotient * d2;
+    let residual = second - third;
+    // Each of the four rounded within `u` of its result, and the last
+    // product, which may be a subnormal, within the least subnormal.
+    let rounding = (first.abs() + second.abs() + third.abs() + residual.abs()) * 2f64.powi(-52)
+        + f64::from_bits(4);
+    let off = rounding + sn + quotient.abs() * sd;
+    let correction = residual / d1;
+    let divisor = d1.abs() * (1.0 - 2f64.powi(-29));
+    let bound = ((off + residual.abs() * spread / d1.abs()) / divisor
+        + correction.abs() * 2f64.powi(-52))
+        * (1.0 + 2f64.powi(-40));
+    let (value, rest) = two_sum(quotient, correction);
+    T::settle(value, rest, bound)
+}
+
+/// The value nearest the exact `Σ x · y / Σ w` over `pairs` and `weights`;
+/// see [`weighted_mean`].
+#[cold]
+#[inline(never)]
+fn exact_quotient<T: Output>(
+    pairs: impl Iterator<Item = (f64, f64)> + Clone,
+    weights: impl Iterator<Item = f64> + Clone,
+) -> T {
+    match (Total::of_products(pairs), Total::of_wide(weights)) {
+        (Ok(numerator), Ok(denominator)) => numerator.quotient(denominator),
+        (numerator, denominator) => {
+            // A special on one side or both: as float64 divides them, a
+            // finite total standing as itself, or as the largest float64 of
+            // its sign where it is past it -- any finite value does, beside
+            // an infinity or a NaN.
+            let standing = |total: Result<Total, f64>| match total {
+                Err(special) => special,
+                Ok(total) => total.rounded::<f64>().clamp(f64::MIN, f64::MAX),
             };
-            add_shifted(limbs, magnitude, (x.exponent + y.exponent - least) as usize);
+            T::narrow(standing(numerator) / standing(denominator))
         }
     }
-    total.rounded()
 }
 
 /// Columns a task of [`dot_columns_f64`] carries at once.
@@ -1477,6 +1592,100 @@ impl Total {
         Ok(total)
     }
 
+    /// The exact sum of the products of `pairs`, or the answer itself when
+    /// an operand is not finite: a product with a NaN or of an infinity and
+    /// a zero, or infinite products of both signs, make NaN, and infinite
+    /// products of one sign that infinity.
+    #[cold]
+    #[inline(never)]
+    fn of_products(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> Result<Self, f64> {
+        let (mut nan, mut up, mut down) = (false, false, false);
+        for (x, y) in pairs.clone() {
+            if !(x.is_finite() && y.is_finite()) {
+                let product = x * y;
+                nan |= product.is_nan();
+                up |= product == f64::INFINITY;
+                down |= product == f64::NEG_INFINITY;
+            }
+        }
+        if nan || (up && down) {
+            return Err(f64::NAN);
+        }
+        if up || down {
+            return Err(if up { f64::INFINITY } else { f64::NEG_INFINITY });
+        }
+        // Every product of two finite float64s is a whole multiple of
+        // `2^-2148` below `2^2048`, bit 4196 here; the carries of up to 2^64
+        // products take 64 bits more.
+        let least = 2 * LEAST;
+        let mut total = Self::empty(least, (4196 + 64) / 64 + 2);
+        for (x, y) in pairs {
+            let (x, y) = (
+                Exact::float(x).expect("finite"),
+                Exact::float(y).expect("finite"),
+            );
+            let magnitude = u128::from(x.magnitude) * u128::from(y.magnitude);
+            if magnitude != 0 {
+                let limbs = if x.negative != y.negative {
+                    &mut total.negative
+                } else {
+                    &mut total.positive
+                };
+                add_shifted(limbs, magnitude, (x.exponent + y.exponent - least) as usize);
+            }
+        }
+        Ok(total)
+    }
+
+    /// The value nearest this sum over `divisor`'s: sixty-six bits of the
+    /// quotient by long division, with whether a remainder is left marked
+    /// below them. An infinity of this sum's sign over an exact zero, and NaN
+    /// for zero over zero.
+    fn quotient<T: Output>(self, divisor: Self) -> T {
+        let (negative, numerator, least) = self.difference();
+        let (divisor_negative, divisor, divisor_least) = divisor.difference();
+        let bits = |limbs: &[u64]| {
+            limbs
+                .iter()
+                .rposition(|&limb| limb != 0)
+                .map_or(0, |top| 64 * top + 64 - limbs[top].leading_zeros() as usize)
+        };
+        let (top, bottom) = (bits(&numerator), bits(&divisor));
+        if bottom == 0 {
+            return T::narrow(match (top, negative) {
+                (0, _) => f64::NAN,
+                (_, true) => f64::NEG_INFINITY,
+                (_, false) => f64::INFINITY,
+            });
+        }
+        if top == 0 {
+            return T::narrow(if divisor_negative { -0.0 } else { 0.0 });
+        }
+        // The dividend `bottom + 65` bits long against a divisor `bottom`
+        // long, so that the quotient has 65 or 66 bits.
+        let shift = bottom as i64 + 65 - top as i64;
+        let (mut remainder, divisor) = if shift >= 0 {
+            (shifted(&numerator, shift as usize), divisor)
+        } else {
+            (numerator, shifted(&divisor, (-shift) as usize))
+        };
+        let mut quotient = 0u128;
+        for bit in (0..66).rev() {
+            let step = shifted(&divisor, bit);
+            if at_least(&remainder, &step) {
+                subtract(&mut remainder, &step);
+                quotient |= 1 << bit;
+            }
+        }
+        let inexact = remainder.iter().any(|&limb| limb != 0);
+        let exponent = i64::from(least) - i64::from(divisor_least) - shift - 1;
+        rounded(
+            negative != divisor_negative,
+            (quotient << 1) | u128::from(inexact),
+            exponent as i32,
+        )
+    }
+
     /// Whether the sum is negative, its magnitude, and the exponent of that
     /// magnitude's least significant bit.
     fn difference(self) -> (bool, Vec<u64>, i32) {
@@ -1518,6 +1727,43 @@ impl Total {
             *limb = quotient as u64;
         }
         rounded_at(negative, &limbs, remainder != 0, least - 64)
+    }
+}
+
+/// `limbs << bits`, in little-endian 64-bit limbs with room for every bit.
+fn shifted(limbs: &[u64], bits: usize) -> Vec<u64> {
+    let (words, bits) = (bits / 64, bits % 64);
+    let mut out = vec![0u64; limbs.len() + words + 1];
+    for (index, &limb) in limbs.iter().enumerate() {
+        out[index + words] |= limb << bits;
+        if bits != 0 {
+            out[index + words + 1] |= limb >> (64 - bits);
+        }
+    }
+    out
+}
+
+/// Whether `a >= b`, the shorter read as zero-extended.
+fn at_least(a: &[u64], b: &[u64]) -> bool {
+    let limb = |limbs: &[u64], index: usize| limbs.get(index).copied().unwrap_or(0);
+    for index in (0..a.len().max(b.len())).rev() {
+        let (x, y) = (limb(a, index), limb(b, index));
+        if x != y {
+            return x > y;
+        }
+    }
+    true
+}
+
+/// `a -= b`, for `a >= b`.
+fn subtract(a: &mut [u64], b: &[u64]) {
+    let mut borrow = false;
+    for (index, limb) in a.iter_mut().enumerate() {
+        let other = b.get(index).copied().unwrap_or(0);
+        let (value, first) = limb.overflowing_sub(other);
+        let (value, second) = value.overflowing_sub(u64::from(borrow));
+        *limb = value;
+        borrow = first || second;
     }
 }
 
@@ -1826,6 +2072,103 @@ mod tests {
                 }
             }
             let _ = scalar;
+        }
+    }
+
+    #[test]
+    fn long_division_rounds_once() {
+        let mut next = generator(0x8f1b_bcdc_bf3c_a6f7);
+        for _ in 0..20_000 {
+            // Whole numbers below 2^53, whose float64 quotient is rounded
+            // once by the division itself.
+            let n = (next() >> (11 + next() % 50)) as f64;
+            let d = ((next() >> (11 + next() % 50)) | 1) as f64;
+            let sign = if next().is_multiple_of(2) { 1.0 } else { -1.0 };
+            if n == 0.0 {
+                // An exact zero total is `+0`, whatever the sign of its zeros.
+                continue;
+            }
+            let quotient: f64 = Total::of_wide([sign * n].into_iter())
+                .unwrap()
+                .quotient(Total::of_wide([d].into_iter()).unwrap());
+            assert_eq!(quotient.to_bits(), (sign * n / d).to_bits(), "{n} / {d}");
+        }
+        let total = |values: &[f64]| Total::of_wide(values.iter().copied()).unwrap();
+        assert!(total(&[0.0]).quotient::<f64>(total(&[0.0])).is_nan());
+        assert_eq!(
+            total(&[-2.0]).quotient::<f64>(total(&[0.0])),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(
+            total(&[0.0]).quotient::<f64>(total(&[-3.0])).to_bits(),
+            (-0.0f64).to_bits()
+        );
+        // Past the largest float64 over past the largest float64.
+        let big = total(&[f64::MAX, f64::MAX, f64::MAX]);
+        assert_eq!(big.quotient::<f64>(total(&[f64::MAX, f64::MAX])), 1.5);
+    }
+
+    #[test]
+    fn weighted_means_divide_the_exact_totals_once() {
+        let exact = |values: &[f64], weights: &[f64]| -> f64 {
+            exact_quotient(
+                values.iter().copied().zip(weights.iter().copied()),
+                weights.iter().copied(),
+            )
+        };
+        assert_eq!(
+            weighted_mean_row::<f64, f64>(&[1.0, 2.0], &[1.0, 2.0]),
+            5.0 / 3.0
+        );
+        assert!(weighted_mean_row::<f64, f64>(&[], &[]).is_nan());
+        assert!(weighted_mean_row::<f64, f64>(&[1.0, 2.0], &[1.0, -1.0]).is_infinite());
+        // Products and a weight total past the largest float64.
+        let big = 1e300;
+        assert_eq!(weighted_mean_row::<f64, f64>(&[big, big], &[big, big]), big);
+        // An infinite weight makes an infinite weighted sum over an infinite
+        // total.
+        assert!(weighted_mean_row::<f64, f64>(&[1.0, 3.0], &[f64::INFINITY, 1.0]).is_nan());
+        assert_eq!(
+            weighted_mean_row::<f64, f64>(&[f64::INFINITY, 3.0], &[1.0, 1.0]),
+            f64::INFINITY
+        );
+        let mut next = generator(0x5851_f42d_4c95_7f2d);
+        let mut unit = move || (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+        for round in 0..2000 {
+            let len = 1 + (round * 37) % 3000;
+            let mut values: Vec<f64> = (0..len).map(|_| unit() * 1e3).collect();
+            let mut weights: Vec<f64> = (0..len).map(|_| unit() + 0.25).collect();
+            if round % 4 == 1 {
+                // Weights that nearly cancel.
+                let total: f64 = weights.iter().sum();
+                weights.push(-total * (1.0 - 2f64.powi(-40)));
+                values.push(unit());
+            }
+            if round % 4 == 2 {
+                // A weighted sum that cancels across the binades.
+                for (index, value) in values.iter_mut().enumerate() {
+                    *value *= 2f64.powi((index % 60) as i32 - 30);
+                }
+            }
+            let want = exact(&values, &weights);
+            let got: f64 = weighted_mean_row(&values, &weights);
+            assert_eq!(got.to_bits(), want.to_bits(), "{len} values, round {round}");
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let narrow_weights: Vec<f32> = weights.iter().map(|&w| w as f32).collect();
+            let wide: Vec<f64> = narrow.iter().map(|&v| f64::from(v)).collect();
+            let wide_weights: Vec<f64> = narrow_weights.iter().map(|&w| f64::from(w)).collect();
+            let want: f32 = exact_quotient(
+                wide.iter().copied().zip(wide_weights.iter().copied()),
+                wide_weights.iter().copied(),
+            );
+            let got: f32 = weighted_mean_row(&narrow, &narrow_weights);
+            assert_eq!(got.to_bits(), want.to_bits(), "float32, round {round}");
+            let through: f32 = weighted_mean_row(&wide, &wide_weights);
+            assert_eq!(
+                through.to_bits(),
+                want.to_bits(),
+                "float32 from float64, round {round}"
+            );
         }
     }
 
