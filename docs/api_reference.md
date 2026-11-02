@@ -2148,11 +2148,19 @@ Two behaviours are worth knowing:
   `0 / 0 = NaN` instead, which then spreads to everything downstream. `std` of
   a constant slice, `hypot(0, 0)`, `x ** 0` at `x = 0` and `0 ** y` with
   respect to `y` follow the same rule.
-- The 2-norm is computed by scaling with the largest magnitude rather than
-  summing squares directly, so it stays finite for inputs whose squares would
-  overflow. `mt.Tensor([1e20, 1e20]).norm()` returns `1.41e20`, where
-  `(x * x).sum().sqrt()` returns `inf`. Since detecting a blow-up is the usual
-  reason to take a norm, saturating exactly then would defeat the purpose.
+- The 2-norm is the float nearest the exact `sqrt(sum(x ** 2))`, over any
+  set of axes. The squares are summed in float64 with a bound -- plainly for
+  float32, whose squares are exact there, and carried with each square's
+  exact rounding error for float64 -- that settles the root unless it
+  reaches a halfway point; then the exact sum of squares is rooted in whole
+  numbers. A float64 norm of rounded squares was not the nearest float64 in
+  one case of four. No square leaves the range on the way, so the norm stays
+  finite and nonzero wherever it is in range: `mt.Tensor([1e20, 1e20]).norm()`
+  returns `1.41e20`, where `(x * x).sum().sqrt()` returns `inf`, and a float64
+  norm of `1e200`s or `1e-200`s is rounded once too. Since detecting a
+  blow-up is the usual reason to take a norm, saturating exactly then would
+  defeat the purpose. Another finite order scales by the largest magnitude
+  first, for the same reason.
 
 ```python
 import minitensor as mt

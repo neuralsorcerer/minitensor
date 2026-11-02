@@ -462,8 +462,7 @@ fn plain_with<I: Element>(values: &[I], parallel: bool) -> (f64, f64) {
     // Through a block's lanes, its lane merge, and the merges of up to 2^64
     // blocks: the recursive-summation bound `γ_k · Σ|x|`, doubled to cover
     // the rounding of `Σ|x|` itself.
-    let depth = (values.len().min(BLOCK) / LANES + 2 * LANES + 64) as f64;
-    (sum, magnitude * depth * 2f64.powi(-52))
+    (sum, magnitude * plain_depth(values.len()) * 2f64.powi(-52))
 }
 
 /// The carried total of `values`, block by block, the blocks merged
@@ -1014,15 +1013,10 @@ fn dot_blocks<E: Sync, R: Send>(
     }
 }
 
-/// The float32 nearest `Σ a[i] · b[i]`.
-///
-/// Each product of two float32s is exact in float64, so this is a sum of
-/// float64s, settled as a float32 sum is: plainly with a bound, carried
-/// where the bound reaches a halfway point, and exactly where that does.
-/// Products of an infinity and a zero, and NaNs, make NaN as they would
-/// added up one by one.
-pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+/// The plain float64 sum of `a[i] · b[i]` and of the products' magnitudes,
+/// block by block, the blocks merged pairwise: within
+/// [`plain_depth`] roundings of the exact sum.
+fn plain_dot(a: &[f32], b: &[f32]) -> (f64, f64) {
     let avx = {
         #[cfg(target_arch = "x86_64")]
         {
@@ -1041,14 +1035,33 @@ pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
         }
         plain_dot_lanes(x, y)
     };
-    let (sum, magnitude) = if a.len() <= BLOCK {
+    if a.len() <= BLOCK {
         plain_block(a, b)
     } else {
         let plain = dot_blocks(a, b, plain_block);
         pairwise_fold(plain, (0.0, 0.0), |p, q| (p.0 + q.0, p.1 + q.1))
-    };
-    let depth = (a.len().min(BLOCK) / LANES + 2 * LANES + 64) as f64;
-    if let Some(value) = f32::settle(sum, 0.0, magnitude * depth * 2f64.powi(-52)) {
+    }
+}
+
+/// The roundings a value passes through in [`plain_dot`] or a plain sum of
+/// `len` values: a block's lanes, its lane merge, and the merges of up to
+/// 2^64 blocks.
+fn plain_depth(len: usize) -> f64 {
+    (len.min(BLOCK) / LANES + 2 * LANES + 64) as f64
+}
+
+/// The float32 nearest `Σ a[i] · b[i]`.
+///
+/// Each product of two float32s is exact in float64, so this is a sum of
+/// float64s, settled as a float32 sum is: plainly with a bound, carried
+/// where the bound reaches a halfway point, and exactly where that does.
+/// Products of an infinity and a zero, and NaNs, make NaN as they would
+/// added up one by one.
+pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let (sum, magnitude) = plain_dot(a, b);
+    let bound = magnitude * plain_depth(a.len()) * 2f64.powi(-52);
+    if let Some(value) = f32::settle(sum, 0.0, bound) {
         return value;
     }
     f32::carried_dot(a, b).rounded().unwrap_or_else(|| {
@@ -1368,6 +1381,318 @@ fn exact_quotient<T: Output>(
     }
 }
 
+/// The float32 nearest `sqrt(Σ values[i]²)`.
+///
+/// Each square of a float32 is exact in float64, so the squares are first
+/// added plainly in float64, whose bound settles the root unless it reaches
+/// a halfway point between two float32s; then the root is taken of the
+/// carried sum as [`root_of`] takes it.
+pub(crate) fn norm_f32(values: &[f32]) -> f32 {
+    let block = crate::ops::simd::simd_square_sum_f32;
+    let len = values.len();
+    let sum = if len <= BLOCK {
+        block(values)
+    } else {
+        let span = |nth: usize| nth * BLOCK..(nth * BLOCK + BLOCK).min(len);
+        let partials = if len >= crate::ops::map::PAR_THRESHOLD {
+            crate::parallel::map_tasks(len.div_ceil(BLOCK), &|nth| block(&values[span(nth)]))
+        } else {
+            (0..len.div_ceil(BLOCK))
+                .map(|nth| block(&values[span(nth)]))
+                .collect()
+        };
+        pairwise_fold(partials, 0.0, |p, q| p + q)
+    };
+    // Sixteen lanes merged pairwise a block, within the depth a plain sum
+    // allows for.
+    plain_root_f32(sum, plain_depth(len)).unwrap_or_else(|| {
+        root_of(
+            f32::carried_dot(values, values),
+            values.iter().map(|&value| f64::from(value)),
+        )
+    })
+}
+
+/// The float32 nearest the root of a sum of squares that the plain float64
+/// `sum` is within `depth` roundings of, when the bound says which it is.
+fn plain_root_f32(sum: f64, depth: f64) -> Option<f32> {
+    if sum == 0.0 {
+        // No square of a float32 vanishes in float64, so every value is zero.
+        return Some(0.0);
+    }
+    // The squares' magnitudes are the squares.
+    let bound = sum * depth * 2f64.powi(-52);
+    if !(sum.is_finite() && sum > 2.0 * bound) {
+        return None;
+    }
+    // The root moves by at most the bound over twice the least root within
+    // it, and is rounded once itself.
+    let root = sum.sqrt();
+    let moved = bound / (2.0 * (sum - bound).sqrt()) + root * 2f64.powi(-52);
+    f32::settle(root, 0.0, moved * (1.0 + 2f64.powi(-40)))
+}
+
+/// Columns of a block of rows a task of [`column_norms`] takes at once.
+const NORM_COLUMNS: usize = 256;
+
+/// `out[o · inner + j]`, the value nearest `sqrt(Σ_r x[o][r][j]²)` for
+/// `values` laid out `[outer, len, inner]`: the norms along a middle axis,
+/// read in place a tile of columns at a time rather than from a transposed
+/// copy.
+///
+/// Float32 squares are added plainly in float64 a block of rows at a time,
+/// the blocks merged pairwise, and float64 ones carried as [`norm_f64`]
+/// carries them; a column the bound cannot settle is gathered and taken as
+/// [`norm_f32`] or [`norm_f64`] takes a run.
+pub(crate) fn column_norms<T: Squares>(
+    values: &[T],
+    outer: usize,
+    len: usize,
+    inner: usize,
+    out: &mut [T],
+) {
+    let tiles = inner.div_ceil(NORM_COLUMNS);
+    let task = |index: usize| -> Vec<T> {
+        let (slab, first) = (index / tiles, index % tiles * NORM_COLUMNS);
+        let width = NORM_COLUMNS.min(inner - first);
+        let slab = &values[slab * len * inner..(slab + 1) * len * inner];
+        let blocks: Vec<T::Partial> = (0..len.div_ceil(BLOCK).max(1))
+            .map(|block| {
+                let rows = block * BLOCK..(block * BLOCK + BLOCK).min(len);
+                T::partial(rows.map(|row| &slab[row * inner + first..][..width]), width)
+            })
+            .collect();
+        let merged = T::merge(blocks, width);
+        (0..width)
+            .map(|j| {
+                let column = (0..len).map(|row| slab[row * inner + first + j]);
+                T::settled(&merged, j, len, column)
+            })
+            .collect()
+    };
+    let tasks = outer * tiles;
+    let parts: Vec<Vec<T>> = if tasks > 1 && outer * len * inner >= crate::ops::map::PAR_THRESHOLD {
+        crate::parallel::map_tasks(tasks, &task)
+    } else {
+        (0..tasks).map(&task).collect()
+    };
+    for (index, part) in parts.into_iter().enumerate() {
+        let (slab, first) = (index / tiles, index % tiles * NORM_COLUMNS);
+        out[slab * inner + first..][..part.len()].copy_from_slice(&part);
+    }
+}
+
+/// A float dtype [`column_norms`] reads: what it keeps of each column over
+/// a block of rows, how blocks merge, and the root of the merged total.
+pub(crate) trait Squares: Copy + Send + Sync + 'static {
+    type Partial: Send;
+    fn partial<'a>(rows: impl Iterator<Item = &'a [Self]>, width: usize) -> Self::Partial;
+    fn merge(blocks: Vec<Self::Partial>, width: usize) -> Self::Partial;
+    fn settled(
+        merged: &Self::Partial,
+        j: usize,
+        len: usize,
+        column: impl Iterator<Item = Self> + Clone,
+    ) -> Self;
+}
+
+impl Squares for f32 {
+    /// Each column's plain float64 sum of squares.
+    type Partial = Vec<f64>;
+
+    fn partial<'a>(rows: impl Iterator<Item = &'a [f32]>, width: usize) -> Vec<f64> {
+        let mut sums = vec![0f64; width];
+        for row in rows {
+            for (sum, &value) in sums.iter_mut().zip(row) {
+                let wide = f64::from(value);
+                *sum += wide * wide;
+            }
+        }
+        sums
+    }
+
+    fn merge(blocks: Vec<Vec<f64>>, width: usize) -> Vec<f64> {
+        (0..width)
+            .map(|j| {
+                pairwise_fold(
+                    blocks.iter().map(|block| block[j]).collect(),
+                    0.0,
+                    |p, q| p + q,
+                )
+            })
+            .collect()
+    }
+
+    fn settled(
+        merged: &Vec<f64>,
+        j: usize,
+        len: usize,
+        column: impl Iterator<Item = f32> + Clone,
+    ) -> f32 {
+        // A block of rows in one chain, and the merges of up to 2^64 blocks.
+        let depth = (len.min(BLOCK) + 2 + 64) as f64;
+        plain_root_f32(merged[j], depth).unwrap_or_else(|| norm_f32(&column.collect::<Vec<_>>()))
+    }
+}
+
+impl Squares for f64 {
+    /// Each column's carried sum of squares.
+    type Partial = Vec<Carried>;
+
+    fn partial<'a>(rows: impl Iterator<Item = &'a [f64]>, width: usize) -> Vec<Carried> {
+        let mut lanes = Columns {
+            sums: vec![0.0; width],
+            errors: vec![0.0; width],
+            magnitudes: vec![0.0; width],
+        };
+        let mut count = 0usize;
+        let fused = fused();
+        for row in rows {
+            count += 1;
+            #[cfg(target_arch = "x86_64")]
+            if fused {
+                // SAFETY: avx2 and fma were detected on this CPU.
+                unsafe { add_column_squares_fma(&mut lanes, row) };
+                continue;
+            }
+            add_column_squares(&mut lanes, row);
+        }
+        // A column's error terms pass through a pairing and the chain.
+        let additions = (count + 2) as f64;
+        (0..width)
+            .map(|j| Carried {
+                sum: lanes.sums[j],
+                error: lanes.errors[j],
+                slack: lanes.magnitudes[j] * additions * 2f64.powi(-52),
+            })
+            .collect()
+    }
+
+    fn merge(blocks: Vec<Vec<Carried>>, width: usize) -> Vec<Carried> {
+        (0..width)
+            .map(|j| {
+                pairwise_fold(
+                    blocks.iter().map(|block| block[j]).collect(),
+                    Carried::default(),
+                    Carried::merge,
+                )
+            })
+            .collect()
+    }
+
+    fn settled(
+        merged: &Vec<Carried>,
+        j: usize,
+        _len: usize,
+        column: impl Iterator<Item = f64> + Clone,
+    ) -> f64 {
+        root_of(merged[j], column)
+    }
+}
+
+/// [`add_product`] of each value of `row` with itself into its column.
+#[inline(always)]
+fn add_column_squares(lanes: &mut Columns, row: &[f64]) {
+    let width = lanes.sums.len();
+    let (sums, errors, magnitudes) = (
+        &mut lanes.sums[..width],
+        &mut lanes.errors[..width],
+        &mut lanes.magnitudes[..width],
+    );
+    let row = &row[..width];
+    for j in 0..width {
+        add_product(
+            &mut sums[j],
+            &mut errors[j],
+            &mut magnitudes[j],
+            row[j],
+            row[j],
+        );
+    }
+}
+
+/// [`add_column_squares`] with fused multiply-adds in hardware.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn add_column_squares_fma(lanes: &mut Columns, row: &[f64]) {
+    add_column_squares(lanes, row)
+}
+
+/// The float64 nearest `sqrt(Σ values[i]²)`; see [`root_of`].
+pub(crate) fn norm_f64(values: &[f64]) -> f64 {
+    root_of(f64::carried_dot(values, values), values.iter().copied())
+}
+
+/// The value nearest the root of the sum of the squares of `values` that
+/// `carried` carries.
+///
+/// With the allowance [`settled_dot`] makes for squares whose errors may have
+/// been rounded to subnormals, and without it where no square is that small;
+/// the exact sum of squares is rooted in whole numbers where neither settles
+/// it. A NaN gives NaN, and an infinity otherwise infinity.
+fn root_of<T: Output>(carried: Carried, values: impl Iterator<Item = f64> + Clone) -> T {
+    let count = values.clone().count() as f64;
+    let allowing = Carried {
+        slack: carried.slack + count * f64::from_bits(1),
+        ..carried
+    };
+    root_settled(allowing)
+        .or_else(|| {
+            let tiny = values
+                .clone()
+                .any(|x| x != 0.0 && (x * x).abs() < 2f64.powi(-968));
+            if tiny { None } else { root_settled(carried) }
+        })
+        .unwrap_or_else(|| exact_root(values))
+}
+
+/// The value nearest the root of the total `carried` carries, when the
+/// bound says which it is.
+///
+/// `r = sqrt(s)` of the total's leading part, the residual `S - r²` with `r²`
+/// split exactly, and `r + residual / 2r` within a bound covering the
+/// total's slack, the residual's roundings, and the curvature the step
+/// leaves out, at most `residual² / 8r³`.
+fn root_settled<T: Output>(carried: Carried) -> Option<T> {
+    let (s1, s2) = two_sum(carried.sum, carried.error);
+    if s1 == 0.0 && s2 == 0.0 && carried.slack == 0.0 {
+        return Some(T::narrow(0.0));
+    }
+    // Clear of underflow in the square's split; a NaN, an infinity or a
+    // negative total fails this too.
+    let ordinary = (2f64.powi(-900)..=2f64.powi(900)).contains(&s1);
+    let known = s2.abs() + carried.slack <= s1 * 2f64.powi(-30);
+    if !(ordinary && known) {
+        return None;
+    }
+    let root = s1.sqrt();
+    let square = root * root;
+    let square_rounding = product_error(root, root, square);
+    // Within three roundings of `s1`, so the difference is exact.
+    let first = (s1 - square) - square_rounding;
+    let residual = first + s2;
+    let off = (first.abs() + residual.abs()) * 2f64.powi(-52) + f64::from_bits(4) + carried.slack;
+    let correction = residual / (2.0 * root);
+    let ratio = (residual.abs() + off) / root;
+    let bound = (off / (2.0 * root)
+        + ratio * ratio / (8.0 * root) * 1.01
+        + correction.abs() * 2f64.powi(-52))
+        * (1.0 + 2f64.powi(-40));
+    let (value, rest) = two_sum(root, correction);
+    T::settle(value, rest, bound)
+}
+
+/// The value nearest the exact root of the sum of the squares of `values`.
+#[cold]
+#[inline(never)]
+fn exact_root<T: Output>(values: impl Iterator<Item = f64> + Clone) -> T {
+    match Total::of_products(values.map(|value| (value, value))) {
+        // A NaN, or an infinity: a square is never a negative one.
+        Err(special) => T::narrow(special.sqrt()),
+        Ok(total) => total.square_root(),
+    }
+}
+
 /// Columns a task of [`dot_columns_f64`] carries at once.
 const DOT_COLUMNS: usize = 256;
 
@@ -1684,6 +2009,45 @@ impl Total {
             (quotient << 1) | u128::from(inexact),
             exponent as i32,
         )
+    }
+
+    /// The value nearest the root of this sum, which is not negative: the
+    /// leading 127 or 128 bits of its magnitude, at an even exponent, rooted
+    /// as a whole number, with whether anything is left marked below.
+    fn square_root<T: Output>(self) -> T {
+        let (_, limbs, least) = self.difference();
+        let Some(top) = limbs.iter().rposition(|&limb| limb != 0) else {
+            return T::narrow(0.0);
+        };
+        let bits = 64 * top as i64 + 64 - i64::from(limbs[top].leading_zeros());
+        // `magnitude · 2^shift` as the whole number to root, with
+        // `least - shift` even.
+        let mut shift = 128 - bits;
+        if (i64::from(least) - shift).rem_euclid(2) != 0 {
+            shift -= 1;
+        }
+        let (whole, dropped) = if shift >= 0 {
+            let moved = shifted(&limbs, shift as usize);
+            let low = |index: usize| u128::from(moved.get(index).copied().unwrap_or(0));
+            (low(0) | (low(1) << 64), false)
+        } else {
+            let from = (-shift) as usize;
+            let (word, bit) = (from / 64, (from % 64) as u32);
+            let limb = |index: usize| u128::from(limbs.get(index).copied().unwrap_or(0));
+            let window = (limb(word) | (limb(word + 1) << 64)) >> bit;
+            let whole = if bit == 0 {
+                window
+            } else {
+                window | (limb(word + 2) << (128 - bit))
+            };
+            let below = limbs[..word].iter().any(|&limb| limb != 0)
+                || (bit != 0 && limbs[word] & ((1u64 << bit) - 1) != 0);
+            (whole, below)
+        };
+        let root = whole.isqrt();
+        let inexact = dropped || root * root != whole;
+        let exponent = (i64::from(least) - shift) / 2 - 1;
+        rounded(false, (root << 1) | u128::from(inexact), exponent as i32)
     }
 
     /// Whether the sum is negative, its magnitude, and the exponent of that
@@ -2169,6 +2533,95 @@ mod tests {
                 want.to_bits(),
                 "float32 from float64, round {round}"
             );
+        }
+    }
+
+    #[test]
+    fn roots_are_rounded_once() {
+        let mut next = generator(0x1405_7b7e_f767_814f);
+        for _ in 0..20_000 {
+            // Whole numbers below 2^53 and their sums of squares below it
+            // too, whose float64 root `sqrt` rounds once.
+            let n = (next() >> (11 + next() % 52)) as f64;
+            let root: f64 = Total::of_wide([n].into_iter()).unwrap().square_root();
+            assert_eq!(root.to_bits(), n.sqrt().to_bits(), "{n}");
+            let values: Vec<f64> = (0..1 + next() % 8)
+                .map(|_| (next() >> 40) as f64 * if next() % 2 == 1 { -1.0 } else { 1.0 })
+                .collect();
+            let squares: f64 = values.iter().map(|v| v * v).sum();
+            assert_eq!(norm_f64(&values).to_bits(), squares.sqrt().to_bits());
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            assert_eq!(norm_f32(&narrow), squares.sqrt() as f32);
+        }
+        assert_eq!(norm_f64(&[]), 0.0);
+        assert_eq!(norm_f64(&[0.0, -0.0]), 0.0);
+        assert_eq!(norm_f64(&[3.0, 4.0]), 5.0);
+        // Squares past the largest float64, and below the least subnormal.
+        let (big, small) = (2f64.powi(600), 2f64.powi(-600));
+        assert_eq!(norm_f64(&[3.0 * big, 4.0 * big]), 5.0 * big);
+        assert_eq!(norm_f64(&[3.0 * small, -4.0 * small]), 5.0 * small);
+        assert_eq!(norm_f64(&[f64::from_bits(1)]), f64::from_bits(1));
+        assert_eq!(norm_f64(&[f64::MAX, f64::MAX]), f64::INFINITY);
+        assert_eq!(norm_f64(&[f64::NEG_INFINITY, 1.0]), f64::INFINITY);
+        assert!(norm_f64(&[f64::NAN, 1.0]).is_nan());
+        let big = 2f32.powi(100);
+        assert_eq!(norm_f32(&[3.0 * big, 4.0 * big]), 5.0 * big);
+        assert_eq!(norm_f32(&[f32::from_bits(1)]), f32::from_bits(1));
+        assert_eq!(norm_f32(&[f32::MAX, f32::MAX]), f32::INFINITY);
+    }
+
+    #[test]
+    fn the_carried_root_agrees_with_the_exact_one() {
+        let mut next = generator(0xda94_2042_e4dd_58b5);
+        for round in 0..1500 {
+            let len = 1 + (next() % 5000) as usize;
+            let spread = 1 + next() % 80;
+            let values: Vec<f64> = (0..len)
+                .map(|_| {
+                    let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                    let scale = if round % 5 == 1 { -1040 } else { -40 };
+                    unit * 2f64.powi((next() % spread) as i32 + scale)
+                })
+                .collect();
+            let exact: f64 = exact_root(values.iter().copied());
+            assert_eq!(norm_f64(&values).to_bits(), exact.to_bits(), "{len} values");
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let exact: f32 = exact_root(narrow.iter().map(|&v| f64::from(v)));
+            assert_eq!(norm_f32(&narrow).to_bits(), exact.to_bits(), "{len} values");
+        }
+    }
+
+    #[test]
+    fn column_norms_agree_with_the_norms_of_runs() {
+        let mut next = generator(0x6a09_e667_f3bc_c908);
+        for (outer, len, inner) in [(3, 50, 7), (2, 9000, 3), (1, 5, 600), (4, 1, 2)] {
+            let values: Vec<f64> = (0..outer * len * inner)
+                .map(|_| {
+                    let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                    unit * 2f64.powi((next() % 60) as i32 - 30)
+                })
+                .collect();
+            let column = |o: usize, j: usize| -> Vec<f64> {
+                (0..len)
+                    .map(|r| values[(o * len + r) * inner + j])
+                    .collect()
+            };
+            let mut out = vec![0f64; outer * inner];
+            column_norms(&values, outer, len, inner, &mut out);
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let mut narrow_out = vec![0f32; outer * inner];
+            column_norms(&narrow, outer, len, inner, &mut narrow_out);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let run = column(o, j);
+                    assert_eq!(out[o * inner + j].to_bits(), norm_f64(&run).to_bits());
+                    let run: Vec<f32> = run.iter().map(|&v| v as f32).collect();
+                    assert_eq!(
+                        narrow_out[o * inner + j].to_bits(),
+                        norm_f32(&run).to_bits()
+                    );
+                }
+            }
         }
     }
 

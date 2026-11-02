@@ -1604,7 +1604,7 @@ mod tests {
     /// where the sum is long enough for roundings to pile up -- below a block
     /// either can win by a rounding and neither means anything. So this
     /// asserts the two things that are actually true: over a whole chunk,
-    /// which is the length `accurate_self_sum` hands it, the wide accumulator
+    /// which is the length a block of `accurate_pair_sum` is, the wide accumulator
     /// is strictly closer; and at every length it is within a factor of two
     /// of the narrow one, so no short input pays for the change.
     ///

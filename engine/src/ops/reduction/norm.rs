@@ -319,167 +319,71 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
     reduction::sum(&indicator, Some(dims_isize), true)
 }
 
-/// Vector p-norm over `dim`, or over the flattened tensor when `dim` is `None`.
+/// The 2-norm over `dims` of a float tensor, each the float nearest the
+/// exact `sqrt(Σ x²)`; see `arithmetic::exact_sum::norm_f32` and `norm_f64`.
 ///
-/// Supported orders: any finite `p > 0`, plus `inf` (maximum magnitude), `-inf`
-/// (minimum magnitude) and `0` (count of non-zeros, which is not a norm but is
-/// the conventional reading of `p = 0`). Finite negative orders are rejected —
-/// they are defined by a limit but have no useful derivative here, and silently
-/// returning something differentiable-looking would be worse than an error.
+/// Rounded from float64 sums of the squares, a float64 norm was a few ulps
+/// out on ordinary data and a float32 one occasionally an ulp, and a sum of
+/// squares that left the range at either end had to be redone scaled by the
+/// largest magnitude, rounding at the divide and again at the multiply. The
+/// exact root needs no scaling: squares past the range are summed exactly,
+/// so a float64 norm of `1e200`s or of `1e-200`s is in range and rounded
+/// once.
 ///
-/// The 2-norm is computed as `m * sqrt(sum((x / m)^2))` with `m = max|x|`
-/// rather than as `sqrt(sum(x^2))`. Squaring first overflows f32 once `|x|`
-/// passes about 1.8e19, so the direct form reports `inf` for a norm that is
-/// perfectly representable — and `norm` is exactly what you call to *detect*
-/// a blow-up, so saturating right at that point defeats the purpose. Scaling by
-/// the largest magnitude keeps every intermediate inside the range. When that
-/// magnitude is itself zero or infinite there is nothing to scale by, and
-/// [`unusable_scales_to_ones`] stands one in for it.
-/// `sqrt(sum(x^2))` straight, for the `p == 2` orders whose data does not need
-/// the scaling.
-///
-/// The scaled route below is what keeps `norm` right where squaring leaves
-/// the exponent range in either direction: `norm` of a float32 vector of
-/// `1e20`s is `1.73e20` rather than `inf`, and of `1e-25`s it is `1.41e-25`
-/// rather than `0`. Dividing by
-/// the largest magnitude first moves the whole vector back into range.
-///
-/// It is also three passes and a full-size temporary where the direct form
-/// needs neither: a max over the input, then `(|x| / s)^2` materialized, then
-/// the sum. On a 2048x1024 float32 tensor `norm()` measured 1.155ms against
-/// 0.271ms for `(x * x).sum()` spelled out with this library's own operators --
-/// its own `mul` and `sum` beat its `norm` by 4.3x.
-///
-/// So try the direct form first and keep the scaled one for the inputs that
-/// actually need it. Overflow and underflow are both detectable *after* the
-/// fact and neither is silent: a sum of squares that leaves the range comes
-/// back `inf` or `0`, and either sends the whole reduction down the scaled
-/// path. A NaN is not a scaling failure -- it means the input held one -- so it
-/// propagates rather than triggering the fallback.
-///
-/// The values this returns are not bit-identical to the scaled route's, and are
-/// slightly closer to the true norm: `(|x| / s)^2 ... * s` rounds at the divide
-/// and again at the multiply, and this does neither.
-/// `sqrt(sum(x^2))` over `dims` without ever writing the squares down.
-///
-/// `mul` then `sum` is two passes over the data and a temporary the size of the
-/// input: 64MB for a 16-million-element float32 tensor, allocated, written,
-/// and read straight back. The squares are wanted one at a time by an
-/// accumulator and never again, so the whole buffer is avoidable -- square in a
-/// register and accumulate, which is what a dot product is. `accurate_pair_sum`
-/// against the input twice is exactly that, and it is the same accumulation
-/// `dot` and the Cholesky panels already use: chunk-pinned partials folded
-/// pairwise, so the answer depends on the length and not on how rayon split it.
-///
-/// Measured on a 4-core x86-64 container, float32, reducing every axis:
-///
-/// ```text
-///        N     mul + sum      fused
-///     65536         27 us       11 us
-///   1048576        275 us      130 us
-///   4194304        694 us      290 us
-///  16777216      15377 us     1430 us
-/// ```
-///
-/// and reducing the last axis only, where each row is its own run:
-///
-/// ```text
-///      shape     mul + sum      fused
-///  1000x1000        360 us      174 us
-///  4000x4000      13613 us     1485 us
-/// ```
-///
-/// The last row of each is the allocation. Below a few megabytes the temporary
-/// stays in cache and the second pass is cheap; at 64MB it does not, and the
-/// sum reads all of it back from main memory, and the fused walk is ten times
-/// faster there rather than twice.
-///
-/// `None` when the reduced axes are not a trailing block, because then a
-/// reduced slice is not a contiguous run and the walk is a gather rather than a
-/// dot. That case keeps the old route. The two that matter are covered:
-/// reducing every axis (the flattened norm, and what gradient clipping asks
-/// for) and reducing the last (row norms), and both are one contiguous run per
-/// output element.
-fn fused_euclidean_norm(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>> {
+/// The squares are never written down: each run is read in place, where the
+/// reduced axes are a trailing block of the tensor, and from a copy with them
+/// moved last otherwise. `None` for a dtype that is not float32 or float64.
+fn euclidean_norm(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>> {
+    if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
+        return Ok(None);
+    }
     let shape = input.shape().dims();
-    let ndim = shape.len();
-    // `dims` arrives sorted and deduplicated from `normalize_norm_dims`, so a
-    // trailing block is exactly a run ending at the last axis.
-    let trailing = dims.len() <= ndim
-        && dims
-            .iter()
-            .enumerate()
-            .all(|(i, &d)| d == ndim - dims.len() + i);
-    if !trailing || dims.is_empty() {
-        return Ok(None);
-    }
-
-    let run: usize = shape[ndim - dims.len()..].iter().product();
-    if run == 0 {
-        return Ok(None);
-    }
-    let outer = input.numel() / run;
-
-    // Every run's sum of squares, in `f64` for both widths; see
-    // `simd_square_sum_f32` for why a float32 input accumulates wide.
-    macro_rules! sums_of_squares {
-        ($accessor:ident, $square_sum:path) => {{
-            let data = input.data().$accessor().ok_or_else(|| {
+    let product = |axes: &[usize]| axes.iter().product::<usize>();
+    // A block of consecutive axes is read in place as `[outer, len, inner]`;
+    // any other set is moved last into a copy first, which makes `inner` 1.
+    let consecutive = !dims.is_empty() && dims.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    let (source, outer, len, inner) = if consecutive {
+        let (first, last) = (dims[0], dims[dims.len() - 1]);
+        (
+            input.contiguous()?,
+            product(&shape[..first]),
+            product(&shape[first..=last]),
+            product(&shape[last + 1..]),
+        )
+    } else {
+        let kept: Vec<usize> = (0..shape.len()).filter(|d| !dims.contains(d)).collect();
+        let order: Vec<isize> = kept.iter().chain(dims).map(|&d| d as isize).collect();
+        let outputs = kept.iter().map(|&d| shape[d]).product();
+        let len = dims.iter().map(|&d| shape[d]).product();
+        (input.permute(order)?.contiguous()?, outputs, len, 1)
+    };
+    // Rows enough to a task for a block's work; one long row spreads its own
+    // blocks across the pool instead.
+    let rows_per_task = (65_536 / len.max(1)).max(1);
+    macro_rules! norms {
+        ($accessor:ident, $from_vec:ident, $norm:path, $ty:ty) => {{
+            let data = source.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("norm: tensor data did not match its dtype")
             })?;
-            let mut out = vec![0f64; outer];
-            if outer == 1 {
-                // One run over everything; `accurate_pair_sum` spreads it
-                // across the pool itself.
-                out[0] = crate::ops::util::accurate_self_sum(data, 0f64, $square_sum);
+            let mut out = vec![<$ty>::default(); outer * inner];
+            if inner == 1 {
+                crate::ops::map::par_out_chunks(&mut out, rows_per_task, &|start, block| {
+                    for (offset, slot) in block.iter_mut().enumerate() {
+                        let first = (start + offset) * len;
+                        *slot = $norm(&data[first..first + len]);
+                    }
+                });
             } else {
-                // Many independent runs, so the outer axis is the one to
-                // split; each run then folds on a single thread.
-                let bytes = std::mem::size_of_val(data);
-                crate::ops::map::par_out_chunks_sized(
-                    &mut out,
-                    PAR_CHUNK,
-                    bytes,
-                    &|start, block| {
-                        for (offset, slot) in block.iter_mut().enumerate() {
-                            let base = (start + offset) * run;
-                            let slice = &data[base..base + run];
-                            *slot = crate::ops::util::accurate_self_sum(slice, 0f64, $square_sum);
-                        }
-                    },
-                );
+                column_norms(data, outer, len, inner, &mut out);
             }
-            out
+            TensorData::$from_vec(out, input.device())
         }};
     }
-
+    use crate::ops::arithmetic::exact_sum::{column_norms, norm_f32, norm_f64};
     let data = match input.dtype() {
-        // Nothing a float32 input holds can take its squares out of `f64`'s
-        // range, so the root is taken straight away and rounded once, which
-        // is what makes it the correctly rounded norm. A zero sum is an
-        // all-zero run and an infinite one an infinite input: both are the
-        // answer, not a reason to rescale.
-        DataType::Float32 => {
-            let sums = sums_of_squares!(as_f32_slice, crate::ops::simd::simd_square_sum_f32);
-            TensorData::from_vec_f32(
-                sums.into_iter().map(|s| s.sqrt() as f32).collect(),
-                input.device(),
-            )
-        }
-        // A float64 sum of squares can leave the range where its root does
-        // not, and comes back `inf` or `0` when it has; either sends the whole
-        // reduction down the scaled route. A NaN is not a scaling failure -- it
-        // means the input held one -- so it propagates.
-        DataType::Float64 => {
-            let sums = sums_of_squares!(as_f64_slice, crate::ops::simd::simd_square_sum_f64);
-            if sums.iter().any(|s| s.is_infinite() || *s == 0.0) {
-                return Ok(None);
-            }
-            TensorData::from_vec_f64(sums.into_iter().map(f64::sqrt).collect(), input.device())
-        }
-        _ => return Ok(None),
+        DataType::Float32 => norms!(as_f32_slice, from_vec_f32, norm_f32, f32),
+        _ => norms!(as_f64_slice, from_vec_f64, norm_f64, f64),
     };
-
     Ok(Some(Tensor::new(
         Arc::new(data),
         keepdim_shape(input.shape(), dims),
@@ -489,44 +393,24 @@ fn fused_euclidean_norm(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>
     )))
 }
 
-fn euclidean_norm_unscaled(input: &Tensor, p: f64, dims: &[usize]) -> Result<Option<Tensor>> {
-    if p != 2.0 {
-        return Ok(None);
-    }
-
-    if let Some(fused) = fused_euclidean_norm(input, dims)? {
-        return Ok(Some(fused));
-    }
-    let squared = arithmetic::mul(input, input)?;
-    let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
-    let summed = reduction::sum(&squared, Some(dims_isize), true)?;
-
-    // One element out of range is enough to fall back for the whole reduction:
-    // the scaled path is per-slice, so it costs nothing extra to take it for
-    // every slice, and the alternative is threading a per-slice choice through
-    // the arithmetic below.
-    let needs_scaling = match summed.dtype() {
-        DataType::Float32 => summed
-            .data()
-            .as_f32_slice()
-            .ok_or_else(|| MinitensorError::internal_error("Failed to read squared norm sum"))?
-            .iter()
-            .any(|v| v.is_infinite() || *v == 0.0),
-        DataType::Float64 => summed
-            .data()
-            .as_f64_slice()
-            .ok_or_else(|| MinitensorError::internal_error("Failed to read squared norm sum"))?
-            .iter()
-            .any(|v| v.is_infinite() || *v == 0.0),
-        _ => return Ok(None),
-    };
-    if needs_scaling {
-        return Ok(None);
-    }
-
-    Ok(Some(activation::sqrt(&summed)?))
-}
-
+/// Vector p-norm over `dim`, or over the flattened tensor when `dim` is `None`.
+///
+/// Supported orders: any finite `p > 0`, plus `inf` (maximum magnitude), `-inf`
+/// (minimum magnitude) and `0` (count of non-zeros, which is not a norm but is
+/// the conventional reading of `p = 0`). Finite negative orders are rejected —
+/// they are defined by a limit but have no useful derivative here, and silently
+/// returning something differentiable-looking would be worse than an error.
+///
+/// The 2-norm is the float nearest the exact `sqrt(Σ x²)`; see
+/// [`euclidean_norm`]. Another finite order is computed as
+/// `m * (Σ (|x| / m)^p)^(1/p)` with `m = max|x|` rather than as
+/// `(Σ |x|^p)^(1/p)`: raising first overflows once `|x|^p` passes the range,
+/// so the direct form reports `inf` for a norm that is perfectly
+/// representable -- and `norm` is exactly what you call to *detect* a
+/// blow-up, so saturating right at that point defeats the purpose. Scaling by
+/// the largest magnitude keeps every intermediate inside the range. When that
+/// magnitude is itself zero or infinite there is nothing to scale by, and
+/// [`unusable_scales_to_ones`] stands one in for it.
 pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // An integer argument widens rather than being refused, the rule `mean`
     // already follows: a variance, a norm and a log-sum-exp of integers are
@@ -583,8 +467,12 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
             // float32 against 0.94 for `abs(x).sum()` spelled out.
             let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
             reduction::sum(&activation::abs(&input)?, Some(dims_isize), true)?
-        } else if let Some(fast) = euclidean_norm_unscaled(&input, p, &dims)? {
-            fast
+        } else if let Some(exact) = (p == 2.0)
+            .then(|| euclidean_norm(&input, &dims))
+            .transpose()?
+            .flatten()
+        {
+            exact
         } else {
             let scale = unusable_scales_to_ones(&abs_max_over(&input, &dims)?)?;
             let powered = match scaled_powers(&input, &scale, p, &dims)? {
@@ -798,14 +686,11 @@ mod tests {
         assert!(norm(&t, 2.0, Some(vec![5]), false).is_err());
     }
 
-    /// The fused norm has to answer what `mul`, `sum` and `sqrt` answered.
-    ///
-    /// It replaced that route for the trailing-axis reductions, so the two are
-    /// compared directly rather than both against a reference: a shared error
-    /// in the definition would pass a reference check and this is what catches
-    /// a fused path that reduced over the wrong extent.
+    /// The exact norm reduces every set of axes over the right extent: it is
+    /// compared with `mul`, `sum` and `sqrt` composed, which differ from it
+    /// by their roundings only, on trailing blocks and on axes that are not.
     #[test]
-    fn the_fused_norm_agrees_with_mul_then_sum_then_sqrt() {
+    fn the_exact_norm_agrees_with_mul_then_sum_then_sqrt() {
         let values: Vec<f64> = (0..(3 * 4 * 5)).map(|i| (i as f64) * 0.37 - 8.0).collect();
         let t = tensor_f64(values, vec![3, 4, 5], false);
 
@@ -813,18 +698,20 @@ mod tests {
             vec![0usize, 1, 2], // every axis: the flattened norm
             vec![2],            // the last: one run per row
             vec![1, 2],         // a trailing block of two
+            vec![0],            // a leading axis
+            vec![0, 2],         // axes that are not a block
         ] {
-            let fused = fused_euclidean_norm(&t, &dims)
+            let exact = euclidean_norm(&t, &dims)
                 .unwrap()
-                .expect("a trailing block should take the fused path");
+                .expect("a float64 tensor takes the exact path");
 
             let squared = arithmetic::mul(&t, &t).unwrap();
             let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
             let summed = reduction::sum(&squared, Some(dims_isize), true).unwrap();
             let composed = activation::sqrt(&summed).unwrap();
 
-            assert_eq!(fused.shape().dims(), composed.shape().dims(), "{dims:?}");
-            let a = fused.data().as_f64_slice().unwrap();
+            assert_eq!(exact.shape().dims(), composed.shape().dims(), "{dims:?}");
+            let a = exact.data().as_f64_slice().unwrap();
             let b = composed.data().as_f64_slice().unwrap();
             for (x, y) in a.iter().zip(b) {
                 assert!(
@@ -835,13 +722,13 @@ mod tests {
         }
     }
 
-    /// A float32 norm accumulates in `f64` and rounds once, so it is the
-    /// correctly rounded answer -- here on lengths and magnitudes where the
-    /// single-precision accumulator it replaced landed an ulp off -- and it
-    /// needs no scaling at the ends of the range, where squaring in `f32`
-    /// overflows or underflows.
+    /// A float32 norm needs no scaling at the ends of the range, where
+    /// squaring in float32 overflows or underflows: it lands within an ulp of
+    /// the root of the float64 sum of squares, which is within a hair of the
+    /// exact one, on lengths and magnitudes where a float32 accumulator was
+    /// an ulp or more off.
     #[test]
-    fn a_float32_norm_is_the_correctly_rounded_one() {
+    fn a_float32_norm_needs_no_scaling() {
         fn float32(values: Vec<f32>) -> Tensor {
             let shape = vec![values.len()];
             Tensor::new(
@@ -862,42 +749,39 @@ mod tests {
         for len in [1usize, 17, 1000, 100_000, 2_000_000] {
             for scale in [10.0f32, 1e20, 1e-25] {
                 let values: Vec<f32> = (0..len).map(|_| next() * scale).collect();
-                let exact = values
+                let near = values
                     .iter()
                     .map(|&v| (v as f64) * (v as f64))
                     .sum::<f64>()
-                    .sqrt();
+                    .sqrt() as f32;
                 let t = float32(values);
-                let got = fused_euclidean_norm(&t, &[0]).unwrap().unwrap();
-                assert_eq!(
-                    got.data().as_f32_slice().unwrap()[0],
-                    exact as f32,
-                    "len {len}, scale {scale:e}"
+                let got = euclidean_norm(&t, &[0]).unwrap().unwrap();
+                let got = got.data().as_f32_slice().unwrap()[0];
+                assert!(
+                    got == near || got == near.next_up() || got == near.next_down(),
+                    "len {len}, scale {scale:e}: {got} against {near}"
                 );
             }
         }
     }
 
-    /// Axes that are not a trailing block leave a reduced slice strided rather
-    /// than contiguous, so the fused walk does not apply and must say so.
+    /// Only a float dtype has an exact path; another is left to the caller.
     #[test]
-    fn a_non_trailing_reduction_declines_the_fused_path() {
-        let t = tensor_f64(vec![1.0; 24], vec![2, 3, 4], false);
-        assert!(fused_euclidean_norm(&t, &[0]).unwrap().is_none());
-        assert!(fused_euclidean_norm(&t, &[1]).unwrap().is_none());
-        assert!(fused_euclidean_norm(&t, &[0, 2]).unwrap().is_none());
-        // ... and the ones that are a trailing block do apply.
-        assert!(fused_euclidean_norm(&t, &[2]).unwrap().is_some());
-        assert!(fused_euclidean_norm(&t, &[1, 2]).unwrap().is_some());
+    fn an_integer_tensor_declines_the_exact_path() {
+        let t = Tensor::new(
+            Arc::new(TensorData::from_vec_i64(vec![3, 4], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        );
+        assert!(euclidean_norm(&t, &[0]).unwrap().is_none());
     }
 
-    /// The whole point of the scaled route is that it still catches what the
-    /// direct one cannot represent, and the fused path must not have taken
-    /// that decision away from it.
+    /// Squares past the largest float64 are summed exactly, and the norm,
+    /// which is in range, is still found.
     #[test]
-    fn the_fused_path_still_falls_back_when_squaring_overflows() {
-        // 1e200 squares to inf in f64, so the sum of squares is unusable and
-        // the scaled route has to produce the answer.
+    fn a_norm_whose_squares_overflow_is_in_range() {
         let t = tensor_f64(vec![1e200, 1e200], vec![2], false);
         let got = norm(&t, 2.0, None, false).unwrap();
         let value = got.data().as_f64_slice().unwrap()[0];
@@ -905,9 +789,9 @@ mod tests {
         assert!((value / (1e200 * std::f64::consts::SQRT_2) - 1.0).abs() < 1e-12);
     }
 
-    /// The other direction: squares that underflow to zero.
+    /// The other direction: squares below the least subnormal.
     #[test]
-    fn the_fused_path_still_falls_back_when_squaring_underflows() {
+    fn a_norm_whose_squares_underflow_is_not_zero() {
         let t = tensor_f64(vec![1e-200, 1e-200], vec![2], false);
         let got = norm(&t, 2.0, None, false).unwrap();
         let value = got.data().as_f64_slice().unwrap()[0];
