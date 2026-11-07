@@ -1537,7 +1537,8 @@ the largest value is never left out. A range whose ends are finite but whose
 span is not, such as `(-1e308, 1e308)`, still gives finite, evenly spaced
 edges; each edge is the exact one rounded once, as a `linspace` point is.
 Equal-width bins are found by arithmetic and checked against the edges,
-so their cost does not grow with the number of bins.
+so their cost does not grow with the number of bins. With `weights`, each
+bin is the float nearest the exact total of its weights.
 
 Two conventions worth stating because they are easy to get backwards. Values
 outside the outermost edges are **dropped, not clamped** — clamping would pile
@@ -3013,7 +3014,10 @@ Behavior and validation:
 - `input` must be exactly 1-D; scalar and multidimensional inputs are rejected.
 - Labels must be non-negative. Unweighted output has `int64` dtype.
 - With `weights`, output dtype follows the weight dtype and each bin contains
-  the sum of weights for positions assigned to that label.
+  the sum of weights for positions assigned to that label: the float nearest
+  the exact sum, each bin carried with its additions' exact errors and rounded
+  once, where plain additions had put about half the bins of ordinary weights
+  an ulp or more out. A NaN or an infinity stays in its own bin.
 - Output length is `max(max(input) + 1, minlength)`, or `minlength` for empty
   inputs. `minlength` must be non-negative.
 - `bincount` is currently CPU-only and rejects non-CPU label or weight tensors.

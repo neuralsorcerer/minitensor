@@ -694,6 +694,102 @@ pub(crate) fn sum_to<I: Element, T: Output>(values: &[I]) -> T {
     Reduction::Sum.of_values(values, true)
 }
 
+/// The total of the weights in each of `bins` bins, `label(i)` the bin of
+/// `weights[i]` -- none for a label past the last -- each the value nearest
+/// the exact total of its weights.
+///
+/// Each bin's weights are added by two-sums, the errors and their
+/// magnitudes beside, across the pool in bands merged pairwise; a bin its
+/// bound cannot settle -- a NaN, an infinity, or a total on a halfway point
+/// -- has its weights gathered, all such bins in one pass, and summed as
+/// [`sum_to`] sums them.
+pub(crate) fn bin_totals<I: Element, T: Output>(
+    weights: &[I],
+    bins: usize,
+    label: impl Fn(usize) -> usize + Sync,
+) -> Vec<T> {
+    let totals = crate::ops::search::tally_bands(
+        weights.len(),
+        bins,
+        BinTotal::default(),
+        |first, last, slots: &mut [BinTotal]| {
+            for index in first..last {
+                if let Some(slot) = slots.get_mut(label(index)) {
+                    slot.add(weights[index].wide());
+                }
+            }
+        },
+    );
+    let mut out: Vec<T> = Vec::with_capacity(bins);
+    let mut open = Vec::new();
+    for (bin, total) in totals.iter().enumerate() {
+        // The errors pass through no more additions than were made.
+        let additions = (total.additions + LANES as u64) as f64;
+        let carried = Carried {
+            sum: total.sum,
+            error: total.error,
+            slack: total.magnitude * additions * 2f64.powi(-52),
+        };
+        out.push(carried.rounded().unwrap_or_else(|| {
+            open.push(bin);
+            T::narrow(0.0)
+        }));
+    }
+    if !open.is_empty() {
+        let mut place = vec![usize::MAX; bins];
+        for (nth, &bin) in open.iter().enumerate() {
+            place[bin] = nth;
+        }
+        let mut gathered: Vec<Vec<I>> = vec![Vec::new(); open.len()];
+        for (index, &weight) in weights.iter().enumerate() {
+            let nth = place.get(label(index)).copied().unwrap_or(usize::MAX);
+            if let Some(kept) = gathered.get_mut(nth) {
+                kept.push(weight);
+            }
+        }
+        for (bin, kept) in open.into_iter().zip(gathered) {
+            out[bin] = sum_to(&kept);
+        }
+    }
+    out
+}
+
+/// One bin's weights added so far: the sum, the exact errors of its
+/// additions added up, their magnitudes, and how many additions there were.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BinTotal {
+    sum: f64,
+    error: f64,
+    magnitude: f64,
+    additions: u64,
+}
+
+impl BinTotal {
+    #[inline(always)]
+    fn add(&mut self, value: f64) {
+        let (sum, rounding) = two_sum(self.sum, value);
+        self.sum = sum;
+        self.error += rounding;
+        self.magnitude += rounding.abs();
+        self.additions += 1;
+    }
+}
+
+impl std::ops::Add for BinTotal {
+    type Output = Self;
+
+    /// Two bands' totals: the sums by a two-sum, the errors added twice more.
+    fn add(self, other: Self) -> Self {
+        let (sum, rounding) = two_sum(self.sum, other.sum);
+        Self {
+            sum,
+            error: (self.error + other.error) + rounding,
+            magnitude: self.magnitude + other.magnitude + rounding.abs(),
+            additions: self.additions + other.additions + 2,
+        }
+    }
+}
+
 /// The value nearest the mean of `values`, the exact sum over the count; NaN
 /// for no values.
 pub(crate) fn mean_to<I: Element, T: Output>(values: &[I]) -> T {

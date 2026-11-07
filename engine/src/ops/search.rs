@@ -515,33 +515,12 @@ const TALLY_PRIVATE_BINS: usize = 1 << 16;
 const TALLY_MIN_BAND: usize = 1 << 17;
 const TALLY_BANDS: usize = 64;
 
-/// Add one contribution per value into `bins` slots.
-///
-/// `contribution(index)` says which slot a value lands in and what it adds
-/// there, or `None` for a value that lands nowhere. That closure is the only
-/// difference between a histogram, a weighted histogram and a `bincount`, so
-/// the counting itself is written once.
+/// Add each value's contribution into `bins` slots: `fill(first, last,
+/// slots)` adds everything in `first..last` into `slots`.
 ///
 /// Each band keeps a private tally and they merge pairwise afterwards, which is
 /// what makes this parallel at all: the slots a band touches are scattered, so
 /// bands cannot be given disjoint pieces of one output.
-pub(crate) fn tally<T, F>(count: usize, bins: usize, zero: T, contribution: F) -> Vec<T>
-where
-    T: Copy + Send + Sync + std::ops::Add<Output = T>,
-    F: Fn(usize) -> Option<(usize, T)> + Sync,
-{
-    tally_bands(count, bins, zero, |first, last, slots: &mut [T]| {
-        for position in first..last {
-            if let Some((slot, value)) = contribution(position) {
-                slots[slot] = slots[slot] + value;
-            }
-        }
-    })
-}
-
-/// [`tally`] with the band's loop supplied whole: `fill(first, last, slots)`
-/// adds everything in `first..last` into `slots`. For a caller whose loop is
-/// worth writing itself, as counting labels is.
 pub(crate) fn tally_bands<T, F>(count: usize, bins: usize, zero: T, fill: F) -> Vec<T>
 where
     T: Copy + Send + Sync + std::ops::Add<Output = T>,
@@ -734,6 +713,7 @@ impl Labels<'_> {
 /// `int64`. Neither is differentiable: a count moves in jumps as a label
 /// changes, so both detach.
 pub fn bincount(labels: &Tensor, weights: Option<&Tensor>, minlength: usize) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::bin_totals;
     if labels.ndim() != 1 {
         return Err(MinitensorError::invalid_operation(
             "bincount input must be 1-D",
@@ -806,9 +786,7 @@ pub fn bincount(labels: &Tensor, weights: Option<&Tensor>, minlength: usize) -> 
             let values = weights_contiguous.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("bincount: weights are not float32")
             })?;
-            let totals = tally(count, bins, 0f32, |index| {
-                Some((borrowed.at(index) as usize, values[index]))
-            });
+            let totals: Vec<f32> = bin_totals(values, bins, |index| borrowed.at(index) as usize);
             Ok(counted_tensor(
                 TensorData::from_vec_f32(totals, device),
                 DataType::Float32,
@@ -820,9 +798,7 @@ pub fn bincount(labels: &Tensor, weights: Option<&Tensor>, minlength: usize) -> 
             let values = weights_contiguous.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("bincount: weights are not float64")
             })?;
-            let totals = tally(count, bins, 0f64, |index| {
-                Some((borrowed.at(index) as usize, values[index]))
-            });
+            let totals: Vec<f64> = bin_totals(values, bins, |index| borrowed.at(index) as usize);
             Ok(counted_tensor(
                 TensorData::from_vec_f64(totals, device),
                 DataType::Float64,
@@ -1323,10 +1299,13 @@ fn bin_counts(input: &Tensor, finder: &BinFinder<'_>, weights: Option<&[f64]>) -
         slot: impl Fn(T) -> usize + Sync,
     ) -> Vec<f64> {
         match weights {
-            Some(weights) => tally(values.len(), bins, 0.0, |index| {
-                let bin = slot(values[index]);
-                (bin < bins).then(|| (bin, weights[index]))
-            }),
+            // Each bin's weights summed exactly and rounded once; a value in
+            // no bin has a label past the last, and is left out.
+            Some(weights) => {
+                crate::ops::arithmetic::exact_sum::bin_totals(weights, bins, |index| {
+                    slot(values[index])
+                })
+            }
             // One slot more than there are bins, for the values that fall in
             // none, and dropped once they are counted.
             None => {
