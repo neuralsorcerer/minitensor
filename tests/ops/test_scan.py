@@ -406,11 +406,20 @@ def test_a_scan_of_one_element_is_that_element(name):
     np.testing.assert_array_equal(got, [[2.5], [3.5]])
 
 
-def test_a_long_last_axis_scan_matches_numpy_exactly():
+def test_a_long_last_axis_scan_is_exact():
     """Long enough that the register path is the whole of the work, and in
-    float64 so the comparison is exact rather than approximate."""
+    float64 so the comparison is exact rather than approximate: each running
+    sum is the float64 nearest the exact sum so far, which a total rounded at
+    every step drifts away from."""
     values = np.arange(1.0, 20001.0) / 10000.0
-    np.testing.assert_array_equal(mt.cumsum(_t(values), 0).numpy(), np.cumsum(values))
+    # Every float64 is a whole multiple of 2^-1074, and a whole number over a
+    # power of two divides to the nearest float64.
+    scale, total, want = 2**1074, 0, []
+    for value in values.tolist():
+        numerator, denominator = value.as_integer_ratio()
+        total += numerator * (scale // denominator)
+        want.append(total / scale)
+    np.testing.assert_array_equal(mt.cumsum(_t(values), 0).numpy(), want)
     np.testing.assert_array_equal(
         mt.cummax(_t(values), 0)[0].numpy(), np.maximum.accumulate(values)
     )

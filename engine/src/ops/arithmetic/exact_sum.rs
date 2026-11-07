@@ -137,21 +137,51 @@ pub(crate) trait Output: Target + Send + Sync {
     /// never close enough for float64.
     const PLAIN: bool;
     /// The value nearest every number within `bound` of `value + rest`, when
-    /// that is one value; `value + rest` is a two-sum's pair.
+    /// that is one value; `value + rest` is a two-sum's pair, so `value` is
+    /// the float64 nearest it. A zero bound always settles a finite pair.
     fn settle(value: f64, rest: f64, bound: f64) -> Option<Self>;
+    /// [`Output::settle`] without branches, for lanes advanced side by
+    /// side: the value and whether the bound settles it, a halfway point
+    /// with a zero bound not among them.
+    fn settle_lanes(value: f64, rest: f64, bound: f64) -> (Self, bool);
+    /// Whether `sum + error` with a zero bound is rounded by
+    /// [`Output::exact_pair`]: always for float64, and for float32 where
+    /// the error is zero.
+    fn exact_lane(error: f64) -> bool;
+    /// The value nearest `sum + error`, a two-sum's pair, where
+    /// [`Output::exact_lane`] says it is that simple.
+    fn exact_pair(sum: f64, error: f64) -> Self;
 }
 
 impl Output for f64 {
     const PLAIN: bool = false;
 
     fn settle(value: f64, rest: f64, bound: f64) -> Option<Self> {
-        if bound == 0.0 && rest == 0.0 {
+        if bound == 0.0 {
+            // `value` is the pair rounded once, halfway or not.
             return value.is_finite().then_some(value);
         }
         // The gap to the float64 on the side towards zero, the smaller of the
         // two; a zero or a non-finite value leaves it NaN and the test false.
         let inward = (value - f64::from_bits(value.to_bits().wrapping_sub(1))).abs();
         (rest.abs() + bound < inward * SHY_OF_HALF && value != 0.0).then_some(value)
+    }
+
+    #[inline(always)]
+    fn exact_lane(_error: f64) -> bool {
+        true
+    }
+
+    #[inline(always)]
+    fn exact_pair(sum: f64, error: f64) -> Self {
+        sum + error
+    }
+
+    #[inline(always)]
+    fn settle_lanes(value: f64, rest: f64, bound: f64) -> (Self, bool) {
+        let inward = (value - f64::from_bits(value.to_bits().wrapping_sub(1))).abs();
+        let clear = rest.abs() + bound < inward * SHY_OF_HALF && value != 0.0;
+        (value, value.is_finite() & ((bound == 0.0) | clear))
     }
 }
 
@@ -160,9 +190,25 @@ impl Output for f32 {
 
     fn settle(value: f64, rest: f64, bound: f64) -> Option<Self> {
         let narrow = value as f32;
-        if bound == 0.0 && rest == 0.0 {
-            // `value` is the total, rounded once by the conversion.
-            return value.is_finite().then_some(narrow);
+        if bound == 0.0 {
+            if !value.is_finite() {
+                return None;
+            }
+            if rest == 0.0 {
+                // `value` is the total, rounded once by the conversion.
+                return Some(narrow);
+            }
+            // The total lies past `value` towards `rest`, short of the next
+            // float64, so the odd one of the two is its rounding to odd at
+            // float64's last bit, which narrows to float32 rounded once.
+            let odd = if value.to_bits() & 1 == 1 {
+                value
+            } else if rest > 0.0 {
+                value.next_up()
+            } else {
+                value.next_down()
+            };
+            return Some(odd as f32);
         }
         if !narrow.is_finite() || narrow.abs() == f32::MAX {
             return None;
@@ -175,6 +221,39 @@ impl Output for f32 {
         let below = (back + f64::from(narrow.next_down())) / 2.0;
         let room = |gap: f64| gap * (1.0 - 2f64.powi(-40));
         (rest + bound < room(above - value) && bound - rest < room(value - below)).then_some(narrow)
+    }
+
+    #[inline(always)]
+    fn exact_lane(error: f64) -> bool {
+        error == 0.0
+    }
+
+    #[inline(always)]
+    fn exact_pair(sum: f64, _error: f64) -> Self {
+        sum as f32
+    }
+
+    #[inline(always)]
+    fn settle_lanes(value: f64, rest: f64, bound: f64) -> (Self, bool) {
+        // In magnitudes, the halfway points either side of the float32
+        // nearest, with zero's neighbours its own reflection.
+        let magnitude = value.abs();
+        let narrow = magnitude as f32;
+        let bits = narrow.to_bits();
+        let back = f64::from(narrow);
+        let above = f64::from(f32::from_bits(bits.wrapping_add(1)));
+        let below = if bits == 0 {
+            -above
+        } else {
+            f64::from(f32::from_bits(bits.wrapping_sub(1)))
+        };
+        let (up, down) = ((back + above) * 0.5, (back + below) * 0.5);
+        let toward = if value < 0.0 { -rest } else { rest };
+        let room = |gap: f64| gap * (1.0 - 2f64.powi(-40));
+        let clear =
+            (toward + bound < room(up - magnitude)) & (bound - toward < room(magnitude - down));
+        let signed = if value < 0.0 { -narrow } else { narrow };
+        (signed, (narrow < f32::MAX) & clear)
     }
 }
 
@@ -1755,6 +1834,574 @@ fn exact_difference(a: f64, b: f64, c: f64, d: f64) -> f64 {
         .map_or_else(|special| special, |total| total.rounded())
 }
 
+/// The running sums along one axis of `input`, laid out
+/// `[outer, dim_size, inner]` and summed from the far end when `reverse`:
+/// `output` at each position, the value nearest the exact sum of the values
+/// up to it.
+///
+/// Each lane carries its total as `sum + error` by a two-sum a step, and adds
+/// each step's error into `error` by a two-sum too, keeping the magnitudes of
+/// what that drops as the bound: zero while the errors add exactly, which on
+/// ordinary data is most of the time, and far below an ulp of the sum
+/// otherwise. A pair on a halfway point with a zero bound is rounded by its
+/// own two-sum, ties to even. A prefix the bound cannot settle is rounded
+/// from the exact sum of the lane so far, kept in limbs from the first such
+/// prefix on and extended only as far as it is asked for, and the lane
+/// carries on from that. A NaN, or infinities of both signs, make NaN from
+/// there on and an infinity of one sign that infinity; an exact zero is `-0`
+/// where every value so far is, as adding them one by one gives, and `+0`
+/// otherwise.
+///
+/// Every running sum is the one value nearest the exact sum, so how the
+/// work is split cannot change it: a long run is cut into pieces across the
+/// pool, short runs and columns are advanced side by side in bands.
+pub(crate) fn running_sums<I: Element, T: Output>(
+    output: &mut [T],
+    input: &[I],
+    dim_size: usize,
+    inner: usize,
+    reverse: bool,
+) {
+    let slab = dim_size * inner;
+    if slab == 0 {
+        return;
+    }
+    debug_assert_eq!(output.len(), input.len());
+    let slabs = input.len() / slab;
+    let order = move |step: usize| if reverse { dim_size - 1 - step } else { step };
+    if inner == 1 && dim_size >= crate::ops::map::PAR_THRESHOLD {
+        for (out, values) in output.chunks_mut(slab).zip(input.chunks(slab)) {
+            split_running_sums(out, values, reverse);
+        }
+        return;
+    }
+    if inner == 1 && slabs == 1 {
+        scan_run(
+            output,
+            Lane::new::<T>(),
+            0..dim_size,
+            |step| input[order(step)].wide(),
+            order,
+            || Exactly::of(std::iter::empty()),
+        );
+        return;
+    }
+    if inner == 1 {
+        // Runs side by side, a band of them to a task.
+        crate::ops::map::par_out_chunks(output, slab * BAND, &|start, out| {
+            let values = &input[start..start + out.len()];
+            scan_band(
+                out.len() / slab,
+                dim_size,
+                |step, lanes| {
+                    for (k, lane) in lanes.iter_mut().enumerate() {
+                        *lane = values[k * slab + order(step)].wide();
+                    }
+                },
+                |k, step| values[k * slab + order(step)].wide(),
+                |step, sums| {
+                    for (k, &sum) in sums.iter().enumerate() {
+                        out[k * slab + order(step)] = sum;
+                    }
+                },
+            );
+        });
+        return;
+    }
+    // Columns a band of one slab to a task, written where they belong.
+    let bands = inner.div_ceil(BAND);
+    let parts = crate::parallel::Parts::of(output);
+    crate::parallel::for_each_task(slabs * bands, &|task| {
+        let (base, first) = (task / bands * slab, task % bands * BAND);
+        let values = &input[base..base + slab];
+        let width = BAND.min(inner - first);
+        let row = |step: usize| order(step) * inner + first;
+        scan_band(
+            width,
+            dim_size,
+            |step, lanes| {
+                for (lane, value) in lanes.iter_mut().zip(&values[row(step)..][..width]) {
+                    *lane = value.wide();
+                }
+            },
+            |k, step| values[row(step) + k].wide(),
+            |step, sums| {
+                // SAFETY: a task writes only the columns of its band of its
+                // slab, which no other task writes, and all lie in `output`.
+                let out = unsafe {
+                    std::slice::from_raw_parts_mut(parts.start().add(base + row(step)), width)
+                };
+                out.copy_from_slice(sums);
+            },
+        );
+    });
+}
+
+/// Lanes [`scan_band`] advances side by side.
+const BAND: usize = 64;
+
+/// The running sums of `width` lanes, at most [`BAND`], advanced a step at
+/// a time side by side: `load(step, values)` gives each lane's value at a
+/// step, `read(k, step)` lane `k`'s at an earlier one, and `store(step,
+/// sums)` takes the running sums. Each lane is carried; a lane its bound
+/// cannot settle is rounded from its exact sum, as [`scan_run`] rounds one.
+fn scan_band<T: Output>(
+    width: usize,
+    steps: usize,
+    load: impl Fn(usize, &mut [f64]),
+    read: impl Fn(usize, usize) -> f64,
+    mut store: impl FnMut(usize, &[T]),
+) {
+    let mut band = Band {
+        sums: [0.0; BAND],
+        errors: [0.0; BAND],
+        bounds: [0.0; BAND],
+        zeros: [1; BAND],
+    };
+    let mut values = [0f64; BAND];
+    let mut sums = [T::narrow(0.0); BAND];
+    let mut settled = [0u8; BAND];
+    let mut exact: Vec<Option<Box<Exactly>>> = (0..width).map(|_| None).collect();
+    let wide = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::ops::simd::simd_capabilities().avx2
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    };
+    for step in 0..steps {
+        load(step, &mut values[..width]);
+        #[cfg(target_arch = "x86_64")]
+        if wide {
+            // SAFETY: avx2 was detected on this CPU.
+            unsafe { advance_avx2(&mut band, &values, &mut sums, &mut settled, width) };
+        } else {
+            advance(&mut band, &values, &mut sums, &mut settled, width);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        advance(&mut band, &values, &mut sums, &mut settled, width);
+        for k in 0..width {
+            if settled[k] != 0 {
+                continue;
+            }
+            let mut lane = Lane {
+                sum: band.sums[k],
+                error: band.errors[k],
+                bound: band.bounds[k],
+                carried: true,
+                negative_zero: band.zeros[k] != 0,
+            };
+            let state = exact[k].get_or_insert_with(|| Exactly::of(std::iter::empty()));
+            sums[k] = exactly(state, &mut lane, step, |earlier| read(k, earlier));
+            band.sums[k] = lane.sum;
+            band.errors[k] = lane.error;
+            band.bounds[k] = lane.bound;
+        }
+        store(step, &sums[..width]);
+    }
+}
+
+/// [`BAND`] carried lanes, each field apart, so that a step over them is
+/// one loop the compiler can carry out in vector registers.
+struct Band {
+    sums: [f64; BAND],
+    errors: [f64; BAND],
+    /// The sums of the magnitudes of what adding up the errors dropped.
+    bounds: [f64; BAND],
+    /// Whether every value so far was `-0`, as 0 or 1.
+    zeros: [u8; BAND],
+}
+
+/// Adds `values` to the first `width` lanes, each as [`Lane::add`] adds to a
+/// carried lane, and gives each running sum in `sums` with whether the
+/// bound settles it in `settled`, without a branch.
+#[inline(always)]
+fn advance<T: Output>(
+    band: &mut Band,
+    values: &[f64; BAND],
+    sums: &mut [T; BAND],
+    settled: &mut [u8; BAND],
+    width: usize,
+) {
+    let width = width.min(BAND);
+    let mut exact = true;
+    for k in 0..width {
+        let value = values[k];
+        band.zeros[k] &= u8::from(value.to_bits() == (-0.0f64).to_bits());
+        let (sum, rounding) = two_sum(band.sums[k], value);
+        band.sums[k] = sum;
+        let (error, dropped) = two_sum(band.errors[k], rounding);
+        band.errors[k] = error;
+        let bound = band.bounds[k] + dropped.abs();
+        band.bounds[k] = bound;
+        exact &= (bound == 0.0) & T::exact_lane(error);
+    }
+    // Every value so far `-0` makes `-0`, which the sum's `+0` is not.
+    if exact {
+        // Every lane's pair is its exact sum: rounded as it stands.
+        for k in 0..width {
+            let rounded = T::exact_pair(band.sums[k], band.errors[k]);
+            sums[k] = if band.zeros[k] != 0 {
+                T::narrow(-0.0)
+            } else {
+                rounded
+            };
+            settled[k] = 1;
+        }
+        return;
+    }
+    for k in 0..width {
+        let (total, rest) = two_sum(band.sums[k], band.errors[k]);
+        let (rounded, ok) = T::settle_lanes(total, rest, 2.0 * band.bounds[k]);
+        sums[k] = if band.zeros[k] != 0 {
+            T::narrow(-0.0)
+        } else {
+            rounded
+        };
+        settled[k] = u8::from(ok);
+    }
+}
+
+/// [`advance`] in 256-bit registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn advance_avx2<T: Output>(
+    band: &mut Band,
+    values: &[f64; BAND],
+    sums: &mut [T; BAND],
+    settled: &mut [u8; BAND],
+    width: usize,
+) {
+    advance(band, values, sums, settled, width)
+}
+
+/// `out[order(step)]` for the running sums of one lane over `steps`, from
+/// `lane` as it stands before them; `read(step)` is the value at a step and
+/// `before` the exact state of everything before the first, built only if a
+/// running sum needs it.
+#[inline(always)]
+fn scan_run<T: Output>(
+    out: &mut [T],
+    mut lane: Lane,
+    steps: std::ops::Range<usize>,
+    read: impl Fn(usize) -> f64,
+    order: impl Fn(usize) -> usize,
+    before: impl FnOnce() -> Box<Exactly>,
+) {
+    let first = steps.start;
+    let mut exact: Option<Box<Exactly>> = None;
+    let mut before = Some(before);
+    for step in steps {
+        let at = order(step);
+        out[at] = lane.add::<T>(read(step)).unwrap_or_else(|| {
+            let state = exact.get_or_insert_with(|| before.take().expect("built once")());
+            exactly(state, &mut lane, step - first, |earlier| {
+                read(first + earlier)
+            })
+        });
+    }
+}
+
+/// [`running_sums`] of one long run, in pieces across the pool: each
+/// piece's carried total, as a scan of it carries it, merged in scan order
+/// into what comes before each piece, and each piece scanned from that. A
+/// piece that needs the exact sum of what comes before it adds up the exact
+/// sums of the pieces before it, each taken once and kept.
+fn split_running_sums<I: Element, T: Output>(output: &mut [T], input: &[I], reverse: bool) {
+    const PIECE: usize = 1 << 16;
+    let len = input.len();
+    let pieces = len.div_ceil(PIECE);
+    let span = |piece: usize| piece * PIECE..(piece * PIECE + PIECE).min(len);
+    let scan_values = |piece: usize| {
+        let values = &input[span(piece)];
+        let count = values.len();
+        (0..count).map(move |step| values[if reverse { count - 1 - step } else { step }].wide())
+    };
+    let totals = crate::parallel::map_tasks(pieces, &|piece| {
+        let mut lane = Lane::new::<f64>();
+        for value in scan_values(piece) {
+            lane.carry(value);
+        }
+        lane
+    });
+    // What comes before each piece in scan order.
+    let scan_order: Vec<usize> = if reverse {
+        (0..pieces).rev().collect()
+    } else {
+        (0..pieces).collect()
+    };
+    let mut before = vec![Lane::new::<f64>(); pieces];
+    let mut so_far = Lane::new::<f64>();
+    for &piece in &scan_order {
+        before[piece] = so_far;
+        so_far = so_far.merge(&totals[piece]);
+    }
+    let exact_pieces: Vec<std::sync::OnceLock<Box<Exactly>>> =
+        (0..pieces).map(|_| std::sync::OnceLock::new()).collect();
+    crate::ops::map::par_out_chunks(output, PIECE, &|start, out| {
+        let piece = start / PIECE;
+        let values = &input[span(piece)];
+        let count = values.len();
+        let order = |step: usize| if reverse { count - 1 - step } else { step };
+        let preceding = || {
+            let mut state = Exactly::of(std::iter::empty());
+            let earlier = scan_order.iter().take_while(|&&other| other != piece);
+            for &other in earlier {
+                let exact = exact_pieces[other].get_or_init(|| Exactly::of(scan_values(other)));
+                state.absorb(exact);
+            }
+            state
+        };
+        scan_run(
+            out,
+            before[piece],
+            0..count,
+            |step| values[order(step)].wide(),
+            order,
+            preceding,
+        );
+    });
+}
+
+/// One lane of [`running_sums`].
+///
+/// A float32 lane starts plain: one float64 sum, each addition within `u`
+/// of the total it makes, so `bound` is the sum of the totals' magnitudes
+/// and `u` times it bounds the drift -- far below a float32 halfway point
+/// unless the values cancel. At the first prefix that bound cannot settle
+/// the lane turns carried, from the exact sum so far, which every float64
+/// lane is from the start.
+#[derive(Clone, Copy)]
+struct Lane {
+    sum: f64,
+    error: f64,
+    /// For a plain lane the sum of the totals' magnitudes; for a carried
+    /// one, of the magnitudes of what adding up the errors dropped.
+    bound: f64,
+    carried: bool,
+    /// Whether every value so far was `-0`.
+    negative_zero: bool,
+}
+
+impl Lane {
+    fn new<T: Output>() -> Self {
+        Self {
+            sum: 0.0,
+            error: 0.0,
+            bound: 0.0,
+            carried: !T::PLAIN,
+            negative_zero: true,
+        }
+    }
+
+    /// Adds `value` to a carried lane, without giving the running sum.
+    #[inline(always)]
+    fn carry(&mut self, value: f64) {
+        self.negative_zero &= value.to_bits() == (-0.0f64).to_bits();
+        let (sum, rounding) = two_sum(self.sum, value);
+        self.sum = sum;
+        let (error, dropped) = two_sum(self.error, rounding);
+        self.error = error;
+        self.bound += dropped.abs();
+    }
+
+    /// The carried total of this lane's values followed by `next`'s, with
+    /// what adding them drops added to the bound.
+    fn merge(&self, next: &Self) -> Self {
+        let (sum, rounding) = two_sum(self.sum, next.sum);
+        let (errors, first) = two_sum(self.error, next.error);
+        let (error, second) = two_sum(errors, rounding);
+        Self {
+            sum,
+            error,
+            bound: self.bound + next.bound + first.abs() + second.abs(),
+            carried: true,
+            negative_zero: self.negative_zero && next.negative_zero,
+        }
+    }
+
+    /// Adds `value`, and gives the running sum when the bound says which
+    /// value it is.
+    #[inline(always)]
+    fn add<T: Output>(&mut self, value: f64) -> Option<T> {
+        if !self.carried {
+            self.negative_zero &= value.to_bits() == (-0.0f64).to_bits();
+            let sum = self.sum + value;
+            self.sum = sum;
+            self.bound += sum.abs();
+            if sum == 0.0 && self.bound == 0.0 {
+                return Some(T::narrow(if self.negative_zero { -0.0 } else { 0.0 }));
+            }
+            // Twice `u` covers the roundings of the bound's own sum.
+            return T::settle(sum, 0.0, self.bound * 2f64.powi(-52));
+        }
+        self.carry(value);
+        if self.bound == 0.0 && T::exact_lane(self.error) {
+            // The pair is the exact sum: rounded as it stands.
+            if self.negative_zero {
+                return Some(T::narrow(-0.0));
+            }
+            return Some(T::exact_pair(self.sum, self.error));
+        }
+        let (value, rest) = two_sum(self.sum, self.error);
+        // Twice the float64 sum of the magnitudes covers its own roundings.
+        T::settle(value, rest, 2.0 * self.bound)
+    }
+}
+
+/// A lane's sum so far in limbs, and the specials among its values.
+struct Exactly {
+    total: Total,
+    done: usize,
+    nan: bool,
+    up: bool,
+    down: bool,
+}
+
+impl Exactly {
+    /// The exact state of `values`, before any step of a lane.
+    fn of(values: impl Iterator<Item = f64>) -> Box<Self> {
+        let mut state = Box::new(Self {
+            total: Total::empty(LEAST, (2098 + 64) / 64 + 2),
+            done: 0,
+            nan: false,
+            up: false,
+            down: false,
+        });
+        for value in values {
+            state.add(value);
+        }
+        state
+    }
+
+    fn add(&mut self, value: f64) {
+        self.nan |= value.is_nan();
+        self.up |= value == f64::INFINITY;
+        self.down |= value == f64::NEG_INFINITY;
+        if let Some(exact) = Exact::float(value).filter(|exact| exact.magnitude != 0) {
+            let limbs = if exact.negative {
+                &mut self.total.negative
+            } else {
+                &mut self.total.positive
+            };
+            add_shifted(
+                limbs,
+                u128::from(exact.magnitude),
+                (exact.exponent - LEAST) as usize,
+            );
+        }
+    }
+
+    /// Adds another state's values to this one's, limb by limb.
+    fn absorb(&mut self, other: &Self) {
+        add_limbs(&mut self.total.positive, &other.total.positive);
+        add_limbs(&mut self.total.negative, &other.total.negative);
+        self.nan |= other.nan;
+        self.up |= other.up;
+        self.down |= other.down;
+    }
+}
+
+/// `total += other`, limbs of the same length with room for the carry.
+fn add_limbs(total: &mut [u64], other: &[u64]) {
+    let mut carry = false;
+    for (limb, &addend) in total.iter_mut().zip(other) {
+        let (sum, first) = limb.overflowing_add(addend);
+        let (sum, second) = sum.overflowing_add(u64::from(carry));
+        *limb = sum;
+        carry = first || second;
+    }
+}
+
+/// `total -= value` for a finite float64.
+fn take(total: &mut Total, value: f64) {
+    let exact = Exact::float(value).expect("finite");
+    if exact.magnitude != 0 {
+        let limbs = if exact.negative {
+            &mut total.positive
+        } else {
+            &mut total.negative
+        };
+        add_shifted(
+            limbs,
+            u128::from(exact.magnitude),
+            (exact.exponent - LEAST) as usize,
+        );
+    }
+}
+
+/// The running sum of `lane` from the exact sum of what came before it and
+/// its first `step + 1` values, which `earlier` reads in scan order, kept in
+/// `state` and extended from where it was last asked for. The lane carries
+/// on from the exact sum: its float64 nearest and the float64 nearest what
+/// is left, with half an ulp of that as the bound unless the two hold the
+/// sum exactly.
+#[cold]
+#[inline(never)]
+fn exactly<T: Output>(
+    state: &mut Exactly,
+    lane: &mut Lane,
+    step: usize,
+    earlier: impl Fn(usize) -> f64,
+) -> T {
+    let negative_zero = lane.negative_zero;
+    for index in state.done..=step {
+        state.add(earlier(index));
+    }
+    state.done = step + 1;
+    if state.nan || (state.up && state.down) {
+        return T::narrow(f64::NAN);
+    }
+    if state.up || state.down {
+        return T::narrow(if state.up {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        });
+    }
+    // A sum of floats that is not zero is at least the least subnormal, and
+    // so rounds to a value that is not zero either.
+    if state.total.positive == state.total.negative {
+        *lane = Lane {
+            carried: true,
+            negative_zero,
+            ..Lane::new::<T>()
+        };
+        return T::narrow(if negative_zero { -0.0 } else { 0.0 });
+    }
+    let high: f64 = state.total.clone().rounded();
+    if high.is_finite() {
+        let mut rest = state.total.clone();
+        take(&mut rest, high);
+        let low: f64 = rest.clone().rounded();
+        take(&mut rest, low);
+        let exact = rest.positive == rest.negative;
+        *lane = Lane {
+            sum: high,
+            error: low,
+            // At most half an ulp of `low` is left beyond the two, and twice
+            // the bound is what is allowed for.
+            bound: if exact {
+                0.0
+            } else {
+                low.abs() * 2f64.powi(-53)
+            },
+            carried: true,
+            negative_zero,
+        };
+    }
+    if T::PLAIN {
+        // A float32 is rounded from the exact sum, not from `high`.
+        state.total.clone().rounded()
+    } else {
+        // A float64 is `high` itself.
+        T::narrow(high)
+    }
+}
+
 /// Columns a task of [`dot_columns_f64`] carries at once.
 const DOT_COLUMNS: usize = 256;
 
@@ -1912,6 +2559,7 @@ pub(crate) fn mean_i64(values: &[i64]) -> f64 {
 
 /// The exact sum of finite floats, in base-2^64 limbs from `2^-1074` up,
 /// the positive and the negative values apart.
+#[derive(Clone)]
 struct Total {
     positive: Vec<u64>,
     negative: Vec<u64>,
@@ -2740,6 +3388,123 @@ mod tests {
         // Two products of half the least subnormal, each rounding to zero.
         let (x, y) = (2f64.powi(-537), 2f64.powi(-538));
         assert_eq!(difference_of_products_f64(x, y, -x, y), f64::from_bits(1));
+    }
+
+    #[test]
+    fn every_running_sum_is_rounded_once() {
+        let mut next = generator(0x3c6e_f372_fe94_f82b);
+        for round in 0..300 {
+            let (len, inner) = (1 + (next() % 400) as usize, 1 + (next() % 3) as usize);
+            let spread = 1 + next() % 80;
+            let mut values: Vec<f64> = (0..len * inner)
+                .map(|_| {
+                    let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                    unit * 2f64.powi((next() % spread) as i32 - 40)
+                })
+                .collect();
+            if round % 3 == 0 {
+                // Values that cancel what came before.
+                for index in (inner..values.len()).step_by(2) {
+                    values[index] = -values[index - inner];
+                }
+            }
+            let reverse = round % 2 == 1;
+            let mut out = vec![0f64; values.len()];
+            running_sums(&mut out, &values, len, inner, reverse);
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let mut narrow_out = vec![0f32; values.len()];
+            running_sums(&mut narrow_out, &narrow, len, inner, reverse);
+            for lane in 0..inner {
+                let order: Vec<usize> = if reverse {
+                    (0..len).rev().collect()
+                } else {
+                    (0..len).collect()
+                };
+                for (step, &row) in order.iter().enumerate() {
+                    let prefix: Vec<f64> = order[..=step]
+                        .iter()
+                        .map(|&r| values[r * inner + lane])
+                        .collect();
+                    let want: f64 = Total::of(&prefix).unwrap().rounded();
+                    assert_eq!(out[row * inner + lane], want, "round {round}");
+                    let prefix: Vec<f32> = order[..=step]
+                        .iter()
+                        .map(|&r| narrow[r * inner + lane])
+                        .collect();
+                    let want: f32 = Total::of(&prefix).unwrap().rounded();
+                    assert_eq!(narrow_out[row * inner + lane], want, "round {round}");
+                }
+            }
+        }
+        let mut out = [0f64; 4];
+        running_sums(&mut out, &[-0.0, -0.0, 1.0, -1.0], 4, 1, false);
+        assert_eq!(
+            out.map(f64::to_bits),
+            [-0.0f64, -0.0, 1.0, 0.0].map(f64::to_bits)
+        );
+        running_sums(&mut out, &[1e308, 1e308, -1e308, f64::NAN], 4, 1, false);
+        assert_eq!(out[..3], [1e308, f64::INFINITY, 1e308]);
+        assert!(out[3].is_nan());
+        running_sums(
+            &mut out,
+            &[1.0, f64::INFINITY, 2.0, f64::NEG_INFINITY],
+            4,
+            1,
+            false,
+        );
+        assert_eq!(out[..3], [1.0, f64::INFINITY, f64::INFINITY]);
+        assert!(out[3].is_nan());
+    }
+
+    #[test]
+    fn long_runs_and_many_columns_round_once() {
+        let mut next = generator(0xa54f_f53a_5f1d_36f1);
+        let mut value = move || {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            unit * 2f64.powi((next() % 50) as i32 - 25)
+        };
+        // A run long enough to be split into pieces, with a stretch that
+        // cancels everything before it.
+        let len = 300_000;
+        let mut values: Vec<f64> = (0..len).map(|_| value()).collect();
+        let half: f64 = values[..len / 2].iter().sum();
+        values[len / 2] = -half;
+        for reverse in [false, true] {
+            let mut out = vec![0f64; len];
+            running_sums(&mut out, &values, len, 1, reverse);
+            let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let mut narrow_out = vec![0f32; len];
+            running_sums(&mut narrow_out, &narrow, len, 1, reverse);
+            let mut exact = Exactly::of(std::iter::empty());
+            let mut narrow_exact = Exactly::of(std::iter::empty());
+            for step in 0..len {
+                let at = if reverse { len - 1 - step } else { step };
+                exact.add(values[at]);
+                narrow_exact.add(f64::from(narrow[at]));
+                if step % 97 == 0 || step.abs_diff(len / 2) < 3 {
+                    let want: f64 = exact.total.clone().rounded();
+                    assert_eq!(out[at], want, "step {step}");
+                    let want: f32 = narrow_exact.total.clone().rounded();
+                    assert_eq!(narrow_out[at], want, "step {step}");
+                }
+            }
+        }
+        // More columns than a band, in two slabs.
+        let (outer, len, inner) = (2, 40, 150);
+        let values: Vec<f64> = (0..outer * len * inner).map(|_| value()).collect();
+        let mut out = vec![0f64; values.len()];
+        running_sums(&mut out, &values, len, inner, false);
+        for slab in 0..outer {
+            for column in 0..inner {
+                let mut exact = Exactly::of(std::iter::empty());
+                for row in 0..len {
+                    let at = (slab * len + row) * inner + column;
+                    exact.add(values[at]);
+                    let want: f64 = exact.total.clone().rounded();
+                    assert_eq!(out[at], want);
+                }
+            }
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::arithmetic::exact_sum::{Element, Output, running_sums};
 use crate::ops::map::par_out_chunks;
 use crate::ops::util::Accumulate;
 use crate::ops::util::check_dim;
@@ -548,34 +549,42 @@ cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 cumprod_backward!(cumprod_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
 cumprod_backward!(cumprod_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
 
-cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
 cumsum_forward!(cumsum_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
 cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 
-/// [`scan_wide_f32`] adding along `dim` of `tensor`, forwards for the running
-/// sum and backwards for its gradient.
-fn cumsum_f32_along(
+/// The running sums along `dim` of a float tensor, forwards for the running
+/// sum and backwards for its gradient, each the value nearest the exact one;
+/// see `arithmetic::exact_sum::running_sums`. A float64 running total rounded
+/// at every step drifted from the exact one, and a float32 one carried in
+/// float64 was rounded again on the way back.
+fn exact_cumsum<T: Element + Output>(
     tensor: &Tensor,
     result_data: &mut TensorData,
     dim: usize,
     reverse: bool,
+    read: fn(&TensorData) -> Option<&[T]>,
+    write: fn(&mut TensorData) -> Option<&mut [T]>,
 ) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_f32_slice()
+    let input_data = read(tensor.data())
         .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
-    let output = result_data
-        .as_f32_slice_mut()
+    let output = write(result_data)
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
     check_dim(dim, tensor.ndim())?;
     let shape = tensor.shape().dims();
     let inner = shape[dim + 1..].iter().product::<usize>();
-    scan_wide_f32(output, input_data, shape[dim], inner, reverse, |a, b| a + b);
+    running_sums(output, input_data, shape[dim], inner, reverse);
     Ok(())
 }
 
 pub(crate) fn cumsum_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    cumsum_f32_along(tensor, result_data, dim, false)
+    exact_cumsum(
+        tensor,
+        result_data,
+        dim,
+        false,
+        TensorData::as_f32_slice,
+        TensorData::as_f32_slice_mut,
+    )
 }
 
 pub(crate) fn cumsum_backward_f32(
@@ -583,9 +592,41 @@ pub(crate) fn cumsum_backward_f32(
     result_data: &mut TensorData,
     dim: usize,
 ) -> Result<()> {
-    cumsum_f32_along(tensor, result_data, dim, true)
+    exact_cumsum(
+        tensor,
+        result_data,
+        dim,
+        true,
+        TensorData::as_f32_slice,
+        TensorData::as_f32_slice_mut,
+    )
 }
-cumsum_backward!(cumsum_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
+
+pub(crate) fn cumsum_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    exact_cumsum(
+        tensor,
+        result_data,
+        dim,
+        false,
+        TensorData::as_f64_slice,
+        TensorData::as_f64_slice_mut,
+    )
+}
+
+pub(crate) fn cumsum_backward_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    exact_cumsum(
+        tensor,
+        result_data,
+        dim,
+        true,
+        TensorData::as_f64_slice,
+        TensorData::as_f64_slice_mut,
+    )
+}
 cumsum_backward!(cumsum_backward_i32, as_i32_slice, as_i32_slice_mut, i32);
 cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
 

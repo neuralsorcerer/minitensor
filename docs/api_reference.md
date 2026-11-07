@@ -1965,10 +1965,29 @@ accumulate with something else:
   positions, and a value that wins several prefixes collects all of them.
 - `logcumsumexp(input, dim=-1)` is the running `log(sum(exp(x)))`.
 
-A `float32` scan -- `cumsum`, `cumprod` and `logcumsumexp` -- carries its running
-value in `float64` and rounds it once per element, so every element is the
-`float32` nearest its exact prefix and the error does not grow with the length.
-The result is still `float32`.
+Every running sum of a float `cumsum` -- `float32` or `float64`, along any
+axis -- is the float nearest the exact sum of the values so far, and so is
+every entry of `nancumsum`, of `cumulative_sum` and of the gradient of
+`cumsum`, which runs the sum the other way. Each lane carries its running sum
+with the exact errors of its additions and a bound on what adding those
+leaves out; where the bound cannot place a running sum against a halfway
+point, the values so far are summed exactly and the lane carries on from that
+sum. A `float64` total rounded at every step drifted from the exact one --
+every one of two hundred short runs of ordinary data held a wrong prefix --
+and a `float32` total carried in `float64` was rounded again on the way back,
+so `[1, 2^-24, 2^-60]` ran to `[1, 1, 1]` rather than `[1, 1, 1 + 2^-23]`. A
+total that overflows on the way is the exact one again once it is back in
+range -- `[max, max, -max]` runs to `[max, inf, max]` -- and since each
+running sum is unique, a long run split across the pool gives the same bits
+as one scanned whole.
+
+A `float32` `cumprod` or `logcumsumexp` carries its running value in
+`float64` and rounds it to `float32` once per element. The carry is some
+thirty bits finer than a `float32` place, so its error does not grow into
+anything a `float32` element shows, but an element can still miss the
+`float32` nearest its exact value where that value lies within the carry's
+error of a halfway point between two `float32`s. The result is still
+`float32`.
 
 `logcumsumexp` is not `cumsum` of `exp`, and the difference is the reason it
 exists. `exp` of a log-probability underflows to zero long before a real
