@@ -159,7 +159,7 @@ impl Element for f32 {
 }
 
 /// A float dtype a total is rounded to.
-pub(crate) trait Output: Target + Send + Sync {
+pub(crate) trait Output: Target + Send + Sync + PartialEq {
     /// Whether a plain float64 sum, with a bound on its rounding, usually
     /// settles the answer: it does for float32, 29 bits narrower, and is
     /// never close enough for float64.
@@ -179,6 +179,8 @@ pub(crate) trait Output: Target + Send + Sync {
     /// The value nearest `sum + error`, a two-sum's pair, where
     /// [`Output::exact_lane`] says it is that simple.
     fn exact_pair(sum: f64, error: f64) -> Self;
+    /// The value as a float64, which holds it exactly.
+    fn widen(self) -> f64;
 }
 
 impl Output for f64 {
@@ -203,6 +205,11 @@ impl Output for f64 {
     #[inline(always)]
     fn exact_pair(sum: f64, error: f64) -> Self {
         sum + error
+    }
+
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        self
     }
 
     #[inline(always)]
@@ -259,6 +266,11 @@ impl Output for f32 {
     #[inline(always)]
     fn exact_pair(sum: f64, _error: f64) -> Self {
         sum as f32
+    }
+
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        f64::from(self)
     }
 
     #[inline(always)]
@@ -1620,7 +1632,7 @@ fn carried_dot_fma(a: &[f64], b: &[f64]) -> Carried {
 
 /// Whether the CPU has the fused multiply-add the float64 kernels use in
 /// hardware.
-fn fused() -> bool {
+pub(super) fn fused() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         crate::ops::simd::simd_capabilities().avx2_fma
@@ -4929,7 +4941,7 @@ impl Total {
 }
 
 /// `a · b` of two magnitudes in limbs, schoolbook.
-fn product_of(a: &[u64], b: &[u64]) -> Vec<u64> {
+pub(super) fn product_of(a: &[u64], b: &[u64]) -> Vec<u64> {
     let mut out = vec![0u64; a.len() + b.len() + 1];
     for (i, &x) in a.iter().enumerate() {
         if x == 0 {

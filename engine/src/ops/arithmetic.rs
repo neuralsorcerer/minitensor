@@ -15,6 +15,8 @@ mod difference_of_products;
 mod elementwise_impl;
 #[path = "arithmetic/evenly_spaced.rs"]
 mod evenly_spaced;
+#[path = "arithmetic/exact_product.rs"]
+pub(crate) mod exact_product;
 #[path = "arithmetic/exact_sum.rs"]
 pub(crate) mod exact_sum;
 #[path = "arithmetic/fused.rs"]

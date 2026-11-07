@@ -526,23 +526,6 @@ macro_rules! cumsum_backward {
     };
 }
 
-/// The float32 running product, carried in float64 as the running sum is:
-/// over 100,000 factors near one, float32 drifted 9e-6 from the exact product.
-pub(crate) fn cumprod_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
-    let output = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
-    check_dim(dim, tensor.ndim())?;
-    let shape = tensor.shape().dims();
-    let inner = shape[dim + 1..].iter().product::<usize>();
-    scan_wide_f32(output, input_data, shape[dim], inner, false, |a, b| a * b);
-    Ok(())
-}
-cumprod_forward!(cumprod_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
 cumprod_forward!(cumprod_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
 cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 

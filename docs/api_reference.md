@@ -1991,13 +1991,30 @@ range -- `[max, max, -max]` runs to `[max, inf, max]` -- and since each
 running sum is unique, a long run split across the pool gives the same bits
 as one scanned whole.
 
-A `float32` `cumprod` or `logcumsumexp` carries its running value in
-`float64` and rounds it to `float32` once per element. The carry is some
-thirty bits finer than a `float32` place, so its error does not grow into
-anything a `float32` element shows, but an element can still miss the
-`float32` nearest its exact value where that value lies within the carry's
-error of a halfway point between two `float32`s. The result is still
-`float32`.
+Every product of a float `prod` -- over every element, along an axis or
+over several -- and every running product of a float `cumprod`, `float32` or
+`float64`, is the float nearest the exact product of the values so far, and
+so is every product of `nanprod` and `nancumprod`, which read NaN as one. A
+product multiplied out a factor at a time rounded at every factor: more than
+half of two hundred `float64` products of a few factors near one were an ulp
+or more out, and a running product drifted further at each step. Each is
+carried as a pair with the exponent kept apart and a bound on what the
+carrying leaves out; where the bound cannot place a product against a
+halfway point it is formed exactly. No partial product leaves the range on
+the way, so `[1e200, 1e200, 1e-200, 1e-200]` multiplies to
+`0.9999999999999999` -- the float nearest the exact product of those four
+doubles, where multiplying out gave `1.0` -- and runs to
+`[1e200, inf, 1e200, 0.9999999999999999]`, back in range once its product
+is. A NaN factor, or a zero beside an infinity, makes NaN; otherwise a zero
+makes a zero and an infinity an infinity, each signed by the count of
+negative factors.
+
+A `float32` `logcumsumexp` carries its running value in `float64` and rounds
+it to `float32` once per element. The carry is some thirty bits finer than a
+`float32` place, so its error does not grow into anything a `float32` element
+shows, but an element can still miss the `float32` nearest its exact value
+where that value lies within the carry's error of a halfway point between
+two `float32`s. The result is still `float32`.
 
 `logcumsumexp` is not `cumsum` of `exp`, and the difference is the reason it
 exists. `exp` of a log-probability underflows to zero long before a real

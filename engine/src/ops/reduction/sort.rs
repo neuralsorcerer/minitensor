@@ -4,7 +4,6 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::sum_prod_impl::{ProdFloat, prod_run};
 use super::*;
 use crate::ops::map::{
     SIMD_PAR_CHUNK, build_vec, par_fold_chunks, par_out_chunks, par_out_chunks2,
@@ -1057,6 +1056,81 @@ pub(crate) fn rounded_nan_total(
     ))
 }
 
+/// The product of each slice of float `tensor` over `dims`, each the float
+/// nearest the exact product; see `arithmetic::exact_product`. Axes side by
+/// side are read where they lie, as one axis; others go last first, so that
+/// each slice is one run. No gradient.
+pub(crate) fn rounded_product(tensor: &Tensor, dims: &[usize], keepdim: bool) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_product::axis_products;
+    use crate::ops::arithmetic::exact_sum::{Element, Output};
+    let shape = tensor.shape().dims().to_vec();
+    let mut reduced = dims.to_vec();
+    reduced.sort_unstable();
+    reduced.dedup();
+    let kept: Vec<usize> = (0..shape.len())
+        .filter(|axis| !reduced.contains(axis))
+        .collect();
+    let len: usize = reduced.iter().map(|&axis| shape[axis]).product();
+    let side_by_side = reduced.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    let (moved, inner) = match reduced.first() {
+        Some(&first) if side_by_side => {
+            let last = first + reduced.len() - 1;
+            (tensor.detach(), shape[last + 1..].iter().product())
+        }
+        _ => {
+            let order: Vec<isize> = kept
+                .iter()
+                .chain(&reduced)
+                .map(|&axis| axis as isize)
+                .collect();
+            (tensor.detach().permute(order)?, 1)
+        }
+    };
+    let moved = moved.contiguous()?;
+    let outer: usize = kept.iter().map(|&axis| shape[axis]).product();
+    fn products<I: Element, T: Output>(
+        values: &[I],
+        outer: usize,
+        len: usize,
+        inner: usize,
+    ) -> Vec<T> {
+        let mut out = vec![T::narrow(1.0); outer];
+        axis_products(values, &mut out, len, inner);
+        out
+    }
+    let missing = || MinitensorError::internal_error("a product without its float slice");
+    let data = match moved.dtype() {
+        DataType::Float32 => {
+            let values = moved.data().as_f32_slice().ok_or_else(missing)?;
+            let out = products::<f32, f32>(values, outer, len, inner);
+            TensorData::from_vec_f32(out, tensor.device())
+        }
+        _ => {
+            let values = moved.data().as_f64_slice().ok_or_else(missing)?;
+            let out = products::<f64, f64>(values, outer, len, inner);
+            TensorData::from_vec_f64(out, tensor.device())
+        }
+    };
+    let out_shape = if keepdim {
+        let mut kept_shape = shape.clone();
+        for &axis in &reduced {
+            kept_shape[axis] = 1;
+        }
+        Shape::new(kept_shape)
+    } else if kept.is_empty() {
+        Shape::scalar()
+    } else {
+        Shape::new(kept.iter().map(|&axis| shape[axis]).collect())
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        out_shape,
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
+}
+
 /// Whether any of `values` is NaN: a block at a time across the pool for a
 /// long run, each block folded without an early exit, which keeps it
 /// vectorized.
@@ -1171,38 +1245,6 @@ impl crate::autograd::GradientFunction for VarianceBackward {
 }
 
 // Helper functions for type-specific operations
-
-pub(crate) fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-    // In `f64`, over fixed chunks multiplied in order: see `prod_run`. The
-    // chunk products used to be combined by rayon's `product()`, whose
-    // grouping follows the pool, so the answer moved with the thread count.
-    let prod = <f32 as ProdFloat>::narrow(prod_run(data));
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-    result_slice[0] = prod;
-    Ok(())
-}
-
-pub(crate) fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-    // In `f64`, over fixed chunks multiplied in order: see `prod_run`. The
-    // chunk products used to be combined by rayon's `product()`, whose
-    // grouping follows the pool, so the answer moved with the thread count.
-    let prod = <f64 as ProdFloat>::narrow(prod_run(data));
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-    result_slice[0] = prod;
-    Ok(())
-}
 
 pub(crate) fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor

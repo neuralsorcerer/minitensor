@@ -540,6 +540,14 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
     let dims_clone = dim.clone();
 
     let result = match dim {
+        // A float product over any axes, each the float nearest the exact
+        // one.
+        Some(ref dims) if dims.is_empty() => return Ok(tensor.clone()),
+        _ if tensor.dtype().is_float() => {
+            let axes = dim.unwrap_or_else(|| (0..tensor.ndim()).collect());
+            let tracked = tensor.requires_grad() && crate::autograd::is_grad_enabled();
+            super::sort_impl::rounded_product(tensor, &axes, keepdim)?.requires_grad_(tracked)
+        }
         None => {
             let result_shape = if keepdim {
                 Shape::new(vec![1; tensor.ndim()])
@@ -550,11 +558,9 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
             let out_dtype = accumulating_dtype(tensor.dtype());
             let mut result_data = TensorData::zeros_on_device(1, out_dtype, tensor.device());
             match tensor.dtype() {
-                DataType::Float32 => prod_all_f32(tensor, &mut result_data)?,
-                DataType::Float64 => prod_all_f64(tensor, &mut result_data)?,
                 DataType::Int32 => prod_all_i32(tensor, &mut result_data)?,
                 DataType::Int64 => prod_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => unreachable!("bool was promoted above"),
+                _ => unreachable!("a float is taken above, and bool was promoted"),
             }
 
             Tensor::new(
@@ -689,8 +695,20 @@ pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
         TensorData::uninitialized_on_device(tensor.numel(), out_dtype, tensor.device());
 
     match tensor.dtype() {
-        DataType::Float32 => cumprod_f32(tensor, &mut result_data, dim)?,
-        DataType::Float64 => cumprod_f64(tensor, &mut result_data, dim)?,
+        DataType::Float32 => exact_cumprod(
+            tensor,
+            &mut result_data,
+            dim,
+            TensorData::as_f32_slice,
+            TensorData::as_f32_slice_mut,
+        )?,
+        DataType::Float64 => exact_cumprod(
+            tensor,
+            &mut result_data,
+            dim,
+            TensorData::as_f64_slice,
+            TensorData::as_f64_slice_mut,
+        )?,
         DataType::Int32 => cumprod_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => cumprod_i64(tensor, &mut result_data, dim)?,
         DataType::Bool => unreachable!("bool was promoted above"),
@@ -718,6 +736,32 @@ pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     } else {
         Ok(result)
     }
+}
+
+/// The running products along `dim` of a float tensor, each the float
+/// nearest the exact product of the values so far; see
+/// `arithmetic::exact_product::running_products`. A running product rounded
+/// at every step drifted from the exact one, and a float32 one carried in
+/// float64 was rounded again on the way back.
+fn exact_cumprod<T>(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+    read: fn(&TensorData) -> Option<&[T]>,
+    write: fn(&mut TensorData) -> Option<&mut [T]>,
+) -> Result<()>
+where
+    T: crate::ops::arithmetic::exact_sum::Element + crate::ops::arithmetic::exact_sum::Output,
+{
+    let contiguous = tensor.contiguous()?;
+    let input = read(contiguous.data())
+        .ok_or_else(|| MinitensorError::internal_error("cumprod: float slice"))?;
+    let output = write(result_data)
+        .ok_or_else(|| MinitensorError::internal_error("cumprod: float output"))?;
+    let shape = tensor.shape().dims();
+    let inner = shape[dim + 1..].iter().product::<usize>();
+    crate::ops::arithmetic::exact_product::running_products(input, output, shape[dim], inner);
+    Ok(())
 }
 
 /// Backward helper for cumulative product
