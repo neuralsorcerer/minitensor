@@ -1881,6 +1881,306 @@ pub(crate) fn hypot_of<T: Output>(x: f64, y: f64) -> T {
     root_settled(Carried { sum, error, slack }).unwrap_or_else(|| exact_root([x, y].into_iter()))
 }
 
+/// `x · y` and its exact rounding error, by a fused multiply-add where
+/// `FMA` and from halves otherwise; exact while the product is finite and
+/// at least `2^-960` or zero.
+#[inline(always)]
+fn split_product<const FMA: bool>(x: f64, y: f64) -> (f64, f64) {
+    let product = x * y;
+    let error = if FMA {
+        x.mul_add(y, -product)
+    } else {
+        product_error(x, y, product)
+    };
+    (product, error)
+}
+
+/// Whether a product or quotient may have lost bits of its error to the
+/// subnormal range, where the quick paths below do not answer.
+#[inline(always)]
+fn tiny(value: f64) -> bool {
+    (value != 0.0) & (value.abs() < 2f64.powi(-960))
+}
+
+/// The value nearest `value + rest`, within `bound` of the exact sum of
+/// `terms`, or of that sum taken exactly; an exact zero is `formula` where
+/// that is a zero, and `+0` otherwise.
+#[inline(always)]
+fn settled_terms<T: Output>(
+    value: f64,
+    rest: f64,
+    bound: f64,
+    formula: f64,
+    exact: impl FnOnce() -> T,
+) -> T {
+    if value == 0.0 && rest == 0.0 && bound == 0.0 {
+        return T::narrow(if formula == 0.0 { formula } else { 0.0 });
+    }
+    if value.is_finite()
+        && let Some(settled) = T::settle(value, rest, bound)
+    {
+        return settled;
+    }
+    exact()
+}
+
+/// The value nearest the exact `Σ x · y · z` over `terms`, all finite; an
+/// exact zero is `formula` where that is a zero, and `+0` otherwise.
+#[cold]
+#[inline(never)]
+fn exact_terms<T: Output>(terms: &[(f64, f64, f64)], formula: f64) -> T {
+    let total = Total::of_terms(terms);
+    if total.positive == total.negative {
+        return T::narrow(if formula == 0.0 { formula } else { 0.0 });
+    }
+    total.rounded()
+}
+
+/// A quick path's value and whether its bound settles it, without a
+/// branch: `parts` are a two-sum's pair within `bound` of the exact value
+/// and whether they were taken exactly. An exact zero, whose sign the
+/// formula decides, is left to the full path, as is anything not finite.
+#[inline(always)]
+fn settled_lane<T: Output>((sum, rest, bound, exact): (f64, f64, f64, bool)) -> (T, bool) {
+    let (rounded, settled) = T::settle_lanes(sum, rest, bound);
+    (rounded, settled & exact & (sum != 0.0))
+}
+
+/// `start + weight · end - weight · start` as a two-sum's pair, a bound on
+/// the pair's distance from the exact value, and whether both products were
+/// split exactly: each product split, the five parts added with the
+/// roundings of the three smallest bounded.
+#[inline(always)]
+fn lerp_parts<const FMA: bool>(start: f64, end: f64, weight: f64) -> (f64, f64, f64, bool) {
+    let (p, p_error) = split_product::<FMA>(weight, end);
+    let (q, q_error) = split_product::<FMA>(weight, start);
+    let (head, head_error) = two_sum(p, -q);
+    let (value, value_error) = two_sum(start, head);
+    let errors = p_error - q_error;
+    let tail = (value_error + head_error) + errors;
+    let (sum, rest) = two_sum(value, tail);
+    // Three roundings in `tail`, each within `u` of its result.
+    let bound = (value_error.abs() + head_error.abs() + errors.abs() + tail.abs()) * 2f64.powi(-52);
+    (sum, rest, bound, !(tiny(p) | tiny(q)))
+}
+
+/// The value nearest `start + weight · (end - start)`, the point `weight`
+/// of the way from `start` to `end`.
+///
+/// The exact value is `start + weight · end - weight · start`, taken by
+/// [`lerp_parts`] and settled by its bound, or with the products summed
+/// exactly where the bound reaches a halfway point. So `weight = 0` gives
+/// `start` and `weight = 1` gives `end`, and the result moves the way
+/// `weight` does. An operand that is not finite gives what the formula gives
+/// in float64.
+#[inline(always)]
+pub(crate) fn lerp_of<T: Output, const FMA: bool>(start: f64, end: f64, weight: f64) -> T {
+    let formula = start + weight * (end - start);
+    if !(start.is_finite() && end.is_finite() && weight.is_finite()) {
+        return T::narrow(formula);
+    }
+    let (sum, rest, bound, exact) = lerp_parts::<FMA>(start, end, weight);
+    let terms = [(start, 1.0, 1.0), (weight, end, 1.0), (-weight, start, 1.0)];
+    if !exact {
+        return exact_terms(&terms, formula);
+    }
+    settled_terms(sum, rest, bound, formula, || exact_terms(&terms, formula))
+}
+
+/// [`lerp_of`]'s quick path without a branch; see [`settled_lane`].
+#[inline(always)]
+pub(crate) fn lerp_lane<T: Output, const FMA: bool>(
+    start: f64,
+    end: f64,
+    weight: f64,
+) -> (T, bool) {
+    settled_lane(lerp_parts::<FMA>(start, end, weight))
+}
+
+/// `input + value · first · second` as [`lerp_parts`] gives its value:
+/// `first · second` split exactly and its float64 times `value` split again,
+/// so the sum has five parts, the smallest rounded once.
+#[inline(always)]
+fn addcmul_parts<const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (f64, f64, f64, bool) {
+    let (a, a_error) = split_product::<FMA>(first, second);
+    let (b, b_error) = split_product::<FMA>(a, value);
+    let c = a_error * value;
+    let (head, head_error) = two_sum(input, b);
+    let small = b_error + c;
+    let tail = head_error + small;
+    let (sum, rest) = two_sum(head, tail);
+    // `c` is rounded once, then `small` and `tail`.
+    let bound = (c.abs() + small.abs() + tail.abs()) * 2f64.powi(-52);
+    (sum, rest, bound, !(tiny(a) | tiny(b) | tiny(c)))
+}
+
+/// The value nearest `input + value · first · second`, from
+/// [`addcmul_parts`] or, where its bound reaches a halfway point, from the
+/// triple product summed exactly. An operand that is not finite gives what
+/// the formula gives in float64.
+#[inline(always)]
+pub(crate) fn addcmul_of<T: Output, const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> T {
+    let formula = input + first * second * value;
+    if !(input.is_finite() && first.is_finite() && second.is_finite() && value.is_finite()) {
+        return T::narrow(formula);
+    }
+    let (sum, rest, bound, exact) = addcmul_parts::<FMA>(input, first, second, value);
+    let terms = [(input, 1.0, 1.0), (value, first, second)];
+    if !exact {
+        return exact_terms(&terms, formula);
+    }
+    settled_terms(sum, rest, bound, formula, || exact_terms(&terms, formula))
+}
+
+/// [`addcmul_of`]'s quick path without a branch; see [`settled_lane`].
+#[inline(always)]
+pub(crate) fn addcmul_lane<T: Output, const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (T, bool) {
+    settled_lane(addcmul_parts::<FMA>(input, first, second, value))
+}
+
+/// `input + value · first / second` as [`lerp_parts`] gives its value: the
+/// quotient `q` and its exact remainder `first - q · second` make
+/// `value · q`, split exactly, and `value · remainder / second`, rounded
+/// twice.
+#[inline(always)]
+fn addcdiv_parts<const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (f64, f64, f64, bool) {
+    let quotient = first / second;
+    let (m, m_error) = split_product::<FMA>(quotient, second);
+    // `m` is within two roundings of `first`, so the first difference is
+    // exact, and so is the second: a quotient's remainder is a float64.
+    let remainder = (first - m) - m_error;
+    let (b, b_error) = split_product::<FMA>(value, quotient);
+    let c = value * (remainder / second);
+    let (head, head_error) = two_sum(input, b);
+    let small = b_error + c;
+    let tail = head_error + small;
+    let (sum, rest) = two_sum(head, tail);
+    // `c` is rounded twice, then `small` and `tail`.
+    let bound = (3.0 * c.abs() + small.abs() + tail.abs()) * 2f64.powi(-52);
+    (
+        sum,
+        rest,
+        bound,
+        !(tiny(first) | tiny(m) | tiny(b) | tiny(c)),
+    )
+}
+
+/// The value nearest `input + value · first / second`, from
+/// [`addcdiv_parts`] or, where its bound reaches a halfway point, as
+/// `(input · second + value · first) / second` exactly. A zero divisor, or
+/// an operand that is not finite, gives what the formula gives in float64.
+#[inline(always)]
+pub(crate) fn addcdiv_of<T: Output, const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> T {
+    let formula = input + first / second * value;
+    if !(input.is_finite() && first.is_finite() && second.is_finite() && value.is_finite())
+        || second == 0.0
+    {
+        return T::narrow(formula);
+    }
+    let (sum, rest, bound, exact) = addcdiv_parts::<FMA>(input, first, second, value);
+    let exact_value = || exact_addcdiv(input, first, second, value, formula);
+    if !exact {
+        return exact_value();
+    }
+    settled_terms(sum, rest, bound, formula, exact_value)
+}
+
+/// [`addcdiv_of`]'s quick path without a branch; see [`settled_lane`]. A
+/// zero divisor leaves a quotient that is not finite, and so the full path.
+#[inline(always)]
+pub(crate) fn addcdiv_lane<T: Output, const FMA: bool>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (T, bool) {
+    settled_lane(addcdiv_parts::<FMA>(input, first, second, value))
+}
+
+/// [`lerp_lane`] for float32 operands, whose products float64 holds
+/// exactly: their difference and the sum are each rounded once, within
+/// `u` of the result, which settles a float32 unless it lies by a halfway
+/// point. Only for float32 operands.
+#[inline(always)]
+pub(crate) fn lerp_lane_narrow<T: Output>(start: f64, end: f64, weight: f64) -> (T, bool) {
+    let difference = weight * end - weight * start;
+    let sum = start + difference;
+    let bound = (difference.abs() + sum.abs()) * 2f64.powi(-52);
+    settled_lane((sum, 0.0, bound, true))
+}
+
+/// [`addcmul_lane`] for float32 operands: `first · second` is exact in
+/// float64, and its product with `value` and the sum are each rounded
+/// once. Only for float32 operands.
+#[inline(always)]
+pub(crate) fn addcmul_lane_narrow<T: Output>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (T, bool) {
+    let product = first * second * value;
+    let sum = input + product;
+    let bound = (product.abs() + sum.abs()) * 2f64.powi(-52);
+    settled_lane((sum, 0.0, bound, true))
+}
+
+/// [`addcdiv_lane`] for float32 operands: the quotient, its product with
+/// `value` and the sum are each rounded once. Only for float32 operands,
+/// whose quotients stay clear of the subnormal range.
+#[inline(always)]
+pub(crate) fn addcdiv_lane_narrow<T: Output>(
+    input: f64,
+    first: f64,
+    second: f64,
+    value: f64,
+) -> (T, bool) {
+    let product = first / second * value;
+    let sum = input + product;
+    let bound = (3.0 * product.abs() + sum.abs()) * 2f64.powi(-52);
+    settled_lane((sum, 0.0, bound, true))
+}
+
+/// The value nearest `(input · second + value · first) / second`, all
+/// finite and `second` not zero; an exact zero is `formula` where that is a
+/// zero, and `+0` otherwise.
+#[cold]
+#[inline(never)]
+fn exact_addcdiv<T: Output>(input: f64, first: f64, second: f64, value: f64, formula: f64) -> T {
+    let pairs = [(input, second), (value, first)];
+    let numerator = Total::of_products(pairs.into_iter()).expect("finite");
+    if numerator.positive == numerator.negative {
+        return T::narrow(if formula == 0.0 { formula } else { 0.0 });
+    }
+    let divisor = Total::of_wide(std::iter::once(second)).expect("finite");
+    numerator.quotient(divisor)
+}
+
 /// The float32 nearest `a · b - c · d`.
 ///
 /// Each product of two float32s is exact in float64, and their difference a
@@ -2779,6 +3079,36 @@ impl Total {
             }
         }
         Ok(total)
+    }
+
+    /// The exact sum of the products of `terms`, three finite factors each.
+    #[cold]
+    #[inline(never)]
+    fn of_terms(terms: &[(f64, f64, f64)]) -> Self {
+        // Every product of three finite float64s is a whole multiple of
+        // `2^-3222` below `2^3072`, bit 6294 here; the carries take a limb.
+        let least = 3 * LEAST;
+        let mut total = Self::empty(least, (6294 + 64) / 64 + 2);
+        for &(x, y, z) in terms {
+            let exact = |value: f64| Exact::float(value).expect("finite");
+            let (x, y, z) = (exact(x), exact(y), exact(z));
+            let pair = u128::from(x.magnitude) * u128::from(y.magnitude);
+            if pair == 0 || z.magnitude == 0 {
+                continue;
+            }
+            let limbs = if x.negative ^ y.negative ^ z.negative {
+                &mut total.negative
+            } else {
+                &mut total.positive
+            };
+            let shift = (x.exponent + y.exponent + z.exponent - least) as usize;
+            // The pair's two halves, 64 bits and at most 42, each times the
+            // third's at most 53.
+            let third = u128::from(z.magnitude);
+            add_shifted(limbs, (pair & u128::from(u64::MAX)) * third, shift);
+            add_shifted(limbs, (pair >> 64) * third, shift + 64);
+        }
+        total
     }
 
     /// The value nearest this sum over `divisor`'s: sixty-six bits of the
@@ -3699,6 +4029,265 @@ mod tests {
         // point, and the exact root of its square plus one lies past it.
         let big = 2f64.powi(30) + 64.0;
         assert_eq!(hypot_of::<f32>(big, 1.0), 2f32.powi(30) + 128.0);
+    }
+
+    /// Whether `got`, among values `down` below it and `up` above it, is the
+    /// value nearest `Σ terms / divisor`: the exact value lies between the
+    /// halfway points either side, on one only where `got` is even.
+    fn nearest_value(
+        terms: &[(f64, f64, f64)],
+        divisor: f64,
+        got: f64,
+        (down, up): (f64, f64),
+        even: bool,
+    ) -> bool {
+        let sign = |extra: [(f64, f64, f64); 2], negate: bool| {
+            let mut all: Vec<(f64, f64, f64)> = terms
+                .iter()
+                .map(|&(x, y, z)| if negate { (-x, y, z) } else { (x, y, z) })
+                .chain(extra)
+                .collect();
+            all.shrink_to_fit();
+            let (negative, limbs, _) = Total::of_terms(&all).difference();
+            let side = match (limbs.iter().all(|&limb| limb == 0), negative) {
+                (true, _) => 0,
+                (false, true) => -1,
+                (false, false) => 1,
+            };
+            if divisor < 0.0 { -side } else { side }
+        };
+        // `Σ terms - (got - down / 2) · divisor` and
+        // `(got + up / 2) · divisor - Σ terms`.
+        let low = sign([(-got, divisor, 1.0), (down, divisor, 0.5)], false);
+        let high = sign([(got, divisor, 1.0), (up, divisor, 0.5)], true);
+        let inside = |side: i32| side > 0 || (side == 0 && even);
+        inside(low) && inside(high)
+    }
+
+    /// The gaps to the float64s either side of `got`, the largest's gap
+    /// above it taken as the ulp an unbounded exponent would give.
+    fn gaps_wide(got: f64) -> (f64, f64) {
+        let beyond = 2f64.powi(971);
+        let down = if got == -f64::MAX {
+            beyond
+        } else {
+            got - got.next_down()
+        };
+        let up = if got == f64::MAX {
+            beyond
+        } else {
+            got.next_up() - got
+        };
+        (down, up)
+    }
+
+    /// [`gaps_wide`] for float32.
+    fn gaps_narrow(got: f32) -> (f64, f64) {
+        let beyond = 2f64.powi(104);
+        let wide = f64::from(got);
+        let down = if got == -f32::MAX {
+            beyond
+        } else {
+            wide - f64::from(got.next_down())
+        };
+        let up = if got == f32::MAX {
+            beyond
+        } else {
+            f64::from(got.next_up()) - wide
+        };
+        (down, up)
+    }
+
+    #[test]
+    fn lerp_addcmul_and_addcdiv_round_once() {
+        let mut next = generator(0x510e_527f_ade6_82d1);
+        let mut draw = move |spread: u64| {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let exponent = (next() % (2 * spread + 1)) as i32 - spread as i32;
+            unit * 2f64.powi(exponent)
+        };
+        let check = |terms: &[(f64, f64, f64)], divisor: f64, wide: [f64; 2], narrow: f32| {
+            assert_eq!(wide[0].to_bits(), wide[1].to_bits(), "{terms:?}");
+            let got = wide[0];
+            if got.is_finite() {
+                let even = got.to_bits() & 1 == 0;
+                assert!(
+                    nearest_value(terms, divisor, got, gaps_wide(got), even),
+                    "{terms:?} / {divisor:e} gave {got:e}"
+                );
+            }
+            let _ = narrow;
+        };
+        let check_narrow = |terms: &[(f64, f64, f64)], divisor: f64, got: f32| {
+            if got.is_finite() {
+                let even = got.to_bits() & 1 == 0;
+                assert!(
+                    nearest_value(terms, divisor, f64::from(got), gaps_narrow(got), even),
+                    "{terms:?} / {divisor:e} gave {got:e} in float32"
+                );
+            }
+        };
+        for round in 0..6000 {
+            let spread = [4, 30, 300][round % 3];
+            let (mut a, mut b, mut c, mut d) = (draw(spread), draw(spread), draw(4), draw(spread));
+            match round % 5 {
+                // Ends near each other, and a weight near the ends.
+                0 => b = a * (1.0 + draw(0) * 1e-9),
+                1 => c = [0.0, 1.0, 0.5, -0.0, 2.0][round / 5 % 5],
+                // An input that cancels the product.
+                2 => a = -(b * c * d),
+                3 => d = c * b / a,
+                _ => {}
+            }
+            if round % 7 == 0 {
+                (a, b) = (-b, b);
+            }
+            // lerp(start = a, end = b, weight = c)
+            let terms = [(a, 1.0, 1.0), (c, b, 1.0), (-c, a, 1.0)];
+            check(
+                &terms,
+                1.0,
+                [
+                    lerp_of::<f64, false>(a, b, c),
+                    lerp_of::<f64, true>(a, b, c),
+                ],
+                0.0,
+            );
+            // addcmul(input = a, b, d, value = c)
+            let terms = [(a, 1.0, 1.0), (c, b, d)];
+            check(
+                &terms,
+                1.0,
+                [
+                    addcmul_of::<f64, false>(a, b, d, c),
+                    addcmul_of::<f64, true>(a, b, d, c),
+                ],
+                0.0,
+            );
+            // addcdiv(input = a, b, d, value = c)
+            if d != 0.0 {
+                let terms = [(a, d, 1.0), (c, b, 1.0)];
+                check(
+                    &terms,
+                    d,
+                    [
+                        addcdiv_of::<f64, false>(a, b, d, c),
+                        addcdiv_of::<f64, true>(a, b, d, c),
+                    ],
+                    0.0,
+                );
+            }
+            for ((lane, settled), full) in [
+                (
+                    lerp_lane::<f64, true>(a, b, c),
+                    lerp_of::<f64, true>(a, b, c),
+                ),
+                (
+                    addcmul_lane::<f64, false>(a, b, d, c),
+                    addcmul_of::<f64, false>(a, b, d, c),
+                ),
+                (
+                    addcdiv_lane::<f64, true>(a, b, d, c),
+                    addcdiv_of::<f64, true>(a, b, d, c),
+                ),
+            ] {
+                assert!(
+                    !settled || lane.to_bits() == full.to_bits(),
+                    "{a:e} {b:e} {c:e} {d:e}"
+                );
+            }
+            // The same in float32.
+            let (a, b, c, d) = (
+                f64::from(a as f32),
+                f64::from(b as f32),
+                f64::from(c as f32),
+                f64::from(d as f32),
+            );
+            if [a, b, c, d].iter().all(|value| value.is_finite()) {
+                let got = lerp_of::<f32, false>(a, b, c);
+                check_narrow(&[(a, 1.0, 1.0), (c, b, 1.0), (-c, a, 1.0)], 1.0, got);
+                let got = addcmul_of::<f32, true>(a, b, d, c);
+                check_narrow(&[(a, 1.0, 1.0), (c, b, d)], 1.0, got);
+                if d != 0.0 {
+                    let got = addcdiv_of::<f32, false>(a, b, d, c);
+                    check_narrow(&[(a, d, 1.0), (c, b, 1.0)], d, got);
+                }
+                // A lane that settles gives what the full path gives.
+                let lanes = [
+                    (
+                        lerp_lane_narrow::<f32>(a, b, c),
+                        lerp_of::<f32, false>(a, b, c),
+                    ),
+                    (
+                        lerp_lane::<f32, false>(a, b, c),
+                        lerp_of::<f32, false>(a, b, c),
+                    ),
+                    (
+                        addcmul_lane_narrow::<f32>(a, b, d, c),
+                        addcmul_of::<f32, true>(a, b, d, c),
+                    ),
+                    (
+                        addcmul_lane::<f32, true>(a, b, d, c),
+                        addcmul_of::<f32, true>(a, b, d, c),
+                    ),
+                    (
+                        addcdiv_lane_narrow::<f32>(a, b, d, c),
+                        addcdiv_of::<f32, false>(a, b, d, c),
+                    ),
+                    (
+                        addcdiv_lane::<f32, false>(a, b, d, c),
+                        addcdiv_of::<f32, false>(a, b, d, c),
+                    ),
+                ];
+                for ((lane, settled), full) in lanes {
+                    assert!(
+                        !settled || lane.to_bits() == full.to_bits(),
+                        "{a:e} {b:e} {c:e} {d:e}"
+                    );
+                }
+            }
+        }
+        // The ends of the range.
+        let largest = f64::MAX;
+        assert_eq!(
+            lerp_of::<f64, false>(-largest, largest, 0.75),
+            largest / 2.0
+        );
+        assert_eq!(lerp_of::<f64, true>(-largest, largest, 1.0), largest);
+        assert_eq!(lerp_of::<f64, false>(largest, largest, 3.0), largest);
+        assert_eq!(lerp_of::<f64, false>(0.0, largest, 2.0), f64::INFINITY);
+        // `2^1000 · 2^1000` is past the largest float64 on the way.
+        let (big, small) = (2f64.powi(1000), 2f64.powi(-1000));
+        assert_eq!(addcmul_of::<f64, false>(3.0, big, big, small), big);
+        assert_eq!(addcmul_of::<f64, true>(3.0, big, small, small), 3.0);
+        assert_eq!(
+            addcmul_of::<f64, true>(-largest, largest, 2.0, 0.5),
+            0.0,
+            "the product cancels the input"
+        );
+        let tiny = f64::from_bits(1);
+        assert_eq!(addcmul_of::<f64, false>(0.0, tiny, 0.5, 1.0), 0.0);
+        assert_eq!(addcmul_of::<f64, false>(0.0, tiny, 0.75, 1.0), tiny);
+        assert_eq!(addcdiv_of::<f64, false>(0.0, tiny, 4.0, 3.0), tiny);
+        assert_eq!(addcdiv_of::<f64, true>(1.0, 1.0, 3.0, 3.0), 2.0);
+        assert_eq!(addcdiv_of::<f32, false>(1.0, 1.0, 3.0, 3.0), 2.0);
+        // Specials and zeros take the formula's.
+        assert!(lerp_of::<f64, false>(f64::INFINITY, f64::INFINITY, 0.5).is_nan());
+        assert_eq!(
+            lerp_of::<f64, false>(0.0, f64::INFINITY, 0.5),
+            f64::INFINITY
+        );
+        assert_eq!(addcdiv_of::<f64, false>(1.0, 1.0, 0.0, 1.0), f64::INFINITY);
+        assert!(addcdiv_of::<f64, false>(1.0, 0.0, 0.0, 1.0).is_nan());
+        let weight = -1.0f64;
+        let negative_zero = lerp_of::<f64, false>(-0.0, -0.0, weight);
+        let formula = -0.0f64 + weight * (-0.0f64 - -0.0);
+        assert_eq!(negative_zero.to_bits(), formula.to_bits());
+        assert_eq!(
+            addcmul_of::<f64, false>(-0.0, -0.0, 1.0, 1.0).to_bits(),
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(addcmul_of::<f64, false>(-1.0, 1.0, 1.0, 1.0).to_bits(), 0);
     }
 
     #[test]

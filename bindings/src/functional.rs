@@ -605,6 +605,66 @@ pub fn weighted_mean(
         .map_err(_convert_error)
 }
 
+/// `input + weight · (end - input)`, broadcast together, each element the
+/// float nearest the exact value. Behind `lerp`, which types Python values
+/// and keeps integer results to the formula.
+#[pyfunction]
+#[pyo3(name = "_lerp", signature = (input, end, weight))]
+pub fn lerp_rounded(
+    input: &Bound<PyAny>,
+    end: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+) -> PyResult<PyTensor> {
+    let (input, end, weight) = (
+        borrow_tensor(input)?,
+        borrow_tensor(end)?,
+        borrow_tensor(weight)?,
+    );
+    engine::ops::arithmetic::lerp(input.tensor(), end.tensor(), weight.tensor())
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+/// `input + value · tensor1 · tensor2`, each element the float nearest the
+/// exact value. Behind `addcmul`.
+#[pyfunction]
+#[pyo3(name = "_addcmul", signature = (input, tensor1, tensor2, value))]
+pub fn addcmul_rounded(
+    input: &Bound<PyAny>,
+    tensor1: &Bound<PyAny>,
+    tensor2: &Bound<PyAny>,
+    value: f64,
+) -> PyResult<PyTensor> {
+    let (input, tensor1, tensor2) = (
+        borrow_tensor(input)?,
+        borrow_tensor(tensor1)?,
+        borrow_tensor(tensor2)?,
+    );
+    engine::ops::arithmetic::addcmul(input.tensor(), tensor1.tensor(), tensor2.tensor(), value)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+/// `input + value · tensor1 / tensor2`, each element the float nearest the
+/// exact value. Behind `addcdiv`.
+#[pyfunction]
+#[pyo3(name = "_addcdiv", signature = (input, tensor1, tensor2, value))]
+pub fn addcdiv_rounded(
+    input: &Bound<PyAny>,
+    tensor1: &Bound<PyAny>,
+    tensor2: &Bound<PyAny>,
+    value: f64,
+) -> PyResult<PyTensor> {
+    let (input, tensor1, tensor2) = (
+        borrow_tensor(input)?,
+        borrow_tensor(tensor1)?,
+        borrow_tensor(tensor2)?,
+    );
+    engine::ops::arithmetic::addcdiv(input.tensor(), tensor1.tensor(), tensor2.tensor(), value)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2177,6 +2237,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(split, parent)?)?;
     parent.add_function(wrap_pyfunction!(vecdot, parent)?)?;
     parent.add_function(wrap_pyfunction!(weighted_mean, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lerp_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;

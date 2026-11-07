@@ -2324,11 +2324,22 @@ assert row_std.shape == (2, 3)
   of each product recovered and added back -- where `x * x * x` rounds twice.
   `0.5` is the square root, except at `-0` and `-inf`, where the power is `+0`
   and `+inf`.
-- `lerp(input, end, weight)` — `input + weight * (end - input)`, written as a
-  step from `input` so `weight = 0` and `weight = 1` return the endpoints
-  exactly rather than approximately.
+- `lerp(input, end, weight)` — `input + weight * (end - input)`, the point
+  `weight` of the way from `input` to `end`. Each float element is the float
+  nearest the exact value: both products are split exactly and the parts
+  settled by a bound, or summed exactly where the bound cannot say. So
+  `weight = 0` and `weight = 1` give the endpoints exactly, which the formula,
+  rounded at the difference, did not where the endpoints lay far apart --
+  `lerp(1, 1e-20, 1)` was `0`. The result moves the way `weight` does, and
+  ends of opposite sign past half the largest float no longer overflow the
+  difference. Integer operands keep the formula's integer result.
 - `addcmul(input, tensor1, tensor2, value=1)`, `addcdiv(...)` — `input + value * tensor1 * tensor2`
-  and the same with a division.
+  and the same with a division, each float element the float nearest the
+  exact value where the formula rounded at the product, the scaling and the
+  sum. `value` is read at the result's width, as a literal beside it is. The
+  quotient is a float even for integer operands, so `addcdiv` is always
+  rounded once. An integer beside a float32 is read exactly in float64 and
+  rounded once to float32. A tensor `value` takes the formula.
 - `deg2rad`, `rad2deg` — a multiplication by `pi/180` and its inverse.
 - `float_power(input, exponent)` — the power computed in float64 whatever the
   inputs are, since an integer power overflows silently once the answer leaves

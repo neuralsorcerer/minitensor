@@ -17,6 +17,8 @@ mod elementwise_impl;
 mod evenly_spaced;
 #[path = "arithmetic/exact_sum.rs"]
 pub(crate) mod exact_sum;
+#[path = "arithmetic/fused.rs"]
+mod fused;
 #[path = "arithmetic/rounded_once.rs"]
 pub(crate) mod rounded_once;
 
@@ -25,3 +27,4 @@ pub use self::elementwise_impl::*;
 pub use self::evenly_spaced::{
     evenly_spaced_data, evenly_spaced_point, stepped_data, stepped_point,
 };
+pub use self::fused::{addcdiv, addcmul, lerp};

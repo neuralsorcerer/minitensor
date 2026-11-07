@@ -145,36 +145,65 @@ def rad2deg(input: object) -> Tensor:
 # --- interpolation and fused forms ----------------------------------------
 
 
+def _floating(*operands: Tensor) -> bool:
+    """Whether any of `operands` is a float, so the formula's result is."""
+
+    return any("float" in str(operand.dtype) for operand in operands)
+
+
+def _number(value: object) -> bool:
+    """Whether `value` is a plain Python number, not a tensor or an array."""
+
+    return isinstance(value, (int, float)) and not isinstance(value, complex)
+
+
 def lerp(input: object, end: object, weight: object) -> Tensor:
     """`input + weight * (end - input)`: the point `weight` of the way from
     `input` to `end`.
 
-    Written as a step from `input` rather than as `(1 - w) a + w b`, so
-    `weight = 0` returns `input` and `weight = 1` returns `end` exactly, with
-    no rounding in between them to make either endpoint approximate.
+    Each float element is the float nearest the exact value, not the formula
+    rounded at the difference, the product and the sum -- so `weight = 0`
+    returns `input` and `weight = 1` returns `end` exactly, and the result
+    moves the way `weight` does. Integer operands keep the formula.
     """
 
     # A Python value in any of the three places takes the width of the typed
     # ones, so a float64 `lerp` with `weight=0.1` steps by the float64 `0.1`.
     start, end, weight = _operands([input, end, weight])
+    if _floating(start, end, weight):
+        return _C.functional._lerp(start, end, weight)
     return start + weight * (end - start)
 
 
 def addcmul(
     input: object, tensor1: object, tensor2: object, value: float = 1
 ) -> Tensor:
-    """`input + value * tensor1 * tensor2`, element-wise."""
+    """`input + value * tensor1 * tensor2`, element-wise.
+
+    Each float element is the float nearest the exact value, `value` read at
+    the result's width as a literal beside it is. Integer operands keep the
+    formula.
+    """
 
     input, tensor1, tensor2 = _operands([input, tensor1, tensor2])
+    if _number(value) and _floating(input, tensor1, tensor2):
+        return _C.functional._addcmul(input, tensor1, tensor2, float(value))
     return input + _scaled(tensor1 * tensor2, value)
 
 
 def addcdiv(
     input: object, tensor1: object, tensor2: object, value: float = 1
 ) -> Tensor:
-    """`input + value * tensor1 / tensor2`, element-wise."""
+    """`input + value * tensor1 / tensor2`, element-wise.
+
+    Each element is the float nearest the exact value -- the quotient is a
+    float even for integer operands -- `value` read at the result's width as
+    a literal beside it is.
+    """
 
     input, tensor1, tensor2 = _operands([input, tensor1, tensor2])
+    if _number(value):
+        return _C.functional._addcdiv(input, tensor1, tensor2, float(value))
     return input + _scaled(tensor1 / tensor2, value)
 
 
