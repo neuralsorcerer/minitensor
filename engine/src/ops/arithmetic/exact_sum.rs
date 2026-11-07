@@ -56,6 +56,10 @@ pub(crate) trait Element: Copy + Send + Sync + 'static {
     /// The carried total of `a[i] · b[i]`, block by block in the widest
     /// build the CPU runs, the blocks merged pairwise.
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried;
+    /// `values` as float64s, when they are.
+    fn as_wide(_values: &[Self]) -> Option<&[f64]> {
+        None
+    }
 }
 
 impl Element for f64 {
@@ -87,6 +91,10 @@ impl Element for f64 {
             return block(a, b);
         }
         pairwise_fold(dot_blocks(a, b, block), Carried::default(), Carried::merge)
+    }
+
+    fn as_wide(values: &[Self]) -> Option<&[f64]> {
+        Some(values)
     }
 }
 
@@ -276,6 +284,18 @@ impl Carried {
         let magnitude = self.error.abs() + other.error.abs() + rounding.abs();
         let slack =
             (self.slack + other.slack) * (1.0 + 2f64.powi(-50)) + magnitude * 2f64.powi(-51);
+        Self { sum, error, slack }
+    }
+
+    /// The total of two whose `slack` is twice the sum of what their error
+    /// additions dropped: the sums and the errors added by two-sums, and what
+    /// those drop added to it, so that it stays zero while nothing drops.
+    fn merge_tracked(self, other: Self) -> Self {
+        let (sum, rounding) = two_sum(self.sum, other.sum);
+        let (errors, first) = two_sum(self.error, other.error);
+        let (error, second) = two_sum(errors, rounding);
+        let slack = (self.slack + other.slack) * (1.0 + 2f64.powi(-50))
+            + 2.0 * (first.abs() + second.abs());
         Self { sum, error, slack }
     }
 
@@ -1751,11 +1771,16 @@ fn root_settled<T: Output>(carried: Carried) -> Option<T> {
     let first = (s1 - square) - square_rounding;
     let residual = first + s2;
     let off = (first.abs() + residual.abs()) * 2f64.powi(-52) + f64::from_bits(4) + carried.slack;
-    let correction = residual / (2.0 * root);
-    let ratio = (residual.abs() + off) / root;
-    let bound = (off / (2.0 * root)
-        + ratio * ratio / (8.0 * root) * 1.01
-        + correction.abs() * 2f64.powi(-52))
+    // One division: `1 / 2r` is within `u` of itself and each product with
+    // it within another, so the correction is within `2u` of its own, and
+    // the bound's terms take room for both.
+    let half = 0.5 / root;
+    let correction = residual * half;
+    let room = 1.0 + 2f64.powi(-50);
+    let ratio = (residual.abs() + off) * (2.0 * half) * room;
+    let bound = (off * half * room
+        + ratio * ratio * half * 0.25 * 1.01
+        + correction.abs() * 2f64.powi(-51))
         * (1.0 + 2f64.powi(-40));
     let (value, rest) = two_sum(root, correction);
     T::settle(value, rest, bound)
@@ -1769,6 +1794,500 @@ fn exact_root<T: Output>(values: impl Iterator<Item = f64> + Clone) -> T {
         // A NaN, or an infinity: a square is never a negative one.
         Err(special) => T::narrow(special.sqrt()),
         Ok(total) => total.square_root(),
+    }
+}
+
+/// The value nearest the exact distance between `x` and `y`, each difference
+/// shifted by `shift`: `Σ |x - y + shift|`, or with `euclidean` the root of
+/// `Σ (x - y + shift)²`.
+///
+/// A float32 distance is first taken plainly in float64, whose bound
+/// settles it unless it reaches a halfway point between two float32s. Then,
+/// and for float64, each difference is taken exactly -- a two-sum's pair,
+/// three parts once shifted -- in lanes a block at a time, the blocks
+/// across the pool for a long row. For the 1-distance each part takes the
+/// difference's sign and is carried as [`sum_to`] carries a value; for the
+/// 2-distance each leading part's square is split exactly and carried, with
+/// the cross terms beside it, and the root taken as [`root_of`] takes it.
+/// Where a bound cannot settle the answer, the exact differences are summed,
+/// or their squares rooted, in whole numbers. A NaN, or an infinity, gives
+/// what the formula gives.
+pub(crate) fn distance<I: Element, T: Output>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> T {
+    debug_assert_eq!(x.len(), y.len());
+    if let ([a], [b]) = (x, y)
+        && shift == 0.0
+    {
+        // `|a - b|` either way, a two-sum's pair, rounded once: to odd at
+        // float64's last bit for a narrower float, which keeps whether
+        // anything lay below it.
+        let (head, tail) = two_sum(a.wide(), -b.wide());
+        if tail == 0.0 || !head.is_finite() {
+            return T::narrow(head.abs());
+        }
+        let odd = if head.to_bits() & 1 == 1 {
+            head
+        } else if (tail > 0.0) == (head > 0.0) {
+            f64::from_bits(head.to_bits() + 1)
+        } else {
+            f64::from_bits(head.to_bits() - 1)
+        };
+        return T::narrow(odd.abs());
+    }
+    if T::PLAIN
+        && let Some(value) = plain_distance(x, y, euclidean, shift)
+    {
+        return value;
+    }
+    let part = if x.len() <= BLOCK {
+        // One block, as most rows are, without gathering it into a list.
+        distance_block(x, y, euclidean, shift)
+    } else {
+        let block = |xs: &[I], ys: &[I]| distance_block(xs, ys, euclidean, shift);
+        let parts = dot_blocks(x, y, block);
+        DistancePart {
+            finite: parts.iter().all(|part| part.finite),
+            unsure: parts.iter().any(|part| part.unsure),
+            loose: parts.iter().map(|part| part.loose).sum(),
+            carried: pairwise_fold(
+                parts.into_iter().map(|part| part.carried).collect(),
+                Carried::default(),
+                if euclidean {
+                    Carried::merge
+                } else {
+                    Carried::merge_tracked
+                },
+            ),
+        }
+    };
+    let DistancePart {
+        carried,
+        loose,
+        finite,
+        unsure,
+    } = part;
+    if !finite {
+        return distance_formula(x, y, euclidean, shift);
+    }
+    if unsure {
+        return exact_distance(x, y, euclidean, shift);
+    }
+    if !euclidean {
+        return carried
+            .rounded()
+            .unwrap_or_else(|| exact_distance(x, y, euclidean, shift));
+    }
+    // The third parts' share of the squares, and an allowance for a square's
+    // error or a cross term rounded to the subnormal range, by under the
+    // least subnormal each; the root needs a total clear of that range.
+    let allowing = Carried {
+        slack: carried.slack
+            + loose * (1.0 + 2f64.powi(-50))
+            + 4.0 * x.len() as f64 * f64::from_bits(1),
+        ..carried
+    };
+    root_settled(allowing).unwrap_or_else(|| exact_distance(x, y, euclidean, shift))
+}
+
+/// A float32 distance taken plainly in float64, when its bound settles it.
+///
+/// Each difference is rounded at most twice and each square once more, and
+/// the sum of `n` of them, in lanes, `n` times: so `(n + 6) u` of the sum
+/// bounds it, with the least subnormal for each square that may have
+/// underflowed. A zero is the answer only unshifted, where a rounded
+/// difference is zero only if the exact one is.
+fn plain_distance<I: Element, T: Output>(
+    x: &[I],
+    y: &[I],
+    euclidean: bool,
+    shift: f64,
+) -> Option<T> {
+    let block = |xs: &[I], ys: &[I]| {
+        let mut lanes = [0f64; LANES];
+        let (left, left_rest) = xs.as_chunks::<LANES>();
+        let (right, right_rest) = ys.as_chunks::<LANES>();
+        let term = |a: &I, b: &I| {
+            let difference = (a.wide() - b.wide()) + shift;
+            if euclidean {
+                difference * difference
+            } else {
+                difference.abs()
+            }
+        };
+        for (a, b) in left.iter().zip(right) {
+            for lane in 0..LANES {
+                lanes[lane] += term(&a[lane], &b[lane]);
+            }
+        }
+        for (a, b) in left_rest.iter().zip(right_rest) {
+            lanes[0] += term(a, b);
+        }
+        lanes.iter().sum::<f64>()
+    };
+    let (sum, blocks) = if x.len() <= BLOCK {
+        (block(x, y), 1)
+    } else {
+        let partials = dot_blocks(x, y, block);
+        (partials.iter().sum::<f64>(), partials.len())
+    };
+    if !sum.is_finite() {
+        return None;
+    }
+    if sum == 0.0 {
+        return (shift == 0.0).then(|| T::narrow(0.0));
+    }
+    let depth = (x.len() + blocks + LANES) as f64;
+    if !euclidean {
+        return T::settle(sum, 0.0, sum * (depth + 4.0) * 2f64.powi(-52));
+    }
+    let bound = sum * (depth + 6.0) * 2f64.powi(-52) + depth * f64::from_bits(2);
+    let clear = sum > 4.0 * bound;
+    if !clear {
+        return None;
+    }
+    // The root moves by at most the bound over twice the least root within
+    // it, `sqrt(sum - bound) ≥ r (1 - bound / sum)`, and is rounded once
+    // itself.
+    let root = sum.sqrt();
+    let moved = bound * (0.5 / root) * (1.0 + 2.0 * bound / sum) * (1.0 + 2f64.powi(-50))
+        + root * 2f64.powi(-52);
+    T::settle(root, 0.0, moved * (1.0 + 2f64.powi(-40)))
+}
+
+/// One block of a distance's exact differences, carried, with what the
+/// rest of [`distance`] needs to know of it.
+struct DistancePart {
+    carried: Carried,
+    /// For the 2-distance, a bound on the third parts' share of the squares.
+    loose: f64,
+    /// Whether every difference was finite.
+    finite: bool,
+    /// For the 1-distance, whether a difference's sign was left undecided.
+    unsure: bool,
+}
+
+/// [`distance_lanes`] for one block, with fused multiply-adds where the CPU
+/// has them, and without the shift's third parts where there is none.
+fn distance_block<I: Element>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> DistancePart {
+    macro_rules! with {
+        ($fma:literal, $x:ident, $y:ident, $euclidean:ident, $shift:ident) => {
+            match ($euclidean, $shift == 0.0) {
+                (true, true) => distance_lanes::<I, true, false, $fma>($x, $y, $shift),
+                (true, false) => distance_lanes::<I, true, true, $fma>($x, $y, $shift),
+                (false, true) => distance_lanes::<I, false, false, $fma>($x, $y, $shift),
+                (false, false) => distance_lanes::<I, false, true, $fma>($x, $y, $shift),
+            }
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn fused_block<I: Element>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> DistancePart {
+        with!(true, x, y, euclidean, shift)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        if euclidean
+            && shift == 0.0
+            && x.len() >= 2 * LANES
+            && let Some((x, y)) = I::as_wide(x).zip(I::as_wide(y))
+        {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { euclidean_block_fma(x, y) };
+        }
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { fused_block(x, y, euclidean, shift) };
+    }
+    with!(false, x, y, euclidean, shift)
+}
+
+/// [`distance_lanes`] for the unshifted 2-distance of float64 rows, in
+/// 256-bit registers with fused multiply-adds: the same lanes and terms,
+/// written out because the compiler kept the two-sums scalar. The cross
+/// terms are one fused multiply-add rounding fewer, inside the same bound.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn euclidean_block_fma(x: &[f64], y: &[f64]) -> DistancePart {
+    use std::arch::x86_64::{
+        __m256d, _CMP_LT_OQ, _mm256_add_pd, _mm256_and_pd, _mm256_andnot_pd, _mm256_cmp_pd,
+        _mm256_fmadd_pd, _mm256_fmsub_pd, _mm256_loadu_pd, _mm256_movemask_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    };
+    let sign = _mm256_set1_pd(-0.0);
+    let (two, infinity) = (_mm256_set1_pd(2.0), _mm256_set1_pd(f64::INFINITY));
+    let (mut sums, mut errors, mut magnitudes) = (
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+    );
+    // All ones while every difference is finite.
+    let mut finite = _mm256_cmp_pd(_mm256_setzero_pd(), infinity, _CMP_LT_OQ);
+    let (left, left_rest) = x.as_chunks::<LANES>();
+    let (right, right_rest) = y.as_chunks::<LANES>();
+    for (a, b) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (a, b) = unsafe {
+                (
+                    _mm256_loadu_pd(a.as_ptr().add(4 * half)),
+                    _mm256_loadu_pd(b.as_ptr().add(4 * half)),
+                )
+            };
+            // `a - b` and its exact error, by a two-sum.
+            let head = _mm256_sub_pd(a, b);
+            let virtual_b = _mm256_sub_pd(a, head);
+            let virtual_a = _mm256_add_pd(head, virtual_b);
+            let tail = _mm256_sub_pd(_mm256_sub_pd(a, virtual_a), _mm256_sub_pd(b, virtual_b));
+            finite = _mm256_and_pd(
+                finite,
+                _mm256_cmp_pd(_mm256_andnot_pd(sign, head), infinity, _CMP_LT_OQ),
+            );
+            let square = _mm256_mul_pd(head, head);
+            let square_error = _mm256_fmsub_pd(head, head, square);
+            let cross = _mm256_fmadd_pd(_mm256_mul_pd(two, head), tail, _mm256_mul_pd(tail, tail));
+            // The square into the lane's sum by a two-sum.
+            let sum = _mm256_add_pd(sums[half], square);
+            let virtual_value = _mm256_sub_pd(sum, sums[half]);
+            let virtual_sum = _mm256_sub_pd(sum, virtual_value);
+            let rounding = _mm256_add_pd(
+                _mm256_sub_pd(sums[half], virtual_sum),
+                _mm256_sub_pd(square, virtual_value),
+            );
+            sums[half] = sum;
+            let extra = _mm256_add_pd(square_error, cross);
+            errors[half] = _mm256_add_pd(errors[half], _mm256_add_pd(rounding, extra));
+            let size = _mm256_add_pd(
+                _mm256_add_pd(
+                    _mm256_andnot_pd(sign, rounding),
+                    _mm256_andnot_pd(sign, square_error),
+                ),
+                _mm256_mul_pd(two, _mm256_andnot_pd(sign, cross)),
+            );
+            magnitudes[half] = _mm256_add_pd(magnitudes[half], size);
+        }
+    }
+    let unpack = |vectors: [__m256d; 2]| {
+        let mut lanes = [0f64; LANES];
+        for (half, vector) in vectors.into_iter().enumerate() {
+            // SAFETY: four lanes from `4 * half` lie inside the array.
+            unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+        }
+        lanes
+    };
+    let (mut sums, mut errors, mut magnitudes) = (unpack(sums), unpack(errors), unpack(magnitudes));
+    let mut all_finite = _mm256_movemask_pd(finite) == 0b1111;
+    for (&a, &b) in left_rest.iter().zip(right_rest) {
+        let (head, tail) = two_sum(a, -b);
+        all_finite &= head.is_finite();
+        let square = head * head;
+        let square_error = head.mul_add(head, -square);
+        let cross = 2.0 * head * tail + tail * tail;
+        let (sum, rounding) = two_sum(sums[0], square);
+        sums[0] = sum;
+        errors[0] += rounding + (square_error + cross);
+        magnitudes[0] += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
+    }
+    DistancePart {
+        carried: finish(sums, errors, magnitudes, std::iter::empty(), 3 * x.len()),
+        loose: 0.0,
+        finite: all_finite,
+        unsure: false,
+    }
+}
+
+/// One block of a distance in [`LANES`] lanes, each difference taken
+/// exactly by [`exact_difference_of`].
+///
+/// For the 2-distance, each leading part's square is split -- by a fused
+/// multiply-add where `FMA` -- and added to its lane's sum by a two-sum, the
+/// two errors and the cross terms `2 head tail + tail²` added to the lane's
+/// error: three additions a value, which `finish` is told of, with the cross
+/// terms' own two roundings in their magnitude. For the 1-distance each part
+/// takes the difference's sign, decided where the leading part outweighs
+/// twice the others, and is carried as a value.
+#[inline(always)]
+fn distance_lanes<I: Element, const EUCLIDEAN: bool, const SHIFTED: bool, const FMA: bool>(
+    x: &[I],
+    y: &[I],
+    shift: f64,
+) -> DistancePart {
+    let (mut sums, mut errors, mut magnitudes) = ([0f64; LANES], [0f64; LANES], [0f64; LANES]);
+    let (mut loose, mut finite, mut unsure) = ([0f64; LANES], [true; LANES], [false; LANES]);
+    let mut add = |lane: usize, a: f64, b: f64| {
+        let (head, tail, third) = if SHIFTED {
+            exact_difference_of(a, b, shift)
+        } else {
+            let (head, tail) = two_sum(a, -b);
+            (head, tail, 0.0)
+        };
+        finite[lane] &= head.is_finite();
+        if EUCLIDEAN {
+            let mut carry = |value: f64, extra: f64, extra_magnitude: f64| {
+                let (sum, rounding) = two_sum(sums[lane], value);
+                sums[lane] = sum;
+                errors[lane] += rounding + extra;
+                magnitudes[lane] += rounding.abs() + extra_magnitude;
+            };
+            let square = head * head;
+            let square_error = if FMA {
+                head.mul_add(head, -square)
+            } else {
+                product_error(head, head, square)
+            };
+            let cross = 2.0 * head * tail + tail * tail;
+            carry(
+                square,
+                square_error + cross,
+                square_error.abs() + 2.0 * cross.abs(),
+            );
+            if SHIFTED {
+                loose[lane] += (2.0 * (head.abs() + tail.abs()) + third.abs()) * third.abs();
+            }
+        } else {
+            // Each part's rounding added to the error by a two-sum too, what
+            // that drops kept as the bound: zero while the errors add
+            // exactly, so that a total on a halfway point settles.
+            let mut carry = |value: f64| {
+                let (sum, rounding) = two_sum(sums[lane], value);
+                sums[lane] = sum;
+                let (error, dropped) = two_sum(errors[lane], rounding);
+                errors[lane] = error;
+                magnitudes[lane] += dropped.abs();
+            };
+            let sure = head.abs() > 2.0 * (tail.abs() + third.abs());
+            let zero = (head == 0.0) & (tail == 0.0);
+            unsure[lane] |= !(sure | zero);
+            let sign = if sure { head.signum() } else { third.signum() };
+            carry(sign * head);
+            carry(sign * tail);
+            if SHIFTED {
+                carry(sign * third);
+            }
+        }
+    };
+    if x.len() < 2 * LANES {
+        // A short row in one lane, with nothing to merge: each value passes
+        // through up to three additions to the lane's error.
+        for (a, b) in x.iter().zip(y) {
+            add(0, a.wide(), b.wide());
+        }
+        let additions = (3 * x.len() + LANES) as f64;
+        let slack = if EUCLIDEAN {
+            magnitudes[0] * additions * 2f64.powi(-52)
+        } else {
+            // Twice the float64 sum of what was dropped covers its roundings.
+            2.0 * magnitudes[0]
+        };
+        return DistancePart {
+            carried: Carried {
+                sum: sums[0],
+                error: errors[0],
+                slack,
+            },
+            loose: loose[0] * (1.0 + 2f64.powi(-50)),
+            finite: finite[0],
+            unsure: unsure[0],
+        };
+    }
+    let (left, left_rest) = x.as_chunks::<LANES>();
+    let (right, right_rest) = y.as_chunks::<LANES>();
+    for (a, b) in left.iter().zip(right) {
+        for lane in 0..LANES {
+            add(lane, a[lane].wide(), b[lane].wide());
+        }
+    }
+    for (a, b) in left_rest.iter().zip(right_rest) {
+        add(0, a.wide(), b.wide());
+    }
+    // A value passes through up to three additions to its lane's error.
+    let values = 3 * x.len();
+    let carried = if EUCLIDEAN {
+        finish(sums, errors, magnitudes, std::iter::empty(), values)
+    } else {
+        let lanes = (0..LANES).map(|lane| Carried {
+            sum: sums[lane],
+            error: errors[lane],
+            slack: 2.0 * magnitudes[lane],
+        });
+        lanes.reduce(Carried::merge_tracked).unwrap_or_default()
+    };
+    DistancePart {
+        carried,
+        loose: loose.iter().sum::<f64>() * (1.0 + 2f64.powi(-50)),
+        finite: finite.iter().all(|&finite| finite),
+        unsure: unsure.iter().any(|&unsure| unsure),
+    }
+}
+
+/// `x - y + shift` exactly, as a leading part, a part below its last bit and
+/// a third below that one's, the last zero without a shift.
+#[inline(always)]
+fn exact_difference_of(x: f64, y: f64, shift: f64) -> (f64, f64, f64) {
+    let (head, tail) = two_sum(x, -y);
+    if shift == 0.0 {
+        return (head, tail, 0.0);
+    }
+    let (shifted, rounding) = two_sum(head, shift);
+    let (low, third) = two_sum(rounding, tail);
+    let (head, tail) = two_sum(shifted, low);
+    (head, tail, third)
+}
+
+/// [`distance`] as its formula gives it in float64, for operands with a NaN
+/// or an infinity among them.
+#[cold]
+#[inline(never)]
+fn distance_formula<I: Element, T: Output>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> T {
+    let differences = x.iter().zip(y).map(|(a, b)| a.wide() - b.wide() + shift);
+    T::narrow(if euclidean {
+        differences.map(|d| d * d).sum::<f64>().sqrt()
+    } else {
+        differences.map(f64::abs).sum()
+    })
+}
+
+/// [`distance`] in whole numbers: the exact differences' magnitudes summed,
+/// or their squares -- each expanded into products of the operands -- rooted.
+#[cold]
+#[inline(never)]
+fn exact_distance<I: Element, T: Output>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> T {
+    let pairs = x.iter().zip(y).map(|(a, b)| (a.wide(), b.wide()));
+    if euclidean {
+        // `(a - b + s)²`, as products of the operands.
+        let products = pairs.flat_map(move |(a, b)| {
+            [
+                (a, a),
+                (b, b),
+                (shift, shift),
+                (a, -b),
+                (a, -b),
+                (a, shift),
+                (a, shift),
+                (-b, shift),
+                (-b, shift),
+            ]
+        });
+        return match Total::of_products(products) {
+            Err(special) => T::narrow(special.sqrt()),
+            Ok(total) => total.square_root(),
+        };
+    }
+    // `|a - b + s|`, each difference's sign taken exactly.
+    let values = pairs.flat_map(move |(a, b)| {
+        let sign = match Total::of_wide([a, -b, shift].into_iter()) {
+            Ok(total) => {
+                let (negative, limbs, _) = total.difference();
+                if negative && limbs.iter().any(|&limb| limb != 0) {
+                    -1.0
+                } else {
+                    1.0
+                }
+            }
+            Err(_) => 1.0,
+        };
+        [sign * a, -sign * b, sign * shift]
+    });
+    match Total::of_wide(values) {
+        Err(special) => T::narrow(special),
+        Ok(total) => total.rounded(),
     }
 }
 
@@ -4288,6 +4807,188 @@ mod tests {
             (-0.0f64).to_bits()
         );
         assert_eq!(addcmul_of::<f64, false>(-1.0, 1.0, 1.0, 1.0).to_bits(), 0);
+    }
+
+    /// Whether `got`, among values `down` below it and `up` above it, is the
+    /// value nearest the root of `Σ terms`: the exact sum lies between the
+    /// squares of the halfway points either side, on one only where `got` is
+    /// even.
+    fn nearest_root_of_terms(
+        terms: &[(f64, f64, f64)],
+        got: f64,
+        (down, up): (f64, f64),
+        even: bool,
+    ) -> bool {
+        let sign = |extra: [(f64, f64, f64); 3], negate: bool| {
+            let all: Vec<(f64, f64, f64)> = terms
+                .iter()
+                .map(|&(x, y, z)| if negate { (-x, y, z) } else { (x, y, z) })
+                .chain(extra)
+                .collect();
+            let (negative, limbs, _) = Total::of_terms(&all).difference();
+            match (limbs.iter().all(|&limb| limb == 0), negative) {
+                (true, _) => 0,
+                (false, true) => -1,
+                (false, false) => 1,
+            }
+        };
+        // `S - (got - down / 2)²` and `(got + up / 2)² - S`; a root of zero
+        // has nothing below it.
+        let low = if got == 0.0 {
+            1
+        } else {
+            sign(
+                [(-got, got, 1.0), (got, down, 1.0), (-down, down, 0.25)],
+                false,
+            )
+        };
+        let high = sign([(got, got, 1.0), (got, up, 1.0), (up, up, 0.25)], true);
+        let inside = |side: i32| side > 0 || (side == 0 && even);
+        inside(low) && inside(high)
+    }
+
+    #[test]
+    fn distances_round_once() {
+        let mut next = generator(0x9b05_688c_2b3e_6c1f);
+        let mut draw = move |spread: u64| {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let exponent = (next() % (2 * spread + 1)) as i32 - spread as i32;
+            unit * 2f64.powi(exponent)
+        };
+        for round in 0..1500 {
+            let len = 1 + round % 300;
+            let spread = [2, 30, 300][round % 3];
+            let x: Vec<f64> = (0..len).map(|_| draw(spread)).collect();
+            let mut y: Vec<f64> = (0..len).map(|_| draw(spread)).collect();
+            if round % 4 == 0 {
+                // Rows that nearly coincide.
+                for (y, x) in y.iter_mut().zip(&x) {
+                    *y = x * (1.0 + draw(0) * 1e-12);
+                }
+            }
+            let shift = if round % 5 == 0 {
+                draw(spread) * 1e-3
+            } else {
+                0.0
+            };
+            // The lanes split a square the same with halves as with a fused
+            // multiply-add: both errors are exact.
+            for (halves, fused) in [
+                (
+                    distance_lanes::<f64, true, false, false>(&x, &y, 0.0),
+                    distance_lanes::<f64, true, false, true>(&x, &y, 0.0),
+                ),
+                (
+                    distance_lanes::<f64, true, true, false>(&x, &y, shift),
+                    distance_lanes::<f64, true, true, true>(&x, &y, shift),
+                ),
+            ] {
+                let bits = |part: &DistancePart| {
+                    let carried = &part.carried;
+                    [carried.sum, carried.error, carried.slack].map(f64::to_bits)
+                };
+                assert_eq!(bits(&halves), bits(&fused), "round {round}");
+            }
+            // The registers' sums are the lanes', for a row long enough to
+            // fill them: each square and its error are exact either way.
+            #[cfg(target_arch = "x86_64")]
+            if fused() && len >= 2 * LANES {
+                // SAFETY: avx2 and fma were detected on this CPU.
+                let registers = unsafe { euclidean_block_fma(&x, &y) };
+                let lanes = distance_lanes::<f64, true, false, true>(&x, &y, 0.0);
+                assert_eq!(registers.carried.sum.to_bits(), lanes.carried.sum.to_bits());
+                assert_eq!(registers.finite, lanes.finite);
+            }
+            for euclidean in [false, true] {
+                let got: f64 = distance(&x, &y, euclidean, shift);
+                let narrow_x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+                let narrow_y: Vec<f32> = y.iter().map(|&v| v as f32).collect();
+                let narrow_shift = f64::from(shift as f32);
+                let narrow: f32 = distance(&narrow_x, &narrow_y, euclidean, narrow_shift);
+                let cases = [
+                    (
+                        x.clone(),
+                        y.clone(),
+                        shift,
+                        got,
+                        gaps_wide(got),
+                        got.to_bits() & 1 == 0,
+                    ),
+                    (
+                        narrow_x.iter().map(|&v| f64::from(v)).collect(),
+                        narrow_y.iter().map(|&v| f64::from(v)).collect(),
+                        narrow_shift,
+                        f64::from(narrow),
+                        gaps_narrow(narrow),
+                        narrow.to_bits() & 1 == 0,
+                    ),
+                ];
+                for (x, y, shift, got, gaps, even) in cases {
+                    if !got.is_finite() {
+                        continue;
+                    }
+                    let ok = if euclidean {
+                        let terms: Vec<(f64, f64, f64)> = x
+                            .iter()
+                            .zip(&y)
+                            .flat_map(|(&a, &b)| {
+                                [
+                                    (a, a, 1.0),
+                                    (b, b, 1.0),
+                                    (shift, shift, 1.0),
+                                    (a, -b, 2.0),
+                                    (a, shift, 2.0),
+                                    (-b, shift, 2.0),
+                                ]
+                            })
+                            .collect();
+                        nearest_root_of_terms(&terms, got, gaps, even)
+                    } else {
+                        let terms: Vec<(f64, f64, f64)> = x
+                            .iter()
+                            .zip(&y)
+                            .flat_map(|(&a, &b)| {
+                                let parts = [(a, 1.0, 1.0), (-b, 1.0, 1.0), (shift, 1.0, 1.0)];
+                                let (negative, limbs, _) = Total::of_terms(&parts).difference();
+                                let sign = if negative && limbs.iter().any(|&limb| limb != 0) {
+                                    -1.0
+                                } else {
+                                    1.0
+                                };
+                                [
+                                    (sign * a, 1.0, 1.0),
+                                    (-sign * b, 1.0, 1.0),
+                                    (sign * shift, 1.0, 1.0),
+                                ]
+                            })
+                            .collect();
+                        nearest_value(&terms, 1.0, got, gaps, even)
+                    };
+                    assert!(ok, "round {round} euclidean {euclidean}: {got:e}");
+                }
+            }
+        }
+        // The ends of the range, where squares leave float64.
+        let largest = f64::MAX;
+        let got: f64 = distance(&[largest, 1.0], &[0.0, 1.0], true, 0.0);
+        assert_eq!(got, largest);
+        let got: f64 = distance(&[largest], &[-largest], false, 0.0);
+        assert_eq!(got, f64::INFINITY);
+        let tiny = f64::from_bits(1);
+        let got: f64 = distance(&[3.0 * tiny, 0.0], &[0.0, -4.0 * tiny], true, 0.0);
+        assert_eq!(got, 5.0 * tiny);
+        let got: f64 = distance(&[1e-200, 3e-200], &[-1e-200, 0.0], false, 0.0);
+        assert_eq!(got, 5e-200);
+        // Specials take the formula's answer.
+        assert!(distance::<f64, f64>(&[f64::NAN], &[1.0], true, 0.0).is_nan());
+        let got: f64 = distance(&[f64::INFINITY, 1.0], &[0.0, 1.0], false, 0.0);
+        assert_eq!(got, f64::INFINITY);
+        // No elements, and equal rows, are zero apart.
+        assert_eq!(distance::<f64, f64>(&[], &[], true, 0.0), 0.0);
+        assert_eq!(
+            distance::<f32, f32>(&[1.5, -2.0], &[1.5, -2.0], false, 0.0),
+            0.0
+        );
     }
 
     #[test]

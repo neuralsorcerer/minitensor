@@ -1,0 +1,179 @@
+// Copyright (c) Soumyadip Sarkar.
+// All rights reserved.
+//
+// This source code is licensed under the Apache-style license found in the
+// LICENSE file in the root directory of this source tree.
+
+//! Distances between rows, each rounded once.
+//!
+//! A distance was the norm of the difference, and the difference was rounded
+//! before the norm saw it: between rows of a hundred normal values, one
+//! float64 2-distance in five and nearly half the 1-distances were not the
+//! float nearest the exact one. Each 1- and 2-distance is now the float
+//! nearest the exact value of the exact differences; see
+//! `arithmetic::exact_sum::distance`.
+
+use std::sync::Arc;
+
+use crate::{
+    error::{MinitensorError, Result},
+    ops::arithmetic::exact_sum::{Element, Output, distance},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+
+/// Elements of work a task takes at least.
+const TASK: usize = 1 << 14;
+
+/// The `p`-distance, `p` 1 or 2, between each pair of corresponding rows of
+/// `a` and `b` -- their last axis -- with every difference shifted by
+/// `shift`, read at the operands' width. `a` and `b` share a shape and a float
+/// dtype; the result drops the last axis.
+pub fn row_distances(a: &Tensor, b: &Tensor, p: f64, shift: f64) -> Result<Tensor> {
+    let euclidean = check(a, b, p, "row_distances")?;
+    if a.shape() != b.shape() || a.ndim() == 0 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "row_distances takes two tensors of one shape with rows, got {:?} and {:?}",
+            a.shape().dims(),
+            b.shape().dims()
+        )));
+    }
+    let (a, b) = (a.contiguous()?, b.contiguous()?);
+    let dims = a.shape().dims();
+    let width = dims[dims.len() - 1];
+    let shape = Shape::new(dims[..dims.len() - 1].to_vec());
+    let rows = shape.numel();
+    let data = match a.dtype() {
+        DataType::Float32 => {
+            let shift = f64::from(shift as f32);
+            let read = TensorData::as_f32_slice;
+            let out = pairs(read, &a, &b, rows, width, euclidean, shift, same_rows)?;
+            TensorData::from_vec_f32(out, a.device())
+        }
+        _ => {
+            let read = TensorData::as_f64_slice;
+            let out = pairs(read, &a, &b, rows, width, euclidean, shift, same_rows)?;
+            TensorData::from_vec_f64(out, a.device())
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        a.dtype(),
+        a.device(),
+        false,
+    ))
+}
+
+/// Every `p`-distance, `p` 1 or 2, between the rows of `a`, laid out
+/// `[batch, n, d]`, and the rows of `b`, `[batch, m, d]`, of one float dtype:
+/// `[batch, n, m]`.
+pub fn cross_distances(a: &Tensor, b: &Tensor, p: f64) -> Result<Tensor> {
+    let euclidean = check(a, b, p, "cross_distances")?;
+    let (ad, bd) = (a.shape().dims(), b.shape().dims());
+    if ad.len() != 3 || bd.len() != 3 || ad[0] != bd[0] || ad[2] != bd[2] {
+        return Err(MinitensorError::invalid_operation(format!(
+            "cross_distances takes [batch, n, d] and [batch, m, d], got {ad:?} and {bd:?}"
+        )));
+    }
+    let (batch, n, m, width) = (ad[0], ad[1], bd[1], ad[2]);
+    let (a, b) = (a.contiguous()?, b.contiguous()?);
+    let shape = Shape::new(vec![batch, n, m]);
+    // Output `(k, i, j)` pairs row `k · n + i` of `a` with row `k · m + j`
+    // of `b`; the indices are found once a block and then counted on.
+    let rows = move |start: usize| {
+        let (k, rest) = (start / (n * m).max(1), start % (n * m).max(1));
+        let (mut i, mut j) = (k * n + rest / m.max(1), rest % m.max(1));
+        let mut k = k;
+        std::iter::from_fn(move || {
+            let pair = (i, k * m + j);
+            j += 1;
+            if j == m {
+                j = 0;
+                i += 1;
+                if i == (k + 1) * n {
+                    k += 1;
+                }
+            }
+            Some(pair)
+        })
+    };
+    let data = match a.dtype() {
+        DataType::Float32 => {
+            let read = TensorData::as_f32_slice;
+            let out = pairs(read, &a, &b, batch * n * m, width, euclidean, 0.0, rows)?;
+            TensorData::from_vec_f32(out, a.device())
+        }
+        _ => {
+            let read = TensorData::as_f64_slice;
+            let out = pairs(read, &a, &b, batch * n * m, width, euclidean, 0.0, rows)?;
+            TensorData::from_vec_f64(out, a.device())
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        a.dtype(),
+        a.device(),
+        false,
+    ))
+}
+
+/// Whether `p` asks for the 2-distance, after checking the operands are two
+/// tensors of one float dtype and `p` is 1 or 2.
+fn check(a: &Tensor, b: &Tensor, p: f64, name: &str) -> Result<bool> {
+    if a.dtype() != b.dtype() || !matches!(a.dtype(), DataType::Float32 | DataType::Float64) {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{name} takes two float32 or two float64 tensors, got {:?} and {:?}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    if a.device() != b.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", a.device()),
+            format!("{:?}", b.device()),
+        ));
+    }
+    match p {
+        1.0 => Ok(false),
+        2.0 => Ok(true),
+        _ => Err(MinitensorError::invalid_operation(format!(
+            "{name} takes p = 1 or p = 2, got {p}"
+        ))),
+    }
+}
+
+/// The rows `row_distances` pairs from output `start` on: each with itself.
+fn same_rows(start: usize) -> impl Iterator<Item = (usize, usize)> {
+    (start..).map(|row| (row, row))
+}
+
+/// `count` distances, the `index`-th between the rows of `a` and `b` that
+/// `rows(start)` names in turn from `start` on, each `width` long and read
+/// by `read`, a block of them to a task.
+#[allow(clippy::too_many_arguments)]
+fn pairs<T: Element + Output, R: Iterator<Item = (usize, usize)>>(
+    read: fn(&TensorData) -> Option<&[T]>,
+    a: &Tensor,
+    b: &Tensor,
+    count: usize,
+    width: usize,
+    euclidean: bool,
+    shift: f64,
+    rows: impl Fn(usize) -> R + Sync,
+) -> Result<Vec<T>> {
+    let missing = || MinitensorError::internal_error("a distance operand without its float slice");
+    let (x, y) = (
+        read(a.data()).ok_or_else(missing)?,
+        read(b.data()).ok_or_else(missing)?,
+    );
+    let mut out = vec![T::narrow(0.0); count];
+    let per_task = (TASK / width.max(1)).max(1);
+    crate::ops::map::par_out_chunks(&mut out, per_task, &|start, block| {
+        for (slot, (i, j)) in block.iter_mut().zip(rows(start)) {
+            let (row_x, row_y) = (&x[i * width..][..width], &y[j * width..][..width]);
+            *slot = distance(row_x, row_y, euclidean, shift);
+        }
+    });
+    Ok(out)
+}

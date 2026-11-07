@@ -10,6 +10,8 @@ mod argminmax_impl;
 mod boolean_impl;
 #[path = "reduction/core.rs"]
 mod core_impl;
+#[path = "reduction/distance.rs"]
+mod distance_impl;
 #[path = "reduction/logsumexp.rs"]
 mod logsumexp_impl;
 #[path = "reduction/minmax_indices.rs"]
@@ -36,6 +38,7 @@ mod sum_prod_impl;
 pub(crate) use self::argminmax_impl::*;
 pub use self::boolean_impl::*;
 pub use self::core_impl::*;
+pub use self::distance_impl::{cross_distances, row_distances};
 pub use self::logsumexp_impl::*;
 pub(crate) use self::minmax_indices_impl::*;
 pub(crate) use self::nan_minmax_impl::*;

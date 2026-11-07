@@ -33,6 +33,8 @@ from ._shape import (
     _promote_pair,
     _promoted_dtype,
 )
+from ._shape import broadcast_shapes as _broadcast_shapes
+from ._shape import broadcast_tensors as _broadcast_tensors
 from .autograd import Function as _Function
 
 Tensor = _C.Tensor
@@ -106,6 +108,47 @@ def kron(input: object, other: object) -> Tensor:
     return product.reshape([a_dim * b_dim for a_dim, b_dim in zip(a_dims, b_dims)])
 
 
+def _rounded_once(p: object) -> bool:
+    """Whether a `p`-distance is taken from the exact differences and rounded
+    once: the 1- and the 2-distance."""
+
+    return isinstance(p, (int, float)) and not isinstance(p, bool) and p in (1, 2)
+
+
+class _Distances(_Function):
+    """Distances rounded once -- between corresponding rows, each difference
+    shifted by `shift`, or with `cross` between every row of one batch and
+    every row of the other -- with the gradient of the norm of the
+    difference, zero where two rows coincide."""
+
+    @staticmethod
+    def forward(ctx, a, b, p, shift, cross):
+        if cross:
+            result = _F._cross_distances(a, b, p)
+        else:
+            result = _F._row_distances(a, b, p, shift)
+        ctx.save_for_backward(a, b)
+        ctx.p, ctx.shift, ctx.cross, ctx.result = p, shift, cross, result
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a, b = ctx.saved_tensors
+        if ctx.cross:
+            difference = a.unsqueeze(-2) - b.unsqueeze(-3)
+        else:
+            difference = a - b + ctx.shift if ctx.shift else a - b
+        if ctx.p == 1:
+            direction = _F.sign(difference)
+        else:
+            length = ctx.result.unsqueeze(-1)
+            direction = _F.where(length == 0, difference * 0, difference / length)
+        weighted = grad_output.unsqueeze(-1) * direction
+        if ctx.cross:
+            return weighted.sum(-2), -weighted.sum(-3), None, None, None
+        return weighted, -weighted, None, None, None
+
+
 def dist(input: object, other: object, p: float = 2.0) -> Tensor:
     """The `p`-norm of the difference: how far apart two tensors are.
 
@@ -117,6 +160,13 @@ def dist(input: object, other: object, p: float = 2.0) -> Tensor:
 
     a, b = _operand_pair(input, other)
     a, b = _require_float(a, "dist"), _require_float(b, "dist")
+    if _rounded_once(p):
+        a, b = _broadcast_tensors(*_promote_pair(a, b))
+        whole = [1, int(a.numel())]
+        distance = _Distances.apply(
+            a.reshape(whole), b.reshape(whole), float(p), 0.0, False
+        )
+        return distance.reshape([])
     return _F.norm(a - b, p)
 
 
@@ -124,9 +174,11 @@ def cdist(input: object, other: object, p: float = 2.0) -> Tensor:
     """Every pairwise `p`-distance between the rows of two batches.
 
     `input` is `(..., n, d)` and `other` is `(..., m, d)`; the result is
-    `(..., n, m)`. The difference is formed in full, so this costs `n * m * d`
-    elements of memory -- fine for the batch sizes a distance matrix is usually
-    wanted at, and the reason to reach for `matmul` instead when it is not.
+    `(..., n, m)`. For `p` 1 and 2 each distance is the float nearest the exact
+    one, taken a pair of rows at a time. Any other `p` forms the difference in
+    full, at `n * m * d` elements of memory -- fine for the batch sizes a
+    distance matrix is usually wanted at, and the reason to reach for `matmul`
+    instead when it is not.
     """
 
     a, b = _operand_pair(input, other)
@@ -138,6 +190,15 @@ def cdist(input: object, other: object, p: float = 2.0) -> Tensor:
             f"cdist needs matching feature counts, got {a.shape[-1]} and {b.shape[-1]}"
         )
 
+    if _rounded_once(p):
+        a, b = _promote_pair(a, b)
+        batch = list(_broadcast_shapes(tuple(a.shape)[:-2], tuple(b.shape)[:-2]))
+        rows, others, width = int(a.shape[-2]), int(b.shape[-2]), int(a.shape[-1])
+        count = _math.prod(batch)
+        a = a.expand([*batch, rows, width]).reshape([count, rows, width])
+        b = b.expand([*batch, others, width]).reshape([count, others, width])
+        distances = _Distances.apply(a, b, float(p), 0.0, True)
+        return distances.reshape([*batch, rows, others])
     return _F.norm(a.unsqueeze(-2) - b.unsqueeze(-3), p, [-1])
 
 
@@ -187,6 +248,11 @@ def pairwise_distance(
     a, b = _require_float(a, "pairwise_distance"), _require_float(
         b, "pairwise_distance"
     )
+    if _rounded_once(p):
+        a, b = _broadcast_tensors(*_promote_pair(a, b))
+        if a.ndim() > 0:
+            distances = _Distances.apply(a, b, float(p), float(eps), False)
+            return distances.unsqueeze(-1) if keepdim else distances
     return _F.norm(a - b + float(eps), p, [-1], keepdim)
 
 
@@ -212,6 +278,8 @@ def pdist(input: object, p: float = 2.0) -> Tensor:
     pairs = _triu_indices(rows, rows, 1)
     left = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 0, 1), 0))
     right = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 1, 1), 0))
+    if _rounded_once(p):
+        return _Distances.apply(left, right, float(p), 0.0, False)
     return _F.norm(left - right, p, [-1])
 
 

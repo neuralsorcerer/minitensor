@@ -665,6 +665,34 @@ pub fn addcdiv_rounded(
         .map_err(_convert_error)
 }
 
+/// The `p`-distance, `p` 1 or 2, between corresponding rows of `a` and `b`
+/// with every difference shifted by `shift`, each rounded once. Behind the
+/// distance functions, which broadcast and differentiate.
+#[pyfunction]
+#[pyo3(name = "_row_distances", signature = (a, b, p, shift))]
+pub fn row_distances_rounded(
+    a: &Bound<PyAny>,
+    b: &Bound<PyAny>,
+    p: f64,
+    shift: f64,
+) -> PyResult<PyTensor> {
+    let (a, b) = (borrow_tensor(a)?, borrow_tensor(b)?);
+    engine::ops::reduction::row_distances(a.tensor(), b.tensor(), p, shift)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+/// Every `p`-distance, `p` 1 or 2, between the rows of `a`, `[batch, n, d]`,
+/// and of `b`, `[batch, m, d]`, each rounded once. Behind `cdist`.
+#[pyfunction]
+#[pyo3(name = "_cross_distances", signature = (a, b, p))]
+pub fn cross_distances_rounded(a: &Bound<PyAny>, b: &Bound<PyAny>, p: f64) -> PyResult<PyTensor> {
+    let (a, b) = (borrow_tensor(a)?, borrow_tensor(b)?);
+    engine::ops::reduction::cross_distances(a.tensor(), b.tensor(), p)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2240,6 +2268,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(lerp_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;
