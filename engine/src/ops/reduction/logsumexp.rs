@@ -4,7 +4,6 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::nan_stats_impl::NanMoment;
 use super::*;
 use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
@@ -966,133 +965,30 @@ pub(crate) fn slice_length(tensor: &Tensor, dims: Option<&[usize]>) -> usize {
     }
 }
 
-/// NaN-aware mean reduction along specified dimensions
-///
-/// Kept inside the float range as [`mean`] is, with the NaN entries skipped
-/// in deciding a slice's scale as they are in its mean.
+/// NaN-aware mean reduction along specified dimensions: each the float
+/// nearest the exact mean of its slice's values that are not NaN, NaN for a
+/// slice of nothing but NaN. The gradient is one over that count at each value
+/// kept and zero at each NaN skipped.
 pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return mean(tensor, dim, keepdim);
     }
-    let result = nanmean_direct(tensor, dim.clone(), keepdim)?;
-    rescue_mean(tensor, dim, result, |scaled, dim| {
-        nanmean_direct(scaled, dim, keepdim)
-    })
-}
-
-/// The NaN-aware mean as computed directly: the sum of the non-NaN entries
-/// over their count.
-fn nanmean_direct(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
-    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
-    // One axis or all of them, with no gradient to record: one fused kernel
-    // rather than a mask, a float copy of it and two reductions.
-    if dim.as_ref().is_none_or(|dims| dims.len() == 1)
-        && let Some(fused) = super::nan_stats_impl::nan_moments_fused(
-            tensor,
-            dim.as_deref(),
-            keepdim,
-            NanMoment::Mean,
-        )?
-    {
-        return Ok(fused);
-    }
-    // A float32 tensor is averaged in float64 and rounded once on the way
-    // back, as the fused kernel and `mean` average one; the conversion is
-    // in the graph, so the gradient comes back as float32.
-    if tensor.dtype() == DataType::Float32 {
-        let dim = dim.map(|dims| dims.iter().map(|&d| d as isize).collect());
-        return nanmean_direct(&tensor.astype(DataType::Float64)?, dim, keepdim)?
-            .astype(DataType::Float32);
-    }
-    let dims_clone = dim.clone();
-    let needs_mask =
-        tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);
-    let mask = if needs_mask {
-        Some(non_nan_mask(tensor)?)
-    } else {
-        None
-    };
-
-    if let Some(dims) = &dim
-        && dims.is_empty()
-    {
+    let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?;
+    if dims.as_ref().is_some_and(|dims| dims.is_empty()) {
         return Ok(tensor.clone());
     }
-
-    let (sum, count) = match dim {
-        None => {
-            let result_shape = if keepdim {
-                Shape::new(vec![1; tensor.ndim()])
-            } else {
-                Shape::scalar()
-            };
-            let mut sum_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
-            let mut count_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
-
-            match tensor.dtype() {
-                DataType::Float64 => nanmean_all_f64(tensor, &mut sum_data, &mut count_data)?,
-                _ => unreachable!("a float32 nanmean is taken in float64 above"),
-            }
-
-            (
-                Tensor::new(
-                    Arc::new(sum_data),
-                    result_shape.clone(),
-                    tensor.dtype(),
-                    tensor.device(),
-                    false,
-                ),
-                Tensor::new(
-                    Arc::new(count_data),
-                    result_shape,
-                    tensor.dtype(),
-                    tensor.device(),
-                    false,
-                ),
-            )
-        }
-        Some(dims) => {
-            let mask = mask.as_ref().ok_or_else(|| {
-                MinitensorError::internal_error("nanmean expected mask for count computation")
-            })?;
-            let mut count = mask.astype(tensor.dtype())?;
-            let order: Vec<usize> = if keepdim {
-                dims.clone()
-            } else {
-                dims.iter().rev().copied().collect()
-            };
-            // NaN is skipped on the first axis, which reads the input; the
-            // later ones sum partial totals, and a NaN among those is the
-            // `inf - inf` of a slice holding both, which has to stand.
-            // Skipped there too, a slice of `inf`, `-inf` and finite values
-            // averaged over two axes came out finite.
-            let mut sum = nansum_along_dim(tensor, order[0], keepdim)?;
-            for &d in &order[1..] {
-                sum = sum_along_dim(&sum, d, keepdim)?;
-            }
-            for &d in &order {
-                count = sum_along_dim(&count, d, keepdim)?;
-            }
-            (sum, count)
-        }
-    };
-
-    let result = nanmean_from_sum_count(&sum, &count, tensor.requires_grad())?;
-
-    if result.requires_grad() {
-        let mask = mask.ok_or_else(|| {
-            MinitensorError::internal_error("nanmean expected mask for gradient computation")
-        })?;
-        let grad_fn = Arc::new(NanMeanBackward {
-            input_id: tensor.id(),
-            input_shape: tensor.shape().dims().to_vec(),
-            dims: dims_clone,
-            keepdim,
-            mask,
-            count,
-        });
-        with_grad_fn(result, grad_fn)
-    } else {
-        Ok(result)
+    let axes = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
+    let result = super::sort_impl::rounded_nan_total(tensor, &axes, keepdim, true)?;
+    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+        return Ok(result);
     }
+    let grad_fn = Arc::new(NanMeanBackward {
+        input_id: tensor.id(),
+        input_shape: tensor.shape().dims().to_vec(),
+        dims,
+        keepdim,
+        mask: non_nan_mask(tensor)?,
+        count: super::nan_stats_impl::non_nan_count(tensor, dim, keepdim)?,
+    });
+    with_grad_fn(result.requires_grad_(true), grad_fn)
 }

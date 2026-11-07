@@ -482,190 +482,33 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
     }
 }
 
-/// A float32 tensor's sum over `dims` in float64, with no gradient: over the
-/// axes `sum` takes, in its order, without a widened copy -- the first axis
-/// is read as float32 and widened in the fold, and the rest are float64
-/// already, so the total is rounded once at the end rather than once an
-/// axis.
-///
-/// `skip_nan` skips the NaN entries of the input, which the first axis reads.
-/// The later axes sum partial totals, whose NaN is an `inf - inf` that has to
-/// stand.
-pub(crate) fn widened_sum(
-    tensor: &Tensor,
-    dims: Option<&[usize]>,
-    keepdim: bool,
-    skip_nan: bool,
-) -> Result<Tensor> {
-    use crate::ops::simd::simd_sum_f32_wide_by;
-    fn total(data: &[f32], keep: impl Fn(f32) -> f64 + Copy + Sync) -> f64 {
-        let block = |part: &[f32]| simd_sum_f32_wide_by(part, keep);
-        if data.len() >= 1024 {
-            crate::ops::util::deterministic_par_sum(data, 8192, block)
-        } else {
-            block(data)
-        }
-    }
-    let missing = || MinitensorError::internal_error("widened sum: f32 slice");
-    let Some(dims) = dims else {
-        let data = tensor.data().as_f32_slice().ok_or_else(missing)?;
-        let sum = if skip_nan {
-            total(data, |v| f64::from(if v.is_nan() { 0.0 } else { v }))
-        } else {
-            total(data, f64::from)
-        };
-        let shape = if keepdim {
-            Shape::new(vec![1; tensor.ndim()])
-        } else {
-            Shape::scalar()
-        };
-        return Ok(Tensor::new(
-            Arc::new(TensorData::from_vec_f64(vec![sum], tensor.device())),
-            shape,
-            DataType::Float64,
-            tensor.device(),
-            false,
-        ));
-    };
-    // `sum` takes the axes first to last when it keeps them and last to first
-    // when it drops them, so that the later indices still name their axes.
-    let order: Vec<usize> = if keepdim {
-        dims.to_vec()
-    } else {
-        dims.iter().rev().copied().collect()
-    };
-    let mut result: Option<Tensor> = None;
-    for &dim in &order {
-        result = Some(match result {
-            Some(partial) => sum_along_dim(&partial, dim, keepdim)?,
-            None => {
-                let mut shape = tensor.shape().dims().to_vec();
-                if keepdim {
-                    shape[dim] = 1;
-                } else {
-                    shape.remove(dim);
-                }
-                let shape = Shape::new(shape);
-                let mut data =
-                    TensorData::zeros_on_device(shape.numel(), DataType::Float64, tensor.device());
-                if skip_nan {
-                    super::sum_prod_impl::nansum_along_dim_f32_wide(tensor, &mut data, dim)?;
-                } else {
-                    super::sum_prod_impl::sum_along_dim_f32_wide(tensor, &mut data, dim)?;
-                }
-                Tensor::new(
-                    Arc::new(data),
-                    shape,
-                    DataType::Float64,
-                    tensor.device(),
-                    false,
-                )
-            }
-        });
-    }
-    result.ok_or_else(|| MinitensorError::internal_error("widened sum: no axes"))
-}
-
-/// A float64 tensor rounded to float32, as a new tensor that asks for a
-/// gradient when `requires_grad` says so.
-fn narrowed(wide: &Tensor, requires_grad: bool) -> Result<Tensor> {
-    let values = wide
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("narrowed: f64 slice"))?;
-    let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-    Ok(Tensor::new(
-        Arc::new(TensorData::from_vec_f32(narrow, wide.device())),
-        wide.shape().clone(),
-        DataType::Float32,
-        wide.device(),
-        requires_grad,
-    ))
-}
-
-/// NaN-aware sum reduction along specified dimensions
+/// NaN-aware sum reduction along specified dimensions: each the float
+/// nearest the exact sum of its slice's values that are not NaN. A slice of
+/// nothing but NaN sums to zero; one holding infinities of both signs sums to
+/// NaN, a NaN that is the answer rather than one to skip. The gradient is one
+/// at each value kept and zero at each NaN skipped.
 pub fn nansum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return sum(tensor, dim, keepdim);
     }
-
-    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
-    let dims_clone = dim.clone();
-    // The mask is for the gradient alone; building it for every call with a
-    // `dim` was a full-size pass `nansum` then threw away.
-    let needs_mask = tensor.requires_grad();
-    let mask = if needs_mask {
-        Some(non_nan_mask(tensor)?)
-    } else {
-        None
-    };
-
-    let result = match dim {
-        None => {
-            let result_shape = if keepdim {
-                Shape::new(vec![1; tensor.ndim()])
-            } else {
-                Shape::scalar()
-            };
-
-            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
-            match tensor.dtype() {
-                DataType::Float32 => nansum_all_f32(tensor, &mut result_data)?,
-                DataType::Float64 => nansum_all_f64(tensor, &mut result_data)?,
-                _ => unreachable!("nansum only supports floating point tensors"),
-            }
-
-            Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                tensor.dtype(),
-                tensor.device(),
-                tensor.requires_grad(),
-            )
-        }
-        Some(dims) => {
-            if dims.is_empty() {
-                // Reducing over no axes is the tensor itself, which is already
-                // in the graph. Recording a node for it made the input its own
-                // output -- a cycle backward refused.
-                return Ok(tensor.clone());
-            } else if tensor.dtype() == DataType::Float32 && dims.len() > 1 {
-                narrowed(
-                    &widened_sum(tensor, Some(&dims), keepdim, true)?,
-                    tensor.requires_grad(),
-                )?
-            } else {
-                // NaN is skipped on the first axis, which reads the input. The
-                // later ones sum partial totals, and a NaN among those is an
-                // `inf - inf` that has to stand: skipped, `nansum` of
-                // `[[inf], [-inf]], [[1], [2]]` over two axes came out 3.
-                let order: Vec<usize> = if keepdim {
-                    dims.clone()
-                } else {
-                    dims.iter().rev().copied().collect()
-                };
-                let mut result = nansum_along_dim(tensor, order[0], keepdim)?;
-                for &d in &order[1..] {
-                    result = sum_along_dim(&result, d, keepdim)?;
-                }
-                result
-            }
-        }
-    };
-
-    if result.requires_grad() {
-        let mask = mask.ok_or_else(|| {
-            MinitensorError::internal_error("nansum expected mask for gradient computation")
-        })?;
-        let grad_fn = Arc::new(NanSumBackward {
-            input_id: tensor.id(),
-            input_shape: tensor.shape().dims().to_vec(),
-            dims: dims_clone,
-            keepdim,
-            mask,
-        });
-        with_grad_fn(result, grad_fn)
-    } else {
-        Ok(result)
+    let dims = normalize_reduction_dims(dim, tensor.ndim())?;
+    if dims.as_ref().is_some_and(|dims| dims.is_empty()) {
+        // Reducing over no axes is the tensor itself, which is already in the
+        // graph. Recording a node for it made the input its own output -- a
+        // cycle backward refused.
+        return Ok(tensor.clone());
     }
+    let axes = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
+    let result = super::sort_impl::rounded_nan_total(tensor, &axes, keepdim, false)?;
+    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+        return Ok(result);
+    }
+    let grad_fn = Arc::new(NanSumBackward {
+        input_id: tensor.id(),
+        input_shape: tensor.shape().dims().to_vec(),
+        dims,
+        keepdim,
+        mask: non_nan_mask(tensor)?,
+    });
+    with_grad_fn(result.requires_grad_(true), grad_fn)
 }

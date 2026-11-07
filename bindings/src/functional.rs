@@ -1231,6 +1231,8 @@ pub fn logsumexp(
 }
 
 /// Like `sum`, treating NaN as zero. An all-NaN slice sums to 0.
+///
+/// Each is the float nearest the exact sum of the values that are not NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nansum(
@@ -1243,6 +1245,8 @@ pub fn nansum(
 }
 
 /// Like `mean`, ignoring NaN. A slice that is entirely NaN gives NaN.
+///
+/// Each is the float nearest the exact mean of the values that are not NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nanmean(

@@ -33,6 +33,8 @@ impl PyTensor {
     }
 
     /// Like `sum`, treating NaN as zero. An all-NaN slice sums to 0.
+    ///
+    /// Each is the float nearest the exact sum of the values that are not NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nansum(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -99,6 +101,8 @@ impl PyTensor {
     }
 
     /// Like `mean`, ignoring NaN. A slice that is entirely NaN gives NaN.
+    ///
+    /// Each is the float nearest the exact mean of the values that are not NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nanmean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);

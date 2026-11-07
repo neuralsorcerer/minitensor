@@ -440,56 +440,6 @@ macro_rules! sum_along_dim_kernel {
     };
 }
 
-/// Generates a NaN-ignoring sum-along-dim reduction kernel. Float dtypes only
-/// (integer dtypes have no NaN, so they route through the plain sum kernel).
-macro_rules! nansum_along_dim_kernel {
-    ($name:ident, $ty:ty, $accessor:ident, $accessor_mut:ident, $tyname:literal, $zero:expr,
-     $simd_nansum:ident) => {
-        pub(crate) fn $name(
-            tensor: &Tensor,
-            result_data: &mut TensorData,
-            dim: usize,
-        ) -> Result<()> {
-            let input_data = tensor.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
-            })?;
-            let result_slice = result_data.$accessor_mut().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get mutable ",
-                    $tyname,
-                    " slice"
-                ))
-            })?;
-            let input_shape = tensor.shape().dims();
-            // See the note in `sum_along_dim_kernel!`: an empty reduced axis
-            // yields the identity everywhere, and short-circuiting here keeps
-            // the 2-D `dim == 1` branch from calling `chunks_exact(0)`.
-            if input_shape.get(dim) == Some(&0) {
-                result_slice.fill($zero);
-                return Ok(());
-            }
-            let Some(&len) = input_shape.get(dim) else {
-                return Err(MinitensorError::dim_out_of_range(
-                    dim as isize,
-                    tensor.ndim(),
-                ));
-            };
-            let inner = input_shape[dim + 1..].iter().product::<usize>();
-            reduce_axis(
-                input_data,
-                result_slice,
-                len,
-                inner,
-                $zero,
-                |a: $ty, v: $ty| if v.is_nan() { a } else { a + v },
-                |a: $ty, b| a + b,
-                |run| accurate_run_sum(run, $simd_nansum),
-            );
-            Ok(())
-        }
-    };
-}
-
 /// The float32 axis sum, each the float32 nearest the exact sum. Summed in
 /// float32 it took a rounding per addition against a growing total; carried
 /// in float64 and narrowed, it lost what lay below float64's last bit where
@@ -502,83 +452,6 @@ pub(crate) fn sum_along_dim_f32(
 ) -> Result<()> {
     reduce_along_dim_exactly::<f32>(tensor, result_data, dim, Reduction::Sum)
 }
-
-/// [`sum_along_dim_f32`] skipping NaN.
-pub(crate) fn nansum_along_dim_f32(
-    tensor: &Tensor,
-    result_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    let mut wide =
-        TensorData::zeros_on_device(result_data.len(), DataType::Float64, tensor.device());
-    nansum_along_dim_f32_wide(tensor, &mut wide, dim)?;
-    narrow_into(&wide, result_data)
-}
-
-/// A float32 axis summed in float64 skipping NaN, into float64.
-pub(crate) fn nansum_along_dim_f32_wide(
-    tensor: &Tensor,
-    result_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-    let input_shape = tensor.shape().dims();
-    // See `sum_along_dim_kernel!` for the empty axis and the range check.
-    if input_shape.get(dim) == Some(&0) {
-        result_slice.fill(0.0);
-        return Ok(());
-    }
-    let Some(&len) = input_shape.get(dim) else {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    };
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let keep = |v: f32| f64::from(if v.is_nan() { 0.0 } else { v });
-    reduce_axis(
-        input_data,
-        result_slice,
-        len,
-        inner,
-        0f64,
-        move |a: f64, v: f32| a + keep(v),
-        |a: f64, b| a + b,
-        |run| accurate_run_sum(run, |part: &[f32]| simd_sum_f32_wide_by(part, keep)),
-    );
-    Ok(())
-}
-
-/// Float64 sums rounded into a float32 buffer of the same length.
-fn narrow_into(wide: &TensorData, narrow: &mut TensorData) -> Result<()> {
-    let source = wide
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-    let target = narrow
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-    for (slot, &value) in target.iter_mut().zip(source) {
-        *slot = value as f32;
-    }
-    Ok(())
-}
-
-sum_along_dim_kernel!(
-    // A float32 axis summed in float64, as a float32 mean takes it.
-    sum_along_dim_f32_wide,
-    as_f32_slice,
-    as_f64_slice_mut,
-    "f32",
-    f64,
-    0f64,
-    simd_sum_f32_wide
-);
 
 /// A float dtype whose sums and means are the exact ones rounded once, with
 /// its buffer's accessors.
@@ -802,16 +675,6 @@ fn weighted_mean_of<I: WeightedOperand<T>, T: ExactFloat>(
         false,
     ))
 }
-
-nansum_along_dim_kernel!(
-    nansum_along_dim_f64,
-    f64,
-    as_f64_slice,
-    as_f64_slice_mut,
-    "f64",
-    0f64,
-    simd_nansum_f64
-);
 
 sum_along_dim_kernel!(
     sum_along_dim_i32,

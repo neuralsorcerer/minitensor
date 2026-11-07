@@ -1902,9 +1902,7 @@ reaches a halfway point between two float32s; then the float64 path below
 decides. Narrowed from a plain float64 sum, a float32 sum whose values
 cancelled across a wide range lost what lay below float64's last bit, and
 one whose float64 sum fell on a float32 halfway point rounded twice --
-`1 + 2^-24 + 2^-60` came out `1`. A float32 `nansum` is carried in float64
-and rounded once; it skips the input's own NaN entries, and a NaN made of
-`inf + -inf` on the way is the answer and stays.
+`1 + 2^-24 + 2^-60` came out `1`.
 
 A float64 `sum` and `mean` -- over every element, along one axis, or over
 several -- are the float64 nearest the exact sum and the exact mean: each lane
@@ -1918,6 +1916,14 @@ output's values are summed as one run. The result does not depend on the
 order of the additions, a sum whose running total overflows is
 still the exact one when that is in range -- `[max, max, -max]` sums to `max`
 -- and an int64 `mean` divides the exact integer sum once.
+
+`nansum` and `nanmean` are `sum` and `mean` of the values that are not NaN,
+float32 or float64, in every layout: each the float nearest the exact sum of
+those values, or their exact mean. A float64 one had added its values
+plainly, and of small tensors with a fifth of their entries NaN two thirds
+of the sums over every element came out an ulp or more off. They skip the
+input's own NaN entries; a NaN made of `inf + -inf` is the answer and stays,
+a slice of nothing but NaN sums to zero, and its mean is NaN.
 
 A `var` and a `std` -- over every element, along one axis or over several,
 float32 or float64 -- are the float nearest the exact variance,
@@ -2047,10 +2053,12 @@ and `amin` propagate NaN, as `max` and `min` do.
 
 #### The NaN-skipping statistics
 
-`nansum`, `nanmean`, `nanmax`, `nanmin`, `nanamax` and `nanamin` each carry a
-kernel that walks the buffer once and tests as it goes. The rest of the family
-needs no kernel of its own, because each is an arrangement of operations that
-already exist:
+`nanmax`, `nanmin`, `nanamax` and `nanamin` each carry a kernel that walks
+the buffer once and tests as it goes. `nansum`, `nanmean`, `nanvar` and
+`nanstd` are `sum`, `mean`, `var` and `std` of the values that are not NaN,
+each rounded once from the exact answer. The rest of the family needs no
+kernel of its own, because each is an arrangement of operations that already
+exist:
 
 - `nanprod(input, dim=None, keepdim=False)` — the product with NaN read as the
   multiplicative identity, so an all-NaN slice gives `1`, exactly as a genuinely

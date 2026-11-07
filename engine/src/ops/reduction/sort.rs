@@ -7,7 +7,7 @@
 use super::sum_prod_impl::{ProdFloat, prod_run};
 use super::*;
 use crate::ops::map::{
-    SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
+    SIMD_PAR_CHUNK, build_vec, par_fold_chunks, par_out_chunks, par_out_chunks2,
 };
 use crate::ops::order::{
     Entry, bool_key, float_key32, float_key64, int_key32, int_key64, pack32, pack64,
@@ -16,7 +16,7 @@ use crate::ops::order::{
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
-use crate::ops::util::{Accumulate, accumulating_dtype, deterministic_par_sum, pairwise_fold};
+use crate::ops::util::{Accumulate, accumulating_dtype};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -954,6 +954,109 @@ fn rounded_variance(
     ))
 }
 
+/// The sum, or with `mean` the mean, of the values of each slice of `tensor`
+/// over `dims` that are not NaN, each the float nearest the exact one; no
+/// gradient.
+///
+/// With no NaN at all it is `sum` or `mean`, which are that; otherwise the
+/// reduced axes go last and each slice holding a NaN is gathered without it,
+/// as `nanvar` gathers one. A slice with nothing left sums to zero and has a
+/// mean of NaN, and one holding infinities of both signs sums to NaN.
+pub(crate) fn rounded_nan_total(
+    tensor: &Tensor,
+    dims: &[usize],
+    keepdim: bool,
+    mean: bool,
+) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::{Element, Output, mean_to, sum_to};
+    let moved = tensor.detach().contiguous()?;
+    let has_nan = {
+        let data = moved.data();
+        match (data.as_f32_slice(), data.as_f64_slice()) {
+            (Some(values), _) => any_nan(values),
+            (_, Some(values)) => any_nan(values),
+            _ => false,
+        }
+    };
+    let axes: Vec<isize> = dims.iter().map(|&axis| axis as isize).collect();
+    if !has_nan {
+        return if mean {
+            crate::ops::reduction::mean(&moved, Some(axes), keepdim)
+        } else {
+            super::sum(&moved, Some(axes), keepdim)
+        };
+    }
+    let shape = tensor.shape().dims().to_vec();
+    let kept: Vec<usize> = (0..shape.len())
+        .filter(|axis| !dims.contains(axis))
+        .collect();
+    let run: usize = dims.iter().map(|&axis| shape[axis]).product();
+    let outer: usize = kept.iter().map(|&axis| shape[axis]).product();
+    let order: Vec<isize> = kept.iter().chain(dims).map(|&axis| axis as isize).collect();
+    let moved = if order
+        .iter()
+        .enumerate()
+        .any(|(index, &axis)| index as isize != axis)
+    {
+        moved.permute(order)?.contiguous()?
+    } else {
+        moved
+    };
+    fn slices<I: Element, T: Output>(values: &[I], outer: usize, run: usize, mean: bool) -> Vec<T> {
+        let mut out = vec![T::narrow(0.0); outer];
+        let per_task = ((1 << 14) / run.max(1)).max(1);
+        par_out_chunks(&mut out, per_task, &|start, block| {
+            // One buffer a task for the slices that hold a NaN.
+            let mut kept: Vec<I> = Vec::new();
+            for (offset, slot) in block.iter_mut().enumerate() {
+                let first = (start + offset) * run;
+                let mut numbers = &values[first..first + run];
+                if any_nan(numbers) {
+                    keep_numbers(numbers, &mut kept);
+                    numbers = &kept;
+                }
+                *slot = if mean {
+                    mean_to(numbers)
+                } else {
+                    sum_to(numbers)
+                };
+            }
+        });
+        out
+    }
+    let missing = || MinitensorError::internal_error("a NaN-skipping total without its slice");
+    let data = match moved.dtype() {
+        DataType::Float32 => {
+            let values = moved.data().as_f32_slice().ok_or_else(missing)?;
+            let out = slices::<f32, f32>(values, outer, run, mean);
+            TensorData::from_vec_f32(out, tensor.device())
+        }
+        _ => {
+            let values = moved.data().as_f64_slice().ok_or_else(missing)?;
+            let out = slices::<f64, f64>(values, outer, run, mean);
+            TensorData::from_vec_f64(out, tensor.device())
+        }
+    };
+    let out_shape = if keepdim {
+        let mut kept_shape = shape.clone();
+        for &axis in dims {
+            kept_shape[axis] = 1;
+        }
+        Shape::new(kept_shape)
+    } else if kept.is_empty() {
+        Shape::scalar()
+    } else {
+        Shape::new(kept.iter().map(|&axis| shape[axis]).collect())
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        out_shape,
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
+}
+
 /// Whether any of `values` is NaN: a block at a time across the pool for a
 /// long run, each block folded without an early exit, which keeps it
 /// vectorized.
@@ -1266,170 +1369,6 @@ pub(crate) fn sum_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
 
     result_slice[0] = sum;
     Ok(())
-}
-
-pub(crate) fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-
-    // Carried in float64 and rounded once; see `sum_along_dim_f32`.
-    let sum = deterministic_par_sum(data, 8192, |block: &[f32]| {
-        simd_sum_f32_wide_by(block, |v| f64::from(if v.is_nan() { 0.0 } else { v }))
-    }) as f32;
-
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-    result_slice[0] = sum;
-    Ok(())
-}
-
-pub(crate) fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-
-    let sum: f64 = deterministic_par_sum(data, 8192, simd_nansum_f64);
-
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-    result_slice[0] = sum;
-    Ok(())
-}
-
-pub(crate) fn nanmean_all_f64(
-    tensor: &Tensor,
-    sum_data: &mut TensorData,
-    count_data: &mut TensorData,
-) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-
-    // Each block's total through the lane-and-tree kernel `nansum` uses, not
-    // a running total: a chain of 8192 roundings left the mean this feeds,
-    // the one a gradient goes through, less accurate than the one without.
-    let count_chunk = |chunk: &[f64]| {
-        (
-            simd_nansum_f64(chunk),
-            chunk.iter().filter(|v| !v.is_nan()).count(),
-        )
-    };
-    let partials: Vec<(f64, usize)> = if data.len() > 8192 {
-        crate::parallel::install(|| data.par_chunks(8192).map(count_chunk).collect())
-    } else {
-        data.chunks(8192).map(count_chunk).collect()
-    };
-    let (sum, count) = pairwise_fold(partials, (0.0_f64, 0usize), |(s1, c1), (s2, c2)| {
-        (s1 + s2, c1 + c2)
-    });
-
-    let sum_slice = sum_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-    let count_slice = count_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-
-    sum_slice[0] = sum;
-    count_slice[0] = count as f64;
-    Ok(())
-}
-
-pub(crate) fn nanmean_from_sum_count(
-    sum: &Tensor,
-    count: &Tensor,
-    requires_grad: bool,
-) -> Result<Tensor> {
-    if sum.dtype() != count.dtype() || sum.shape() != count.shape() {
-        return Err(MinitensorError::invalid_operation(
-            "nanmean requires sum and count tensors with matching dtype and shape",
-        ));
-    }
-
-    let numel = sum.numel();
-    let mut result_data = TensorData::zeros_on_device(numel, sum.dtype(), sum.device());
-
-    // `count == 0` means every element along the axis was NaN, so there is no
-    // mean to report and NaN is the answer rather than a division by zero.
-    macro_rules! divide {
-        ($accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal) => {{
-            let missing =
-                || MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"));
-            let sum_slice = sum.data().$accessor().ok_or_else(missing)?;
-            let count_slice = count.data().$accessor().ok_or_else(missing)?;
-            let out = result_data.$accessor_mut().ok_or_else(missing)?;
-            par_out_chunks(out, outputs_per_task(1), &|start, chunk| {
-                let span = start..start + chunk.len();
-                for ((dst, &s), &c) in chunk
-                    .iter_mut()
-                    .zip(&sum_slice[span.clone()])
-                    .zip(&count_slice[span])
-                {
-                    *dst = if c == 0.0 { <$ty>::NAN } else { s / c };
-                }
-            });
-        }};
-    }
-
-    match sum.dtype() {
-        DataType::Float32 => divide!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
-        DataType::Float64 => divide!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "nanmean only supports floating point tensors",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(result_data),
-        sum.shape().clone(),
-        sum.dtype(),
-        sum.device(),
-        requires_grad,
-    ))
-}
-
-#[inline]
-pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    check_dim(dim, tensor.ndim())?;
-
-    let input_shape = tensor.shape().dims();
-    let mut output_shape = input_shape.to_vec();
-
-    if keepdim {
-        output_shape[dim] = 1;
-    } else {
-        output_shape.remove(dim);
-    }
-
-    let output_shape_obj = Shape::new(output_shape);
-    let mut result_data =
-        TensorData::zeros_on_device(output_shape_obj.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => nansum_along_dim_f32(tensor, &mut result_data, dim)?,
-        DataType::Float64 => nansum_along_dim_f64(tensor, &mut result_data, dim)?,
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "nansum only supports floating point tensors",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(result_data),
-        output_shape_obj,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
 }
 
 #[inline]
