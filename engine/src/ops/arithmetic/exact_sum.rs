@@ -870,24 +870,40 @@ pub(crate) fn reduce_axis_exactly<I: Element, T: Output>(
     } else {
         (0..tasks).map(task).collect()
     };
+    // Each band's parts merged pairwise, a band's columns side by side.
+    let merged: Vec<Vec<Carried>> = if parts == 1 {
+        partials
+    } else {
+        let mut partials = partials.into_iter();
+        (0..outer * bands)
+            .map(|_| {
+                let group: Vec<Vec<Carried>> = partials.by_ref().take(parts).collect();
+                if T::PLAIN {
+                    pairwise_fold_vectors(group, |a, b| Carried {
+                        sum: a.sum + b.sum,
+                        error: 0.0,
+                        slack: a.slack + b.slack,
+                    })
+                } else {
+                    pairwise_fold_vectors(group, Carried::merge)
+                }
+            })
+            .collect()
+    };
     let output = |index: usize| {
         let (o, column) = (index / inner, index % inner);
         let (band, offset) = (column / COLUMNS, column % COLUMNS);
-        let first = (o * bands + band) * parts;
         let gathered = || -> Vec<I> {
             (0..len)
                 .map(|row| input[o * slab + row * inner + column])
                 .collect()
         };
-        let partial = partials[first..first + parts]
-            .iter()
-            .map(|part| part[offset]);
+        let total = merged[o * bands + band][offset];
         if T::PLAIN {
             // A value passes through its lane's additions -- a part's rows
             // over the rows a pass takes, and the rows left over -- the merge
             // of its column's lanes, and the merge of the parts, pairwise.
-            let pairs: Vec<(f64, f64)> = partial.map(|part| (part.sum, part.slack)).collect();
-            let (sum, magnitude) = pairwise_fold(pairs, (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+            let (sum, magnitude) = (total.sum, total.slack);
             let width = COLUMNS.min(inner - band * COLUMNS);
             let group = if width == inner {
                 (64 / width).max(1)
@@ -899,7 +915,6 @@ pub(crate) fn reduce_axis_exactly<I: Element, T: Output>(
                 .settled_plain(sum, magnitude * depth * 2f64.powi(-52), len)
                 .unwrap_or_else(|| reduction.of_values(&gathered(), false));
         }
-        let total = partial.fold(Carried::default(), Carried::merge);
         reduction
             .settled(total, len)
             .unwrap_or_else(|| reduction.exactly(&gathered()))
@@ -968,15 +983,16 @@ fn columns_part_body<I: Element, const PLAIN: bool>(
     let lanes = width * group;
     let (mut sums, mut errors, mut magnitudes) =
         (vec![0f64; lanes], vec![0f64; lanes], vec![0f64; lanes]);
+    let run = |row: usize| &slab[row * inner + columns.start..][..lanes];
     let mut row = rows.start;
+    // A block of runs at a time, in order, then the runs left over.
+    while row + ROW_BLOCK * group <= rows.end {
+        let block = std::array::from_fn(|nth| run(row + nth * group));
+        accumulate_block::<I, PLAIN>(&mut sums, &mut errors, &mut magnitudes, block);
+        row += ROW_BLOCK * group;
+    }
     while row + group <= rows.end {
-        let start = row * inner + columns.start;
-        accumulate_columns::<I, PLAIN>(
-            &mut sums,
-            &mut errors,
-            &mut magnitudes,
-            &slab[start..start + lanes],
-        );
+        accumulate_columns::<I, PLAIN>(&mut sums, &mut errors, &mut magnitudes, run(row));
         row += group;
     }
     while row < rows.end {
@@ -1048,6 +1064,130 @@ fn accumulate_columns<I: Element, const PLAIN: bool>(
             *sum = total;
             *error += rounding;
             *magnitude += rounding.abs();
+        }
+    }
+}
+
+/// Rows a column kernel takes into its accumulators at once.
+const ROW_BLOCK: usize = 4;
+
+/// [`accumulate_columns`] for [`ROW_BLOCK`] rows, in order: each column's
+/// accumulators held in registers, [`LANES`] columns at a time, across the
+/// rows, and loaded and stored once for the block rather than once a row.
+/// Each column takes the same additions in the same order.
+#[inline(always)]
+fn accumulate_block<I: Element, const PLAIN: bool>(
+    sums: &mut [f64],
+    errors: &mut [f64],
+    magnitudes: &mut [f64],
+    rows: [&[I]; ROW_BLOCK],
+) {
+    let whole = sums.len() / LANES * LANES;
+    for start in (0..whole).step_by(LANES) {
+        let lanes = start..start + LANES;
+        let mut sum: [f64; LANES] = std::array::from_fn(|lane| sums[start + lane]);
+        let mut error: [f64; LANES] = std::array::from_fn(|lane| errors[start + lane]);
+        let mut magnitude: [f64; LANES] = std::array::from_fn(|lane| magnitudes[start + lane]);
+        for row in &rows {
+            let values = &row[lanes.clone()];
+            for lane in 0..LANES {
+                let value = values[lane].wide();
+                if PLAIN {
+                    sum[lane] += value;
+                    magnitude[lane] += value.abs();
+                } else {
+                    let (total, rounding) = two_sum(sum[lane], value);
+                    sum[lane] = total;
+                    error[lane] += rounding;
+                    magnitude[lane] += rounding.abs();
+                }
+            }
+        }
+        sums[lanes.clone()].copy_from_slice(&sum);
+        if !PLAIN {
+            errors[lanes.clone()].copy_from_slice(&error);
+        }
+        magnitudes[lanes].copy_from_slice(&magnitude);
+    }
+    for row in &rows {
+        accumulate_columns::<I, PLAIN>(
+            &mut sums[whole..],
+            &mut errors[whole..],
+            &mut magnitudes[whole..],
+            &row[whole..],
+        );
+    }
+}
+
+/// Each column's square about its centre added in, as [`deviation_lanes`]
+/// adds one, for each of `rows` in order -- [`ROW_BLOCK`] of them, or one --
+/// the columns' accumulators held in registers, [`LANES`] at a time, across
+/// them: with `PLAIN` the plain square, otherwise the exact deviation's
+/// square split, by a fused multiply-add where `FMA`, its errors and the
+/// cross terms beside it, and their magnitudes.
+#[inline(always)]
+fn accumulate_squares<I: Element, const PLAIN: bool, const FMA: bool, const ROWS: usize>(
+    sums: &mut [f64],
+    errors: &mut [f64],
+    magnitudes: &mut [f64],
+    centres: &[f64],
+    rows: [&[I]; ROWS],
+) {
+    let width = sums.len();
+    let add = |sum: &mut f64, error: &mut f64, magnitude: &mut f64, value: f64, centre: f64| {
+        if PLAIN {
+            let deviation = value - centre;
+            *sum += deviation * deviation;
+            return;
+        }
+        let (head, tail) = two_sum(value, -centre);
+        let square = head * head;
+        let square_error = if FMA {
+            head.mul_add(head, -square)
+        } else {
+            product_error(head, head, square)
+        };
+        let cross = 2.0 * head * tail + tail * tail;
+        let (next, rounding) = two_sum(*sum, square);
+        *sum = next;
+        *error += rounding + (square_error + cross);
+        *magnitude += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
+    };
+    let whole = width / LANES * LANES;
+    for start in (0..whole).step_by(LANES) {
+        let lanes = start..start + LANES;
+        let centre: [f64; LANES] = std::array::from_fn(|lane| centres[start + lane]);
+        let mut sum: [f64; LANES] = std::array::from_fn(|lane| sums[start + lane]);
+        let mut error: [f64; LANES] = std::array::from_fn(|lane| errors[start + lane]);
+        let mut magnitude: [f64; LANES] = std::array::from_fn(|lane| magnitudes[start + lane]);
+        for row in &rows {
+            let values = &row[lanes.clone()];
+            for lane in 0..LANES {
+                let value = values[lane].wide();
+                add(
+                    &mut sum[lane],
+                    &mut error[lane],
+                    &mut magnitude[lane],
+                    value,
+                    centre[lane],
+                );
+            }
+        }
+        sums[lanes.clone()].copy_from_slice(&sum);
+        if !PLAIN {
+            errors[lanes.clone()].copy_from_slice(&error);
+            magnitudes[lanes].copy_from_slice(&magnitude);
+        }
+    }
+    for row in &rows {
+        for column in whole..width {
+            let value = row[column].wide();
+            let (sum, error, magnitude) = (
+                &mut sums[column],
+                &mut errors[column],
+                &mut magnitudes[column],
+            );
+            add(sum, error, magnitude, value, centres[column]);
         }
     }
 }
@@ -2548,46 +2688,32 @@ fn column_part<I: Element, const PLAIN: bool, const FMA: bool>(
     let (mut sums, mut errors, mut magnitudes) =
         (vec![0f64; width], vec![0f64; width], vec![0f64; width]);
     let row = |index: usize| &slab[index * inner + columns.start..][..width];
-    if let Some(centres) = centres {
-        for index in rows.clone() {
-            let lanes = sums.iter_mut().zip(&mut errors).zip(&mut magnitudes);
-            for ((((sum, error), magnitude), &centre), value) in lanes.zip(centres).zip(row(index))
-            {
-                if PLAIN {
-                    let deviation = value.wide() - centre;
-                    *sum += deviation * deviation;
-                    continue;
-                }
-                let (head, tail) = two_sum(value.wide(), -centre);
-                let square = head * head;
-                let square_error = if FMA {
-                    head.mul_add(head, -square)
-                } else {
-                    product_error(head, head, square)
-                };
-                let cross = 2.0 * head * tail + tail * tail;
-                let (next, rounding) = two_sum(*sum, square);
-                *sum = next;
-                *error += rounding + (square_error + cross);
-                *magnitude += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
-            }
+    let mut index = rows.start;
+    // A block of rows at a time, in order, then the rows left over.
+    while index + ROW_BLOCK <= rows.end {
+        let block: [&[I]; ROW_BLOCK] = std::array::from_fn(|nth| row(index + nth));
+        let (sums, errors, magnitudes) = (&mut sums, &mut errors, &mut magnitudes);
+        match centres {
+            Some(centres) => accumulate_squares::<I, PLAIN, FMA, ROW_BLOCK>(
+                sums, errors, magnitudes, centres, block,
+            ),
+            None => accumulate_block::<I, PLAIN>(sums, errors, magnitudes, block),
         }
-    } else {
-        for index in rows.clone() {
-            let lanes = sums.iter_mut().zip(&mut errors).zip(&mut magnitudes);
-            for (((sum, error), magnitude), value) in lanes.zip(row(index)) {
-                let value = value.wide();
-                if PLAIN {
-                    *sum += value;
-                    *magnitude += value.abs();
-                    continue;
-                }
-                let (next, rounding) = two_sum(*sum, value);
-                *sum = next;
-                *error += rounding;
-                *magnitude += rounding.abs();
-            }
+        index += ROW_BLOCK;
+    }
+    while index < rows.end {
+        let (sums, errors, magnitudes) = (&mut sums, &mut errors, &mut magnitudes);
+        match centres {
+            Some(centres) => accumulate_squares::<I, PLAIN, FMA, 1>(
+                sums,
+                errors,
+                magnitudes,
+                centres,
+                [row(index)],
+            ),
+            None => accumulate_columns::<I, PLAIN>(sums, errors, magnitudes, row(index)),
         }
+        index += 1;
     }
     // A value's roundings pass through one addition to its lane's error, a
     // deviation's through three.
