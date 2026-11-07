@@ -12,7 +12,9 @@ nearly half were an ulp or more from the exact variance, and a quarter of the
 standard deviations. Each is now the float nearest
 `(N Σx² - (Σx)²) / (N (N - ddof))`, or nearest its root, in every layout --
 over every element, along rows, down columns, over several axes -- for float32
-and float64, and for integers, which are read exactly.
+and float64, and for integers, which are read exactly. `nanvar` and `nanstd`
+are the same of the values that are not NaN, where a float32 one had been
+rounded twice.
 """
 
 from __future__ import annotations
@@ -219,3 +221,52 @@ def test_gradients():
     y.var(unbiased=False).backward()
     assert y.grad.tolist() == [-2.0, 2.0]
     assert str(y.grad.dtype) == "float32"
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_the_nan_skipping_forms_round_once(dtype):
+    rng = np.random.default_rng(521)
+    values = _draw(rng, (50, 40), dtype, "offset")
+    values[rng.random((50, 40)) < 0.2] = np.nan
+    # A column with one value left, and one with none.
+    values[1:, 3] = np.nan
+    values[:, 5] = np.nan
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    def kept(slice_):
+        return [v for v in slice_ if not math.isnan(v)]
+
+    for unbiased in (True, False):
+        ddof = int(unbiased)
+        for root in (False, True):
+            reduce = tensor.nanstd if root else tensor.nanvar
+            got = reduce(dim=1, unbiased=unbiased).tolist()
+            want = [_expected(kept(values[i]), ddof, root, dtype) for i in range(50)]
+            assert all(_same(g, w) for g, w in zip(got, want)), (got, want)
+            got = reduce(dim=0, unbiased=unbiased).tolist()
+            want = [_expected(kept(values[:, j]), ddof, root, dtype) for j in range(40)]
+            assert all(_same(g, w) for g, w in zip(got, want)), (got, want)
+            got = reduce(unbiased=unbiased).item()
+            assert _same(got, _expected(kept(values.ravel()), ddof, root, dtype))
+    # An infinity is not skipped.
+    assert math.isnan(mt.tensor([math.inf, 1.0, math.nan], dtype=dtype).nanvar().item())
+
+
+def test_the_nan_skipping_gradient():
+    values = [[1.5, math.nan, -2.0, 4.25], [math.nan, 3.0, math.nan, math.nan]]
+    x = mt.tensor(values, dtype="float64", requires_grad=True)
+    x.nanvar(dim=1, unbiased=False).sum().backward()
+    kept = np.array([1.5, -2.0, 4.25])
+    want = 2 * (kept - kept.mean()) / 3
+    got = x.grad.tolist()
+    assert np.allclose([got[0][0], got[0][2], got[0][3]], want)
+    # A skipped NaN takes nothing, and neither does a lone value's zero
+    # deviation.
+    assert got[0][1] == 0.0 and got[1] == [0.0, 0.0, 0.0, 0.0]
+    x.grad = None
+    x.nanstd(dim=1).sum().backward()
+    deviation = kept - kept.mean()
+    want = deviation / (2 * np.sqrt((deviation**2).sum() / 2))
+    got = x.grad.tolist()
+    assert np.allclose([got[0][0], got[0][2], got[0][3]], want)
+    assert got[0][1] == 0.0

@@ -2321,7 +2321,8 @@ fn deviation_lanes<I: Element, const FMA: bool>(values: &[I], centre: f64) -> Ca
 /// it, the parts merged pairwise. For float32 both are plain, settled as
 /// [`plain_variance`] settles them; otherwise carried, settled as
 /// [`variance_of`] settles them. A column neither settles is gathered and
-/// handed to [`variance_of`].
+/// handed to [`variance_of`] -- with `skip_nan`, only its values that are
+/// not NaN, which a NaN among them always sends there.
 pub(crate) fn column_variances<I: Element, T: Output>(
     values: &[I],
     outer: usize,
@@ -2329,6 +2330,7 @@ pub(crate) fn column_variances<I: Element, T: Output>(
     inner: usize,
     ddof: usize,
     root: bool,
+    skip_nan: bool,
 ) -> Vec<T> {
     debug_assert_eq!(values.len(), outer * len * inner);
     let outputs = outer * inner;
@@ -2350,21 +2352,34 @@ pub(crate) fn column_variances<I: Element, T: Output>(
     // parts, pairwise; a plain sum's magnitudes' rounding is covered twice.
     let depth = (rows_per_part + parts.ilog2() as usize + 20) as f64;
     // The columns from output `start` on that their bounds left open,
-    // gathered a group at a time, row by row, and handed to `variance_of`.
+    // gathered a group at a time, row by row, into one buffer, column `k` of
+    // a group at `k * len`, and handed to `variance_of`.
     let reopen = |start: usize, slots: &mut [T], open: Vec<usize>| {
-        for group in open.chunks(BAND) {
-            let mut gathered: Vec<Vec<I>> = vec![Vec::with_capacity(len); group.len()];
+        let width = BAND.min(((1 << 20) / len).max(1));
+        let mut gathered: Vec<I> = Vec::new();
+        for group in open.chunks(width) {
+            let firsts: Vec<usize> = group
+                .iter()
+                .map(|&offset| (start + offset) / inner * slab + (start + offset) % inner)
+                .collect();
+            gathered.clear();
+            gathered.resize(group.len() * len, values[firsts[0]]);
+            let mut lengths = vec![0; group.len()];
             for row in 0..len {
-                for (column, &offset) in gathered.iter_mut().zip(group) {
-                    let (o, index) = ((start + offset) / inner, (start + offset) % inner);
-                    column.push(values[o * slab + row * inner + index]);
+                for (column, &first) in firsts.iter().enumerate() {
+                    let value = values[first + row * inner];
+                    if !(skip_nan && value.wide().is_nan()) {
+                        gathered[column * len + lengths[column]] = value;
+                        lengths[column] += 1;
+                    }
                 }
             }
-            for (column, &offset) in gathered.iter().zip(group) {
-                slots[offset] = if T::PLAIN {
-                    variance_of(column, ddof, root)
+            for (column, &offset) in group.iter().enumerate() {
+                let kept = &gathered[column * len..][..lengths[column]];
+                slots[offset] = if T::PLAIN || skip_nan {
+                    variance_of(kept, ddof, root)
                 } else {
-                    unsettled_variance(column, ddof, root)
+                    unsettled_variance(kept, ddof, root)
                 };
             }
         }
@@ -6083,8 +6098,10 @@ mod tests {
                         .collect()
                 };
                 for (ddof, root) in [(0, false), (1, false), (0, true), (1, true)] {
-                    let wide: Vec<f64> = column_variances(&values, outer, len, inner, ddof, root);
-                    let thin: Vec<f32> = column_variances(&narrow, outer, len, inner, ddof, root);
+                    let wide: Vec<f64> =
+                        column_variances(&values, outer, len, inner, ddof, root, false);
+                    let thin: Vec<f32> =
+                        column_variances(&narrow, outer, len, inner, ddof, root, false);
                     for slab in 0..outer {
                         for index in 0..inner {
                             let alone = column(slab, index);
@@ -6107,9 +6124,9 @@ mod tests {
             }
         }
         // Too few values for the correction, and no values at all.
-        let none: Vec<f64> = column_variances(&[1.0, 2.0], 1, 1, 2, 1, false);
+        let none: Vec<f64> = column_variances(&[1.0, 2.0], 1, 1, 2, 1, false, false);
         assert!(none.iter().all(|value| value.is_nan()));
-        let empty: Vec<f64> = column_variances::<f64, f64>(&[], 2, 0, 3, 0, true);
+        let empty: Vec<f64> = column_variances::<f64, f64>(&[], 2, 0, 3, 0, true, false);
         assert_eq!(empty.len(), 6);
         assert!(empty.iter().all(|value| value.is_nan()));
     }

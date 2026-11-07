@@ -786,8 +786,7 @@ fn rescue_mean(
     if dims.is_empty() {
         return Ok(result);
     }
-    let Some(scales) = super::rescue_scales(tensor, &dims, &result, super::Intermediate::Sum)?
-    else {
+    let Some(scales) = super::rescue_scales(tensor, &dims, &result)? else {
         return Ok(result);
     };
     let (averaged, scales) =

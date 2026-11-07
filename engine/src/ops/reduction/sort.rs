@@ -710,44 +710,13 @@ pub fn std(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    let root = rounded_variance(tensor, dim.clone(), keepdim, unbiased, true)?;
-    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
-        return Ok(root);
-    }
-    let variance = var(tensor, dim, keepdim, unbiased)?;
-    let output = root.requires_grad_(true);
-    let grad_fn = Arc::new(crate::autograd::StdBackward {
-        input_id: variance.id(),
-        output: output.clone().detach(),
-    });
-    crate::autograd::with_grad_fn(output, grad_fn)
+    spread(tensor, dim, keepdim, unbiased, true, false)
 }
 
 /// The axes a statistic over `dim` reduces, every one when `dim` is `None`.
 pub(crate) fn statistic_dims(tensor: &Tensor, dim: &Option<Vec<isize>>) -> Result<Vec<usize>> {
     Ok(normalize_reduction_dims(dim.clone(), tensor.ndim())?
         .unwrap_or_else(|| (0..tensor.ndim()).collect()))
-}
-
-/// The scales for the slices of `variance`, a variance of `tensor` over
-/// `dim`, that may have been computed outside the float range, or `None`
-/// when none was; see [`rescue_scales`]. A slice without the samples to have
-/// a variance at all is left to say so.
-pub(crate) fn variance_rescue(
-    tensor: &Tensor,
-    dim: &Option<Vec<isize>>,
-    variance: &Tensor,
-    unbiased: bool,
-) -> Result<Option<Tensor>> {
-    if !tensor.dtype().is_float() {
-        return Ok(None);
-    }
-    let dims = statistic_dims(tensor, dim)?;
-    let samples: usize = dims.iter().map(|&d| tensor.shape().dims()[d]).product();
-    if dims.is_empty() || samples <= usize::from(unbiased) {
-        return Ok(None);
-    }
-    rescue_scales(tensor, &dims, variance, Intermediate::Squares)
 }
 
 /// A statistic taken again by `compute` over `tensor` divided by `scales`,
@@ -789,24 +758,6 @@ pub(crate) fn divide_by_count(tensor: &Tensor, count: f64) -> Result<Tensor> {
     crate::ops::arithmetic::div(tensor, &scalar(count, tensor.dtype())?)
 }
 
-/// The square root of a variance, as a standard deviation.
-///
-/// The square root's own gradient is infinite at a zero variance, which the
-/// variance's zero gradient there turns into NaN; `StdBackward` keeps a
-/// constant slice's gradient at 0 instead.
-pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
-    if !variance.requires_grad() {
-        return crate::ops::activation::sqrt(variance);
-    }
-    let root = crate::ops::activation::sqrt(&variance.detach())?;
-    let output = root.requires_grad_(true);
-    let grad_fn = Arc::new(crate::autograd::StdBackward {
-        input_id: variance.id(),
-        output: output.clone().detach(),
-    });
-    crate::autograd::with_grad_fn(output, grad_fn)
-}
-
 /// Variance along specified dimensions: each the float nearest the exact
 /// `(N Σx² - (Σx)²) / (N (N - ddof))` of its slice, `ddof` one when
 /// `unbiased`; see `arithmetic::exact_sum::variance_of`.
@@ -823,34 +774,55 @@ pub fn var(
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    let values = rounded_variance(tensor, dim.clone(), keepdim, unbiased, false)?;
+    spread(tensor, dim, keepdim, unbiased, false, false)
+}
+
+/// The variance over `dim`, or with `root` the standard deviation, of every
+/// value or with `skip_nan` of those that are not NaN, each rounded once,
+/// and its gradient: `2 (x - mean) / (N - ddof)` over the values it takes,
+/// zero for a NaN it skips, through the root for a standard deviation.
+pub(crate) fn spread(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+    root: bool,
+    skip_nan: bool,
+) -> Result<Tensor> {
+    let values = rounded_variance(tensor, dim.clone(), keepdim, unbiased, root, skip_nan)?;
     if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
         return Ok(values);
     }
-    let dims = statistic_dims(tensor, &dim)?;
-    let count: usize = dims
-        .iter()
-        .map(|&axis| tensor.shape().dims()[axis])
-        .product();
     let output = values.requires_grad_(true);
+    if root {
+        let variance = spread(tensor, dim, keepdim, unbiased, false, skip_nan)?;
+        let grad_fn = Arc::new(crate::autograd::StdBackward {
+            input_id: variance.id(),
+            output: output.clone().detach(),
+        });
+        return crate::autograd::with_grad_fn(output, grad_fn);
+    }
     let grad_fn = Arc::new(VarianceBackward {
         input: tensor.detach(),
-        dims,
+        dims: statistic_dims(tensor, &dim)?,
         keepdim,
-        divisor: count as f64 - f64::from(u8::from(unbiased)),
+        ddof: usize::from(unbiased),
+        skip_nan,
         input_ids: [tensor.id()],
     });
     crate::autograd::with_grad_fn(output, grad_fn)
 }
 
 /// The variance of each slice of `tensor` over `dim`, or with `root` its
-/// standard deviation, rounded once; no gradient.
+/// standard deviation, of every value or with `skip_nan` of those that are
+/// not NaN, rounded once; no gradient.
 fn rounded_variance(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
     root: bool,
+    skip_nan: bool,
 ) -> Result<Tensor> {
     use crate::ops::arithmetic::exact_sum::{Element, Output, column_variances, variance_of};
     let dtype = match tensor.dtype() {
@@ -877,15 +849,26 @@ fn rounded_variance(
         .last()
         .map_or(1, |&last| shape[last + 1..].iter().product());
     let block = dims.windows(2).all(|pair| pair[1] == pair[0] + 1);
-    let columns = !dims.is_empty() && block && after >= 8 && outer >= 32;
     // An integer slice is shifted by its first element first, exactly, which
     // leaves its variance and makes an int64 past 2^53 convert to float64
     // exactly.
     let mut moved = if tensor.dtype().is_float() {
-        tensor.detach()
+        tensor.detach().contiguous()?
     } else {
         integer_deviations(&tensor.detach(), &dims)?
     };
+    // Columns holding a NaN to skip are read as runs, where each one's
+    // values are gathered without its NaNs at the cost of a copy, rather
+    // than column by column.
+    let skipping = skip_nan && {
+        let data = moved.data();
+        match (data.as_f32_slice(), data.as_f64_slice()) {
+            (Some(values), _) => any_nan(values),
+            (_, Some(values)) => any_nan(values),
+            _ => false,
+        }
+    };
+    let columns = !dims.is_empty() && block && after >= 8 && outer >= 32 && !skipping;
     let order: Vec<isize> = kept
         .iter()
         .chain(&dims)
@@ -908,38 +891,46 @@ fn rounded_variance(
         values: &[I],
         (outer, run, after): (usize, usize, usize),
         columns: bool,
-        ddof: usize,
-        root: bool,
+        (ddof, root, skip_nan): (usize, bool, bool),
     ) -> Vec<T> {
         if columns {
-            return column_variances(values, outer / after, run, after, ddof, root);
+            return column_variances(values, outer / after, run, after, ddof, root, skip_nan);
         }
         let mut out = vec![T::narrow(0.0); outer];
         let per_task = ((1 << 14) / run.max(1)).max(1);
         par_out_chunks(&mut out, per_task, &|start, block| {
+            // One buffer a task for the slices that hold a NaN.
+            let mut kept: Vec<I> = Vec::new();
             for (offset, slot) in block.iter_mut().enumerate() {
                 let first = (start + offset) * run;
-                *slot = variance_of(&values[first..first + run], ddof, root);
+                let slice = &values[first..first + run];
+                *slot = if skip_nan && any_nan(slice) {
+                    keep_numbers(slice, &mut kept);
+                    variance_of(&kept, ddof, root)
+                } else {
+                    variance_of(slice, ddof, root)
+                };
             }
         });
         out
     }
     let layout = (outer, run, after);
+    let ddof = (ddof, root, skip_nan);
     let missing = || MinitensorError::internal_error("a variance operand without its slice");
     let data = match (moved.dtype(), dtype) {
         (DataType::Float32, _) => {
             let values = moved.data().as_f32_slice().ok_or_else(missing)?;
-            let out = slices::<f32, f32>(values, layout, columns, ddof, root);
+            let out = slices::<f32, f32>(values, layout, columns, ddof);
             TensorData::from_vec_f32(out, tensor.device())
         }
         (_, DataType::Float32) => {
             let values = moved.data().as_f64_slice().ok_or_else(missing)?;
-            let out = slices::<f64, f32>(values, layout, columns, ddof, root);
+            let out = slices::<f64, f32>(values, layout, columns, ddof);
             TensorData::from_vec_f32(out, tensor.device())
         }
         _ => {
             let values = moved.data().as_f64_slice().ok_or_else(missing)?;
-            let out = slices::<f64, f64>(values, layout, columns, ddof, root);
+            let out = slices::<f64, f64>(values, layout, columns, ddof);
             TensorData::from_vec_f64(out, tensor.device())
         }
     };
@@ -963,13 +954,68 @@ fn rounded_variance(
     ))
 }
 
-/// The gradient of a variance over `dims`: `2 (x - mean) / divisor` times
-/// the incoming gradient, spread back over the reduced axes.
+/// Whether any of `values` is NaN: a block at a time across the pool for a
+/// long run, each block folded without an early exit, which keeps it
+/// vectorized.
+fn any_nan<I: crate::ops::arithmetic::exact_sum::Element>(values: &[I]) -> bool {
+    use crate::ops::map::{SIMD_PAR_CHUNK, par_all_chunk};
+    !par_all_chunk(values, SIMD_PAR_CHUNK, &|block| {
+        block
+            .iter()
+            .fold(true, |clear, value| clear & !value.wide().is_nan())
+    })
+}
+
+/// `values` without their NaNs, in order, in `kept`: a block at a time
+/// across the pool for a long run, each block's count first and then its
+/// values in place.
+fn keep_numbers<I: crate::ops::arithmetic::exact_sum::Element>(values: &[I], kept: &mut Vec<I>) {
+    use crate::ops::map::{PAR_THRESHOLD, SIMD_PAR_CHUNK};
+    kept.clear();
+    let number = |value: &&I| !value.wide().is_nan();
+    if values.len() < PAR_THRESHOLD {
+        kept.extend(values.iter().filter(number).copied());
+        return;
+    }
+    let span =
+        |nth: usize| &values[nth * SIMD_PAR_CHUNK..((nth + 1) * SIMD_PAR_CHUNK).min(values.len())];
+    let blocks = values.len().div_ceil(SIMD_PAR_CHUNK);
+    let counts = crate::parallel::map_tasks(blocks, &|nth| span(nth).iter().filter(number).count());
+    let Some(&filler) = values.iter().find(number) else {
+        return;
+    };
+    kept.resize(counts.iter().sum(), filler);
+    let starts: Vec<usize> = counts
+        .iter()
+        .scan(0, |at, &count| {
+            let start = *at;
+            *at += count;
+            Some(start)
+        })
+        .collect();
+    let parts = crate::parallel::Parts::of(kept);
+    crate::parallel::for_each_task(blocks, &|nth| {
+        // SAFETY: block `nth` writes `starts[nth]..starts[nth] + counts[nth]`,
+        // apart from every other block's and inside `kept`, which stays
+        // borrowed mutably throughout.
+        let part =
+            unsafe { std::slice::from_raw_parts_mut(parts.start().add(starts[nth]), counts[nth]) };
+        for (slot, &value) in part.iter_mut().zip(span(nth).iter().filter(number)) {
+            *slot = value;
+        }
+    });
+}
+
+/// The gradient of a variance over `dims`: `2 (x - mean) / (N - ddof)` times
+/// the incoming gradient, spread back over the reduced axes; with `skip_nan`
+/// the mean and the count are of each slice's values that are not NaN, and a
+/// NaN it skipped takes zero.
 struct VarianceBackward {
     input: Tensor,
     dims: Vec<usize>,
     keepdim: bool,
-    divisor: f64,
+    ddof: usize,
+    skip_nan: bool,
     input_ids: [crate::autograd::TensorId; 1],
 }
 
@@ -978,28 +1024,39 @@ impl crate::autograd::GradientFunction for VarianceBackward {
         &self,
         grad_output: &Tensor,
     ) -> Result<rustc_hash::FxHashMap<crate::autograd::TensorId, Tensor>> {
-        use crate::ops::arithmetic::{mul, sub};
+        use crate::ops::arithmetic::{div, mul, sub};
+        use crate::ops::util::create_scalar_tensor;
+        let input = &self.input;
+        let scalar = |value: f64| create_scalar_tensor(value, input.dtype(), input.device());
         let axes: Vec<isize> = self.dims.iter().map(|&axis| axis as isize).collect();
-        let mean = crate::ops::reduction::mean(&self.input, Some(axes), true)?;
-        let deviations = sub(&self.input, &mean)?;
+        let (mean, divisor) = if self.skip_nan {
+            let count = super::nan_stats_impl::non_nan_count(input, Some(axes.clone()), true)?;
+            let mean = crate::ops::reduction::nanmean(input, Some(axes), true)?;
+            (mean, sub(&count, &scalar(self.ddof as f64)?)?)
+        } else {
+            let count: usize = self
+                .dims
+                .iter()
+                .map(|&axis| input.shape().dims()[axis])
+                .product();
+            let mean = crate::ops::reduction::mean(input, Some(axes), true)?;
+            (mean, scalar(count as f64 - self.ddof as f64)?)
+        };
+        let deviations = sub(input, &mean)?;
         let grad = if self.keepdim {
             grad_output.clone()
         } else {
-            let mut kept_shape = self.input.shape().dims().to_vec();
+            let mut kept_shape = input.shape().dims().to_vec();
             for &axis in &self.dims {
                 kept_shape[axis] = 1;
             }
             shape_ops::reshape(grad_output, Shape::new(kept_shape))?
         };
-        let scale = crate::ops::util::create_scalar_tensor(
-            2.0 / self.divisor,
-            deviations.dtype(),
-            deviations.device(),
-        )?;
-        let gradient = mul(
-            &mul(&grad.astype(deviations.dtype())?, &deviations)?,
-            &scale,
-        )?;
+        let scale = div(&scalar(2.0)?, &divisor)?;
+        let mut gradient = mul(&mul(&grad.astype(input.dtype())?, &deviations)?, &scale)?;
+        if self.skip_nan {
+            gradient = crate::ops::selection::where_op(&input.isnan()?, &scalar(0.0)?, &gradient)?;
+        }
         let mut gradients = rustc_hash::FxHashMap::default();
         gradients.insert(self.input_ids[0], gradient);
         Ok(gradients)

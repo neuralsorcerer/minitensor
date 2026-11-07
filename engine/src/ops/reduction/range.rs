@@ -4,22 +4,19 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Keeping a statistic's intermediate values inside the float range.
+//! Keeping a mean's sum inside the float range.
 //!
-//! A mean sums before it divides, and a variance squares before it averages,
-//! and either intermediate can leave the float range while the answer does
-//! not: the mean of `[1e308, 1e308]` is `1e308`, and the standard deviation
-//! of `[1e200, -1e200]` is `1.4e200`, though the sum and the squares are past
-//! the top of float64. The squares of small values fall off the bottom the
-//! same way. Each such slice is taken again at a power of two near its largest
-//! magnitude, which scales exactly, and scaled back.
+//! A mean sums before it divides, and the sum can leave the float range while
+//! the answer does not: the mean of `[1e308, 1e308]` is `1e308`, though the
+//! sum is past the top of float64. Such a slice is taken again at a power of
+//! two near its largest magnitude, which scales exactly, and scaled back.
 //!
-//! A float32 statistic never needs it: it is carried in float64, where no
-//! float32 values' sum or squares leave the range.
+//! A float32 mean never needs it: it is carried in float64, where no float32
+//! values' sum leaves the range.
 //!
-//! The direct computation is tried first and checked afterwards, so a
-//! statistic that never left the range costs nothing more than the check,
-//! and only the slices that may have are computed again.
+//! The direct computation is tried first and checked afterwards, so a mean
+//! that never left the range costs nothing more than the check, and only the
+//! slices that may have are computed again.
 
 use crate::{
     error::{MinitensorError, Result},
@@ -28,16 +25,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// The intermediate a statistic computed directly can take out of range.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Intermediate {
-    /// A mean's sum, which overflows.
-    Sum,
-    /// A variance's squares, which overflow or underflow.
-    Squares,
-}
-
-/// For each slice of `tensor` over `dims` whose statistic `result` the direct
+/// For each slice of `tensor` over `dims` whose mean `result` the direct
 /// computation may have taken out of range, the power of two at or below the
 /// slice's largest finite magnitude; one for every other slice. `None` when
 /// no slice needs a scale.
@@ -47,26 +35,13 @@ pub(crate) enum Intermediate {
 /// scaled by one is computed again exactly as it was, so a slice that never
 /// left the range keeps its value bit for bit.
 ///
-/// A slice is in doubt when its value is out of range and its largest finite
-/// magnitude `a`, over `n` elements, could have put the intermediate there:
-///
-/// - a non-finite sum, when `2 * n * a` reaches the dtype's largest value.
-///   Below that no partial sum overflows, and a non-finite mean is the
-///   input's own NaN or infinity;
-/// - non-finite squares, when `8 * n * a^2` reaches it, twice the bound on a
-///   sum of squared deviations, each at most `2a` in magnitude;
-/// - a variance below the smallest normal, which lost digits to underflow;
-/// - a zero variance when `a` is below `2^-45 * sqrt(n)` in float32 and
-///   `2^-478 * sqrt(n)` in float64. A slice whose elements are not all equal
-///   has a deviation of at least half an ulp of `a`, whose square over `n`
-///   is past the smallest subnormal above those bounds; so a zero there is a
-///   slice of equal elements, the common way to get one.
-///
-/// Each test is made as cheaply as it can be first: on the result alone,
-/// then a non-finite one against a single read of the tensor for any element
-/// large enough to have overflowed, and a zero against the first element of
-/// its slice, at most `a` in magnitude. Only a slice still in doubt costs the
-/// pass for the largest magnitudes.
+/// A slice is in doubt when its mean is not finite and its largest finite
+/// magnitude `a`, over `n` elements, could have overflowed the sum: when
+/// `2 * n * a` reaches the dtype's largest value. Below that no partial sum
+/// overflows, and a non-finite mean is the input's own NaN or infinity. The
+/// test is made on the result alone first, and then against a single read of
+/// the tensor for any element large enough to have overflowed; only a slice
+/// still in doubt costs the pass for the largest magnitudes.
 ///
 /// The largest *finite* magnitude, so that an infinity or a NaN elsewhere in
 /// a slice neither stops it being rescued nor sets its scale: the mean of
@@ -76,7 +51,6 @@ pub(crate) fn rescue_scales(
     tensor: &Tensor,
     dims: &[usize],
     result: &Tensor,
-    intermediate: Intermediate,
 ) -> Result<Option<Tensor>> {
     if tensor.numel() == 0 || dims.is_empty() {
         return Ok(None);
@@ -88,13 +62,7 @@ pub(crate) fn rescue_scales(
     let missing = || MinitensorError::internal_error("rescue scales: float slice");
     let data = match tensor.dtype() {
         DataType::Float32 => {
-            let bounds = Bounds::new(
-                f32::MAX.into(),
-                f32::MIN_POSITIVE.into(),
-                f64::powi(2.0, -45),
-                n,
-                intermediate,
-            );
+            let bounds = Bounds::new(f32::MAX.into(), n);
             let scales = scales_in_doubt(
                 tensor,
                 dims,
@@ -111,13 +79,7 @@ pub(crate) fn rescue_scales(
             )
         }
         DataType::Float64 => {
-            let bounds = Bounds::new(
-                f64::MAX,
-                f64::MIN_POSITIVE,
-                f64::powi(2.0, -478),
-                n,
-                intermediate,
-            );
+            let bounds = Bounds::new(f64::MAX, n);
             let scales = scales_in_doubt(
                 tensor,
                 dims,
@@ -145,53 +107,30 @@ pub(crate) fn rescue_scales(
     )))
 }
 
-/// Where a slice's value is in doubt, in a dtype and over slices of `n`
+/// Where a slice's mean is in doubt, in a dtype and over slices of `n`
 /// elements; see [`rescue_scales`].
 struct Bounds {
-    intermediate: Intermediate,
-    /// The dtype's smallest normal magnitude.
-    tiny: f64,
-    /// The largest finite magnitude at or past which a non-finite value may
-    /// be an overflowed intermediate.
+    /// The largest finite magnitude at or past which a non-finite mean may
+    /// be an overflowed sum.
     large: f64,
-    /// The largest finite magnitude below which a zero variance may be
-    /// underflowed squares.
-    small: f64,
 }
 
 impl Bounds {
-    fn new(max: f64, tiny: f64, doubtful: f64, n: f64, intermediate: Intermediate) -> Self {
-        let large = match intermediate {
-            Intermediate::Sum => max / (2.0 * n),
-            Intermediate::Squares => (max / (8.0 * n)).sqrt(),
-        };
+    fn new(max: f64, n: f64) -> Self {
         Self {
-            intermediate,
-            tiny,
-            large,
-            small: doubtful * n.sqrt(),
+            large: max / (2.0 * n),
         }
     }
 
-    fn squares(&self) -> bool {
-        self.intermediate == Intermediate::Squares
-    }
-
-    /// Whether a slice of value `r` and largest finite magnitude `a` is in
+    /// Whether a slice of mean `r` and largest finite magnitude `a` is in
     /// doubt.
     fn in_doubt(&self, r: f64, a: f64) -> bool {
-        if a == 0.0 {
-            return false;
-        }
-        if !r.is_finite() {
-            return a >= self.large;
-        }
-        self.squares() && ((r != 0.0 && r.abs() < self.tiny) || (r == 0.0 && a < self.small))
+        a != 0.0 && !r.is_finite() && a >= self.large
     }
 }
 
-/// The scale for each slice of `tensor` over `dims` whose statistic in
-/// `values` is in doubt, or `None` when none is. See [`rescue_scales`].
+/// The scale for each slice of `tensor` over `dims` whose mean in `values`
+/// is in doubt, or `None` when none is. See [`rescue_scales`].
 fn scales_in_doubt<T>(
     tensor: &Tensor,
     dims: &[usize],
@@ -203,35 +142,9 @@ where
     T: num_traits::Float + Into<f64> + Send + Sync,
 {
     let missing = || MinitensorError::internal_error("rescue scales: float slice");
-    let (mut non_finite, mut subnormal, mut zero) = (false, false, false);
-    for &r in values {
-        let r: f64 = r.into();
-        if !r.is_finite() {
-            non_finite = true;
-        } else if bounds.squares() && r == 0.0 {
-            zero = true;
-        } else if bounds.squares() && r.abs() < bounds.tiny {
-            subnormal = true;
-        }
-    }
+    let non_finite = values.iter().any(|&r| !r.is_finite());
     let data = slice_of(tensor.data()).ok_or_else(missing)?;
-    let mut possible = subnormal;
-    if non_finite && !possible {
-        possible = any_finite_at_least(data, bounds.large);
-    }
-    if zero && !possible {
-        let mut first = tensor.detach();
-        for &dim in dims {
-            first = shape_ops::narrow(&first, dim as isize, 0, 1)?;
-        }
-        let first = slice_of(first.data()).ok_or_else(missing)?;
-        // A NaN first element says nothing of the rest, and is in doubt.
-        possible = values.iter().zip(first).any(|(&r, &x)| {
-            let x: f64 = x.abs().into();
-            r == T::zero() && (x.is_nan() || x < bounds.small)
-        });
-    }
-    if !possible {
+    if !non_finite || !any_finite_at_least(data, bounds.large) {
         return Ok(None);
     }
     let largest = largest_finite_magnitudes(tensor, dims)?;

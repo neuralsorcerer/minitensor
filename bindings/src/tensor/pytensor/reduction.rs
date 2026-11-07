@@ -566,7 +566,9 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Like `std`, ignoring NaN. Reduces one dimension at a time.
+    /// Like `std`, of the values that are not NaN.
+    ///
+    /// Each is the float nearest the exact root of the variance of those values.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn nanstd(
         &self,
@@ -584,7 +586,9 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Like `var`, ignoring NaN. Reduces one dimension at a time.
+    /// Like `var`, of the values that are not NaN.
+    ///
+    /// Each is the float nearest the exact variance of those values.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn nanvar(
         &self,

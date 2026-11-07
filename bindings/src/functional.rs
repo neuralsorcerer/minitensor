@@ -1266,7 +1266,9 @@ pub fn nanprod(
     tensor.nanprod(dim, Some(keepdim))
 }
 
-/// Like `var`, ignoring NaN. Reduces one dimension at a time.
+/// Like `var`, of the values that are not NaN.
+///
+/// Each is the float nearest the exact variance of those values.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 pub fn nanvar(
@@ -1279,7 +1281,9 @@ pub fn nanvar(
     tensor.nanvar(dim, Some(unbiased), Some(keepdim))
 }
 
-/// Like `std`, ignoring NaN. Reduces one dimension at a time.
+/// Like `std`, of the values that are not NaN.
+///
+/// Each is the float nearest the exact root of the variance of those values.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 pub fn nanstd(

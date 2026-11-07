@@ -7,11 +7,11 @@
 //! The NaN-skipping reductions that are arrangements of the others.
 //!
 //! `nansum`, `nanmean`, `nanmax` and the rest each carry a kernel that walks
-//! the buffer once, testing as it goes. These need no kernel of their own: a
-//! variance is a mean of squared deviations, and a product with NaN skipped is
-//! a product with NaN replaced by the identity. Writing them as those
-//! arrangements is one definition rather than two, and it is what makes their
-//! gradients the gradients of the ops underneath.
+//! the buffer once, testing as it goes. These need little of their own: a
+//! variance with NaN skipped is `var` of the values kept, and a product with
+//! NaN skipped is a product with NaN replaced by the identity. Writing them
+//! as those arrangements is one definition rather than two, and it is what
+//! makes their gradients the gradients of the ops underneath.
 //!
 //! `nanargmax` and `nanargmin` used to be here on the same grounds -- an index
 //! of the largest non-NaN read as an index of the largest once NaN had been
@@ -21,20 +21,15 @@
 //! ask the NaN-skipping extremum directly, which is both the faster and the
 //! only correct way to spell it.
 
-use super::core_impl::normalize_reduction_dims;
-use super::sum_prod_impl::{fold_lanes, fold_slab_with};
+use super::sum_prod_impl::fold_slab_with;
 use crate::ops::map::{outputs_per_task, par_map_indexed};
-use crate::ops::simd::DeviationSums;
 use crate::{
     error::{MinitensorError, Result},
     ops::{
-        arithmetic::{div, mul, sub},
         comparison::eq,
-        minmax::maximum,
         reduction::{
             any, argmax, argmin, checked_reduction_dim, count_nonzero, nanargmax_all,
-            nanargmin_all, nanmax_along_dim_with_indices, nanmean, nanmin_along_dim_with_indices,
-            prod, sum,
+            nanargmin_all, nanmax_along_dim_with_indices, nanmin_along_dim_with_indices, prod,
         },
         selection::where_op,
         util::create_scalar_tensor,
@@ -48,7 +43,11 @@ use std::sync::Arc;
 ///
 /// `count_nonzero` counts the mask, which is what `nanmean` divides by too;
 /// this is the same count in the dtype the division needs.
-fn non_nan_count(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn non_nan_count(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+) -> Result<Tensor> {
     let finite = eq(&tensor.isnan()?, &boolean_false(tensor)?)?;
     count_nonzero(&finite, dim, keepdim)?.astype(tensor.dtype())
 }
@@ -68,32 +67,18 @@ fn boolean_false(like: &Tensor) -> Result<Tensor> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NanMoment {
     Mean,
-    /// The variance, divided by the count less this correction.
-    Var {
-        correction: usize,
-    },
 }
 
-/// `nanmean` or `nanvar` over one axis, or over everything, for a tensor that
-/// does not require gradients; `None` when the call is not one of those, and
-/// the composition answers instead.
+/// `nanmean` over one axis, or over everything, for a tensor that does not
+/// require gradients; `None` when the call is not one of those, and the
+/// composition answers instead.
 ///
-/// The compositions are the definitions -- and what gradients go through --
-/// but as kernels they are a dozen full-size passes: `nanvar` built a NaN
-/// mask, a boolean negation of it, a float copy of that to count, the
-/// NaN-skipping mean (which built its own mask and float copy again), a
-/// difference, a masked select and a square, each a new tensor the size of
-/// the input. Here it is three reads of the input and no full-size
-/// intermediate: the non-NaN sums, the non-NaN counts, and for the variance
-/// the squared deviations from their quotient, each through the blocked
-/// column fold `sum` uses, so the accuracy is `sum`'s as well.
-///
-/// The arithmetic after the passes is the composition's: the mean is
-/// `sum / count` in the tensor's dtype, and the variance divides by
-/// `max(count - correction, 0)`, so an all-NaN slice is `0 / 0` and a slice
-/// with one value and a correction of one is `0 / 0` too. A NaN is skipped
-/// wherever it is; an infinity is not, and its deviation `inf - inf` makes
-/// the variance NaN, again as before.
+/// The composition is the definition -- and what gradients go through -- but
+/// as a kernel it is several full-size passes: a NaN mask, a float copy of it
+/// to count, and the reductions. Here it is two reads of the input and no
+/// full-size intermediate: the non-NaN sums and the non-NaN counts, each
+/// through the blocked column fold `sum` uses. The mean is `sum / count`, a
+/// NaN is skipped wherever it is, and an all-NaN slice is `0 / 0`.
 pub(crate) fn nan_moments_fused(
     tensor: &Tensor,
     dims: Option<&[usize]>,
@@ -259,25 +244,8 @@ fn nan_moments_runs_f32(input: &[f32], outer: usize, len: usize, moment: NanMome
             spread,
         );
         let count = total(run, |v: f32| if v.is_nan() { 0.0 } else { 1.0 }, spread);
-        let mean = sum / count;
-        let NanMoment::Var { correction } = moment else {
-            return mean;
-        };
-        // In float64 the mean needs no correction; see
-        // `DeviationSums::centred_squares`.
-        let squares = total(
-            run,
-            move |v: f32| {
-                if v.is_nan() {
-                    0.0
-                } else {
-                    let d = f64::from(v) - mean;
-                    d * d
-                }
-            },
-            spread,
-        );
-        squares / (count - correction as f64).max(0.0)
+        let NanMoment::Mean = moment;
+        sum / count
     };
     if outer == 1 {
         return vec![one(input, true)];
@@ -327,200 +295,36 @@ where
         |x, y| x + y,
         spread,
     );
-    let means: Vec<f64> = sums
-        .iter()
+    let NanMoment::Mean = moment;
+    sums.iter()
         .zip(&counts)
         .map(|(&s, &c)| s / f64::from(c))
-        .collect();
-    let NanMoment::Var { correction } = moment else {
-        return means;
-    };
-
-    let tiled: Vec<f64> = means
-        .iter()
-        .copied()
-        .cycle()
-        .take(fold_lanes(cols).max(cols))
-        .collect();
-    let correction = correction.min(u32::MAX as usize) as u32;
-    // A float32 slab, carried in float64, needs only the squares; see
-    // `DeviationSums::centred_squares`.
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        let squares = fold_slab_with(
-            slab,
-            cols,
-            0.0f64,
-            |acc: &mut [f64], values: &[T], first| {
-                let means = &tiled[first..first + acc.len()];
-                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                    let d = if v.is_nan() { 0.0 } else { wide(v) - m };
-                    *a += d * d;
-                }
-            },
-            |x, y| x + y,
-            spread,
-        );
-        return squares
-            .iter()
-            .zip(&counts)
-            .map(|(&q, &c)| q / f64::from(c.saturating_sub(correction)))
-            .collect();
-    }
-    // The deviations' sum beside their squares, to take the mean's rounding
-    // back out; see `DeviationSums::centred_squares`.
-    let deviations = fold_slab_with(
-        slab,
-        cols,
-        DeviationSums::<f64>::default(),
-        |acc: &mut [DeviationSums<f64>], values: &[T], first| {
-            let means = &tiled[first..first + acc.len()];
-            for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                let d = if v.is_nan() { 0.0 } else { wide(v) - m };
-                a.sum += d;
-                a.squares += d * d;
-            }
-        },
-        |x, y| x + y,
-        spread,
-    );
-    deviations
-        .iter()
-        .zip(&counts)
-        .map(|(&q, &c)| q.centred_squares(f64::from(c)) / f64::from(c.saturating_sub(correction)))
         .collect()
 }
 
-/// Variance over the non-NaN entries along `dim`.
-///
-/// A slice with fewer non-NaN entries than the correction demands has no
-/// variance to report, and the division says so: `0 / 0` is NaN and `x / 0` is
-/// infinity.
-///
-/// Kept inside the float range as `var` is, with the NaN entries skipped in
-/// deciding a slice's scale as they are in its variance.
+/// Variance over the non-NaN entries along `dim`: each the float nearest the
+/// exact variance of its slice's values that are not NaN; see `var`. A slice
+/// with no more of them than the correction takes away has none to report,
+/// and is NaN, as is one holding an infinity. The gradient is `var`'s over
+/// the values kept, and zero at a NaN skipped.
 pub fn nanvar(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    // An integer holds no NaN, so this is `var` -- the same delegation
-    // `nanmax` and `nanprod` make, rather than a refusal.
-    if !tensor.dtype().is_float() {
-        return crate::ops::reduction::var(tensor, dim, keepdim, unbiased);
-    }
-    // Carried in float64 and rounded once; see `var`.
-    if tensor.dtype() == DataType::Float32 {
-        return nanvar_direct(tensor, dim, keepdim, unbiased)?.astype(DataType::Float32);
-    }
-    let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {
-        return Ok(variance);
-    };
-    let (variance, scales) = super::sort_impl::rescaled(tensor, &scales, |scaled| {
-        nanvar_direct(scaled, dim, keepdim, unbiased)
-    })?;
-    mul(&mul(&variance, &scales)?, &scales)
+    super::sort_impl::spread(tensor, dim, keepdim, unbiased, false, true)
 }
 
-/// The NaN-aware variance of a float tensor as computed directly, in
-/// float64: the squares about the NaN-skipping mean, less the deviations' own
-/// sum squared over the count.
-fn nanvar_direct(
-    tensor: &Tensor,
-    dim: Option<Vec<isize>>,
-    keepdim: bool,
-    unbiased: bool,
-) -> Result<Tensor> {
-    // An empty `dim` reduces nothing; the composition already answers that.
-    let dims = normalize_reduction_dims(dim.clone(), tensor.ndim())?;
-    if dims.as_ref().is_none_or(|dims| !dims.is_empty())
-        && let Some(fused) = nan_moments_fused(
-            tensor,
-            dims.as_deref(),
-            keepdim,
-            NanMoment::Var {
-                correction: usize::from(unbiased),
-            },
-        )?
-    {
-        return Ok(fused);
-    }
-
-    if tensor.dtype() == DataType::Float32 {
-        return nanvar_direct(&tensor.astype(DataType::Float64)?, dim, keepdim, unbiased);
-    }
-
-    // Centred on the NaN-skipping mean, kept broadcastable.
-    //
-    // The deviation is zeroed at the NaN positions *before* it is squared,
-    // rather than the NaN being carried through and dropped by `nansum`
-    // afterwards. Both give the same total, but only this one has a gradient:
-    // `nansum` hands back a zero for a skipped entry, and the square's chain
-    // rule then computes `0 * 2 * NaN`, which is NaN and spreads through the
-    // shared mean to every finite entry in the slice.
-    let centre = nanmean(tensor, dim.clone(), true)?;
-    let deviation = sub(tensor, &centre)?;
-    let zero = create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?;
-    let finite_deviation = where_op(&tensor.isnan()?, &zero, &deviation)?;
-    let squared = mul(&finite_deviation, &finite_deviation)?;
-
-    let total = sum(&squared, dim.clone(), keepdim)?;
-    let count = non_nan_count(tensor, dim.clone(), keepdim)?;
-    // Less the deviations' own sum squared over the count, the rounding of
-    // `centre`; see `DeviationSums::centred_squares`. Its gradient is zero.
-    let offset = sum(&finite_deviation, dim, keepdim)?;
-    let total = sub(&total, &mul(&offset, &div(&offset, &count)?)?)?;
-    let total = maximum(
-        &total,
-        &create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?,
-    )?;
-    let divisor = if unbiased {
-        // Clamped at zero, because a slice with nothing in it has no variance
-        // to report and the division is how this says so. `count - 1` is -1
-        // for a slice that is all NaN, and `0 / -1` is a clean -0.0 -- an
-        // answer claiming the data does not vary, from data that is not
-        // there. At zero the division is `0 / 0`, which is NaN: what `var`
-        // answers for an empty slice.
-        let corrected = sub(
-            &count,
-            &create_scalar_tensor(1.0, tensor.dtype(), tensor.device())?,
-        )?;
-        maximum(
-            &corrected,
-            &create_scalar_tensor(0.0, tensor.dtype(), tensor.device())?,
-        )?
-    } else {
-        count
-    };
-
-    div(&total, &divisor)
-}
-
-/// Standard deviation over the non-NaN entries: the square root of [`nanvar`].
+/// Standard deviation over the non-NaN entries: each the float nearest the
+/// exact root of [`nanvar`]'s variance, with the gradient through the root.
 pub fn nanstd(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    use super::sort_impl::std_from_variance;
-    if !tensor.dtype().is_float() {
-        return crate::ops::reduction::std(tensor, dim, keepdim, unbiased);
-    }
-    // Carried in float64 and rounded once, the root included; see `std`.
-    if tensor.dtype() == DataType::Float32 {
-        let variance = nanvar_direct(tensor, dim, keepdim, unbiased)?;
-        return std_from_variance(&variance)?.astype(DataType::Float32);
-    }
-    let variance = nanvar_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    let Some(scales) = super::sort_impl::variance_rescue(tensor, &dim, &variance, unbiased)? else {
-        return std_from_variance(&variance);
-    };
-    let (variance, scales) = super::sort_impl::rescaled(tensor, &scales, |scaled| {
-        nanvar_direct(scaled, dim, keepdim, unbiased)
-    })?;
-    mul(&std_from_variance(&variance)?, &scales)
+    super::sort_impl::spread(tensor, dim, keepdim, unbiased, true, true)
 }
 
 /// Product over the non-NaN entries, taking an all-NaN slice as 1.

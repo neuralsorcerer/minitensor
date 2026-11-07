@@ -1948,17 +1948,10 @@ float32 arithmetic had put the mean of offset data tens of ulps out. A float
 `mean` that is itself in range is computed in range: the mean of
 `[1e308, 1e308]` is `1e308`.
 
-`nanvar` and `nanstd` are carried in float64 and centred on the exact mean of
-the values they keep, not on its rounding. The mean rounded to the dtype is
-off by up to half an ulp, and every squared deviation from it carries that
-offset, which is most of the answer for data that varies over a few ulps of
-its mean: float32 readings near `1` varying by `1e-7` had a variance `4e-4`
-high. The deviations' own sum measures the offset, and its square over the
-count is taken back out -- `sum(d^2) - sum(d)^2 / n` -- so they are within a
-few roundings of the exact answer, and constant data has a variance of
-exactly zero. A slice whose direct result came out non-finite, or lost digits
-to underflow, is computed again divided by a power of two near its largest
-magnitude, which is exact, and scaled back.
+`nanvar` and `nanstd` are `var` and `std` of the values that are not NaN:
+each the float nearest the exact variance of those values, or nearest its
+root, in every layout. A float32 one had been carried in float64 and rounded
+again to float32, and a float64 one was within a few roundings.
 
 #### Running totals that are not sums
 
@@ -2063,18 +2056,20 @@ already exist:
   multiplicative identity, so an all-NaN slice gives `1`, exactly as a genuinely
   empty one does.
 - `nanvar(input, dim=None, unbiased=True, keepdim=False)` and `nanstd(...)` —
-  the mean of the squared deviations from `nanmean`, over the entries that are
-  not NaN. `unbiased` divides by the non-NaN count less one, so a slice with a
-  single finite entry gives `NaN` and one with none gives `NaN` as well.
+  `var` and `std` of the entries that are not NaN, each the float nearest the
+  exact answer. `unbiased` divides by the non-NaN count less one, so a slice
+  with a single entry left gives `NaN` and one with none gives `NaN` as well;
+  an infinity is not skipped, and gives `NaN` as it does in `var`.
 - `nanargmax(input, dim=None, keepdim=False)` and `nanargmin(...)` — the index
   of the largest or smallest entry that is not NaN. A slice of nothing but NaN
   raises: every index it could name points at a NaN, so there is no answer to
   give.
 
 Writing them this way is one definition rather than two, and it is what makes
-their gradients the gradients of the operations underneath — `nanvar` is
-differentiable because `sub`, `mul` and `sum` are, with the deviation zeroed at
-the NaN positions before it is squared so no `0 * NaN` reaches the chain rule.
+their gradients the gradients of the operations underneath. `nanvar`'s is
+`var`'s over the entries it keeps, `2 (x - mean) / (N - ddof)` with the mean
+and count of those entries, and exactly zero at a NaN it skipped, so no
+`0 * NaN` reaches the chain rule.
 
 `nanargmax` and `nanargmin` reduce one dimension at a time, because they
 report an index and an index names a position along one axis. `nanvar`,
