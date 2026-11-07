@@ -1919,36 +1919,46 @@ order of the additions, a sum whose running total overflows is
 still the exact one when that is in range -- `[max, max, -max]` sums to `max`
 -- and an int64 `mean` divides the exact integer sum once.
 
-Float32 statistics -- `mean`, `var`, `std` and their NaN-skipping forms -- are
-carried in float64 and rounded once, the root of a standard deviation
-included, so each is the float32 nearest the exact answer: the mean of a
-constant tensor is the constant and its variance zero, where float32
-arithmetic had put the mean of offset data tens of ulps out. The squares of
-float32 values cannot leave the float64 range, so the float32 standard
-deviation of `[1e20, -1e20]` is `1.4e20` though its variance overflows
-float32. An int32 statistic is taken the same way, from exact float64
-deviations, and rounded to float32 once. A variance over no axes is zero, or
-NaN unbiased: each slice is one element.
+A `var` and a `std` -- over every element, along one axis or over several,
+float32 or float64 -- are the float nearest the exact variance,
+`(N Σx² - (Σx)²) / (N (N - ddof))`, and the float nearest its root. A mean
+rounded once, deviations rounded again and squares rounded and summed had put
+nearly half the float64 variances of short ordinary slices an ulp or more
+out, and a quarter of the standard deviations. Now the sum is carried with
+its exact error, `c`, the float64 nearest the mean it gives, taken as a
+centre, and the exact squares about it carried too; the squares about the
+exact mean are those less `N (μ - c)²`, which the carried sum measures well
+inside the last place. A bound on what that leaves out settles the answer,
+and a slice it cannot settle is formed exactly, in whole numbers. A float32
+one is first taken plainly in float64, whose bound settles it unless it
+reaches a halfway point between two float32s. Columns are read in place, a
+band of them side by side. The squares cannot leave the range: the standard
+deviation of `[1e200, -1e200]` is `1.4e200` though its variance is past the
+largest float64, and that of the float32s `[1e20, -1e20]` is `1.4e20`.
+Constant data has a variance of exactly zero; a NaN or an infinity gives NaN,
+as does a slice with no more values than `ddof`, and a variance over no axes
+is zero, or NaN unbiased: each slice is one element. An integer variance is a
+float, float32 for int32 and float64 for int64, taken from each element less
+the first of its slice, exactly, so int64s past `2^53` keep the steps between
+them: `var([2^53, 2^53 + 1, 2^53 + 2])` is `1`.
 
-A float `mean`, `var` or `std` that is itself in range is computed in range.
-The sum behind a mean and the squares behind a variance can leave the float
-range when the answer does not: the mean of `[1e308, 1e308]` is `1e308`, and
-the standard deviation of the float32s `[1e20, -1e20]` is `1.4e20`. A slice
-whose direct result came out non-finite, or lost digits to underflow, is
-computed again divided by a power of two near its largest magnitude, which is
-exact, and scaled back. An infinite or NaN input still gives a non-finite
-result. An integer variance is taken from each element less the first of its
-slice, exactly, so int64s past `2^53` keep the steps between them:
-`var([2^53, 2^53 + 1, 2^53 + 2])` is `1`.
+A float32 `mean` is carried in float64 and rounded once, so it is the float32
+nearest the exact mean: the mean of a constant tensor is the constant, where
+float32 arithmetic had put the mean of offset data tens of ulps out. A float
+`mean` that is itself in range is computed in range: the mean of
+`[1e308, 1e308]` is `1e308`.
 
-A variance is centred on the exact mean, not on its rounding. The mean
-rounded to the dtype is off by up to half an ulp, and every squared deviation
-from it carries that offset, which is most of the answer for data that varies
-over a few ulps of its mean: float32 readings near `1` varying by `1e-7` had
-a variance `4e-4` high. The deviations' own sum measures the offset, and its
-square over the count is taken back out -- `sum(d^2) - sum(d)^2 / n` -- so
-`var`, `std`, `nanvar` and `nanstd` are within a few roundings of the exact
-answer, and constant data has a variance of exactly zero.
+`nanvar` and `nanstd` are carried in float64 and centred on the exact mean of
+the values they keep, not on its rounding. The mean rounded to the dtype is
+off by up to half an ulp, and every squared deviation from it carries that
+offset, which is most of the answer for data that varies over a few ulps of
+its mean: float32 readings near `1` varying by `1e-7` had a variance `4e-4`
+high. The deviations' own sum measures the offset, and its square over the
+count is taken back out -- `sum(d^2) - sum(d)^2 / n` -- so they are within a
+few roundings of the exact answer, and constant data has a variance of
+exactly zero. A slice whose direct result came out non-finite, or lost digits
+to underflow, is computed again divided by a power of two near its largest
+magnitude, which is exact, and scaled back.
 
 #### Running totals that are not sums
 

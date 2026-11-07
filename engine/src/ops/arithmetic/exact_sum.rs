@@ -35,7 +35,7 @@
 
 use super::close::add_shifted;
 use super::rounded_once::{Exact, Target, product_error, rounded, two_sum};
-use crate::ops::util::pairwise_fold;
+use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 
 /// Lanes a run is added in, and values per block a task takes.
 const LANES: usize = 8;
@@ -53,6 +53,8 @@ pub(crate) trait Element: Copy + Send + Sync + 'static {
     fn plain_block(values: &[Self]) -> (f64, f64) {
         plain_lanes(values)
     }
+    /// [`plain_squares_lanes`] in the widest build the CPU runs.
+    fn plain_squares(values: &[Self], centre: f64) -> f64;
     /// The carried total of `a[i] · b[i]`, block by block in the widest
     /// build the CPU runs, the blocks merged pairwise.
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried;
@@ -75,6 +77,15 @@ impl Element for f64 {
             return unsafe { block_avx(values) };
         }
         block_lanes(values)
+    }
+
+    fn plain_squares(values: &[Self], centre: f64) -> f64 {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { plain_squares_avx(values, centre) };
+        }
+        plain_squares_lanes(values, centre)
     }
 
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried {
@@ -120,6 +131,15 @@ impl Element for f32 {
             return unsafe { plain_avx_f32(values) };
         }
         plain_lanes(values)
+    }
+
+    fn plain_squares(values: &[Self], centre: f64) -> f64 {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe { plain_squares_avx_f32(values, centre) };
+        }
+        plain_squares_lanes(values, centre)
     }
 
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried {
@@ -309,22 +329,44 @@ impl Carried {
             // The values cancel exactly, or are all zeros.
             return Some(T::narrow(0.0));
         }
-        let count = count as f64;
-        let quotient = self.sum / count;
-        let product = quotient * count;
-        // `product` is within a rounding of `sum`, so the first difference
-        // is exact and the remainder rounds once.
-        let remainder = (self.sum - product) - product_error(quotient, count, product);
-        let tail = (remainder + self.error) / count;
-        let (value, rest) = two_sum(quotient, tail);
-        let bound = self.slack / count * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50);
-        // Clear of underflow in the product's split, and of a zero or a value
-        // that is not finite.
-        let ordinary = value.abs() >= 2f64.powi(-900) && value.abs() <= 2f64.powi(900);
+        let (value, rest, bound, ordinary) = self.quotient_parts::<false>(count as f64);
         if !ordinary {
             return None;
         }
         T::settle(value, rest, bound)
+    }
+
+    /// [`Carried::divided`] without branches, for lanes side by side, of a
+    /// total that is not an exact zero: the value and whether the bound,
+    /// which is not zero, settles it.
+    #[inline(always)]
+    fn divided_lane<T: Output, const FMA: bool>(self, count: f64) -> (T, bool) {
+        let (value, rest, bound, ordinary) = self.quotient_parts::<FMA>(count);
+        let (rounded, settled) = T::settle_lanes(value, rest, bound);
+        (rounded, settled & ordinary)
+    }
+
+    /// The quotient by `count` as a two-sum's pair, the bound on it, and
+    /// whether it is clear of underflow in the product's split, and of a
+    /// zero or a value that is not finite; the product's error by a fused
+    /// multiply-add where `FMA`.
+    #[inline(always)]
+    fn quotient_parts<const FMA: bool>(self, count: f64) -> (f64, f64, f64, bool) {
+        let quotient = self.sum / count;
+        let product = quotient * count;
+        let rounding = if FMA {
+            quotient.mul_add(count, -product)
+        } else {
+            product_error(quotient, count, product)
+        };
+        // `product` is within a rounding of `sum`, so the first difference
+        // is exact and the remainder rounds once.
+        let remainder = (self.sum - product) - rounding;
+        let tail = (remainder + self.error) / count;
+        let (value, rest) = two_sum(quotient, tail);
+        let bound = self.slack / count * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50);
+        let ordinary = (value.abs() >= 2f64.powi(-900)) & (value.abs() <= 2f64.powi(900));
+        (value, rest, bound, ordinary)
     }
 
     /// The value nearest the exact total, when the bound says which it is.
@@ -543,21 +585,82 @@ fn plain_avx_f32(values: &[f32]) -> (f64, f64) {
     )
 }
 
+/// [`plain_squares_lanes`] in 256-bit registers, for a CPU that has them.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn plain_squares_avx(values: &[f64], centre: f64) -> f64 {
+    use std::arch::x86_64::_mm256_loadu_pd;
+    plain_squares_avx_with(values, centre, |chunk, half| {
+        // SAFETY: four values from `4 * half` lie inside the chunk.
+        unsafe { _mm256_loadu_pd(chunk.as_ptr().add(4 * half)) }
+    })
+}
+
+/// [`plain_squares_avx`] for float32 values, each four read and widened at
+/// once.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn plain_squares_avx_f32(values: &[f32], centre: f64) -> f64 {
+    use std::arch::x86_64::{_mm_loadu_ps, _mm256_cvtps_pd};
+    plain_squares_avx_with(values, centre, |chunk, half| {
+        // SAFETY: four values from `4 * half` lie inside the chunk.
+        _mm256_cvtps_pd(unsafe { _mm_loadu_ps(chunk.as_ptr().add(4 * half)) })
+    })
+}
+
+/// The lanes of [`plain_squares_lanes`] in two 256-bit registers, `load`
+/// giving half a chunk's values in float64: each deviation and its square
+/// rounded apart, as there.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn plain_squares_avx_with<I: Element>(
+    values: &[I],
+    centre: f64,
+    load: impl Fn(&[I; LANES], usize) -> std::arch::x86_64::__m256d,
+) -> f64 {
+    use std::arch::x86_64::{
+        _mm256_add_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_sub_pd,
+    };
+    let middle = _mm256_set1_pd(centre);
+    let mut sums = [_mm256_setzero_pd(); 2];
+    let (chunks, rest) = values.as_chunks::<LANES>();
+    for chunk in chunks {
+        for half in 0..2 {
+            let deviation = _mm256_sub_pd(load(chunk, half), middle);
+            sums[half] = _mm256_add_pd(sums[half], _mm256_mul_pd(deviation, deviation));
+        }
+    }
+    let mut lanes = [0f64; LANES];
+    for (half, vector) in sums.into_iter().enumerate() {
+        // SAFETY: four lanes from `4 * half` lie inside the array.
+        unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+    }
+    for value in rest {
+        let deviation = value.wide() - centre;
+        lanes[0] += deviation * deviation;
+    }
+    lanes.iter().sum()
+}
+
 /// The plain float64 sum of `values` and of their magnitudes, block by block
 /// with the blocks merged pairwise, and a bound on how far the sum is from
 /// the exact one.
 fn plain_with<I: Element>(values: &[I], parallel: bool) -> (f64, f64) {
-    let partials: Vec<(f64, f64)> = if values.len() <= BLOCK {
-        vec![I::plain_block(values)]
-    } else if parallel && values.len() >= crate::ops::map::PAR_THRESHOLD {
-        let len = values.len();
-        crate::parallel::map_tasks(len.div_ceil(BLOCK), &|nth| {
-            I::plain_block(&values[nth * BLOCK..(nth * BLOCK + BLOCK).min(len)])
-        })
+    let (sum, magnitude) = if values.len() <= BLOCK {
+        I::plain_block(values)
     } else {
-        values.chunks(BLOCK).map(I::plain_block).collect()
+        let partials: Vec<(f64, f64)> =
+            if parallel && values.len() >= crate::ops::map::PAR_THRESHOLD {
+                let len = values.len();
+                crate::parallel::map_tasks(len.div_ceil(BLOCK), &|nth| {
+                    I::plain_block(&values[nth * BLOCK..(nth * BLOCK + BLOCK).min(len)])
+                })
+            } else {
+                values.chunks(BLOCK).map(I::plain_block).collect()
+            };
+        pairwise_fold(partials, (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
     };
-    let (sum, magnitude) = pairwise_fold(partials, (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
     // Through a block's lanes, its lane merge, and the merges of up to 2^64
     // blocks: the recursive-summation bound `γ_k · Σ|x|`, doubled to cover
     // the rounding of `Σ|x|` itself.
@@ -673,8 +776,10 @@ impl Reduction {
     }
 }
 
-/// Columns a task takes of a strided axis.
-const COLUMNS: usize = 512;
+/// Columns a task takes of a strided axis: rows of up to this many are read
+/// whole, one stream through memory, and a band's sums, errors and
+/// magnitudes stay in the first-level cache.
+const COLUMNS: usize = 1024;
 
 /// Below this many tasks across the outputs, a long axis is cut into parts
 /// as well. A count fixed by the shape, so the parts, and the answer, do not
@@ -1757,16 +1862,41 @@ fn root_settled<T: Output>(carried: Carried) -> Option<T> {
     if s1 == 0.0 && s2 == 0.0 && carried.slack == 0.0 {
         return Some(T::narrow(0.0));
     }
-    // Clear of underflow in the square's split; a NaN, an infinity or a
-    // negative total fails this too.
-    let ordinary = (2f64.powi(-900)..=2f64.powi(900)).contains(&s1);
-    let known = s2.abs() + carried.slack <= s1 * 2f64.powi(-30);
-    if !(ordinary && known) {
+    let (value, rest, bound, ordinary) = root_parts::<false>(carried);
+    if !ordinary {
         return None;
     }
+    T::settle(value, rest, bound)
+}
+
+/// [`root_settled`] without branches, for lanes side by side, of a total
+/// that is not an exact zero: the value and whether the bound, which is not
+/// zero, settles it.
+#[inline(always)]
+fn root_lane<T: Output, const FMA: bool>(carried: Carried) -> (T, bool) {
+    let (value, rest, bound, ordinary) = root_parts::<FMA>(carried);
+    let (rounded, settled) = T::settle_lanes(value, rest, bound);
+    (rounded, settled & ordinary)
+}
+
+/// The root of a carried total as a two-sum's pair, the bound on it, and
+/// whether the total is clear of the ends of the range and known well
+/// enough for the bound to hold; the square's error by a fused multiply-add
+/// where `FMA`.
+#[inline(always)]
+fn root_parts<const FMA: bool>(carried: Carried) -> (f64, f64, f64, bool) {
+    let (s1, s2) = two_sum(carried.sum, carried.error);
+    // Clear of underflow in the square's split; a NaN, an infinity or a
+    // negative total fails this too.
+    let ordinary = (s1 >= 2f64.powi(-900)) & (s1 <= 2f64.powi(900));
+    let known = s2.abs() + carried.slack <= s1 * 2f64.powi(-30);
     let root = s1.sqrt();
     let square = root * root;
-    let square_rounding = product_error(root, root, square);
+    let square_rounding = if FMA {
+        root.mul_add(root, -square)
+    } else {
+        product_error(root, root, square)
+    };
     // Within three roundings of `s1`, so the difference is exact.
     let first = (s1 - square) - square_rounding;
     let residual = first + s2;
@@ -1783,7 +1913,7 @@ fn root_settled<T: Output>(carried: Carried) -> Option<T> {
         + correction.abs() * 2f64.powi(-51))
         * (1.0 + 2f64.powi(-40));
     let (value, rest) = two_sum(root, correction);
-    T::settle(value, rest, bound)
+    (value, rest, bound, ordinary & known)
 }
 
 /// The value nearest the exact root of the sum of the squares of `values`.
@@ -1795,6 +1925,739 @@ fn exact_root<T: Output>(values: impl Iterator<Item = f64> + Clone) -> T {
         Err(special) => T::narrow(special.sqrt()),
         Ok(total) => total.square_root(),
     }
+}
+
+/// The value nearest the variance of `values` over `count - ddof`, or with
+/// `root` the value nearest its square root: the exact
+/// `(N Σx² - (Σx)²) / (N (N - ddof))`, NaN for no more values than `ddof`
+/// and for any value that is not finite.
+///
+/// A float32 variance is first taken plainly in float64, by
+/// [`plain_variance`]. Otherwise, and where that cannot say, the sum is
+/// carried and `c`, the float64 nearest the mean it gives, taken as a
+/// centre: the exact squares about it, `Σ (x - c)²`, are carried as
+/// [`distance`] carries a 2-distance's, and [`centred_variance`] settles the
+/// answer from the two -- two passes, a block of values to a task. Where
+/// that cannot say, the variance is formed in whole numbers.
+pub(crate) fn variance_of<I: Element, T: Output>(values: &[I], ddof: usize, root: bool) -> T {
+    let count = values.len();
+    if count <= ddof {
+        return T::narrow(f64::NAN);
+    }
+    if T::PLAIN
+        && let Some(value) = plain_variance(values, ddof, root)
+    {
+        return value;
+    }
+    // A NaN or an infinity among the values leaves the sum one too.
+    let sum = if count < 2 * LANES {
+        one_lane_sum(values)
+    } else {
+        carried_with(values, true)
+    };
+    let centre = sum.sum / count as f64;
+    let settled = centre.is_finite().then(|| {
+        let squares = if count <= BLOCK {
+            deviation_block(values, centre)
+        } else {
+            let blocks = each_block(values, |block| deviation_block(block, centre));
+            pairwise_fold(blocks, Carried::default(), Carried::merge)
+        };
+        centred_variance(sum, squares, centre, count, ddof, root)
+    });
+    settled
+        .flatten()
+        .unwrap_or_else(|| unsettled_variance(values, ddof, root))
+}
+
+/// The variance, or its root, of more than `ddof` values whose bounds did
+/// not settle it: NaN for a value that is not finite, zero for equal values,
+/// and otherwise formed in whole numbers.
+#[cold]
+#[inline(never)]
+fn unsettled_variance<I: Element, T: Output>(values: &[I], ddof: usize, root: bool) -> T {
+    if values.iter().any(|value| !value.wide().is_finite()) {
+        return T::narrow(f64::NAN);
+    }
+    // Equal values, and only those, vary by nothing.
+    let first = values[0].wide();
+    if values.iter().all(|value| value.wide() == first) {
+        return T::narrow(0.0);
+    }
+    exact_variance(
+        values.iter().map(|value| value.wide()),
+        values.len(),
+        ddof,
+        root,
+    )
+}
+
+/// The variance, or its root, of `count` values from their carried `sum`,
+/// `centre`, the float64 nearest its quotient by the count, and the carried
+/// `squares` of their exact deviations from it, when the bounds settle it.
+///
+/// The squares about the mean `μ` are those about `c` less `N (μ - c)²`, a
+/// sliver beside them, which is `d² / N` for `d = Σx - N c`: the sum's
+/// leading part less `N c` is exact, both within a rounding of each other,
+/// and the rest is rounded twice, within the sum's slack beside. The
+/// quotient by the count is settled by its bound, or its root by
+/// [`root_settled`].
+fn centred_variance<T: Output>(
+    sum: Carried,
+    squares: Carried,
+    centre: f64,
+    count: usize,
+    ddof: usize,
+    root: bool,
+) -> Option<T> {
+    let (total, divisor) = (count as f64, (count - ddof) as f64);
+    let (value, settled) = centred_lane::<T, false>(sum, squares, centre, total, divisor, root);
+    settled.then_some(value)
+}
+
+/// [`centred_variance`] without branches, for lanes side by side, of `total`
+/// values over `divisor`: the value and whether the bounds settle it, the
+/// products' errors by fused multiply-adds where `FMA`.
+#[inline(always)]
+fn centred_lane<T: Output, const FMA: bool>(
+    sum: Carried,
+    squares: Carried,
+    centre: f64,
+    total: f64,
+    divisor: f64,
+    root: bool,
+) -> (T, bool) {
+    let product = centre * total;
+    let rounding = if FMA {
+        centre.mul_add(total, -product)
+    } else {
+        product_error(centre, total, product)
+    };
+    let low = sum.error - rounding;
+    let distance = (sum.sum - product) + low;
+    let off = sum.slack + (low.abs() + distance.abs()) * 2f64.powi(-52) + f64::from_bits(2);
+    let sliver = distance * distance / total;
+    // `(|d| + off)² - d²` over `N`, and the sliver's three roundings.
+    let sliver_bound = (2.0 * distance.abs() + off) * off / total * (1.0 + 2f64.powi(-50))
+        + sliver.abs() * 2f64.powi(-50);
+    // A square's error, a cross term or the sliver rounded to the subnormal
+    // range is off by under the least subnormal: fewer than four to a value.
+    let allowance = 4.0 * total * f64::from_bits(1);
+    let error = squares.error - sliver;
+    let centred = Carried {
+        sum: squares.sum,
+        error,
+        slack: squares.slack + sliver_bound + error.abs() * 2f64.powi(-52) + allowance,
+    };
+    let (value, settled) = if root {
+        // The quotient carried, for its root: `q = s / k`, its exact
+        // remainder, and the tail with the error added in, as `divided`
+        // forms it.
+        let quotient = centred.sum / divisor;
+        let product = quotient * divisor;
+        let rounding = if FMA {
+            quotient.mul_add(divisor, -product)
+        } else {
+            product_error(quotient, divisor, product)
+        };
+        let rest = (centred.sum - product) - rounding;
+        let tail = (rest + centred.error) / divisor;
+        root_lane::<T, FMA>(Carried {
+            sum: quotient,
+            error: tail,
+            slack: centred.slack / divisor * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50),
+        })
+    } else {
+        centred.divided_lane::<T, FMA>(divisor)
+    };
+    // A sum, or a centre, past the largest float64 leaves no sliver.
+    (value, settled & sliver.is_finite())
+}
+
+/// A float32 variance, or its root, from plain float64 sums, when their
+/// bound settles it; see [`plain_settled`]. A NaN or an infinity, or a sum
+/// past the largest float64, is left to the carried path.
+fn plain_variance<I: Element, T: Output>(values: &[I], ddof: usize, root: bool) -> Option<T> {
+    let (sum, bound) = plain_with(values, true);
+    let centre = sum / values.len() as f64;
+    if !centre.is_finite() {
+        return None;
+    }
+    let squares = if values.len() <= BLOCK {
+        I::plain_squares(values, centre)
+    } else {
+        let blocks = each_block(values, |block| I::plain_squares(block, centre));
+        pairwise_fold(blocks, 0.0, |a, b| a + b)
+    };
+    let depth = plain_depth(values.len());
+    plain_settled(squares, bound, centre, values.len(), depth, ddof, root)
+}
+
+/// A float32 variance, or its root, of `count` values from plain float64
+/// sums, when their bound settles it; see [`plain_lane`].
+fn plain_settled<T: Output>(
+    squares: f64,
+    bound: f64,
+    centre: f64,
+    count: usize,
+    depth: f64,
+    ddof: usize,
+    root: bool,
+) -> Option<T> {
+    let divisor = (count - ddof) as f64;
+    let (value, settled) = plain_lane(squares, bound, centre, count as f64, depth, divisor, root);
+    settled.then_some(value)
+}
+
+/// A float32 variance, or with `root` its root, of `total` values over
+/// `divisor` from plain float64 sums, and whether their bound settles it,
+/// without branches for lanes side by side: `centre`, the quotient by the
+/// count of a sum within `bound` of the exact one, and `squares`, the sum of
+/// the squares about it, none through more than `depth` additions.
+///
+/// `c` is within `δ` of the mean `μ`, the bound over the count and the
+/// quotient's rounding. Each square about `c` is rounded at most three
+/// times, so `(depth + 6) u` of their sum bounds it, with twice the least
+/// subnormal for each square that may have underflowed; and the squares
+/// about the mean are less than those about `c` by `N (μ - c)² ≤ N δ²`. A
+/// NaN or an infinity settles nothing.
+#[inline(always)]
+fn plain_lane<T: Output>(
+    squares: f64,
+    bound: f64,
+    centre: f64,
+    total: f64,
+    depth: f64,
+    divisor: f64,
+    root: bool,
+) -> (T, bool) {
+    debug_assert!(
+        T::PLAIN,
+        "a plain float64 sum settles a float32 answer only"
+    );
+    let off = bound / total * (1.0 + 2f64.powi(-50)) + centre.abs() * 2f64.powi(-52);
+    let sliver = off * off * total * (1.0 + 2f64.powi(-50));
+    let spread = squares * (depth + 6.0) * 2f64.powi(-52) + total * f64::from_bits(2);
+    let quotient = squares / divisor;
+    let bound = (spread + sliver) / divisor * (1.0 + 2f64.powi(-50)) + quotient * 2f64.powi(-52);
+    let (value, settled) = if root {
+        // The root moves by at most the bound over twice the least root
+        // within it, `sqrt(q - bound) ≥ r (1 - bound / q)` for a bound well
+        // inside the quotient, and is rounded once itself.
+        let root = quotient.sqrt();
+        let moved = bound * (0.5 / root) * (1.0 + 2.0 * bound / quotient) * (1.0 + 2f64.powi(-50))
+            + root * 2f64.powi(-52);
+        let (value, settled) = T::settle_lanes(root, 0.0, moved * (1.0 + 2f64.powi(-40)));
+        (value, settled & (quotient > 4.0 * bound))
+    } else {
+        T::settle_lanes(quotient, 0.0, bound)
+    };
+    // No square at all: each value is within 2^-536 of `c`, so the variance
+    // is under 2^-1000 and its root under 2^-500, and both round to zero in
+    // float32.
+    let zero = squares == 0.0;
+    (if zero { T::narrow(0.0) } else { value }, settled | zero)
+}
+
+/// One block's plain float64 `Σ (x - centre)²` in [`LANES`] lanes, the values
+/// left over in lane 0 and the lanes in order: no square passes through more
+/// than [`plain_depth`] additions.
+#[inline(always)]
+fn plain_squares_lanes<I: Element>(values: &[I], centre: f64) -> f64 {
+    let mut lanes = [0f64; LANES];
+    let (chunks, rest) = values.as_chunks::<LANES>();
+    for chunk in chunks {
+        for lane in 0..LANES {
+            let deviation = chunk[lane].wide() - centre;
+            lanes[lane] += deviation * deviation;
+        }
+    }
+    for value in rest {
+        let deviation = value.wide() - centre;
+        lanes[0] += deviation * deviation;
+    }
+    lanes.iter().sum()
+}
+
+/// A short run's carried total in one lane, with nothing to merge: each
+/// value's rounding passes through one addition to the error.
+#[inline(always)]
+fn one_lane_sum<I: Element>(values: &[I]) -> Carried {
+    let (mut sum, mut error, mut magnitude) = (0.0, 0.0, 0.0);
+    for value in values {
+        let (next, rounding) = two_sum(sum, value.wide());
+        sum = next;
+        error += rounding;
+        magnitude += rounding.abs();
+    }
+    Carried {
+        sum,
+        error,
+        slack: magnitude * (values.len() + LANES) as f64 * 2f64.powi(-52),
+    }
+}
+
+/// `block` of each [`BLOCK`] of `values` in turn, across the pool for a long
+/// run.
+fn each_block<E: Sync, R: Send>(values: &[E], block: impl Fn(&[E]) -> R + Sync) -> Vec<R> {
+    dot_blocks(values, values, |part, _| block(part))
+}
+
+/// [`variance_of`] in whole numbers: `N Σx² - (Σx)²` over `N (N - ddof)`,
+/// or the root of that.
+fn exact_variance<T: Output>(
+    values: impl Iterator<Item = f64> + Clone,
+    count: usize,
+    ddof: usize,
+    root: bool,
+) -> T {
+    let (Ok(squares), Ok(sum)) = (
+        Total::of_products(values.clone().map(|value| (value, value))),
+        Total::of_wide(values),
+    ) else {
+        return T::narrow(f64::NAN);
+    };
+    // Both at the squares' least bit: the sum's square has twice the sum's.
+    let (_, squares_magnitude, squares_least) = squares.difference();
+    let (_, sum_magnitude, sum_least) = sum.difference();
+    debug_assert_eq!(squares_least, 2 * sum_least);
+    let scaled = product_of(&squares_magnitude, &[count as u64]);
+    let square = product_of(&sum_magnitude, &sum_magnitude);
+    let limbs = scaled.len().max(square.len()) + 1;
+    let mut numerator = Total::empty(squares_least, limbs);
+    numerator.positive[..scaled.len()].copy_from_slice(&scaled);
+    numerator.negative[..square.len()].copy_from_slice(&square);
+    let whole = (count as u128) * ((count - ddof) as u128);
+    let mut divisor = Total::empty(0, 3);
+    divisor.positive[0] = whole as u64;
+    divisor.positive[1] = (whole >> 64) as u64;
+    if root {
+        numerator.quotient_root(divisor)
+    } else {
+        numerator.quotient(divisor)
+    }
+}
+
+/// `Σ (x - centre)²` of one block, carried as [`distance_lanes`] carries a
+/// 2-distance's squares, with fused multiply-adds where the CPU has them.
+fn deviation_block<I: Element>(values: &[I], centre: f64) -> Carried {
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn fused_block<I: Element>(values: &[I], centre: f64) -> Carried {
+        if values.len() >= 2 * LANES
+            && let Some(values) = I::as_wide(values)
+        {
+            use std::arch::x86_64::_mm256_set1_pd;
+            return squares_fma(values, |_| _mm256_set1_pd(centre), |_| centre).0;
+        }
+        deviation_lanes::<I, true>(values, centre)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { fused_block(values, centre) };
+    }
+    deviation_lanes::<I, false>(values, centre)
+}
+
+/// [`distance_lanes`]' 2-distance, from every value to one `centre`.
+#[inline(always)]
+fn deviation_lanes<I: Element, const FMA: bool>(values: &[I], centre: f64) -> Carried {
+    let (mut sums, mut errors, mut magnitudes) = ([0f64; LANES], [0f64; LANES], [0f64; LANES]);
+    let mut add = |lane: usize, value: f64| {
+        let (head, tail) = two_sum(value, -centre);
+        let square = head * head;
+        let square_error = if FMA {
+            head.mul_add(head, -square)
+        } else {
+            product_error(head, head, square)
+        };
+        let cross = 2.0 * head * tail + tail * tail;
+        let (sum, rounding) = two_sum(sums[lane], square);
+        sums[lane] = sum;
+        errors[lane] += rounding + (square_error + cross);
+        magnitudes[lane] += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
+    };
+    if values.len() < 2 * LANES {
+        // A short run in one lane, with nothing to merge: each value passes
+        // through three additions to the lane's error.
+        for value in values {
+            add(0, value.wide());
+        }
+        let additions = (3 * values.len() + LANES) as f64;
+        return Carried {
+            sum: sums[0],
+            error: errors[0],
+            slack: magnitudes[0] * additions * 2f64.powi(-52),
+        };
+    }
+    let (chunks, rest) = values.as_chunks::<LANES>();
+    for chunk in chunks {
+        for lane in 0..LANES {
+            add(lane, chunk[lane].wide());
+        }
+    }
+    for value in rest {
+        add(0, value.wide());
+    }
+    // A value passes through three additions to its lane's error.
+    finish(
+        sums,
+        errors,
+        magnitudes,
+        std::iter::empty(),
+        3 * values.len(),
+    )
+}
+
+/// The variance, or with `root` its root, of each column of `values`, laid
+/// out `[outer, len, inner]` -- the `inner` columns of each `[len, inner]`
+/// slab -- as [`variance_of`] gives it, `[outer, inner]` of them.
+///
+/// Two passes run down the columns as [`reduce_axis_exactly`] runs down
+/// them, a band of columns side by side row by row, each column a lane, the
+/// rows cut into parts where there are few bands to share out: one for each
+/// column's sum, and, from the centre that gives, one for the squares about
+/// it, the parts merged pairwise. For float32 both are plain, settled as
+/// [`plain_variance`] settles them; otherwise carried, settled as
+/// [`variance_of`] settles them. A column neither settles is gathered and
+/// handed to [`variance_of`].
+pub(crate) fn column_variances<I: Element, T: Output>(
+    values: &[I],
+    outer: usize,
+    len: usize,
+    inner: usize,
+    ddof: usize,
+    root: bool,
+) -> Vec<T> {
+    debug_assert_eq!(values.len(), outer * len * inner);
+    let outputs = outer * inner;
+    if len <= ddof || outputs == 0 {
+        return vec![T::narrow(f64::NAN); outputs];
+    }
+    let slab = len * inner;
+    let bands = inner.div_ceil(COLUMNS);
+    let parts = if outer * bands >= SPREAD {
+        1
+    } else {
+        len.div_ceil((BLOCK / inner.min(COLUMNS)).max(64))
+    };
+    let rows_per_part = len.div_ceil(parts);
+    let parallel = values.len() >= crate::ops::map::PAR_THRESHOLD;
+    let total = len as f64;
+    let divisor = (len - ddof) as f64;
+    // A value passes through its part's additions and the merges of the
+    // parts, pairwise; a plain sum's magnitudes' rounding is covered twice.
+    let depth = (rows_per_part + parts.ilog2() as usize + 20) as f64;
+    // The columns from output `start` on that their bounds left open,
+    // gathered a group at a time, row by row, and handed to `variance_of`.
+    let reopen = |start: usize, slots: &mut [T], open: Vec<usize>| {
+        for group in open.chunks(BAND) {
+            let mut gathered: Vec<Vec<I>> = vec![Vec::with_capacity(len); group.len()];
+            for row in 0..len {
+                for (column, &offset) in gathered.iter_mut().zip(group) {
+                    let (o, index) = ((start + offset) / inner, (start + offset) % inner);
+                    column.push(values[o * slab + row * inner + index]);
+                }
+            }
+            for (column, &offset) in gathered.iter().zip(group) {
+                slots[offset] = if T::PLAIN {
+                    variance_of(column, ddof, root)
+                } else {
+                    unsettled_variance(column, ddof, root)
+                };
+            }
+        }
+    };
+    let mut out = vec![T::narrow(0.0); outputs];
+    if parts == 1 {
+        // Each band whole in one task, both passes and the settling.
+        let band = |start: usize, slots: &mut [T]| {
+            let (o, first) = (start / inner, start % inner);
+            let columns = first..first + slots.len();
+            let slab = &values[o * slab..][..slab];
+            let sums = column_pass::<I, T>(slab, inner, 0..len, columns.clone(), None);
+            let centres: Vec<f64> = sums.iter().map(|sum| sum.sum / total).collect();
+            let squares = column_pass::<I, T>(slab, inner, 0..len, columns, Some(&centres));
+            let open = column_settle(
+                slots, &sums, &squares, &centres, total, depth, divisor, root,
+            );
+            reopen(start, slots, open);
+        };
+        let per_task = ((1 << 14) / len).max(COLUMNS);
+        let task = |start: usize, slots: &mut [T]| {
+            // Bands of up to `COLUMNS` within each slab the task's outputs meet.
+            let end = start + slots.len();
+            let mut index = start;
+            while index < end {
+                let width = (inner - index % inner).min(COLUMNS).min(end - index);
+                band(index, &mut slots[index - start..][..width]);
+                index += width;
+            }
+        };
+        if parallel {
+            crate::ops::map::par_out_chunks(&mut out, per_task, &task);
+        } else {
+            task(0, &mut out);
+        }
+        return out;
+    }
+    // A pass, each column's parts merged pairwise, columns in output order.
+    let pass = |centres: Option<&[f64]>| -> Vec<Carried> {
+        let task = |nth: usize| {
+            let (o, rest) = (nth / (bands * parts), nth % (bands * parts));
+            let (band, part) = (rest / parts, rest % parts);
+            let columns = band * COLUMNS..((band + 1) * COLUMNS).min(inner);
+            let rows = (part * rows_per_part).min(len)..((part + 1) * rows_per_part).min(len);
+            let centres = centres.map(|centres| &centres[o * inner..][columns.clone()]);
+            column_pass::<I, T>(&values[o * slab..][..slab], inner, rows, columns, centres)
+        };
+        let tasks = outer * bands * parts;
+        let partials: Vec<Vec<Carried>> = if parallel {
+            crate::parallel::map_tasks(tasks, &task)
+        } else {
+            (0..tasks).map(task).collect()
+        };
+        let mut partials = partials.into_iter();
+        let mut merged = Vec::with_capacity(outputs);
+        for _ in 0..outer * bands {
+            let group: Vec<Vec<Carried>> = partials.by_ref().take(parts).collect();
+            merged.extend(if T::PLAIN {
+                pairwise_fold_vectors(group, |a, b| Carried {
+                    sum: a.sum + b.sum,
+                    error: 0.0,
+                    slack: a.slack + b.slack,
+                })
+            } else {
+                pairwise_fold_vectors(group, Carried::merge)
+            });
+        }
+        merged
+    };
+    let sums = pass(None);
+    let centres: Vec<f64> = sums.iter().map(|sum| sum.sum / total).collect();
+    let squares = pass(Some(&centres));
+    let settle = |start: usize, slots: &mut [T]| {
+        let index = start..start + slots.len();
+        let (sums, squares, centres) = (
+            &sums[index.clone()],
+            &squares[index.clone()],
+            &centres[index],
+        );
+        let open = column_settle(slots, sums, squares, centres, total, depth, divisor, root);
+        reopen(start, slots, open);
+    };
+    if parallel {
+        crate::ops::map::par_out_chunks(&mut out, crate::ops::map::PAR_CHUNK, &settle);
+    } else {
+        settle(0, &mut out);
+    }
+    out
+}
+
+/// One part of a pass of [`column_variances`], in the widest build the CPU
+/// runs; see [`column_part`].
+fn column_pass<I: Element, T: Output>(
+    slab: &[I],
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    columns: std::ops::Range<usize>,
+    centres: Option<&[f64]>,
+) -> Vec<Carried> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,fma")]
+        fn with_fma<I: Element, const PLAIN: bool>(
+            slab: &[I],
+            inner: usize,
+            rows: std::ops::Range<usize>,
+            columns: std::ops::Range<usize>,
+            centres: Option<&[f64]>,
+        ) -> Vec<Carried> {
+            column_part::<I, PLAIN, true>(slab, inner, rows, columns, centres)
+        }
+        #[target_feature(enable = "avx")]
+        fn with_avx<I: Element, const PLAIN: bool>(
+            slab: &[I],
+            inner: usize,
+            rows: std::ops::Range<usize>,
+            columns: std::ops::Range<usize>,
+            centres: Option<&[f64]>,
+        ) -> Vec<Carried> {
+            column_part::<I, PLAIN, false>(slab, inner, rows, columns, centres)
+        }
+        if fused() {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe {
+                if T::PLAIN {
+                    with_fma::<I, true>(slab, inner, rows, columns, centres)
+                } else {
+                    with_fma::<I, false>(slab, inner, rows, columns, centres)
+                }
+            };
+        }
+        if crate::ops::simd::simd_capabilities().avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe {
+                if T::PLAIN {
+                    with_avx::<I, true>(slab, inner, rows, columns, centres)
+                } else {
+                    with_avx::<I, false>(slab, inner, rows, columns, centres)
+                }
+            };
+        }
+    }
+    if T::PLAIN {
+        column_part::<I, true, false>(slab, inner, rows, columns, centres)
+    } else {
+        column_part::<I, false, false>(slab, inner, rows, columns, centres)
+    }
+}
+
+/// The `columns` of a `[len, inner]` slab over `rows`, each column a lane
+/// that runs down its values: with no centres, each column's plain sum and
+/// the sum of its magnitudes, in `sum` and `slack` (`PLAIN`), or its carried
+/// total; with a centre to each column, the plain sum of the squares about
+/// it (`PLAIN`), or their carried total, each deviation taken exactly as
+/// [`deviation_lanes`] takes it, the square's error by a fused multiply-add
+/// where `FMA`. The columns are independent, so each row's loop vectorizes.
+#[inline(always)]
+fn column_part<I: Element, const PLAIN: bool, const FMA: bool>(
+    slab: &[I],
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    columns: std::ops::Range<usize>,
+    centres: Option<&[f64]>,
+) -> Vec<Carried> {
+    let width = columns.len();
+    let (mut sums, mut errors, mut magnitudes) =
+        (vec![0f64; width], vec![0f64; width], vec![0f64; width]);
+    let row = |index: usize| &slab[index * inner + columns.start..][..width];
+    if let Some(centres) = centres {
+        for index in rows.clone() {
+            let lanes = sums.iter_mut().zip(&mut errors).zip(&mut magnitudes);
+            for ((((sum, error), magnitude), &centre), value) in lanes.zip(centres).zip(row(index))
+            {
+                if PLAIN {
+                    let deviation = value.wide() - centre;
+                    *sum += deviation * deviation;
+                    continue;
+                }
+                let (head, tail) = two_sum(value.wide(), -centre);
+                let square = head * head;
+                let square_error = if FMA {
+                    head.mul_add(head, -square)
+                } else {
+                    product_error(head, head, square)
+                };
+                let cross = 2.0 * head * tail + tail * tail;
+                let (next, rounding) = two_sum(*sum, square);
+                *sum = next;
+                *error += rounding + (square_error + cross);
+                *magnitude += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
+            }
+        }
+    } else {
+        for index in rows.clone() {
+            let lanes = sums.iter_mut().zip(&mut errors).zip(&mut magnitudes);
+            for (((sum, error), magnitude), value) in lanes.zip(row(index)) {
+                let value = value.wide();
+                if PLAIN {
+                    *sum += value;
+                    *magnitude += value.abs();
+                    continue;
+                }
+                let (next, rounding) = two_sum(*sum, value);
+                *sum = next;
+                *error += rounding;
+                *magnitude += rounding.abs();
+            }
+        }
+    }
+    // A value's roundings pass through one addition to its lane's error, a
+    // deviation's through three.
+    let steps = if centres.is_some() { 3 } else { 1 };
+    let additions = (steps * rows.len() + LANES) as f64;
+    (0..width)
+        .map(|lane| Carried {
+            sum: sums[lane],
+            error: errors[lane],
+            slack: if PLAIN {
+                magnitudes[lane]
+            } else {
+                magnitudes[lane] * additions * 2f64.powi(-52)
+            },
+        })
+        .collect()
+}
+
+/// The columns of [`column_variances`] settled side by side into `slots`,
+/// with fused multiply-adds where the CPU has them, and the offsets of those
+/// their bounds did not settle.
+#[allow(clippy::too_many_arguments)]
+fn column_settle<T: Output>(
+    slots: &mut [T],
+    sums: &[Carried],
+    squares: &[Carried],
+    centres: &[f64],
+    total: f64,
+    depth: f64,
+    divisor: f64,
+    root: bool,
+) -> Vec<usize> {
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    #[allow(clippy::too_many_arguments)]
+    fn with_fma<T: Output>(
+        slots: &mut [T],
+        sums: &[Carried],
+        squares: &[Carried],
+        centres: &[f64],
+        total: f64,
+        depth: f64,
+        divisor: f64,
+        root: bool,
+    ) -> Vec<usize> {
+        column_settle_lanes::<T, true>(slots, sums, squares, centres, total, depth, divisor, root)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { with_fma(slots, sums, squares, centres, total, depth, divisor, root) };
+    }
+    column_settle_lanes::<T, false>(slots, sums, squares, centres, total, depth, divisor, root)
+}
+
+/// [`column_settle`]'s columns: plainly, by [`plain_lane`], for float32,
+/// from each sum's magnitudes and `depth`; carried, by [`centred_lane`],
+/// otherwise.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn column_settle_lanes<T: Output, const FMA: bool>(
+    slots: &mut [T],
+    sums: &[Carried],
+    squares: &[Carried],
+    centres: &[f64],
+    total: f64,
+    depth: f64,
+    divisor: f64,
+    root: bool,
+) -> Vec<usize> {
+    let mut open = Vec::new();
+    let lanes = slots.iter_mut().zip(sums).zip(squares).zip(centres);
+    for (offset, (((slot, &sum), &squares), &centre)) in lanes.enumerate() {
+        let (value, settled) = if T::PLAIN {
+            let bound = sum.slack * depth * 2f64.powi(-52);
+            plain_lane(squares.sum, bound, centre, total, depth, divisor, root)
+        } else {
+            centred_lane::<T, FMA>(sum, squares, centre, total, divisor, root)
+        };
+        *slot = value;
+        if !settled {
+            open.push(offset);
+        }
+    }
+    open
 }
 
 /// The value nearest the exact distance between `x` and `y`, each difference
@@ -2000,12 +2863,40 @@ fn distance_block<I: Element>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> 
 }
 
 /// [`distance_lanes`] for the unshifted 2-distance of float64 rows, in
-/// 256-bit registers with fused multiply-adds: the same lanes and terms,
-/// written out because the compiler kept the two-sums scalar. The cross
-/// terms are one fused multiply-add rounding fewer, inside the same bound.
+/// 256-bit registers with fused multiply-adds; see [`squares_fma`].
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 fn euclidean_block_fma(x: &[f64], y: &[f64]) -> DistancePart {
+    use std::arch::x86_64::_mm256_loadu_pd;
+    debug_assert_eq!(x.len(), y.len());
+    let (carried, finite) = squares_fma(
+        x,
+        // SAFETY: `y` is as long as `x`, and only four values that `x` has
+        // too, from `index` on, are read.
+        |index| unsafe { _mm256_loadu_pd(y.as_ptr().add(index)) },
+        |index| y[index],
+    );
+    DistancePart {
+        carried,
+        loose: 0.0,
+        finite,
+        unsure: false,
+    }
+}
+
+/// The carried `Σ (x - y)²` of one block, and whether every difference was
+/// finite, with `y` given four at a time from an index by `load` and one at
+/// a time by `at`: [`distance_lanes`]' lanes and terms for the unshifted
+/// 2-distance in 256-bit registers with fused multiply-adds, written out
+/// because the compiler kept the two-sums scalar. The cross terms are one
+/// fused multiply-add rounding fewer, inside the same bound.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn squares_fma(
+    x: &[f64],
+    load: impl Fn(usize) -> std::arch::x86_64::__m256d,
+    at: impl Fn(usize) -> f64,
+) -> (Carried, bool) {
     use std::arch::x86_64::{
         __m256d, _CMP_LT_OQ, _mm256_add_pd, _mm256_and_pd, _mm256_andnot_pd, _mm256_cmp_pd,
         _mm256_fmadd_pd, _mm256_fmsub_pd, _mm256_loadu_pd, _mm256_movemask_pd, _mm256_mul_pd,
@@ -2020,17 +2911,12 @@ fn euclidean_block_fma(x: &[f64], y: &[f64]) -> DistancePart {
     );
     // All ones while every difference is finite.
     let mut finite = _mm256_cmp_pd(_mm256_setzero_pd(), infinity, _CMP_LT_OQ);
-    let (left, left_rest) = x.as_chunks::<LANES>();
-    let (right, right_rest) = y.as_chunks::<LANES>();
-    for (a, b) in left.iter().zip(right) {
+    let (chunks, rest) = x.as_chunks::<LANES>();
+    for (nth, chunk) in chunks.iter().enumerate() {
         for half in 0..2 {
-            // SAFETY: four values from `4 * half` lie inside each chunk.
-            let (a, b) = unsafe {
-                (
-                    _mm256_loadu_pd(a.as_ptr().add(4 * half)),
-                    _mm256_loadu_pd(b.as_ptr().add(4 * half)),
-                )
-            };
+            // SAFETY: four values from `4 * half` lie inside the chunk.
+            let a = unsafe { _mm256_loadu_pd(chunk.as_ptr().add(4 * half)) };
+            let b = load(LANES * nth + 4 * half);
             // `a - b` and its exact error, by a two-sum.
             let head = _mm256_sub_pd(a, b);
             let virtual_b = _mm256_sub_pd(a, head);
@@ -2074,8 +2960,9 @@ fn euclidean_block_fma(x: &[f64], y: &[f64]) -> DistancePart {
     };
     let (mut sums, mut errors, mut magnitudes) = (unpack(sums), unpack(errors), unpack(magnitudes));
     let mut all_finite = _mm256_movemask_pd(finite) == 0b1111;
-    for (&a, &b) in left_rest.iter().zip(right_rest) {
-        let (head, tail) = two_sum(a, -b);
+    let start = LANES * chunks.len();
+    for (offset, &a) in rest.iter().enumerate() {
+        let (head, tail) = two_sum(a, -at(start + offset));
         all_finite &= head.is_finite();
         let square = head * head;
         let square_error = head.mul_add(head, -square);
@@ -2085,12 +2972,9 @@ fn euclidean_block_fma(x: &[f64], y: &[f64]) -> DistancePart {
         errors[0] += rounding + (square_error + cross);
         magnitudes[0] += rounding.abs() + square_error.abs() + 2.0 * cross.abs();
     }
-    DistancePart {
-        carried: finish(sums, errors, magnitudes, std::iter::empty(), 3 * x.len()),
-        loose: 0.0,
-        finite: all_finite,
-        unsure: false,
-    }
+    // A value passes through three additions to its lane's error.
+    let carried = finish(sums, errors, magnitudes, std::iter::empty(), 3 * x.len());
+    (carried, all_finite)
 }
 
 /// One block of a distance in [`LANES`] lanes, each difference taken
@@ -3679,6 +4563,51 @@ impl Total {
         )
     }
 
+    /// The value nearest the root of this sum over `divisor`'s, both not
+    /// negative: the quotient's leading 125 to 127 bits by long division, at
+    /// an even exponent, rooted as a whole number, with whether anything is
+    /// left of the division or the root marked below. NaN over zero.
+    fn quotient_root<T: Output>(self, divisor: Self) -> T {
+        let (_, numerator, least) = self.difference();
+        let (_, divisor, divisor_least) = divisor.difference();
+        let bits = |limbs: &[u64]| {
+            limbs
+                .iter()
+                .rposition(|&limb| limb != 0)
+                .map_or(0, |top| 64 * top + 64 - limbs[top].leading_zeros() as usize)
+        };
+        let (top, bottom) = (bits(&numerator), bits(&divisor));
+        if bottom == 0 {
+            return T::narrow(f64::NAN);
+        }
+        if top == 0 {
+            return T::narrow(0.0);
+        }
+        // A dividend `bottom + 125` bits long, or one more where that leaves
+        // the quotient's exponent odd.
+        let mut shift = bottom as i64 + 125 - top as i64;
+        if (i64::from(least) - i64::from(divisor_least) - shift).rem_euclid(2) != 0 {
+            shift += 1;
+        }
+        let (mut remainder, divisor) = if shift >= 0 {
+            (shifted(&numerator, shift as usize), divisor)
+        } else {
+            (numerator, shifted(&divisor, (-shift) as usize))
+        };
+        let mut quotient = 0u128;
+        for bit in (0..127).rev() {
+            let step = shifted(&divisor, bit);
+            if at_least(&remainder, &step) {
+                subtract(&mut remainder, &step);
+                quotient |= 1 << bit;
+            }
+        }
+        let root = quotient.isqrt();
+        let inexact = remainder.iter().any(|&limb| limb != 0) || root * root != quotient;
+        let exponent = (i64::from(least) - i64::from(divisor_least) - shift) / 2 - 1;
+        rounded(false, (root << 1) | u128::from(inexact), exponent as i32)
+    }
+
     /// The value nearest the root of this sum, which is not negative: the
     /// leading 127 or 128 bits of its magnitude, at an even exponent, rooted
     /// as a whole number, with whether anything is left marked below.
@@ -3760,6 +4689,30 @@ impl Total {
         }
         rounded_at(negative, &limbs, remainder != 0, least - 64)
     }
+}
+
+/// `a · b` of two magnitudes in limbs, schoolbook.
+fn product_of(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = vec![0u64; a.len() + b.len() + 1];
+    for (i, &x) in a.iter().enumerate() {
+        if x == 0 {
+            continue;
+        }
+        let mut carry = 0u128;
+        for (j, &y) in b.iter().enumerate() {
+            let sum = u128::from(out[i + j]) + u128::from(x) * u128::from(y) + carry;
+            out[i + j] = sum as u64;
+            carry = sum >> 64;
+        }
+        let mut index = i + b.len();
+        while carry != 0 {
+            let sum = u128::from(out[index]) + carry;
+            out[index] = sum as u64;
+            carry = sum >> 64;
+            index += 1;
+        }
+    }
+    out
 }
 
 /// `limbs << bits`, in little-endian 64-bit limbs with room for every bit.
@@ -4989,6 +5942,176 @@ mod tests {
             distance::<f32, f32>(&[1.5, -2.0], &[1.5, -2.0], false, 0.0),
             0.0
         );
+    }
+
+    /// Whether `got` is the variance of `values` -- or with `root` its root --
+    /// nearest the exact one: `N Σx² - (Σx)²` against the halfway points
+    /// either side, scaled by `N (N - ddof)`.
+    fn nearest_variance(
+        values: &[f64],
+        ddof: usize,
+        root: bool,
+        got: f64,
+        gaps: (f64, f64),
+        even: bool,
+    ) -> bool {
+        let count = values.len() as f64;
+        let scale = count * (count - ddof as f64);
+        let mut numerator: Vec<(f64, f64, f64)> = values.iter().map(|&x| (x, x, count)).collect();
+        for &x in values {
+            for &y in values {
+                numerator.push((-x, y, 1.0));
+            }
+        }
+        if !root {
+            return nearest_value(&numerator, scale, got, gaps, even);
+        }
+        let (down, up) = gaps;
+        let sign = |extra: [(f64, f64, f64); 3], negate: bool| {
+            let all: Vec<(f64, f64, f64)> = numerator
+                .iter()
+                .map(|&(x, y, z)| if negate { (-x, y, z) } else { (x, y, z) })
+                .chain(extra)
+                .collect();
+            let (negative, limbs, _) = Total::of_terms(&all).difference();
+            match (limbs.iter().all(|&limb| limb == 0), negative) {
+                (true, _) => 0,
+                (false, true) => -1,
+                (false, false) => 1,
+            }
+        };
+        let low = if got == 0.0 {
+            1
+        } else {
+            sign(
+                [
+                    (-got, got, scale),
+                    (got, down, scale),
+                    (-down, down, scale * 0.25),
+                ],
+                false,
+            )
+        };
+        let high = sign(
+            [(got, got, scale), (got, up, scale), (up, up, scale * 0.25)],
+            true,
+        );
+        let inside = |side: i32| side > 0 || (side == 0 && even);
+        inside(low) && inside(high)
+    }
+
+    #[test]
+    fn variances_and_their_roots_round_once() {
+        let mut next = generator(0x1f83_d9ab_fb41_bd6b);
+        let mut draw = move |spread: u64| {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let exponent = (next() % (2 * spread + 1)) as i32 - spread as i32;
+            unit * 2f64.powi(exponent)
+        };
+        for round in 0..800 {
+            let len = 2 + round % 70;
+            let mut values: Vec<f64> = (0..len).map(|_| draw([2, 20, 200][round % 3])).collect();
+            match round % 5 {
+                // Offset data, nearly constant data, and whole numbers.
+                0 => values.iter_mut().for_each(|v| *v += 1e6),
+                1 => values.iter_mut().for_each(|v| *v = 1.0 + *v * 1e-12),
+                2 => values.iter_mut().for_each(|v| *v = (*v * 64.0).round()),
+                _ => {}
+            }
+            for (ddof, root) in [(0, false), (1, false), (0, true), (1, true)] {
+                let got: f64 = variance_of(&values, ddof, root);
+                let even = got.to_bits() & 1 == 0;
+                assert!(
+                    nearest_variance(&values, ddof, root, got, gaps_wide(got), even),
+                    "round {round} ddof {ddof} root {root}: {got:e}"
+                );
+                let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                let got: f32 = variance_of(&narrow, ddof, root);
+                if got.is_finite() {
+                    let wide: Vec<f64> = narrow.iter().map(|&v| f64::from(v)).collect();
+                    let even = got.to_bits() & 1 == 0;
+                    assert!(
+                        nearest_variance(&wide, ddof, root, f64::from(got), gaps_narrow(got), even),
+                        "round {round} ddof {ddof} root {root}: {got:e} in float32"
+                    );
+                }
+            }
+        }
+        // Constant slices, one value, too few for the correction, and specials.
+        assert_eq!(variance_of::<f64, f64>(&[2.5, 2.5, 2.5], 1, false), 0.0);
+        assert_eq!(variance_of::<f64, f64>(&[-0.0, 0.0], 0, true), 0.0);
+        assert_eq!(variance_of::<f64, f64>(&[7.0], 0, false), 0.0);
+        assert!(variance_of::<f64, f64>(&[7.0], 1, false).is_nan());
+        assert!(variance_of::<f64, f64>(&[], 0, true).is_nan());
+        assert!(variance_of::<f64, f64>(&[1.0, f64::INFINITY], 1, false).is_nan());
+        // Squares past the largest float64, where the variance is not.
+        let big: f64 = variance_of(&[1e200, -1e200], 1, true);
+        let want = (2f64).sqrt() * 1e200;
+        assert!((big - want).abs() <= want * 2f64.powi(-52), "{big:e}");
+        assert_eq!(variance_of::<f64, f64>(&[3e-200, -1e-200], 0, true), 2e-200);
+    }
+
+    #[test]
+    fn column_variances_match_each_column_alone() {
+        let mut next = generator(0x5be0_cd19_137e_2179);
+        let mut draw = move |spread: u64| {
+            let unit = (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let exponent = (next() % (2 * spread + 1)) as i32 - spread as i32;
+            unit * 2f64.powi(exponent)
+        };
+        // One slab cut into parts down its rows, and many slabs whole.
+        for (outer, len, inner) in [(1, 300, 40), (70, 5, 9), (3, 2, 33), (2, 1000, 17)] {
+            for kind in 0..4 {
+                let mut values: Vec<f64> = (0..outer * len * inner)
+                    .map(|_| draw([2, 30, 300][kind % 3]))
+                    .collect();
+                for (index, value) in values.iter_mut().enumerate() {
+                    let column = index % inner;
+                    match (kind, column % 5) {
+                        // Constant columns, offset ones, and specials.
+                        (_, 0) => *value = column as f64 * 0.25,
+                        (1, 1) => *value += 1e9,
+                        (2, 2) if index / inner % len == len / 2 => *value = f64::NAN,
+                        (3, 2) if index / inner % len == 0 => *value = f64::INFINITY,
+                        _ => {}
+                    }
+                }
+                let narrow: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                let column = |slab: usize, index: usize| -> Vec<f64> {
+                    (0..len)
+                        .map(|row| values[slab * len * inner + row * inner + index])
+                        .collect()
+                };
+                for (ddof, root) in [(0, false), (1, false), (0, true), (1, true)] {
+                    let wide: Vec<f64> = column_variances(&values, outer, len, inner, ddof, root);
+                    let thin: Vec<f32> = column_variances(&narrow, outer, len, inner, ddof, root);
+                    for slab in 0..outer {
+                        for index in 0..inner {
+                            let alone = column(slab, index);
+                            let want: f64 = variance_of(&alone, ddof, root);
+                            let got = wide[slab * inner + index];
+                            assert!(
+                                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                                "{outer}x{len}x{inner} kind {kind} ({slab}, {index}): {got:e} {want:e}"
+                            );
+                            let alone: Vec<f32> = alone.iter().map(|&v| v as f32).collect();
+                            let want: f32 = variance_of(&alone, ddof, root);
+                            let got = thin[slab * inner + index];
+                            assert!(
+                                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                                "{outer}x{len}x{inner} kind {kind} ({slab}, {index}): {got:e} {want:e} in float32"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Too few values for the correction, and no values at all.
+        let none: Vec<f64> = column_variances(&[1.0, 2.0], 1, 1, 2, 1, false);
+        assert!(none.iter().all(|value| value.is_nan()));
+        let empty: Vec<f64> = column_variances::<f64, f64>(&[], 2, 0, 3, 0, true);
+        assert_eq!(empty.len(), 6);
+        assert!(empty.iter().all(|value| value.is_nan()));
     }
 
     #[test]

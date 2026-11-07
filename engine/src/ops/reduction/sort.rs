@@ -4,9 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::sum_prod_impl::{
-    ProdFloat, column_band, fold_column_band, fold_lanes, fold_slab_with, prod_run, row_band,
-};
+use super::sum_prod_impl::{ProdFloat, prod_run};
 use super::*;
 use crate::ops::map::{
     SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
@@ -18,9 +16,7 @@ use crate::ops::order::{
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
-use crate::ops::util::{
-    Accumulate, accumulating_dtype, accurate_run_sum, deterministic_par_sum, pairwise_fold,
-};
+use crate::ops::util::{Accumulate, accumulating_dtype, deterministic_par_sum, pairwise_fold};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -704,42 +700,27 @@ pub fn argsort(
     Ok(indices)
 }
 
-/// Standard deviation along specified dimensions
-///
-/// From the variance, except where that left the float range -- overflowed,
-/// or underflowed into the subnormals -- when the root is taken of the
-/// variance of each slice scaled by a power of two and scaled back:
-/// `[1e200, -1e200]` has a standard deviation of `1.4e200`, though its
-/// variance is past the top of float64. See [`rescaled`]. A float32 tensor
-/// is carried in float64, its root too, and rounded once.
+/// Standard deviation along specified dimensions: each the float nearest
+/// the exact root of its slice's variance; see [`var`]. An integer tensor's
+/// is a float, float32 for int32 and float64 for int64. The gradient is the
+/// variance's through the root, zero where a slice is constant.
 pub fn std(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    match tensor.dtype() {
-        DataType::Int32 | DataType::Int64 => {
-            let dims = statistic_dims(tensor, &dim)?;
-            let deviations = integer_deviations(tensor, &dims)?;
-            return narrow_statistic(std(&deviations, dim, keepdim, unbiased)?, tensor);
-        }
-        // Carried in float64 and rounded once, the root included: the root
-        // of a float32 variance past the top of float32 is not.
-        DataType::Float32 => {
-            let variance = var_direct(tensor, dim, keepdim, unbiased)?;
-            return std_from_variance(&variance)?.astype(DataType::Float32);
-        }
-        _ => {}
+    let root = rounded_variance(tensor, dim.clone(), keepdim, unbiased, true)?;
+    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+        return Ok(root);
     }
-    let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
-        return std_from_variance(&variance);
-    };
-    let (variance, scales) = rescaled(tensor, &scales, |scaled| {
-        var_direct(scaled, dim, keepdim, unbiased)
-    })?;
-    crate::ops::arithmetic::mul(&std_from_variance(&variance)?, &scales)
+    let variance = var(tensor, dim, keepdim, unbiased)?;
+    let output = root.requires_grad_(true);
+    let grad_fn = Arc::new(crate::autograd::StdBackward {
+        input_id: variance.id(),
+        output: output.clone().detach(),
+    });
+    crate::autograd::with_grad_fn(output, grad_fn)
 }
 
 /// The axes a statistic over `dim` reduces, every one when `dim` is `None`.
@@ -826,457 +807,207 @@ pub(crate) fn std_from_variance(variance: &Tensor) -> Result<Tensor> {
     crate::autograd::with_grad_fn(output, grad_fn)
 }
 
-/// Variance along specified dimensions
+/// Variance along specified dimensions: each the float nearest the exact
+/// `(N Σx² - (Σx)²) / (N (N - ddof))` of its slice, `ddof` one when
+/// `unbiased`; see `arithmetic::exact_sum::variance_of`.
 ///
 /// An integer argument widens rather than being refused, the rule `mean`
-/// already follows -- a variance of integers is a real number -- and does so
-/// after its slices are shifted to start at zero, exactly; see
-/// [`integer_deviations`]. A float32 variance is carried in float64 and
-/// rounded once; a float64 one whose sum of squares left the range is taken
-/// again over scaled slices; see [`rescaled`].
+/// already follows -- a variance of integers is a real number -- read exactly
+/// in float64 and rounded once to float32 for int32. A slice with no more
+/// values than `ddof` has a variance of NaN, and so has one holding a NaN or
+/// an infinity; squares past the top of the float range are taken exactly.
+/// The gradient is `2 (x - mean) / (N - ddof)`.
 pub fn var(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
 ) -> Result<Tensor> {
-    match tensor.dtype() {
-        DataType::Int32 | DataType::Int64 => {
-            let dims = statistic_dims(tensor, &dim)?;
-            let deviations = integer_deviations(tensor, &dims)?;
-            return narrow_statistic(var(&deviations, dim, keepdim, unbiased)?, tensor);
-        }
-        DataType::Float32 => {
-            return var_direct(tensor, dim, keepdim, unbiased)?.astype(DataType::Float32);
-        }
-        _ => {}
+    let values = rounded_variance(tensor, dim.clone(), keepdim, unbiased, false)?;
+    if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+        return Ok(values);
     }
-    let variance = var_direct(tensor, dim.clone(), keepdim, unbiased)?;
-    let Some(scales) = variance_rescue(tensor, &dim, &variance, unbiased)? else {
-        return Ok(variance);
-    };
-    let (variance, scales) = rescaled(tensor, &scales, |scaled| {
-        var_direct(scaled, dim, keepdim, unbiased)
-    })?;
-    // Once and then again, not by the square of the scale, which can overflow
-    // where the variance does not.
-    let once = crate::ops::arithmetic::mul(&variance, &scales)?;
-    crate::ops::arithmetic::mul(&once, &scales)
+    let dims = statistic_dims(tensor, &dim)?;
+    let count: usize = dims
+        .iter()
+        .map(|&axis| tensor.shape().dims()[axis])
+        .product();
+    let output = values.requires_grad_(true);
+    let grad_fn = Arc::new(VarianceBackward {
+        input: tensor.detach(),
+        dims,
+        keepdim,
+        divisor: count as f64 - f64::from(u8::from(unbiased)),
+        input_ids: [tensor.id()],
+    });
+    crate::autograd::with_grad_fn(output, grad_fn)
 }
 
-/// A statistic of an integer tensor's float64 deviations, in the dtype the
-/// tensor's statistics widen to: float32 for int32, rounded once from the
-/// float64 it was carried in, and float64 for int64.
-fn narrow_statistic(statistic: Tensor, tensor: &Tensor) -> Result<Tensor> {
-    if tensor.dtype() == DataType::Int32 {
-        statistic.astype(DataType::Float32)
-    } else {
-        Ok(statistic)
-    }
-}
-
-/// The variance as computed directly, in float64 -- a float32 tensor is
-/// carried there, where neither its squares nor their sum can leave the range
-/// or lose a digit the float32 answer keeps, and its caller rounds once.
-///
-/// Over no axes each slice is one element, whose variance is zero, or NaN
-/// unbiased; it was the tensor itself.
-fn var_direct(
+/// The variance of each slice of `tensor` over `dim`, or with `root` its
+/// standard deviation, rounded once; no gradient.
+fn rounded_variance(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
     keepdim: bool,
     unbiased: bool,
+    root: bool,
 ) -> Result<Tensor> {
-    if !tensor.dtype().is_float() {
-        return Err(MinitensorError::invalid_operation(
-            "Variance only supported for floating point tensors",
-        ));
-    }
-
-    let dims = normalize_reduction_dims(dim, tensor.ndim())?;
-    let reduction_dims: Vec<usize> = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
-
-    // Fused fast path: single-axis variance for tensors that don't require
-    // gradients. Computes the mean and the deviations' sums in two
-    // cache-friendly passes, avoiding the full-size difference/square
-    // intermediates that the autograd composition below materializes. The
-    // gradient path is left entirely to that composition.
-    if !tensor.requires_grad()
-        && reduction_dims.len() == 1
-        && tensor.shape().dims()[reduction_dims[0]] >= 1
-    {
-        return var_fused_single_axis(tensor, reduction_dims[0], keepdim, unbiased);
-    }
-
-    let reduction_dims_isize: Vec<isize> = reduction_dims.iter().map(|&d| d as isize).collect();
-    if tensor.dtype() == DataType::Float32 {
-        let wide = tensor.astype(DataType::Float64)?;
-        return var_direct(&wide, Some(reduction_dims_isize), keepdim, unbiased);
-    }
-
-    // Keep reduced axes while computing deviations so broadcasting is unambiguous for
-    // both single-axis and multi-axis reductions.
-    let mean_tensor = mean(tensor, Some(reduction_dims_isize.clone()), true)?;
-    let diff = crate::ops::arithmetic::sub(tensor, &mean_tensor)?;
-    let squared_diff = crate::ops::arithmetic::mul(&diff, &diff)?;
-    let squares = sum(&squared_diff, Some(reduction_dims_isize.clone()), true)?;
-    let sample_count = reduction_dims
-        .iter()
-        .map(|&axis| tensor.shape().dims()[axis])
-        .product::<usize>() as f64;
-    // Less the deviations' own sum squared over the count, the rounding of
-    // `mean_tensor`; see `DeviationSums::centred_squares`. Its gradient is
-    // zero, the deviations summing to zero whatever the input, so this
-    // changes the value alone.
-    let offset = sum(&diff, Some(reduction_dims_isize), true)?;
-    let shift = crate::ops::arithmetic::mul(&offset, &divide_by_count(&offset, sample_count)?)?;
-    let centred = crate::ops::minmax::maximum(
-        &crate::ops::arithmetic::sub(&squares, &shift)?,
-        &crate::ops::util::create_scalar_tensor(0.0, squares.dtype(), squares.device())?,
-    )?;
-
-    // The centred squares over the count, or the count less one: one division,
-    // where the mean of the squares times `n / (n - 1)` rounded twice. A
-    // single sample leaves Bessel's divisor zero, and its centred squares are
-    // zero too, so the quotient is NaN -- the honest answer for an undefined
-    // correction.
-    //
-    // That case goes through the same division as any other rather than
-    // substituting a freshly built NaN tensor. A replacement carries a new
-    // tensor id, no `grad_fn` and no graph node, so while it inherited
-    // `requires_grad` it had nothing behind it: `x.var(1)` on a width-1 axis
-    // reported `requires_grad = true` and then left `x` with no gradient at
-    // all after `backward()`. A missing gradient reads as "this parameter was
-    // not used" and an optimizer skips it silently, where the NaN this
-    // produces says plainly that something is undefined.
-    let divisor = if unbiased {
-        (sample_count - 1.0).max(0.0)
-    } else {
-        sample_count
-    };
-    let variance = divide_by_count(&centred, divisor)?;
-
-    if keepdim {
-        return Ok(variance);
-    }
-
-    let mut new_dims = Vec::with_capacity(variance.ndim().saturating_sub(reduction_dims.len()));
-    for (idx, &size) in variance.shape().dims().iter().enumerate() {
-        if reduction_dims.binary_search(&idx).is_err() {
-            new_dims.push(size);
+    use crate::ops::arithmetic::exact_sum::{Element, Output, column_variances, variance_of};
+    let dtype = match tensor.dtype() {
+        DataType::Float32 | DataType::Int32 => DataType::Float32,
+        DataType::Float64 | DataType::Int64 => DataType::Float64,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Variance only supported for floating point tensors",
+            ));
         }
-    }
-    let target_shape = if new_dims.is_empty() {
-        Shape::scalar()
-    } else {
-        Shape::new(new_dims)
     };
-    shape_ops::reshape(&variance, target_shape)
-}
-
-/// Rows one task takes when the reduced axis is the last one. A row is
-/// `dim_size` elements read twice, so a band of these is already substantial
-/// work; the point of banding at all is that one row per task is not.
-const VAR_ROW_BAND: usize = 64;
-
-/// Fewer slabs than this are each spread across the pool rather than handed
-/// one to a task; the same threshold `sum` uses.
-const VAR_MIN_SLABS: usize = 4;
-
-/// Fused single-axis variance for tensors that do not require gradients.
-///
-/// Two cache-friendly slab passes per outer block (mean, then the sum and the
-/// sum of squares of the deviations from it), parallel over the outer index.
-/// The same formula as the autograd composition: the centred squares
-/// `sum(d^2) - sum(d)^2 / n` (see [`DeviationSums::centred_squares`]) over
-/// `n`, or `n - 1` unbiased (and NaN when `n <= 1`).
-fn var_fused_single_axis(
-    tensor: &Tensor,
-    axis: usize,
-    keepdim: bool,
-    unbiased: bool,
-) -> Result<Tensor> {
-    let dims = tensor.shape().dims();
-    let dim_size = dims[axis];
-    let inner: usize = dims[axis + 1..].iter().product();
-    let outer: usize = dims[..axis].iter().product();
-    let out_numel = outer * inner;
-
-    // Float64 out whatever the input: a float32 tensor is carried in float64
-    // throughout and rounded by the caller, once; see `var`.
-    let mut result_data =
-        TensorData::zeros_on_device(out_numel, DataType::Float64, tensor.device());
-
-    macro_rules! fill {
-        ($accessor:ident, $ty:ty, $sum:ident, $row_squares:expr, $paired:literal) => {{
-            let input = tensor
-                .data()
-                .$accessor()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
-            let out = result_data
-                .as_f64_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
-            let count = dim_size as f64;
-            let divisor = if unbiased { count - 1.0 } else { count };
-            let all_nan = unbiased && dim_size <= 1;
-
-            if all_nan {
-                out.fill(f64::NAN);
-            } else if inner == 1 {
-                // Reducing the last axis: each output owns one contiguous run
-                // of `dim_size` elements, so the two passes read straight
-                // through it and the running mean is a scalar.
-                //
-                // Going through the slab path below instead was what made
-                // `var(dim=-1)` cost seventeen times a `mean` over the same
-                // data. With `inner == 1` its chunks are one element wide, so
-                // rayon was handed one task per output and each of those
-                // allocated a one-element `col_mean` on the heap -- a thousand
-                // allocations and a thousand tasks to reduce a thousand rows.
-                // Both passes go through `accurate_run_sum`, for the reason
-                // `sum` does: a running total over a long row accumulates one
-                // rounding per element. This is the path taken only when the
-                // tensor does *not* require gradients, so leaving it naive made
-                // `var` answer differently depending on whether it was being
-                // trained through -- and the untrained answer was the worse
-                // one, by 38000x at a 4M-element axis (3.8e-3 against 1.2e-7).
-                //
-                // Each run is reduced by the same lane-and-tree sum `sum`
-                // itself uses, and not by a scalar `iter().sum()`. Blocking
-                // alone was not enough: a naive total over one eight-thousand
-                // element block still takes a rounding per element against a
-                // magnitude that grows with the run, which left `var` four
-                // orders worse than the `mean` it subtracts on data with a
-                // large offset -- 3.4e-6 against 2.5e-10 at an offset of 1e12,
-                // where the second figure is the floor set by the mean's own
-                // rounding.
-                let run = |first: usize, chunk: &mut [f64]| {
-                    for (i, slot) in chunk.iter_mut().enumerate() {
-                        let base = (first + i) * dim_size;
-                        let row = &input[base..base + dim_size];
-                        let total = accurate_run_sum(row, $sum);
-                        let mean = total / count;
-                        *slot = $row_squares(row, mean) / divisor;
-                    }
-                };
-                if tensor.numel() < crate::ops::map::PAR_THRESHOLD {
-                    run(0, out);
-                } else {
-                    // Rows per task, not elements: a task is `VAR_ROW_BAND`
-                    // whole rows of `dim_size` work each.
-                    par_out_chunks(out, VAR_ROW_BAND, &run);
-                }
-            } else if inner != 0 {
-                // The reduced axis is not the last one: `outer` slabs of
-                // `(dim_size, inner)` rows, each column of a slab one output.
-                // Both passes go through the fold `sum` uses for a column
-                // reduction -- rows read in memory order, narrow rows several
-                // at a time, each accumulator lane held to a short chain -- and
-                // the slabs are split exactly as `sum` splits them, so a slab
-                // is spread across the pool only when there are too few to go
-                // around. The fold of each lane was a chain of up to 8192 rows,
-                // and a narrow slab never vectorized: `(16, 100000, 2)` over
-                // its middle axis took 2.8ms and landed 10 ulps out.
-                let slab = dim_size * inner;
-                let lanes = fold_lanes(inner).max(inner);
-                let column_var = |source: &[$ty], target: &mut [f64], spread: bool| {
-                    let totals = fold_slab_with(
-                        source,
-                        inner,
-                        0.0f64,
-                        |acc: &mut [f64], values: &[$ty], _| {
-                            for (a, &v) in acc.iter_mut().zip(values) {
-                                *a += f64::from(v);
-                            }
-                        },
-                        |x, y| x + y,
-                        spread,
-                    );
-                    let means: Vec<f64> = totals
-                        .iter()
-                        .cycle()
-                        .take(lanes)
-                        .map(|&t| t / count)
-                        .collect();
-                    if $paired {
-                        let deviations = fold_slab_with(
-                            source,
-                            inner,
-                            DeviationSums::<f64>::default(),
-                            |acc: &mut [DeviationSums<f64>], values: &[$ty], first| {
-                                let means = &means[first..first + acc.len()];
-                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                                    let d = f64::from(v) - m;
-                                    a.sum += d;
-                                    a.squares += d * d;
-                                }
-                            },
-                            |x, y| x + y,
-                            spread,
-                        );
-                        for (slot, &q) in target.iter_mut().zip(&deviations) {
-                            *slot = q.centred_squares(count) / divisor;
-                        }
-                    } else {
-                        let squares = fold_slab_with(
-                            source,
-                            inner,
-                            0.0f64,
-                            |acc: &mut [f64], values: &[$ty], first| {
-                                let means = &means[first..first + acc.len()];
-                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(means) {
-                                    let d = f64::from(v) - m;
-                                    *a += d * d;
-                                }
-                            },
-                            |x, y| x + y,
-                            spread,
-                        );
-                        for (slot, &q) in target.iter_mut().zip(&squares) {
-                            *slot = q / divisor;
-                        }
-                    }
-                };
-                // A slab too short to split by rows is split by columns, and
-                // then both passes run inside each column band: the band is
-                // still in cache for the second pass, where running the first
-                // over the whole slab before starting the second evicted it --
-                // 50% slower on a `(512, 4096)` matrix down its rows.
-                let band_var = |source: &[$ty], start: usize, target: &mut [f64]| {
-                    let width = target.len();
-                    let totals = fold_column_band(
-                        source,
-                        inner,
-                        start,
-                        width,
-                        0.0f64,
-                        |acc: &mut [f64], values: &[$ty], _| {
-                            for (a, &v) in acc.iter_mut().zip(values) {
-                                *a += f64::from(v);
-                            }
-                        },
-                        |x, y| x + y,
-                    );
-                    let means: Vec<f64> = totals.iter().map(|&t| t / count).collect();
-                    if $paired {
-                        let deviations = fold_column_band(
-                            source,
-                            inner,
-                            start,
-                            width,
-                            DeviationSums::<f64>::default(),
-                            |acc: &mut [DeviationSums<f64>], values: &[$ty], _| {
-                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
-                                    let d = f64::from(v) - m;
-                                    a.sum += d;
-                                    a.squares += d * d;
-                                }
-                            },
-                            |x, y| x + y,
-                        );
-                        for (slot, &q) in target.iter_mut().zip(&deviations) {
-                            *slot = q.centred_squares(count) / divisor;
-                        }
-                    } else {
-                        let squares = fold_column_band(
-                            source,
-                            inner,
-                            start,
-                            width,
-                            0.0f64,
-                            |acc: &mut [f64], values: &[$ty], _| {
-                                for ((a, &v), &m) in acc.iter_mut().zip(values).zip(&means) {
-                                    let d = f64::from(v) - m;
-                                    *a += d * d;
-                                }
-                            },
-                            |x, y| x + y,
-                        );
-                        for (slot, &q) in target.iter_mut().zip(&squares) {
-                            *slot = q / divisor;
-                        }
-                    }
-                };
-                let outer = out.len() / inner;
-                if outer < VAR_MIN_SLABS {
-                    for (source, target) in
-                        input.chunks_exact(slab).zip(out.chunks_exact_mut(inner))
-                    {
-                        if row_band(dim_size).is_some() {
-                            column_var(source, target, true);
-                        } else {
-                            par_out_chunks(target, column_band(inner), &|start, chunk| {
-                                band_var(source, start, chunk)
-                            });
-                        }
-                    }
-                } else {
-                    let per_task = outputs_per_task(slab).div_ceil(inner).max(1);
-                    par_out_chunks(out, per_task * inner, &|start, chunk| {
-                        let first = start / inner;
-                        for (index, target) in chunk.chunks_exact_mut(inner).enumerate() {
-                            let at = (first + index) * slab;
-                            column_var(&input[at..at + slab], target, false);
-                        }
-                    });
-                }
-            }
-        }};
-    }
-
-    match tensor.dtype() {
-        // A float32 tensor in float64 needs only the squares, its mean being
-        // as near exact as makes no difference to them; a float64 one carries
-        // the deviations' sum to correct for its mean's rounding. See
-        // `DeviationSums::centred_squares`.
-        DataType::Float32 => fill!(
-            as_f32_slice,
-            f32,
-            simd_sum_f32_wide,
-            |row: &[f32], mean: f64| {
-                accurate_run_sum(row, |part: &[f32]| {
-                    simd_square_deviations_f32_wide(part, mean)
-                })
-            },
-            false
-        ),
-        DataType::Float64 => fill!(
-            as_f64_slice,
-            f64,
-            simd_sum_f64,
-            |row: &[f64], mean: f64| {
-                accurate_run_sum(row, |part: &[f64]| simd_deviation_sums_f64(part, mean))
-                    .centred_squares(dim_size as f64)
-            },
-            true
-        ),
-        _ => unreachable!("variance is only defined for floating point tensors"),
-    }
-
-    let out_shape = if keepdim {
-        let mut d = dims.to_vec();
-        d[axis] = 1;
-        Shape::new(d)
+    let dims = statistic_dims(tensor, &dim)?;
+    let shape = tensor.shape().dims().to_vec();
+    let kept: Vec<usize> = (0..shape.len())
+        .filter(|axis| !dims.contains(axis))
+        .collect();
+    let run: usize = dims.iter().map(|&axis| shape[axis]).product();
+    let outer: usize = kept.iter().map(|&axis| shape[axis]).product();
+    // Reduced axes that are one block with axes after it are read in place,
+    // as `[before, run, after]` columns, when there are columns enough to
+    // share out; otherwise the reduced axes go last, so that each slice is
+    // one run.
+    let after: usize = dims
+        .last()
+        .map_or(1, |&last| shape[last + 1..].iter().product());
+    let block = dims.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    let columns = !dims.is_empty() && block && after >= 8 && outer >= 32;
+    // An integer slice is shifted by its first element first, exactly, which
+    // leaves its variance and makes an int64 past 2^53 convert to float64
+    // exactly.
+    let mut moved = if tensor.dtype().is_float() {
+        tensor.detach()
     } else {
-        let d: Vec<usize> = dims
+        integer_deviations(&tensor.detach(), &dims)?
+    };
+    let order: Vec<isize> = kept
+        .iter()
+        .chain(&dims)
+        .map(|&axis| axis as isize)
+        .collect();
+    if !columns
+        && order
             .iter()
             .enumerate()
-            .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
-            .collect();
-        if d.is_empty() {
-            Shape::scalar()
-        } else {
-            Shape::new(d)
+            .any(|(index, &axis)| index as isize != axis)
+    {
+        moved = moved.permute(order)?;
+    }
+    let mut moved = moved.contiguous()?;
+    if moved.dtype() != DataType::Float32 {
+        moved = moved.astype(DataType::Float64)?;
+    }
+    let ddof = usize::from(unbiased);
+    fn slices<I: Element, T: Output>(
+        values: &[I],
+        (outer, run, after): (usize, usize, usize),
+        columns: bool,
+        ddof: usize,
+        root: bool,
+    ) -> Vec<T> {
+        if columns {
+            return column_variances(values, outer / after, run, after, ddof, root);
+        }
+        let mut out = vec![T::narrow(0.0); outer];
+        let per_task = ((1 << 14) / run.max(1)).max(1);
+        par_out_chunks(&mut out, per_task, &|start, block| {
+            for (offset, slot) in block.iter_mut().enumerate() {
+                let first = (start + offset) * run;
+                *slot = variance_of(&values[first..first + run], ddof, root);
+            }
+        });
+        out
+    }
+    let layout = (outer, run, after);
+    let missing = || MinitensorError::internal_error("a variance operand without its slice");
+    let data = match (moved.dtype(), dtype) {
+        (DataType::Float32, _) => {
+            let values = moved.data().as_f32_slice().ok_or_else(missing)?;
+            let out = slices::<f32, f32>(values, layout, columns, ddof, root);
+            TensorData::from_vec_f32(out, tensor.device())
+        }
+        (_, DataType::Float32) => {
+            let values = moved.data().as_f64_slice().ok_or_else(missing)?;
+            let out = slices::<f64, f32>(values, layout, columns, ddof, root);
+            TensorData::from_vec_f32(out, tensor.device())
+        }
+        _ => {
+            let values = moved.data().as_f64_slice().ok_or_else(missing)?;
+            let out = slices::<f64, f64>(values, layout, columns, ddof, root);
+            TensorData::from_vec_f64(out, tensor.device())
         }
     };
-
+    let out_shape = if keepdim {
+        let mut kept_shape = shape.clone();
+        for &axis in &dims {
+            kept_shape[axis] = 1;
+        }
+        Shape::new(kept_shape)
+    } else if kept.is_empty() {
+        Shape::scalar()
+    } else {
+        Shape::new(kept.iter().map(|&axis| shape[axis]).collect())
+    };
     Ok(Tensor::new(
-        Arc::new(result_data),
+        Arc::new(data),
         out_shape,
-        DataType::Float64,
+        dtype,
         tensor.device(),
         false,
     ))
+}
+
+/// The gradient of a variance over `dims`: `2 (x - mean) / divisor` times
+/// the incoming gradient, spread back over the reduced axes.
+struct VarianceBackward {
+    input: Tensor,
+    dims: Vec<usize>,
+    keepdim: bool,
+    divisor: f64,
+    input_ids: [crate::autograd::TensorId; 1],
+}
+
+impl crate::autograd::GradientFunction for VarianceBackward {
+    fn backward(
+        &self,
+        grad_output: &Tensor,
+    ) -> Result<rustc_hash::FxHashMap<crate::autograd::TensorId, Tensor>> {
+        use crate::ops::arithmetic::{mul, sub};
+        let axes: Vec<isize> = self.dims.iter().map(|&axis| axis as isize).collect();
+        let mean = crate::ops::reduction::mean(&self.input, Some(axes), true)?;
+        let deviations = sub(&self.input, &mean)?;
+        let grad = if self.keepdim {
+            grad_output.clone()
+        } else {
+            let mut kept_shape = self.input.shape().dims().to_vec();
+            for &axis in &self.dims {
+                kept_shape[axis] = 1;
+            }
+            shape_ops::reshape(grad_output, Shape::new(kept_shape))?
+        };
+        let scale = crate::ops::util::create_scalar_tensor(
+            2.0 / self.divisor,
+            deviations.dtype(),
+            deviations.device(),
+        )?;
+        let gradient = mul(
+            &mul(&grad.astype(deviations.dtype())?, &deviations)?,
+            &scale,
+        )?;
+        let mut gradients = rustc_hash::FxHashMap::default();
+        gradients.insert(self.input_ids[0], gradient);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[crate::autograd::TensorId] {
+        &self.input_ids
+    }
 }
 
 // Helper functions for type-specific operations

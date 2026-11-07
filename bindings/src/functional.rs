@@ -1176,7 +1176,8 @@ pub fn cumprod(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     tensor.cumprod(dim)
 }
 
-/// Standard deviation over `dim`. `unbiased` applies Bessel's correction.
+/// Standard deviation over `dim`, each the float nearest the exact root.
+/// `unbiased` applies Bessel's correction.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 #[pyo3(name = "std")]
@@ -1190,7 +1191,8 @@ pub fn std_fn(
     tensor.std(dim, Some(unbiased), Some(keepdim))
 }
 
-/// Variance over `dim`. `unbiased` applies Bessel's correction.
+/// Variance over `dim`, each the float nearest the exact variance.
+/// `unbiased` applies Bessel's correction.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 pub fn var(

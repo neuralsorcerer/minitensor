@@ -528,7 +528,8 @@ impl PyTensor {
         Ok(Self::from_tensor(indices))
     }
 
-    /// Standard deviation over `dim`. `unbiased` applies Bessel's correction.
+    /// Standard deviation over `dim`, each the float nearest the exact root.
+    /// `unbiased` applies Bessel's correction.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn std(
         &self,
@@ -546,7 +547,8 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Variance over `dim`. `unbiased` applies Bessel's correction.
+    /// Variance over `dim`, each the float nearest the exact variance.
+    /// `unbiased` applies Bessel's correction.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn var(
         &self,

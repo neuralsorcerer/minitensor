@@ -424,7 +424,8 @@ pub fn nanvar(
 }
 
 /// The NaN-aware variance of a float tensor as computed directly, in
-/// float64; see `var_direct`.
+/// float64: the squares about the NaN-skipping mean, less the deviations' own
+/// sum squared over the count.
 fn nanvar_direct(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
