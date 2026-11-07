@@ -299,11 +299,6 @@ float_pair!(
 
 // --- hypot -----------------------------------------------------------------
 
-float_kernel!(
-    /// `sqrt(x^2 + y^2)` without forming either square, so it answers for
-    /// operands whose squares would overflow or flush to zero.
-    hypot_f32, hypot_f64, |x, y| x.hypot(y)
-);
 float_pair!(
     /// `d/dx hypot(x, y) = x / hypot(x, y)`. The origin is a cone point with
     /// no derivative; it takes the zero subgradient, as `norm` does at the
@@ -1038,15 +1033,121 @@ pub fn fmin(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     float_binary_selecting(lhs, rhs, fmin_f32, fmin_f64, [FMIN_D_X, FMIN_D_Y])
 }
 
-float_binary_op!(
-    hypot,
-    hypot_f32,
-    hypot_f64,
-    HYPOT_D_X,
-    HYPOT_D_Y,
-    "`sqrt(input^2 + other^2)`, computed without forming either square, so it \
-     answers where the squares would overflow."
-);
+/// `sqrt(input^2 + other^2)`, the float nearest the exact root, with no
+/// square formed in the dtype, so it answers where the squares would
+/// overflow or vanish; see `arithmetic::exact_sum::hypot_f32` and `_f64`.
+///
+/// An integer beside a float32 is read exactly in float64 and its root
+/// rounded once to float32: rooted in float64 and narrowed, a root just
+/// past a float32 halfway point could land on it and go to the even side.
+pub fn hypot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::{hypot_f32, hypot_f64, hypot_of};
+    if let Some((lhs, rhs)) = crate::ops::util::widened_pair(lhs, rhs, BinaryOpKind::Div)? {
+        // Each root is a float32, held in float64 until the cast, which is
+        // then exact.
+        let narrowed = |x: f64, y: f64| f64::from(hypot_of::<f32>(x, y));
+        let roots = float_binary_mono(&lhs, &rhs, hypot_f32, narrowed, [HYPOT_D_X, HYPOT_D_Y])?;
+        return roots.astype(DataType::Float32);
+    }
+    float_binary_with(lhs, rhs, [HYPOT_D_X, HYPOT_D_Y], |l, r, dtype, shape| {
+        if dtype == DataType::Float64 {
+            return hypot_data_f64(l, r, shape);
+        }
+        float_binary_data_with(l, r, dtype, shape, hypot_f32, hypot_f64::<NATIVE_FMA>)
+    })
+}
+
+/// Whether a fused multiply-add is an instruction on every CPU of the
+/// target, rather than one to look for at run time.
+const NATIVE_FMA: bool = cfg!(target_arch = "aarch64");
+
+/// `hypot` of float64 operands broadcast to `output_shape`, a block of the
+/// output to a task, with fused multiply-adds where the CPU has them.
+fn hypot_data_f64(lhs: &Tensor, rhs: &Tensor, output_shape: &Shape) -> Result<TensorData> {
+    let missing = || MinitensorError::internal_error("hypot: a float64 operand without its slice");
+    let x = lhs.data().as_f64_slice().ok_or_else(missing)?;
+    let y = rhs.data().as_f64_slice().ok_or_else(missing)?;
+    let dims = output_shape.dims();
+    // Each operand's step along every output axis, zero along one it is
+    // broadcast over.
+    let steps = |operand: &[usize]| {
+        let mut steps = vec![0; dims.len()];
+        let mut step = 1;
+        for (axis, &size) in operand.iter().enumerate().rev() {
+            if size != 1 {
+                steps[dims.len() - operand.len() + axis] = step;
+            }
+            step *= size;
+        }
+        steps
+    };
+    let walk = HypotWalk {
+        x,
+        y,
+        dims,
+        x_steps: steps(lhs.shape().dims()),
+        y_steps: steps(rhs.shape().dims()),
+    };
+    let mut out = vec![0f64; output_shape.numel()];
+    crate::ops::map::par_out_chunks(&mut out, 1 << 14, &|start, block| {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { walk.fill_fma(block, start) };
+        }
+        walk.fill::<NATIVE_FMA>(block, start)
+    });
+    Ok(TensorData::from_vec_f64(out, lhs.device()))
+}
+
+/// Two float64 operands read in the order of the output they broadcast to.
+struct HypotWalk<'a> {
+    x: &'a [f64],
+    y: &'a [f64],
+    dims: &'a [usize],
+    x_steps: Vec<usize>,
+    y_steps: Vec<usize>,
+}
+
+impl HypotWalk<'_> {
+    /// `block` of the output from element `start` on, the index of each
+    /// element in each operand carried along as an odometer turns.
+    #[inline(always)]
+    fn fill<const FMA: bool>(&self, block: &mut [f64], start: usize) {
+        use crate::ops::arithmetic::exact_sum::hypot_f64;
+        let rank = self.dims.len();
+        let mut index = vec![0; rank];
+        let (mut at_x, mut at_y, mut rest) = (0, 0, start);
+        for axis in (0..rank).rev() {
+            index[axis] = rest % self.dims[axis];
+            rest /= self.dims[axis];
+            at_x += index[axis] * self.x_steps[axis];
+            at_y += index[axis] * self.y_steps[axis];
+        }
+        for slot in block.iter_mut() {
+            *slot = hypot_f64::<FMA>(self.x[at_x], self.y[at_y]);
+            for axis in (0..rank).rev() {
+                index[axis] += 1;
+                at_x += self.x_steps[axis];
+                at_y += self.y_steps[axis];
+                if index[axis] < self.dims[axis] {
+                    break;
+                }
+                index[axis] = 0;
+                at_x -= self.x_steps[axis] * self.dims[axis];
+                at_y -= self.y_steps[axis] * self.dims[axis];
+            }
+        }
+    }
+
+    /// [`HypotWalk::fill`] with fused multiply-adds.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn fill_fma(&self, block: &mut [f64], start: usize) {
+        self.fill::<true>(block, start)
+    }
+}
+
 float_binary_op!(
     copysign,
     copysign_f32,

@@ -506,7 +506,7 @@ binary_forwarders!(
     logical_or => "Element-wise logical OR over truth values, giving a boolean tensor.",
     logical_xor => "Element-wise logical XOR over truth values, giving a boolean tensor.",
     heaviside => "The unit step of `input`: 0 below zero, 1 above it, and `other` at exactly zero.",
-    hypot => "`sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.",
+    hypot => "`sqrt(input^2 + other^2)`, the float nearest the exact root, computed without forming either square, so it answers where the squares would overflow.",
     ldexp => "`input * 2**other`. An integer `other` is applied to the exponent, exactly: one rounding, and only where the answer is subnormal. A float `input` keeps its dtype and an integer one is read as float64. A float `other` may be fractional and is the product `input * exp2(other)`, in float64.",
     lcm => "Element-wise least common multiple, always non-negative. `lcm(x, 0)` is 0.",
     nextafter => "The next representable value after each element, in the direction of `other`.",

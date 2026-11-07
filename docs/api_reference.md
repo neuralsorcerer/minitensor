@@ -2494,9 +2494,18 @@ assert row_std.shape == (2, 3)
 - `sinh`, `cosh`, `asinh`, `acosh`, `atanh`
 - `maximum`, `minimum`
 - `hypot(input, other)` — `sqrt(input**2 + other**2)` without forming either
-  square, so it answers for operands whose squares would overflow or flush to
-  zero. At the origin its gradient is `0`, the subgradient `norm` reports at
-  the same point.
+  square in the dtype, so it answers for operands whose squares would overflow
+  or flush to zero. Each element is the float nearest the exact root. A
+  float32 root is taken in float64 from the exact squares and is the answer
+  unless it lies within a few float64 ulps of a float32 halfway point. A
+  float64 pair is scaled by a power of two, each square split exactly, and
+  the root corrected by its residual within a bound. Where either check
+  cannot decide -- a root that lies on a halfway point always needs it --
+  the exact sum of squares is rooted as a whole number. The platform's float64
+  `hypot` put about one root in 170 of ordinary data an ulp out. An integer
+  beside a float32 is read exactly in float64 and rounded once to float32, not
+  rooted in float64 and rounded again. At the origin its gradient is `0`, the
+  subgradient `norm` reports at the same point.
 - `copysign(input, other)` — the magnitude of `input` with the sign of
   `other`. Reads the sign *bit*, so `copysign(1, -0.0)` is `-1`; the gradient
   reaches `input` only, since nothing differentiable depends on `other`.

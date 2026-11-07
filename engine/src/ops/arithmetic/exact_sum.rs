@@ -1772,6 +1772,115 @@ fn exact_root<T: Output>(values: impl Iterator<Item = f64> + Clone) -> T {
     }
 }
 
+/// The float32 nearest `sqrt(x² + y²)`.
+///
+/// The squares of float32s are exact in float64, so the float64 root of
+/// their float64 sum is within two of its ulps of the exact root. That
+/// rounds to float32 as the exact root does unless the bits it keeps below a
+/// float32's last place lie within a few ulps of halfway, or the root is a
+/// float32 subnormal, whose last place lies higher; then the root is taken
+/// as [`hypot_of`] takes it.
+#[inline(always)]
+pub(crate) fn hypot_f32(x: f32, y: f32) -> f32 {
+    let (x, y) = (f64::from(x), f64::from(y));
+    let root = (x * x + y * y).sqrt();
+    // The 29 bits below a float32's last place, against a halfway point's.
+    let below = (root.to_bits() & ((1 << 29) - 1)) as i64;
+    let clear = (below - (1 << 28)).abs() > 8;
+    if clear && (root >= f64::from(f32::MIN_POSITIVE) || root == 0.0) {
+        return root as f32;
+    }
+    hypot_of(x, y)
+}
+
+/// The float64 nearest `sqrt(x² + y²)`, each rounding error of a product
+/// taken by a fused multiply-add where `FMA` and from halves otherwise.
+///
+/// Where the smaller magnitude is under `2^-28` of the larger, the exact
+/// root exceeds the larger by far less than half its ulp, so the larger is
+/// the answer. Otherwise both are scaled by the power of two that brings the
+/// larger into `[4, 8)` -- exactly, since neither leaves the normal range --
+/// rooted by [`scaled_hypot`], or exactly where its bound cannot say, and
+/// the power of two taken back out, exactly unless the root passes the
+/// largest float64, where the infinity is the one the exact root rounds to.
+/// Operands under `2^-1020`, whose root may be subnormal and so rounded
+/// again by that last step, are rooted exactly as they stand.
+#[inline(always)]
+pub(crate) fn hypot_f64<const FMA: bool>(x: f64, y: f64) -> f64 {
+    let (x, y) = (x.abs(), y.abs());
+    let (big, small) = if x < y { (y, x) } else { (x, y) };
+    if !(big <= f64::MAX && small <= f64::MAX) {
+        // An infinity or a NaN.
+        return hypot_of(x, y);
+    }
+    if small < big * 2f64.powi(-28) || small == 0.0 {
+        return big;
+    }
+    if big < 2f64.powi(-1020) {
+        return exact_root([x, y].into_iter());
+    }
+    // For the exponent `e` of `big`, `2^(2 - e)` and `2^(e - 2)`, both
+    // normal for a biased exponent from 3 to 2046.
+    let biased = big.to_bits() >> 52;
+    let down = f64::from_bits((2048 - biased) << 52);
+    let up = f64::from_bits((biased - 2) << 52);
+    let (a, b) = (big * down, small * down);
+    scaled_hypot::<FMA>(a, b).unwrap_or_else(|| exact_root([a, b].into_iter())) * up
+}
+
+/// The float64 nearest `sqrt(a² + b²)` for `a` in `[4, 8)` and `b` from
+/// `2^-28 a` to `a`, when the bound says which it is.
+///
+/// `r = sqrt(s)` of the squares' float64 sum `s`, the residual
+/// `a² + b² - r²` from the exact errors of both squares, of `s` and of
+/// `r²`, and `r + residual / 2r`. Every one of those errors is far inside
+/// the normal range and the residual within `2^-50` of `a² + b²`, so the
+/// step is within `1.5 · 2^-103 r` of the exact root -- the residual's
+/// roundings, the quotient's, and the curvature `residual² / 8r³` the step
+/// leaves out -- and `2^-98 r` bounds it.
+#[inline(always)]
+fn scaled_hypot<const FMA: bool>(a: f64, b: f64) -> Option<f64> {
+    let error = |x: f64, y: f64, product: f64| {
+        if FMA {
+            x.mul_add(y, -product)
+        } else {
+            product_error(x, y, product)
+        }
+    };
+    let (p, q) = (a * a, b * b);
+    let (s, s_error) = two_sum(p, q);
+    let tail = s_error + (error(a, a, p) + error(b, b, q));
+    let r = s.sqrt();
+    let square = r * r;
+    // Within a few roundings of `s`, so the first difference is exact.
+    let residual = ((s - square) - error(r, r, square)) + tail;
+    let (value, rest) = two_sum(r, residual / (2.0 * r));
+    f64::settle(value, rest, r * 2f64.powi(-98))
+}
+
+/// The value nearest `sqrt(x² + y²)` for float64s whose squares stay inside
+/// the float64 range with their roundings' errors whole multiples of the
+/// least subnormal -- any pair of float32s or of integers -- by each square
+/// split exactly and the root of the four parts settled as [`root_settled`]
+/// settles a sum's, or taken exactly where the bound cannot say. An infinity
+/// gives `+inf` even beside a NaN, and a NaN otherwise NaN.
+pub(crate) fn hypot_of<T: Output>(x: f64, y: f64) -> T {
+    if x.is_infinite() || y.is_infinite() {
+        return T::narrow(f64::INFINITY);
+    }
+    if x.is_nan() || y.is_nan() {
+        return T::narrow(f64::NAN);
+    }
+    let (p, q) = (x * x, y * y);
+    let (p_error, q_error) = (product_error(x, x, p), product_error(y, y, q));
+    let (sum, rest) = two_sum(p, q);
+    let errors = p_error + q_error;
+    let error = rest + errors;
+    // Each of the two float64 additions rounds within `u` of its result.
+    let slack = (errors.abs() + error.abs()) * 2f64.powi(-52);
+    root_settled(Carried { sum, error, slack }).unwrap_or_else(|| exact_root([x, y].into_iter()))
+}
+
 /// The float32 nearest `a · b - c · d`.
 ///
 /// Each product of two float32s is exact in float64, and their difference a
@@ -3388,6 +3497,208 @@ mod tests {
         // Two products of half the least subnormal, each rounding to zero.
         let (x, y) = (2f64.powi(-537), 2f64.powi(-538));
         assert_eq!(difference_of_products_f64(x, y, -x, y), f64::from_bits(1));
+    }
+
+    /// Whether `r` is the value nearest `sqrt(x² + y²)` among values spaced
+    /// `below` under it and `above` over it: the exact sum of the squares
+    /// lies between the squares of the halfway points either side, on one
+    /// only where `r` is even.
+    fn nearest_root(x: f64, y: f64, r: f64, below: f64, above: f64, even: bool) -> bool {
+        let sign = |pairs: &[(f64, f64)]| {
+            let total = Total::of_products(pairs.iter().copied()).expect("finite");
+            let (negative, limbs, _) = total.difference();
+            match (limbs.iter().all(|&limb| limb == 0), negative) {
+                (true, _) => 0,
+                (false, true) => -1,
+                (false, false) => 1,
+            }
+        };
+        let (half_below, half_above) = (below / 2.0, above / 2.0);
+        // `S - (r - below / 2)²` and `(r + above / 2)² - S`.
+        let low = sign(&[
+            (x, x),
+            (y, y),
+            (-r, r),
+            (r, below),
+            (-half_below, half_below),
+        ]);
+        let high = sign(&[
+            (r, r),
+            (r, above),
+            (half_above, half_above),
+            (-x, x),
+            (-y, y),
+        ]);
+        let inside = |side: i32| side > 0 || (side == 0 && even);
+        inside(low) && inside(high)
+    }
+
+    /// Legs below `2^bits` whose hypotenuse is an odd whole number past it,
+    /// so halfway between two floats `bits` wide.
+    fn halfway_triple(bits: u32) -> (f64, f64) {
+        let low = 1u64 << bits;
+        let ratio = 1.0 + 2f64.sqrt();
+        let gcd = |mut a: u64, mut b: u64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        };
+        let mut n = ((low as f64) / (4.0 + 2.0 * 2f64.sqrt())).sqrt() as u64;
+        loop {
+            let centre = (n as f64 * ratio) as u64;
+            for m in centre - 3..=centre + 3 {
+                let (a, b, c) = (m * m - n * n, 2 * m * n, m * m + n * n);
+                if (m - n) % 2 == 1 && gcd(m, n) == 1 && c > low && a.max(b) < low {
+                    return (a as f64, b as f64);
+                }
+            }
+            n += 1;
+        }
+    }
+
+    #[test]
+    fn hypot_rounds_once() {
+        let check_wide = |x: f64, y: f64| {
+            let (halves, fused) = (hypot_f64::<false>(x, y), hypot_f64::<true>(x, y));
+            assert_eq!(halves.to_bits(), fused.to_bits(), "hypot({x:e}, {y:e})");
+            let got = halves;
+            if got == f64::INFINITY {
+                // The exact root is at least the largest float64 and half
+                // its ulp, where an odd last bit rounds up.
+                let (top, half) = (f64::MAX, 2f64.powi(970));
+                let pairs = [
+                    (x, x),
+                    (y, y),
+                    (-top, top),
+                    (-top, 2.0 * half),
+                    (-half, half),
+                ];
+                let (negative, _, _) = Total::of_products(pairs.into_iter()).unwrap().difference();
+                assert!(!negative, "hypot({x:e}, {y:e}) overflowed");
+                return;
+            }
+            if got == 0.0 {
+                assert!(x == 0.0 && y == 0.0);
+                return;
+            }
+            let below = got - f64::from_bits(got.to_bits() - 1);
+            let above = if got == f64::MAX {
+                2f64.powi(971)
+            } else {
+                f64::from_bits(got.to_bits() + 1) - got
+            };
+            // Below `2^-1020` everything is scaled up, exactly, so that half
+            // the spacing is a float64 too.
+            let scale = if got < 2f64.powi(-1020) {
+                2f64.powi(600)
+            } else {
+                1.0
+            };
+            let even = got.to_bits() & 1 == 0;
+            let (r, below, above) = (got * scale, below * scale, above * scale);
+            assert!(
+                nearest_root(x * scale, y * scale, r, below, above, even),
+                "hypot({x:e}, {y:e}) = {got:e}"
+            );
+        };
+        let check_narrow = |x: f32, y: f32| {
+            let got = hypot_f32(x, y);
+            if got == f32::INFINITY {
+                let (top, half) = (f64::from(f32::MAX), 2f64.powi(103));
+                let (x, y) = (f64::from(x), f64::from(y));
+                let pairs = [
+                    (x, x),
+                    (y, y),
+                    (-top, top),
+                    (-top, 2.0 * half),
+                    (-half, half),
+                ];
+                let (negative, _, _) = Total::of_products(pairs.into_iter()).unwrap().difference();
+                assert!(!negative, "hypot({x:e}, {y:e}) overflowed");
+                return;
+            }
+            if got == 0.0 {
+                assert!(x == 0.0 && y == 0.0);
+                return;
+            }
+            let r = f64::from(got);
+            let below = r - f64::from(f32::from_bits(got.to_bits() - 1));
+            let above = if got == f32::MAX {
+                2f64.powi(104)
+            } else {
+                f64::from(f32::from_bits(got.to_bits() + 1)) - r
+            };
+            let even = got.to_bits() & 1 == 0;
+            let (x, y) = (f64::from(x), f64::from(y));
+            assert!(
+                nearest_root(x, y, r, below, above, even),
+                "hypot({x:e}, {y:e}) = {got:e}"
+            );
+        };
+        let mut next = generator(0x6a09_e667_f3bc_c909);
+        for round in 0..20_000 {
+            let unit = |bits: u64| (bits >> 11) as f64 / (1u64 << 53) as f64 + 0.5;
+            let exponent = (next() % 2099) as i32 - 1075;
+            let x = unit(next()) * 2f64.powi(exponent / 2) * 2f64.powi(exponent - exponent / 2);
+            let gap = (next() % 70) as i32 - 5;
+            let y = x * unit(next()) * 2f64.powi(-gap);
+            let (x, y) = if round % 2 == 0 { (x, -y) } else { (-y, x) };
+            if x.is_finite() && y.is_finite() {
+                check_wide(x, y);
+            }
+            if (x as f32).is_finite() && (y as f32).is_finite() {
+                check_narrow(x as f32, y as f32);
+            }
+        }
+        for (a, b) in [halfway_triple(53), halfway_triple(24)] {
+            for shift in [-1070, -1000, -600, -1, 0, 1, 600, 969] {
+                let scale = 2f64.powi(shift / 2) * 2f64.powi(shift - shift / 2);
+                check_wide(a * scale, b * scale);
+                check_wide(b * scale, -a * scale);
+            }
+        }
+        let (a, b) = halfway_triple(24);
+        for shift in [-140, -100, 0, 50, 103] {
+            let scale = 2f32.powi(shift);
+            check_narrow(a as f32 * scale, b as f32 * scale);
+        }
+        let largest = f64::MAX;
+        for (x, y) in [
+            (largest, largest),
+            (largest, 1.0),
+            (largest / 2.0, largest / 2.0),
+            (largest, largest * 2f64.powi(-27)),
+            (f64::from_bits(1), f64::from_bits(1)),
+            (f64::from_bits(3), f64::from_bits(4)),
+            (2f64.powi(-1020), 2f64.powi(-1021)),
+            (2f64.powi(-1022), 2f64.powi(-1050)),
+            (3.0, 4.0),
+            (0.0, -0.0),
+        ] {
+            check_wide(x, y);
+        }
+        for (x, y) in [
+            (f32::MAX, f32::MAX),
+            (f32::MAX, 1.0),
+            (f32::from_bits(1), 1e-45),
+        ] {
+            check_narrow(x, y);
+        }
+        assert_eq!(hypot_f64::<false>(f64::INFINITY, f64::NAN), f64::INFINITY);
+        assert_eq!(
+            hypot_f64::<true>(f64::NAN, f64::NEG_INFINITY),
+            f64::INFINITY
+        );
+        assert!(hypot_f64::<false>(f64::NAN, 1.0).is_nan());
+        assert_eq!(hypot_f32(f32::NAN, f32::INFINITY), f32::INFINITY);
+        assert!(hypot_f32(1.0, f32::NAN).is_nan());
+        assert_eq!(hypot_f64::<false>(-0.0, -0.0).to_bits(), 0);
+        assert_eq!(hypot_f32(-0.0, -0.0).to_bits(), 0);
+        // An integer beside a float32: `2^30 + 64` is a float32 halfway
+        // point, and the exact root of its square plus one lies past it.
+        let big = 2f64.powi(30) + 64.0;
+        assert_eq!(hypot_of::<f32>(big, 1.0), 2f32.powi(30) + 128.0);
     }
 
     #[test]
