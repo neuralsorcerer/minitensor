@@ -37,6 +37,10 @@ use super::close::add_shifted;
 use super::rounded_once::{Exact, Target, product_error, rounded, two_sum};
 use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 
+#[path = "exact_covariance.rs"]
+mod covariance;
+pub(crate) use self::covariance::{Refusal, Sample, covariances};
+
 /// Lanes a run is added in, and values per block a task takes.
 const LANES: usize = 8;
 const BLOCK: usize = 8192;
@@ -3910,23 +3914,30 @@ fn cosine_with<I: Element, T: Output, const FMA: bool>(
             }
         }
     };
+    // What the small values could add, their bits or their products'
+    // errors lost among the subnormals.
+    let lost = a.len() as f64 * f64::from_bits(4);
+    let below = |which: usize| below_floor(if which == 0 { a } else { b }, false, floor);
     carried
-        .settled::<I, T, FMA>(a, b, floor)
+        .settled::<T, FMA>(lost, floor, below)
         .unwrap_or_else(|| exact_cosine(a, b, floor))
 }
 
 /// The carried dot and sums of squares of two vectors, each scaled by a
 /// power of two, the product of the two in `scales` that [`scaled_into`]
 /// applied.
-struct Scaled {
-    dot: Carried,
-    squares: [Carried; 2],
-    scales: [(f64, f64); 2],
+pub(super) struct Scaled {
+    pub(super) dot: Carried,
+    pub(super) squares: [Carried; 2],
+    pub(super) scales: [(f64, f64); 2],
 }
 
 impl Scaled {
-    /// The cosine of the vectors `a` and `b` these carry, when the bounds
-    /// settle it.
+    /// The cosine of the two vectors these carry, when the bounds settle
+    /// it: their dot over their norms, each floored at `floor`, `below(k)`
+    /// saying exactly whether the `k`-th norm lies below it where the
+    /// bounds cannot, and `lost` what small values may have left out of each
+    /// carried total.
     ///
     /// Each norm is `n1 + n2` within its bound, or the floor scaled as its
     /// vector was, exactly; the dot `d1 + d2` within its slack. The product
@@ -3937,16 +3948,13 @@ impl Scaled {
     /// bounds, each held under `2^-40` so that their products are covered
     /// by a factor `1 + 2^-37`.
     #[inline(always)]
-    fn settled<I: Element, T: Output, const FMA: bool>(
+    pub(super) fn settled<T: Output, const FMA: bool>(
         self,
-        a: &[I],
-        b: &[I],
+        lost: f64,
         floor: f64,
+        below: impl Fn(usize) -> bool,
     ) -> Option<T> {
-        // What the small values could add, their bits or their products'
-        // errors lost among the subnormals.
-        let lost = a.len() as f64 * f64::from_bits(4);
-        let norm = |squares: Carried, scale: (f64, f64), values: &[I]| -> Option<(f64, f64, f64)> {
+        let norm = |squares: Carried, scale: (f64, f64), which: usize| -> Option<(f64, f64, f64)> {
             let squares = Carried {
                 slack: squares.slack + lost,
                 ..squares
@@ -3965,7 +3973,7 @@ impl Scaled {
             } else if limit < low {
                 false
             } else {
-                below_floor(values, false, floor)
+                below(which)
             };
             if !below {
                 return Some((norm, rest, bound));
@@ -3974,8 +3982,8 @@ impl Scaled {
             // the quotient's remainders.
             (limit >= 2f64.powi(-400) && limit <= 2f64.powi(400)).then_some((limit, 0.0, 0.0))
         };
-        let (n1, n2, bound_a) = norm(self.squares[0], self.scales[0], a)?;
-        let (m1, m2, bound_b) = norm(self.squares[1], self.scales[1], b)?;
+        let (n1, n2, bound_a) = norm(self.squares[0], self.scales[0], 0)?;
+        let (m1, m2, bound_b) = norm(self.squares[1], self.scales[1], 1)?;
         let (d1, d2) = two_sum(self.dot.sum, self.dot.error);
         // Clear of underflow in the remainders below, and not zero.
         let clear = d1.abs() >= 2f64.powi(-900);

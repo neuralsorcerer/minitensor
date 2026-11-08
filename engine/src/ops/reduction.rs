@@ -10,6 +10,8 @@ mod argminmax_impl;
 mod boolean_impl;
 #[path = "reduction/core.rs"]
 mod core_impl;
+#[path = "reduction/covariance.rs"]
+mod covariance_impl;
 #[path = "reduction/distance.rs"]
 mod distance_impl;
 #[path = "reduction/logsumexp.rs"]
@@ -38,6 +40,7 @@ mod sum_prod_impl;
 pub(crate) use self::argminmax_impl::*;
 pub use self::boolean_impl::*;
 pub use self::core_impl::*;
+pub use self::covariance_impl::covariance_matrix;
 pub use self::distance_impl::{cosine_slices, cross_distances, normalized_slices, row_distances};
 pub use self::logsumexp_impl::*;
 pub(crate) use self::minmax_indices_impl::*;

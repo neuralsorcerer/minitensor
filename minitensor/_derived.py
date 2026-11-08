@@ -627,6 +627,74 @@ def trapezoid(
 trapz = trapezoid
 
 
+class _Covariance(_Function):
+    """The covariance or correlation matrix of the rows of a 2-D tensor, each
+    entry rounded once, with the gradient of the exact matrix."""
+
+    @staticmethod
+    def forward(ctx, matrix, correction, frequencies, reliabilities, correlation):
+        result = _F._covariance(
+            matrix, correction, frequencies, reliabilities, correlation
+        )
+        ctx.save_for_backward(matrix)
+        ctx.correction, ctx.correlation, ctx.result = correction, correlation, result
+        ctx.frequencies, ctx.reliabilities = frequencies, reliabilities
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (matrix,) = ctx.saved_tensors
+        # Each row scaled by a power of two, exactly: a covariance moves with
+        # the scales of its two rows and a correlation not at all, and scaled
+        # the arithmetic below stays inside the range however large or small
+        # the rows are.
+        rows = matrix.detach().astype("float64")
+        scales = _row_scales(rows)
+        rows = rows / scales
+        weights = _cov_weights(ctx.frequencies, ctx.reliabilities, rows.shape[1])
+        total = _F.sum(weights)
+        centred = rows - _F.sum(rows * weights, [1], True) / total
+        if ctx.reliabilities is None:
+            scale = total - ctx.correction
+        else:
+            effective = _F.sum(weights * ctx.reliabilities) / total
+            scale = total - ctx.correction * effective
+        grad = grad_output.astype("float64")
+        if ctx.correlation:
+            # Of `r = c / sqrt(c_ii c_jj)`: the entry's own share, and what
+            # its row's and its column's variances take from the diagonal.
+            covariance = (
+                _F.matmul(centred * weights, _F.transpose(centred, 0, 1)) / scale
+            )
+            variance = _F.diagonal(covariance)
+            deviation = _F.sqrt(variance)
+            weighted = grad * ctx.result.astype("float64")
+            through = (_F.sum(weighted, [1]) + _F.sum(weighted, [0])) / (2.0 * variance)
+            grad = grad / outer(deviation, deviation) - _F.diag_embed(through)
+        else:
+            grad = grad * (scales * _F.transpose(scales, 0, 1))
+        moved = _F.matmul(grad + _F.transpose(grad, 0, 1), centred * weights) / scale
+        # Less what moving the weighted means takes back: nothing in exact
+        # arithmetic, where the deviations' weighted sums are zero.
+        moved = moved - _F.sum(moved, [1], True) * (weights / total)
+        return (moved / scales).astype(str(matrix.dtype)), None, None, None, None
+
+
+def _cov_weights(
+    frequencies: Tensor | None, reliabilities: Tensor | None, observations: int
+) -> Tensor:
+    """Each observation's weight in float64: its count times its
+    reliability, either alone, or one."""
+
+    if frequencies is None and reliabilities is None:
+        return Tensor.ones([observations], dtype="float64")
+    if frequencies is None:
+        return reliabilities
+    if reliabilities is None:
+        return frequencies
+    return frequencies * reliabilities
+
+
 def cov(
     input: object,
     correction: int = 1,
@@ -643,38 +711,30 @@ def cov(
     reliability; the difference shows in the denominator, where `aweights`
     reduces the effective sample size rather than the count.
 
-    A float32 or int32 input is carried in float64 and rounded to float32
-    once, as `var` carries one. An integer input is taken as each row less its
-    first element, exactly, which moves no covariance and keeps the steps
-    between int64s past `2^53` that converting first would round away; see
-    `_integer_deviations`. A float64 entry that comes out non-finite or below
-    the smallest normal, where the products of the deviations may have left
-    the float range though the covariance did not, is computed again from
-    rows scaled into range by powers of two and scaled back; see
-    `_row_scales`.
+    Each entry is the float nearest the exact covariance of the values as
+    given: `(W Σ w x y - Σ w x Σ w y) / D` for weights `w` totalling `W` and
+    the divisor `D` the correction leaves, rounded once -- to float32 for a
+    float32 or int32 input, and to float64 otherwise. An integer input is
+    taken exactly, int64s past `2^53` apart included, and an entry in range
+    is the right one however far out of range its products would be. A row
+    with a NaN or an infinity gives NaN entries.
     """
 
-    matrix, single_variable, weights, scaled, narrow = _cov_operands(
+    matrix, single_variable, frequencies, reliabilities = _cov_operands(
         input, fweights, aweights, "cov"
     )
-    result = _cov_matrix(matrix, correction, weights, scaled)
-    doubtful = _out_of_normal_range(result)
-    if bool(_F.any(doubtful).item()):
-        scales = _row_scales(matrix)
-        rescued = _cov_matrix(matrix / scales, correction, weights, scaled)
-        rescued = rescued * scales * _F.transpose(scales, 0, 1)
-        result = _F.where(doubtful, rescued, result)
-    if narrow:
-        result = result.astype("float32")
+    result = _Covariance.apply(
+        matrix, float(correction), frequencies, reliabilities, False
+    )
     return result.reshape([]) if single_variable else result
 
 
 def _cov_operands(
     input: object, fweights: object | None, aweights: object | None, name: str
-) -> tuple[Tensor, bool, Tensor | None, Tensor | None, bool]:
-    """`cov`'s operands, checked: the rows as a float64 matrix, whether there
-    was one variable, the combined weights, the `aweights` alone, and whether
-    the answer rounds to float32 at the end."""
+) -> tuple[Tensor, bool, Tensor | None, Tensor | None]:
+    """`cov`'s operands, checked: the rows as a 2-D tensor of their own
+    dtype, whether there was one variable, and the counts and reliabilities
+    in float64."""
 
     matrix = _atleast_tensor(input)
     if matrix.ndim() > 2:
@@ -683,112 +743,19 @@ def _cov_operands(
     single_variable = matrix.ndim() <= 1
     if single_variable:
         matrix = matrix.reshape(1, -1)
-    dtype = str(matrix.dtype)
-    narrow = dtype in ("float32", "int32")
-    if dtype in ("int32", "int64"):
-        matrix = _integer_deviations(matrix)
-    else:
-        matrix = _require_float(matrix, name).astype("float64")
+    if str(matrix.dtype) not in ("int32", "int64"):
+        matrix = _require_float(matrix, name)
 
     observations = matrix.shape[1]
     if observations == 0:
         raise ValueError(f"{name} requires at least one observation")
 
-    weights = None
-    scaled = None
+    frequencies = reliabilities = None
     if fweights is not None:
-        weights = _check_weights(fweights, observations, "fweights")
+        frequencies = _check_weights(fweights, observations, "fweights")
     if aweights is not None:
-        scaled = _check_weights(aweights, observations, "aweights")
-        weights = scaled if weights is None else weights * scaled
-    return matrix, single_variable, weights, scaled, narrow
-
-
-def _cov_matrix(
-    matrix: Tensor,
-    correction: int,
-    weights: Tensor | None,
-    scaled: Tensor | None,
-) -> Tensor:
-    """The covariance of the rows of a float matrix, as computed directly."""
-
-    observations = matrix.shape[1]
-    if weights is None:
-        total = float(observations)
-        centred = matrix - _F.mean(matrix, [1], True)
-        scale = total - correction
-        weighted = centred
-        offsets = _F.sum(centred, [1], True)
-    else:
-        total = _F.sum(weights).item()
-        if total <= 0.0:
-            raise ValueError("cov requires the weights to sum to a positive value")
-        centred = matrix - _F.sum(matrix * weights, [1], True) / total
-        if scaled is None:
-            scale = total - correction
-        else:
-            # `aweights` shrinks the effective sample size rather than the
-            # count, which is what makes an unbiased estimate under unequal
-            # reliability.
-            effective = _F.sum(weights * scaled).item()
-            scale = total - correction * effective / total
-        weighted = centred * weights
-        offsets = _F.sum(weighted, [1], True)
-
-    if scale <= 0.0:
-        raise ValueError(
-            f"cov: the correction {correction} leaves a non-positive divisor "
-            f"for {observations} observations"
-        )
-
-    # Less the deviations' own weighted sums, `s s^T / W`: the rounding of
-    # the centres, which every product of deviations from them carries, as
-    # `var` takes it back out. Written `s_i * (s_j / W)`, which is at most
-    # the products' own scale. Its gradient is zero, the deviations summing
-    # to zero whatever the input. The diagonal is a variance, which rounding
-    # alone could take below zero.
-    products = _F.matmul(weighted, _F.transpose(centred, 0, 1))
-    products = products - _F.matmul(offsets, _F.transpose(offsets / total, 0, 1))
-    variables = matrix.shape[0]
-    on_diagonal = Tensor.eye(variables, variables, dtype="bool")
-    products = _F.where(on_diagonal & (products < 0), 0.0, products)
-    return products / scale
-
-
-def _integer_deviations(matrix: Tensor) -> Tensor:
-    """An integer matrix's rows less their first elements, in float64: exactly
-    for int32, and to within a rounding of themselves for int64.
-
-    A covariance does not move when a row is shifted by one amount, and
-    shifted by its own first element a row is as small as its spread. An int32
-    difference is exact in int64. An int64 one can wrap there, so each value
-    is split into its top and bottom 32 bits, each half is differenced -- no
-    half's difference reaches `2^33` -- and the two are put back together in
-    float64, where the top's is exact and the sum rounds once. Converted
-    first, int64s above `2^53` a step apart became one float, and the variance
-    of `[2^53, 2^53 + 1, 2^53 + 2]` was 2.
-    """
-
-    if str(matrix.dtype) == "int32":
-        wide = matrix.astype("int64")
-        return (wide - wide[:, :1]).astype("float64")
-    high = matrix >> 32
-    low = matrix & 0xFFFFFFFF
-    high = (high - high[:, :1]).astype("float64")
-    low = (low - low[:, :1]).astype("float64")
-    return high * 4294967296.0 + low
-
-
-def _out_of_normal_range(tensor: Tensor) -> Tensor:
-    """Where a float tensor is non-finite or below the smallest normal
-    magnitude, zero included."""
-
-    tiny = (
-        1.1754943508222875e-38
-        if str(tensor.dtype) == "float32"
-        else 2.2250738585072014e-308
-    )
-    return ~_F.isfinite(tensor) | (_F.abs(tensor) < tiny)
+        reliabilities = _check_weights(aweights, observations, "aweights")
+    return matrix, single_variable, frequencies, reliabilities
 
 
 def _row_scales(matrix: Tensor) -> Tensor:
@@ -797,8 +764,7 @@ def _row_scales(matrix: Tensor) -> Tensor:
 
     Dividing by a power of two is exact, and leaves every row's largest finite
     magnitude in `[1, 2)`, where the products of its deviations cannot leave
-    the range; a covariance is the scaled one times a row's scale and a
-    column's.
+    the range.
     """
 
     magnitude = _F.abs(matrix.detach())
@@ -824,38 +790,18 @@ def _check_weights(weights: object, observations: int, name: str) -> Tensor:
 def corrcoef(input: object) -> Tensor:
     """The Pearson correlation matrix of the rows of `input`.
 
-    The covariance divided by the outer product of the standard deviations, and
-    then clamped: the division is exact in theory and can land a hair outside
-    `[-1, 1]` in floating point, which a caller comparing against 1 would see.
-
-    A correlation does not depend on the scale of a row, and where the
-    covariance left the float range -- the rows `[1e200, 2e200]` have a
-    covariance past the top of float64 -- it is taken of the rows scaled into
-    range by powers of two instead, which is the same correlation. A float32
-    or integer input is taken as `cov` takes it.
+    Each entry is the float nearest the exact correlation
+    `n_xy / sqrt(n_xx n_yy)`, the `n` the covariances' numerators: in
+    `[-1, 1]` with no clamp, one exactly on the diagonal, and NaN for a row
+    that never varies, or that holds a NaN or an infinity. A correlation does
+    not depend on the scale of a row, and rows whose covariances leave the
+    float range correlate like any other. A float32 or int32 input gives
+    float32, and any other float64.
     """
 
-    matrix, single_variable, _, _, narrow = _cov_operands(input, None, None, "corrcoef")
-    covariance = _cov_matrix(matrix, 1, None, None)
-    if bool(_F.any(_out_of_normal_range(covariance)).item()):
-        covariance = _cov_matrix(matrix / _row_scales(matrix), 1, None, None)
-    if single_variable:
-        # One variable is perfectly correlated with itself, unless it never
-        # varies at all -- and `0 / 0` is what says so.
-        covariance = covariance.reshape([])
-        correlation = covariance / covariance
-        return correlation.astype("float32") if narrow else correlation
-
-    deviations = _F.sqrt(_F.diagonal(covariance))
-    normalized = _F.clamp(covariance / outer(deviations, deviations), -1.0, 1.0)
-    # A variable's correlation with itself is one, and `c / sqrt(c)^2` is a
-    # rounding either side of it; `c / c` is one exactly, or NaN for a row
-    # that never varies.
-    variables = covariance.shape[0]
-    on_diagonal = Tensor.eye(variables, variables, dtype="bool")
-    itself = _F.diagonal(covariance)
-    correlation = _F.where(on_diagonal, _F.diag_embed(itself / itself), normalized)
-    return correlation.astype("float32") if narrow else correlation
+    matrix, single_variable, _, _ = _cov_operands(input, None, None, "corrcoef")
+    result = _Covariance.apply(matrix, 1.0, None, None, True)
+    return result.reshape([]) if single_variable else result
 
 
 def ptp(input: object, dim: object = None, keepdim: bool = False) -> Tensor:

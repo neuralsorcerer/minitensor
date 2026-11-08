@@ -711,6 +711,37 @@ pub fn normalized_rounded(
         .map_err(_convert_error)
 }
 
+/// The covariance matrix of the rows of `input`, or with `correlation` their correlation matrix.
+///
+/// Each entry is the float nearest the exact one; `fweights` and `aweights`
+/// weigh the observations, and `correction` comes off the divisor. Behind
+/// `cov` and `corrcoef`, which differentiate.
+#[pyfunction]
+#[pyo3(
+    name = "_covariance",
+    signature = (input, correction, fweights, aweights, correlation)
+)]
+pub fn covariance_rounded(
+    input: &Bound<PyAny>,
+    correction: f64,
+    fweights: Option<&Bound<PyAny>>,
+    aweights: Option<&Bound<PyAny>>,
+    correlation: bool,
+) -> PyResult<PyTensor> {
+    let input = borrow_tensor(input)?;
+    let fweights = borrow_optional_tensor(fweights)?;
+    let aweights = borrow_optional_tensor(aweights)?;
+    engine::ops::reduction::covariance_matrix(
+        input.tensor(),
+        correction,
+        fweights.as_ref().map(|weights| weights.tensor()),
+        aweights.as_ref().map(|weights| weights.tensor()),
+        correlation,
+    )
+    .map(PyTensor::from_tensor)
+    .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2299,6 +2330,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(covariance_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;
