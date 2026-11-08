@@ -14,39 +14,22 @@ what an FFT wants) while one meant for filter design is symmetric about its
 middle (`periodic=False`).
 
 `correlate` and `convolve` are the same sliding product read two ways: the
-first slides one signal along the other as it is, the second reverses it first.
-Both are `conv1d` underneath -- the convolution in machine learning is a
-correlation, which is exactly the confusion these two names exist to keep
-apart.
+first slides one signal along the other as it is, the second reverses it first
+-- the convolution in machine learning is a correlation, which is exactly the
+confusion these two names exist to keep apart. Each overlap is the float
+nearest the exact dot of the samples it covers.
 """
 
 from __future__ import annotations
 
 import math as _math
 
-import numpy as _np
-
 from . import _core as _C
-from ._shape import (
-    _flat,
-    _from_numpy,
-    _numpy_view,
-    _operand_pair,
-    _promote_pair,
-)
+from ._shape import _flat, _operand_pair, _promote_pair
+from .autograd import Function as _Function
 
 Tensor = _C.Tensor
 _F = _C.functional
-
-# An untracked float64 dot of at least this many samples is NumPy's. Its BLAS
-# splits one that long over threads that wake in microseconds, where ours stays
-# on one thread because a round trip through the pool costs tens: 13us against
-# its 9 at 65,536 samples, even at 32,768, and 3.5 against 5.3 at 16,384 in
-# ours' favour. A float32 BLAS dot stays on one thread: a few microseconds
-# ahead up to 131,072 samples (10-18us against 17-24 there), level at 262,144
-# (about 45 each), and half as fast from 524,288 on (130-185 against 70-97), so
-# a float32 dot stays ours at every length.
-_NUMPY_DOT_FROM = 1 << 15
 
 
 def _window_positions(length: int, periodic: bool, name: str) -> tuple[Tensor, float]:
@@ -206,16 +189,47 @@ def kaiser_window(length: int, periodic: bool = True, beta: float = 12.0) -> Ten
     return _F.i0(inside * beta) / float(peak.item())
 
 
+class _Sliding(_Function):
+    """Overlaps of a correlation or a convolution, each rounded once, with the
+    gradient of the exact products."""
+
+    @staticmethod
+    def forward(ctx, signal, kernel, flip, start, count):
+        ctx.save_for_backward(signal, kernel)
+        ctx.flip, ctx.start = flip, start
+        return _F._sliding(signal, kernel, flip, start, count)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        signal, kernel = ctx.saved_tensors
+        signal, kernel = signal.detach(), kernel.detach()
+        length, taps = signal.shape[0], kernel.shape[0]
+        weights = _F.flip(kernel, [0]) if ctx.flip else kernel
+        # The window's gradient placed among all `length + taps - 1` overlaps.
+        dtype = str(signal.dtype)
+        before = Tensor.full([ctx.start], 0.0, dtype=dtype)
+        after = length + taps - 1 - ctx.start - grad_output.shape[0]
+        grad = _F.cat(
+            [before, grad_output.astype(dtype), Tensor.full([after], 0.0, dtype=dtype)]
+        )
+        # Sample `i` meets tap `j` in overlap `i + taps - 1 - j`, so its
+        # gradient convolves the overlaps' with the taps, and a tap's
+        # correlates them with the signal, from the far end.
+        grad_signal = _F._sliding(grad, weights, True, taps - 1, length)
+        grad_weights = _F.flip(_F._sliding(grad, signal, False, length - 1, taps), [0])
+        grad_kernel = _F.flip(grad_weights, [0]) if ctx.flip else grad_weights
+        return grad_signal, grad_kernel, None, None, None
+
+
 def _sliding(first: object, second: object, mode: str, flip: bool, name: str) -> Tensor:
     """The sliding product of two 1-D signals, correlated or convolved.
 
-    Every overlap is computed once -- the `'full'` answer -- and the narrower
-    modes are a window onto it. Where that window starts is the only place the
-    two operations differ once the reversal is done, and it is not symmetric:
+    Every overlap is a dot of a run of the signal with a run of the kernel,
+    the float nearest its exact value, and the narrower modes are a window
+    onto the full answer. Where that window starts is the only place the two
+    operations differ once the reversal is done, and it is not symmetric:
     with a kernel longer than the signal, `'same'` starts one sample later for
-    a correlation than for a convolution. The untracked path's NumPy product
-    answers that way and the tracked one has to agree, and it is easier to
-    state as an offset than to arrive at by padding.
+    a correlation than for a convolution.
     """
 
     signal, kernel = (_flat(side) for side in _operand_pair(first, second))
@@ -223,67 +237,27 @@ def _sliding(first: object, second: object, mode: str, flip: bool, name: str) ->
         raise ValueError(f"{name} needs two non-empty sequences")
     if mode not in ("full", "same", "valid"):
         raise ValueError(f"{name} takes mode 'full', 'same' or 'valid', got {mode!r}")
-    # `conv1d` is a float kernel, so an integer side becomes one -- `float64`,
-    # which holds every `int32` and every `int64` below 2**53 exactly. What
-    # the two sides must not do is meet at *one* of their dtypes: a `float64`
-    # kernel against a `float32` signal used to be rounded to `float32`
-    # before the multiply, losing precision the caller had asked for.
+    # A float product, so an integer side becomes one -- `float64`, which
+    # holds every `int32` and every `int64` below 2**53 exactly. What the two
+    # sides must not do is meet at *one* of their dtypes: a `float64` kernel
+    # against a `float32` signal used to be rounded to `float32` before the
+    # multiply, losing precision the caller had asked for.
     signal, kernel = _promote_pair(signal, kernel)
     if "float" not in str(signal.dtype):
         signal = signal.astype("float64")
         kernel = kernel.astype("float64")
 
     length, taps = signal.shape[0], kernel.shape[0]
-    tracked = signal.requires_grad or kernel.requires_grad
-    if mode == "valid" and length == taps:
-        # One overlap, which is one dot product. NumPy's sliding product
-        # copies an input it cannot write to, and the views below are
-        # read-only by design: two 8MB copies made a 1M-sample correlation
-        # 4.9ms where the dot it amounts to takes 0.2. Its `dot` copies a
-        # reversed view as well, so a convolution reverses into a buffer of
-        # its own.
-        if flip:
-            kernel = _F.flip(kernel, [0])
-        if tracked or length < _NUMPY_DOT_FROM or str(signal.dtype) != "float64":
-            return _F.dot(signal, kernel).reshape(1)
-        return _from_numpy(
-            _np.array([_np.dot(_numpy_view(signal), _numpy_view(kernel))])
-        )
-
-    if not tracked:
-        # Nothing to differentiate, so NumPy's own sliding product answers,
-        # over views and in the dtype promoted above. `conv1d` goes through
-        # its general convolution machinery for a single channel, 5-70x
-        # NumPy's time on these shapes: 1.9ms against 0.3 for 16,384
-        # samples and 64 taps.
-        product = _np.convolve if flip else _np.correlate
-        return _from_numpy(product(_numpy_view(signal), _numpy_view(kernel), mode))
-
-    if flip:
-        kernel = _F.flip(kernel, [0])
-
-    # `conv1d` is a correlation, which is why the reversal above is what
-    # separates the two names. It pads both ends by the same amount, and
-    # that amount decides where its answer starts.
-    def overlaps(padding: int) -> Tensor:
-        return _C.functional.conv1d(
-            signal.reshape(1, 1, -1), kernel.reshape(1, 1, -1), None, 1, padding, 1, 1
-        ).reshape(-1)
-
     shortest, longest = min(length, taps), max(length, taps)
-    if mode == "valid":
-        # The full overlaps run from `1 - taps` to `length - 1`; the valid
-        # ones are the `longest - shortest + 1` starting at `shortest - taps`,
-        # which padding by `taps - shortest` on each side yields exactly.
-        # Computing them all and keeping these did `length + taps - 1` dot
-        # products for as few as one: `correlate` of two 1,024-sample
-        # signals took 1.9ms.
-        return overlaps(taps - shortest)
-    full = overlaps(taps - 1)
     if mode == "full":
-        return full
-    start = (shortest - 1) // 2 if flip or length >= taps else length // 2
-    return _C.functional.narrow(full, 0, start, longest)
+        start, count = 0, length + taps - 1
+    elif mode == "valid":
+        # The overlaps where the shorter lies wholly on the longer.
+        start, count = shortest - 1, longest - shortest + 1
+    else:
+        start = (shortest - 1) // 2 if flip or length >= taps else length // 2
+        count = longest
+    return _Sliding.apply(signal, kernel, flip, start, count)
 
 
 def correlate(input: object, other: object, mode: str = "valid") -> Tensor:

@@ -691,6 +691,24 @@ pub fn interp_rounded(
     .map_err(_convert_error)
 }
 
+/// The overlaps `start..start + count` of the full correlation of two 1-D
+/// float sequences, the kernel reversed first where `flip`, each the float
+/// nearest its exact dot. Behind `correlate` and `convolve`.
+#[pyfunction]
+#[pyo3(name = "_sliding", signature = (signal, kernel, flip, start, count))]
+pub fn sliding_rounded(
+    signal: &Bound<PyAny>,
+    kernel: &Bound<PyAny>,
+    flip: bool,
+    start: usize,
+    count: usize,
+) -> PyResult<PyTensor> {
+    let (signal, kernel) = (borrow_tensor(signal)?, borrow_tensor(kernel)?);
+    engine::ops::linalg::sliding_products(signal.tensor(), kernel.tensor(), flip, start, count)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Degrees to radians, each element the float nearest `input · π / 180`.
 /// Behind `deg2rad`.
 #[pyfunction]
@@ -2415,6 +2433,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(add_scaled_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(trapezoid_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(interp_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sliding_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;

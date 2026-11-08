@@ -212,7 +212,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `multinomial(input, num_samples, replacement=False)` | Draw indices with probability proportional to `input`, a row of weights or a batch of them; they need not sum to one. With replacement it is one `searchsorted` in the cumulative distribution; without, it is the top `k` of `log(w) + Gumbel noise`, which is exactly a weighted sample without replacement in one sort rather than a removal loop. A category of weight zero is never drawn, so without replacement a row can give at most as many draws as it has weights above zero, and asking for more raises. |
 | `hann_window(length, periodic=True)`, `hamming_window(length, periodic=True, alpha=0.54, beta=0.46)`, `blackman_window(...)`, `bartlett_window(...)`, `kaiser_window(length, periodic=True, beta=12.0)` | The five classical tapers, as float tensors of `length`. `periodic=True` divides by `length` and is the one to use for a spectrum, since the window then tiles without a seam; `periodic=False` divides by `length - 1` and is symmetric, which is what a filter design wants. A length of one is a single `1.0` and a length of zero is empty, rather than either being a division by zero. Samples `k` and `N - k` are equal exactly, each taken from the whole-number distance to the nearer end; Bartlett's `(N - |2k - N|) / N` is rounded once, and the cosine windows measure their angle from the nearest of the end, the quarter and the middle, so the samples beside a zero end keep their digits, the quarter of a Hann window is `0.5`, and Blackman's ends are `0.0` rather than the `-1.4e-17` its three terms sum to in floats. |
 | `correlate(input, other, mode='valid')` | The sliding dot product of two 1-D sequences without reversing either. |
-| `convolve(input, other, mode='full')` | The convolution of two 1-D sequences: `correlate` with one of them reversed. Both are computed by the same padded `conv1d` and then narrowed to `mode`, so `'full'`, `'same'` and `'valid'` are three windows onto one result rather than three code paths -- and both inherit the blocked convolution instead of looping over lags. |
+| `convolve(input, other, mode='full')` | The convolution of two 1-D sequences: `correlate` with one of them reversed. `'full'`, `'same'` and `'valid'` are three windows onto one result, and only the overlaps in the window are computed. Each overlap is the float nearest the exact dot of the samples it covers, for both functions -- added in floats, about one overlap in four of random signals came out an ulp or more off -- and the gradient is the exact products'. |
 
 ### Shape compatibility helpers
 
@@ -1028,8 +1028,9 @@ exception, for its own reason:
   membership test behind them is exact, as every comparison is, so which
   values are reported does not depend on the dtype they are reported in.
 
-`convolve` and `correlate` answer in `float64` for an integer input: the
-sliding product is `conv1d`, which is a float kernel. That is exact for any result below 2^53.
+`convolve` and `correlate` answer in `float64` for an integer input, each
+overlap the float64 nearest its exact sum, which holds every integer input
+below 2^53 exactly.
 
 A Python number or list handed to any operation -- an operator, a function
 of two or three operands on any side of it (`pow(2, x)`, `atan2([0.1], x)`,

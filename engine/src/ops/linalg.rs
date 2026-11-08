@@ -26,6 +26,8 @@ mod qr_impl;
 pub(crate) mod reflector;
 #[path = "linalg/rotation.rs"]
 pub(crate) mod rotation;
+#[path = "linalg/sliding.rs"]
+mod sliding_impl;
 #[path = "linalg/svd.rs"]
 mod svd_impl;
 #[path = "linalg/triangular.rs"]
@@ -40,6 +42,7 @@ pub use self::linear_impl::*;
 pub use self::lu_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;
+pub use self::sliding_impl::sliding_products;
 pub use self::svd_impl::*;
 pub(crate) use self::triangular_impl::*;
 
