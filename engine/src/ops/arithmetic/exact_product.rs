@@ -751,7 +751,7 @@ struct Wide {
     limbs: Vec<u64>,
     exponent: i64,
     negative: bool,
-    cuts: u64,
+    cuts: u128,
 }
 
 impl Wide {
@@ -810,7 +810,7 @@ impl Wide {
                 (upper << lead) | (self.limbs[index] >> (64 - lead))
             };
         }
-        self.cuts += u64::from(dropped != 0);
+        self.cuts += u128::from(dropped != 0);
         self.exponent += 64 - i64::from(lead);
     }
 
@@ -832,7 +832,7 @@ impl Wide {
             limbs,
             exponent: self.exponent + other.exponent + shift as i64,
             negative: self.negative ^ other.negative,
-            cuts: self.cuts + other.cuts + u64::from(cut),
+            cuts: self.cuts + other.cuts + u128::from(cut),
         }
     }
 
@@ -843,24 +843,30 @@ impl Wide {
         if self.cuts == 0 {
             return Some(low);
         }
-        // `(1 + 2^(1 - 64·width))^cuts` is under `1 + 1.01·cuts·2^(1 -
-        // 64·width)`, and the limbs are under `2^(64·width)`, so the exact
-        // product is under the limbs plus `3·cuts` in their last place.
         // Rounding is monotonic: the two ends rounding alike settle it.
+        self.upper_limbs(scratch);
+        let high = nearest::<T>(self.negative, scratch, self.exponent);
+        (high == low).then_some(low)
+    }
+
+    /// The limbs plus three cuts in their last place, into `scratch`, a limb
+    /// longer: at least the exact product. `(1 + 2^(1 - 64·width))^cuts` is
+    /// under `1 + 1.01·cuts·2^(1 - 64·width)` -- a count of cuts is under
+    /// `2^66`, and the width at least two limbs -- and the limbs are under
+    /// `2^(64·width)`.
+    fn upper_limbs(&self, scratch: &mut Vec<u64>) {
         scratch.clear();
         scratch.extend_from_slice(&self.limbs);
         scratch.push(0);
-        let mut carry = self.cuts.saturating_mul(3);
+        let mut carry = 3 * self.cuts;
         for limb in scratch.iter_mut() {
-            let (sum, over) = limb.overflowing_add(carry);
-            *limb = sum;
-            carry = u64::from(over);
+            let sum = u128::from(*limb) + (carry & u128::from(u64::MAX));
+            *limb = sum as u64;
+            carry = (carry >> 64) + (sum >> 64);
             if carry == 0 {
                 break;
             }
         }
-        let high = nearest::<T>(self.negative, scratch, self.exponent);
-        (high == low).then_some(low)
     }
 }
 
@@ -1516,6 +1522,453 @@ fn long_run<I: Element, T: Output>(run: &[I], output: &Parts<T>, at: usize, fma:
     });
 }
 
+/// Exponents past which a power's partial products are certainly out of
+/// range: kept well inside an `i64` for any power a float64 exponent names.
+const FAR: i64 = 1 << 40;
+
+/// Exponents up to which a power by squaring in plain float64 decides a
+/// float32 power: its roundings, `|n|` at most counted as often as each is
+/// raised, leave it within `2^-33` of the power, and a float32 halfway point
+/// that close is a one in five hundred chance.
+const PLAIN_POWERS: u64 = 1 << 20;
+
+/// Exponents up to which [`Product`]'s count of steps -- three for each
+/// unit of the exponent, and a few -- fits its integer with room to spare.
+const PRODUCT_POWERS: u64 = 1 << 60;
+
+impl Product {
+    /// A finite, nonzero `value`, its mantissa in `[1, 2)` -- a subnormal's
+    /// scaled into the normal range first -- and its exponent apart.
+    fn of(value: f64) -> Self {
+        const MANTISSA: u64 = (1 << 52) - 1;
+        const ONE: u64 = 1023 << 52;
+        let magnitude = value.abs();
+        let tiny = magnitude < f64::MIN_POSITIVE;
+        let scaled = if tiny {
+            magnitude * 2f64.powi(64)
+        } else {
+            magnitude
+        };
+        let bits = scaled.to_bits();
+        Self {
+            hi: f64::from_bits((bits & MANTISSA) | ONE),
+            lo: 0.0,
+            exponent: ((bits >> 52) as i64) - 1023 - if tiny { 64 } else { 0 },
+            negative: value < 0.0,
+            steps: 0,
+        }
+    }
+
+    /// One over the product: `r = 1 / hi` and `e = 1 - (hi + lo) r`, the
+    /// first part of which is exact, so that `r + r e` is the reciprocal but
+    /// for `r e²`, `4u²` of it, and the roundings of `e` and `r e`, under
+    /// `5u²` together -- three steps' worth -- on top of the product's own.
+    #[inline(always)]
+    fn reciprocal<const FMA: bool>(self) -> Self {
+        let r = 1.0 / self.hi;
+        let p = self.hi * r;
+        let p_error = if FMA {
+            self.hi.mul_add(r, -p)
+        } else {
+            product_error(self.hi, r, p)
+        };
+        let e = ((1.0 - p) - p_error) - self.lo * r;
+        let correction = r * e;
+        let hi = r + correction;
+        Self {
+            hi,
+            lo: correction - (hi - r),
+            exponent: -self.exponent,
+            negative: self.negative,
+            steps: self.steps + 3,
+        }
+        .normalized()
+    }
+}
+
+/// The value nearest `x^n` for a whole `n`, IEEE's for a zero, an infinity
+/// or a NaN `x` and for `n` zero.
+///
+/// The power by squaring as a [`Product`], the reciprocal of it for a
+/// negative `n`, settled by its bound; where that cannot say, the power
+/// formed in whole numbers as wide as it takes, as [`product_to`] forms a
+/// product, and its reciprocal by long division. A power certainly past
+/// either end of the range is an infinity or a zero without being formed.
+#[inline(always)]
+pub(crate) fn integer_power<T: Output, const FMA: bool>(x: f64, n: i64) -> T {
+    let odd = n & 1 == 1;
+    if n == 0 || x.is_nan() {
+        return T::narrow(if n == 0 { 1.0 } else { x });
+    }
+    if x == 0.0 || x.is_infinite() {
+        let large = (x != 0.0) == (n > 0);
+        let value = if large { f64::INFINITY } else { 0.0 };
+        return T::narrow(if x.is_sign_negative() && odd {
+            -value
+        } else {
+            value
+        });
+    }
+    let magnitude = n.unsigned_abs();
+    if T::PLAIN
+        && magnitude <= PLAIN_POWERS
+        && let Some(value) = plain_power::<T>(x, n)
+    {
+        return value;
+    }
+    if magnitude > PRODUCT_POWERS {
+        return exact_integer_power(x, n);
+    }
+    let sign = if x < 0.0 && odd { -1.0 } else { 1.0 };
+    let base = Product::of(x);
+    // `|x|^|n|` is monotonic in `|n|`, so a square past `FAR` with a factor
+    // still to come leaves the power past it in the same direction.
+    let beyond = |exponent: i64| {
+        let large = (exponent > 0) == (n > 0);
+        T::narrow(sign * if large { f64::INFINITY } else { 0.0 })
+    };
+    let (mut power, mut square, mut left) = (Product::ONE, base, n.unsigned_abs());
+    loop {
+        if left & 1 == 1 {
+            power = power.times::<FMA>(square);
+        }
+        left >>= 1;
+        if left == 0 {
+            break;
+        }
+        square = square.times::<FMA>(square);
+        if square.exponent.abs() > FAR {
+            return beyond(square.exponent);
+        }
+    }
+    power.negative = x < 0.0 && odd;
+    let power = if n < 0 {
+        power.reciprocal::<FMA>()
+    } else {
+        power
+    };
+    power.settled().unwrap_or_else(|| exact_integer_power(x, n))
+}
+
+/// [`integer_power`] in the widest build the CPU runs, for one value.
+pub(crate) fn integer_power_of<T: Output>(x: f64, n: i64) -> T {
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: fma was detected on this CPU.
+        return unsafe { integer_power_fused(x, n) };
+    }
+    integer_power::<T, false>(x, n)
+}
+
+/// [`integer_power`] compiled with fused multiply-adds.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+fn integer_power_fused<T: Output>(x: f64, n: i64) -> T {
+    integer_power::<T, true>(x, n)
+}
+
+/// [`integer_power`] in plain float64, for a target a bound on it usually
+/// settles: the power by squaring and its reciprocal for a negative `n`,
+/// each multiplication rounded once. A rounding counts as often as the
+/// power it went into is raised -- the squares' doubling with each squaring
+/// -- `|n|` times in all at most, the reciprocal's included, so the power is
+/// within `(|n| + 1) · 2^-53` of it, relatively. Past float64's range the
+/// power is past the target's too, and a power that ends inside the range
+/// never left it on the way: the squares and partial powers of a base past
+/// one grow towards it, and those of a base short of one shrink.
+#[inline(always)]
+fn plain_power<T: Output>(x: f64, n: i64) -> Option<T> {
+    let (mut power, mut square, mut left) = (1.0f64, x, n.unsigned_abs());
+    loop {
+        if left & 1 == 1 {
+            power *= square;
+        }
+        left >>= 1;
+        if left == 0 {
+            break;
+        }
+        square *= square;
+    }
+    let value = if n < 0 { 1.0 / power } else { power };
+    let size = value.abs();
+    if size > 2f64.powi(T::GREATEST + 2) || size < 2f64.powi(T::LEAST - 2) {
+        return Some(T::narrow(value));
+    }
+    let bound = size * ((n.unsigned_abs() as f64 + 3.0) * 2f64.powi(-53));
+    T::settle(value, 0.0, bound)
+}
+
+/// A float a float32 power is written into: the float32 itself, or the
+/// float64 that holds it until a cast.
+pub(crate) trait Lane: Copy {
+    /// `new` where `take`, `old` otherwise, by a mask rather than a branch:
+    /// whether a lane is taken can be a coin toss from one to the next.
+    fn pick(take: bool, new: f32, old: Self) -> Self;
+}
+
+impl Lane for f32 {
+    #[inline(always)]
+    fn pick(take: bool, new: f32, old: f32) -> f32 {
+        let mask = u32::from(take).wrapping_neg();
+        f32::from_bits((new.to_bits() & mask) | (old.to_bits() & !mask))
+    }
+}
+
+impl Lane for f64 {
+    #[inline(always)]
+    fn pick(take: bool, new: f32, old: f64) -> f64 {
+        let mask = u64::from(take).wrapping_neg();
+        f64::from_bits((f64::from(new).to_bits() & mask) | (old.to_bits() & !mask))
+    }
+}
+
+/// `out[i]`, for each `i` whose exponent `exponent(i)` is whole, the
+/// float32 nearest `base(i) ** n`, as `O`; the rest of `out` as it was.
+///
+/// [`plain_power`] lane by lane over blocks: the squares and the powers of
+/// a block in step, as many squarings as its widest exponent takes, and a
+/// power settled where both ends of its bound narrow to one float32 --
+/// rounding is monotonic, so the power between them does too. Where they
+/// do not, or the base is a NaN, or the exponent is past [`PLAIN_POWERS`],
+/// [`integer_power_of`] answers. A zero or an infinite base needs nothing
+/// apart: its powers by squaring are IEEE's, signs included. Whether an
+/// exponent is whole picks a value rather than a branch, so a run of them
+/// mixed with others costs no more than one of either.
+pub(crate) fn float32_powers<O, B, E>(base: B, exponent: E, out: &mut [O])
+where
+    O: Lane,
+    B: Fn(usize) -> f64,
+    E: Fn(usize) -> f64,
+{
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn wide<O, B, E>(base: B, exponent: E, out: &mut [O])
+    where
+        O: Lane,
+        B: Fn(usize) -> f64,
+        E: Fn(usize) -> f64,
+    {
+        float32_powers_in(base, exponent, out);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { wide(base, exponent, out) };
+    }
+    float32_powers_in(base, exponent, out);
+}
+
+/// [`float32_powers`] in the build it is inlined into.
+#[inline(always)]
+fn float32_powers_in<O, B, E>(base: B, exponent: E, out: &mut [O])
+where
+    O: Lane,
+    B: Fn(usize) -> f64,
+    E: Fn(usize) -> f64,
+{
+    const LANES: usize = 128;
+    for (block, run) in out.chunks_mut(LANES).enumerate() {
+        let start = block * LANES;
+        let mut x = [0.0f64; LANES];
+        let mut n = [0i64; LANES];
+        let mut left = [0u64; LANES];
+        let mut reach = [f64::NAN; LANES];
+        let mut taken = [false; LANES];
+        let mut widest = 0u64;
+        for lane in 0..run.len() {
+            let y = exponent(start + lane);
+            let whole = is_whole(y);
+            // Masks rather than branches: a lane's exponent is zero where it
+            // is not whole, and past `PLAIN_POWERS` it is left at a power of
+            // one with a NaN reach, which settles nothing.
+            let power = (y as i64) & -i64::from(whole);
+            let magnitude = power.unsigned_abs();
+            let plain = magnitude <= PLAIN_POWERS;
+            taken[lane] = whole;
+            x[lane] = base(start + lane);
+            n[lane] = power;
+            left[lane] = magnitude & u64::from(plain).wrapping_neg();
+            reach[lane] =
+                (magnitude as f64 + 3.0) * 2f64.powi(-53) + if plain { 0.0 } else { f64::NAN };
+            widest |= left[lane];
+        }
+        let mut power = [1.0f64; LANES];
+        let mut square = x;
+        for _ in 0..(64 - widest.leading_zeros()) {
+            for lane in 0..LANES {
+                let factor = if left[lane] & 1 == 1 {
+                    square[lane]
+                } else {
+                    1.0
+                };
+                power[lane] *= factor;
+                square[lane] *= square[lane];
+                left[lane] >>= 1;
+            }
+        }
+        let mut nearest = [0.0f32; LANES];
+        let mut open = [false; LANES];
+        for lane in 0..LANES {
+            let value = if n[lane] < 0 {
+                1.0 / power[lane]
+            } else {
+                power[lane]
+            };
+            let size = value.abs();
+            let bound = size * reach[lane];
+            let outside = (size > 2f64.powi(129)) | (size < 2f64.powi(-151));
+            let settled = (((value - bound) as f32 == (value + bound) as f32) | outside)
+                & !reach[lane].is_nan();
+            nearest[lane] = value as f32;
+            open[lane] = taken[lane] & !settled;
+        }
+        // Once for the block: a test on each lane was a branch on whether it
+        // was taken, and a coin toss where whole exponents and others mix.
+        if open.iter().fold(false, |any, &lane| any | lane) {
+            for lane in 0..run.len() {
+                if open[lane] {
+                    nearest[lane] = integer_power_of::<f32>(x[lane], n[lane]);
+                }
+            }
+        }
+        for (lane, slot) in run.iter_mut().enumerate() {
+            *slot = O::pick(taken[lane], nearest[lane], *slot);
+        }
+    }
+}
+
+/// Whether `exponent` is a whole number [`integer_power`] takes: finite and
+/// under `2^63`, which an `i64` holds. Below `2^52`, adding it rounds to a
+/// whole number, which the exponent is only where nothing was rounded off;
+/// from `2^52` every float is one.
+#[inline(always)]
+pub(crate) fn is_whole(exponent: f64) -> bool {
+    const SHIFT: f64 = 4_503_599_627_370_496.0;
+    let magnitude = exponent.abs();
+    (magnitude < 2f64.powi(63))
+        & ((magnitude >= SHIFT) | ((magnitude + SHIFT) - SHIFT == magnitude))
+}
+
+/// The whole number a float exponent is, where [`integer_power`] takes it;
+/// see [`is_whole`].
+#[inline(always)]
+pub(crate) fn whole_exponent(exponent: f64) -> Option<i64> {
+    is_whole(exponent).then_some(exponent as i64)
+}
+
+/// [`integer_power`] where the bound cannot decide: `|x|^|n|` in whole
+/// numbers by squaring, cut to a width and twice as wide again for as long
+/// as the cuts leave the answer open, its reciprocal by long division at
+/// both ends of what the cuts allow.
+#[cold]
+#[inline(never)]
+fn exact_integer_power<T: Output>(x: f64, n: i64) -> T {
+    let negative = x < 0.0 && n & 1 == 1;
+    let mut scratch = Vec::new();
+    let mut width = START_WIDTH;
+    loop {
+        let mut base = Wide::one(width);
+        base.times_factor(x.abs());
+        let (mut power, mut left) = (Wide::one(width), n.unsigned_abs());
+        loop {
+            if left & 1 == 1 {
+                power = power.times(&base);
+            }
+            left >>= 1;
+            if left == 0 {
+                break;
+            }
+            base = base.times(&base);
+            // As in `integer_power`: a square past `FAR` either way leaves
+            // the power past it in the same direction.
+            let magnitude = base.exponent + 64 * width as i64;
+            if magnitude.abs() > FAR {
+                let large = (magnitude > 0) == (n > 0);
+                let value = if large { f64::INFINITY } else { 0.0 };
+                return T::narrow(if negative { -value } else { value });
+            }
+        }
+        power.negative = negative;
+        if n > 0 {
+            if let Some(value) = power.rounded::<T>(&mut scratch) {
+                return value;
+            }
+        } else {
+            // The exact power lies between the limbs and the limbs plus
+            // three cuts in their last place, as `Wide::rounded` reads them,
+            // so its reciprocal between those of the two.
+            let low = nearest_reciprocal::<T>(negative, &power.limbs, power.exponent);
+            if power.cuts == 0 {
+                return low;
+            }
+            power.upper_limbs(&mut scratch);
+            let high = nearest_reciprocal::<T>(negative, &scratch, power.exponent);
+            if high == low {
+                return low;
+            }
+        }
+        width *= 2;
+    }
+}
+
+/// `±1 / (limbs · 2^exponent)`, the limbs nonzero, rounded to the nearest
+/// `T`: the quotient of a power of two by them to 66 bits by long division,
+/// whether a remainder is left marked below it.
+fn nearest_reciprocal<T: Output>(negative: bool, limbs: &[u64], exponent: i64) -> T {
+    let length = bit_length(limbs);
+    let width = limbs.len().max(length.div_ceil(64)) + 1;
+    let divisor: Vec<u64> = (0..width)
+        .map(|index| limbs.get(index).copied().unwrap_or(0))
+        .collect();
+    // The remainder starts at `2^(length - 1)`, below or at the divisor, and
+    // takes 66 doublings: `2^(length + 65) / divisor`, in `[2^65, 2^66]`.
+    let mut remainder = vec![0u64; width];
+    remainder[(length - 1) / 64] = 1 << ((length - 1) % 64);
+    let at_least = |a: &[u64], b: &[u64]| {
+        for index in (0..a.len()).rev() {
+            if a[index] != b[index] {
+                return a[index] > b[index];
+            }
+        }
+        true
+    };
+    let subtract = |a: &mut [u64], b: &[u64]| {
+        let mut borrow = false;
+        for (limb, &other) in a.iter_mut().zip(b) {
+            let (value, first) = limb.overflowing_sub(other);
+            let (value, second) = value.overflowing_sub(u64::from(borrow));
+            *limb = value;
+            borrow = first || second;
+        }
+    };
+    let mut quotient = 0u128;
+    for step in 0..=66 {
+        if step > 0 {
+            let mut carry = 0u64;
+            for limb in remainder.iter_mut() {
+                let next = *limb >> 63;
+                *limb = (*limb << 1) | carry;
+                carry = next;
+            }
+        }
+        quotient <<= 1;
+        if at_least(&remainder, &divisor) {
+            subtract(&mut remainder, &divisor);
+            quotient |= 1;
+        }
+    }
+    let sticky = remainder.iter().any(|&limb| limb != 0);
+    let least = -(length as i64 - 1 + 66) - exponent - 1;
+    let sign = if negative { -1.0 } else { 1.0 };
+    if least + 127 > i64::from(T::GREATEST) + 130 {
+        return T::narrow(sign * f64::INFINITY);
+    }
+    if least + 127 < i64::from(T::LEAST) - 130 {
+        return T::narrow(sign * 0.0);
+    }
+    rounded(negative, (quotient << 1) | u128::from(sticky), least as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,5 +2094,177 @@ mod tests {
         running_products(&values, &mut out, values.len(), 1);
         assert_eq!(out[0], 4097.0);
         assert!(out[1..].iter().all(|&value| value == 16_785_408.0));
+    }
+
+    #[test]
+    fn whole_powers_agree_with_their_exact_form() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let bits = next();
+            // A full mantissa near one, a few binades either way.
+            let exponent = 1013 + bits % 21;
+            let x = f64::from_bits((exponent << 52) | (next() >> 12))
+                * if bits & 1 == 0 { 1.0 } else { -1.0 };
+            for n in [2i64, 4, 5, 7, 10, 33, -1, -2, -3, -7, 100, -100] {
+                let fast: f64 = integer_power::<f64, false>(x, n);
+                let exact: f64 = exact_integer_power(x, n);
+                assert_eq!(fast.to_bits(), exact.to_bits(), "{x:e} ** {n}");
+                let fast: f32 = integer_power::<f32, false>(f64::from(x as f32), n);
+                let exact: f32 = exact_integer_power(f64::from(x as f32), n);
+                assert_eq!(fast.to_bits(), exact.to_bits(), "{x:e} ** {n} in float32");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_float32_powers_agree_with_their_exact_form() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..20_000 {
+            let bits = next();
+            // A float32, or an int32 as an integer beside one is read.
+            let x = if round % 4 == 0 {
+                f64::from(next() as i32)
+            } else {
+                let exponent = 100 + bits % 55;
+                f64::from(f32::from_bits(
+                    ((exponent as u32) << 23) | (next() as u32 >> 9),
+                )) * if bits & 1 == 0 { 1.0 } else { -1.0 }
+            };
+            let n = match round % 3 {
+                0 => (next() % 81) as i64 - 40,
+                1 => (next() % 4001) as i64 - 2000,
+                _ => (next() % (1 << 21)) as i64 - (1 << 20),
+            };
+            let fast: f32 = integer_power::<f32, false>(x, n);
+            let exact: f32 = exact_integer_power(x, n);
+            assert_eq!(fast.to_bits(), exact.to_bits(), "{x:e} ** {n}");
+        }
+    }
+
+    #[test]
+    fn float32_powers_lane_by_lane() {
+        let mut state = 0x2f6b_8d1a_93c4_e507u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let specials = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            1.0,
+            -1.0,
+        ];
+        let mut x = Vec::new();
+        let mut n = Vec::new();
+        for round in 0..3000 {
+            let bits = next();
+            x.push(if round % 50 == 0 {
+                specials[(bits % 7) as usize]
+            } else {
+                f64::from(f32::from_bits(
+                    ((100 + bits % 55) << 23) as u32 | (next() as u32 >> 9),
+                )) * if bits & 1 == 0 { 1.0 } else { -1.0 }
+            });
+            n.push(match round % 5 {
+                0 => (next() % 81) as i64 - 40,
+                1 => (next() % 9) as i64 - 4,
+                2 => (next() % (1 << 22)) as i64 - (1 << 21),
+                3 => 0,
+                _ => (next() % 501) as i64 - 250,
+            });
+        }
+        let mut out = vec![f32::NAN; x.len()];
+        // Every third exponent not whole, which leaves its slot alone.
+        float32_powers(
+            |index| x[index],
+            |index| n[index] as f64 + if index % 3 == 2 { 0.5 } else { 0.0 },
+            &mut out,
+        );
+        for index in 0..x.len() {
+            if index % 3 == 2 {
+                assert!(out[index].is_nan());
+                continue;
+            }
+            let want: f32 = integer_power::<f32, false>(x[index], n[index]);
+            assert!(
+                want.to_bits() == out[index].to_bits() || (want.is_nan() && out[index].is_nan()),
+                "{:e} ** {}",
+                x[index],
+                n[index]
+            );
+        }
+    }
+
+    #[test]
+    fn whole_exponents() {
+        for whole in [
+            0.0,
+            -0.0,
+            1.0,
+            -3.0,
+            2f64.powi(52),
+            2f64.powi(52) + 1.0,
+            2f64.powi(62),
+        ] {
+            assert_eq!(whole_exponent(whole), Some(whole as i64), "{whole}");
+        }
+        assert_eq!(
+            whole_exponent(2f64.powi(63) - 1024.0),
+            Some(i64::MAX - 1023)
+        );
+        for other in [
+            0.5,
+            -2.5,
+            2f64.powi(52) - 0.5,
+            2f64.powi(63),
+            1e300,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            assert_eq!(whole_exponent(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn whole_powers_at_the_edges() {
+        let power = |x: f64, n: i64| integer_power::<f64, false>(x, n);
+        assert_eq!(power(2.0, 10), 1024.0);
+        assert_eq!(power(3.0, -1), 1.0 / 3.0);
+        // `1 + 2^-51 + 2^-104`, under half the last place past `1 + 2^-51`.
+        assert_eq!(power(1.0 + f64::EPSILON, 2), 1.0 + 2.0 * f64::EPSILON);
+        assert_eq!(power(10.0, 400), f64::INFINITY);
+        assert_eq!(power(-10.0, 401), f64::NEG_INFINITY);
+        assert_eq!(power(10.0, -400), 0.0);
+        assert_eq!(power(-2.0, -1075).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(power(2.0f64.powi(-537), 2), f64::from_bits(1));
+        assert_eq!(power(3.0, -1074 / 2), exact_integer_power::<f64>(3.0, -537));
+        assert_eq!(power(0.0, -3), f64::INFINITY);
+        assert_eq!(power(-0.0, -3), f64::NEG_INFINITY);
+        assert_eq!(power(f64::NAN, 0), 1.0);
+        assert!(power(f64::NAN, 2).is_nan());
+        // A power far past the range, without forming it.
+        assert_eq!(power(1.5, 1 << 50), f64::INFINITY);
+        assert_eq!(power(1.5, -(1 << 50)), 0.0);
+        assert_eq!(
+            power(1.0 + f64::EPSILON, 1 << 40),
+            exact_integer_power::<f64>(1.0 + f64::EPSILON, 1 << 40)
+        );
     }
 }

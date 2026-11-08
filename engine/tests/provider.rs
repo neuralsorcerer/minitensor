@@ -571,13 +571,15 @@ fn a_binary_function_hands_a_single_element_over_as_one() {
     let _serial = begin();
     binary_offers().lock().unwrap().clear();
     let values = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN]);
+    let halves: Vec<f64> = ramp_f64(HANDLED_LEN).iter().map(|v| v + 0.5).collect();
+    let fractions = tensor_f64(halves, vec![HANDLED_LEN]);
     let one = tensor_f64(vec![2.5], vec![1]);
 
     // Each form is answered by the provider rather than repeated to length.
     for out in [
-        engine::ops::activation::pow(&values, &values).unwrap(),
+        engine::ops::activation::pow(&values, &fractions).unwrap(),
         engine::ops::activation::pow(&values, &one).unwrap(),
-        engine::ops::activation::pow(&one, &values).unwrap(),
+        engine::ops::activation::pow(&one, &fractions).unwrap(),
         engine::ops::binary_math::atan2(&values, &one).unwrap(),
     ] {
         assert_eq!(out.shape().dims(), &[HANDLED_LEN]);
@@ -593,6 +595,15 @@ fn a_binary_function_hands_a_single_element_over_as_one() {
     let squared = engine::ops::activation::pow(&values, &tensor_f64(vec![2.0], vec![1])).unwrap();
     let want: Vec<f64> = ramp_f64(HANDLED_LEN).iter().map(|v| v * v).collect();
     assert_eq!(squared.data().as_f64_slice().unwrap(), &want[..]);
+    // Nor does any whole exponent, whose power is the value nearest the exact
+    // one: here, small whole numbers to small whole powers, each a product
+    // or a quotient rounded once.
+    let whole = engine::ops::activation::pow(&values, &values).unwrap();
+    let want: Vec<f64> = ramp_f64(HANDLED_LEN)
+        .iter()
+        .map(|&v| v.powi(v as i32))
+        .collect();
+    assert_eq!(whole.data().as_f64_slice().unwrap(), &want[..]);
 
     // A broadcast beyond a single element is computed here, never offered.
     let rows = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN, 1]);

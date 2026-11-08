@@ -197,7 +197,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
 | `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
-| `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
+| `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, each entry the float nearest its exact power, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
 | `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because generic numeric code asks for them defensively. |
 | `imag(input)` | Zero everywhere, as a detached constant -- written as `input * 0` it would answer NaN for an infinite input. |
 | `angle(input)` | `0` for a positive element and `pi` for a negative one. Reads the sign *bit*, so `angle(-0.0)` is `pi`; a NaN has no argument and stays NaN. Piecewise constant, so it carries no gradient. |
@@ -2360,10 +2360,16 @@ assert row_std.shape == (2, 3)
 - `square(input)` — a product, not `pow(input, 2)`: the general power goes
   through `exp(2 log x)` for a non-integral exponent and is both slower and less
   exact than a multiplication, which is exact for every input.
-- A few constant exponents have an exact form, and `x ** c` takes it: `2` is a
-  product and `-1` a division, each rounded once. `3` is rounded once too --
-  computed in float64 for a float32 base, and for a float64 one with the error
-  of each product recovered and added back -- where `x * x * x` rounds twice.
+- A whole exponent gives the float nearest the exact power, `x ** n` for a
+  shared exponent, a tensor of them or one base to many, IEEE's answer at a
+  zero, an infinite or a NaN base, and a zero or an infinity, signed, past
+  either end of the range: `2` is a product and `-1` a division, and any
+  other is a power by squaring with a bound on its rounding, formed exactly
+  where the bound cannot say. The transcendental power missed it by an ulp
+  one time in forty in float64, and `x * x * x` rounds twice. A tensor of
+  exponents that are whole in some places and not in others gives each
+  element what its own pair gives, and an integer beside a float32 is rounded
+  once to float32 rather than first to float64. `vander` is these powers.
   `0.5` is the square root, except at `-0` and `-inf`, where the power is `+0`
   and `+inf`.
 - `lerp(input, end, weight)` — `input + weight * (end - input)`, the point

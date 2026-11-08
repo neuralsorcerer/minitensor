@@ -19,6 +19,9 @@ use crate::autograd::SiluBackward;
 use crate::autograd::SoftmaxBackward;
 use crate::autograd::SoftplusBackward;
 use crate::autograd::SoftsignBackward;
+use crate::ops::arithmetic::exact_product::{
+    float32_powers, integer_power_of, is_whole, whole_exponent,
+};
 use crate::ops::binary::BinaryOpKind;
 use crate::ops::provider::{Ufunc, offer_binary_f64};
 use crate::ops::util::check_dim;
@@ -62,28 +65,159 @@ macro_rules! integer_pow {
 integer_pow!(integer_pow_i32, i32);
 integer_pow!(integer_pow_i64, i64);
 
-/// `base ** exponent` over two equal-length slices.
+/// Where a whole power is rounded: to the dtype it is computed in, or, for a
+/// float32 result computed in float64 -- an integer beside a float32 --
+/// straight to float32, held in float64 until the cast, which is then exact.
+/// Rounded to float64 first, a power just past a float32 halfway point could
+/// land on it and go to the even side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rounding {
+    Own,
+    Float32,
+}
+
+/// The power kernels of one float dtype.
 ///
-/// Float32 goes through `ops::simd::transcendental`, which composes it from
-/// the `exp` and `log` kernels in float64 -- see `pow_one` there for why that
-/// is accurate and why it would not be at float32 width. Every other dtype
-/// keeps `powf`, which for float64 is the only thing accurate enough and for
-/// the integers is not reached at all.
+/// A whole exponent is the value nearest the exact power, by
+/// [`integer_power_of`]; any other is the general power. Float32's goes
+/// through `ops::simd::transcendental`, which composes it from the `exp` and
+/// `log` kernels in float64 -- see `pow_one` there for why that is accurate
+/// and why it would not be at float32 width. Float64 offers it to the
+/// installed provider first -- a vectorized `power`, 5.7x faster than the
+/// scalar `powf` over ten thousand elements -- and computes it with `powf`
+/// only if that declines.
 ///
 /// A trait rather than a `match` on the dtype because the caller is inside a
 /// macro that has already chosen `$ty`; specializing on it here is what lets
 /// one arm serve both widths.
-trait PowKernels: Sized + Copy {
-    /// `base[i] ** exponent[i]`.
-    fn pow_slice(base: &[Self], exponent: &[Self]) -> Vec<Self>;
+trait PowKernels: Sized + Copy + Default + Send + Sync + Into<f64> {
+    /// The general power over two equal-length slices.
+    fn general(base: &[Self], exponent: &[Self]) -> Vec<Self>;
+    /// The general power of one base to each of a slice of exponents.
+    fn general_of_base(base: Self, exponent: &[Self]) -> Vec<Self>;
     /// `base[i] ** exponent`, for one exponent the whole slice shares.
-    fn pow_by_scalar(base: &[Self], exponent: Self) -> Vec<Self>;
-    /// `base ** exponent[i]`, for one base the whole slice shares.
-    fn scalar_pow(base: Self, exponent: &[Self]) -> Vec<Self>;
+    fn pow_by_scalar(base: &[Self], exponent: Self, rounding: Rounding) -> Vec<Self>;
+    /// `out[i]`, for each `i` whose exponent `exponent(i)` is whole, the
+    /// value nearest `base(i) ** exponent(i)`, rounded as `rounding` says;
+    /// the rest of `out` as it was.
+    fn whole_powers(
+        base: impl Fn(usize) -> Self,
+        exponent: impl Fn(usize) -> f64,
+        out: &mut [Self],
+        rounding: Rounding,
+    );
+}
+
+/// `base[i] ** n` for one whole `n` the slice shares, rounded as `rounding`
+/// says.
+fn whole_powers_by<T: PowKernels>(base: &[T], n: f64, rounding: Rounding) -> Vec<T> {
+    let mut out = vec![T::default(); base.len()];
+    crate::ops::map::par_out_chunks_gated(
+        &mut out,
+        crate::ops::map::PAR_CHUNK,
+        EXPENSIVE_PAR_THRESHOLD,
+        &|first, part| T::whole_powers(|index| base[first + index], |_| n, part, rounding),
+    );
+    out
+}
+
+/// `x ** n` for a float32 `x` and `n` three or four: the square is exact in
+/// float64 and the power a two-product's exact pair beside it, at most 96
+/// bits. Rounded to odd at float64's last bit by the pair's sign -- the odd
+/// neighbour on the side the rest lies, where the last bit is even and a
+/// rest is left -- it narrows to the float32 nearest the power, without a
+/// branch on the bits.
+///
+/// A zero comes out a zero of the power's sign, the error being zero; an
+/// infinity or a NaN power is passed on as it is.
+#[inline(always)]
+fn small_power<const N: i64>(x: f32) -> f32 {
+    let wide = f64::from(x);
+    let square = wide * wide;
+    let factor = if N == 3 { wide } else { square };
+    let power = square * factor;
+    let error = crate::ops::arithmetic::rounded_once::product_error(square, factor, power);
+    let bits = power.to_bits();
+    let bump = u64::from(error != 0.0) & !bits & 1;
+    let outward = (error.to_bits() ^ bits) >> 63 == 0;
+    let odd = if outward {
+        bits.wrapping_add(bump)
+    } else {
+        bits.wrapping_sub(bump)
+    };
+    let rounded = if power.is_finite() {
+        f64::from_bits(odd)
+    } else {
+        power
+    };
+    rounded as f32
+}
+
+/// Powers to the exponents `exponent`, each base read by `base_at`: the
+/// value nearest the exact power where the exponent is whole, and the
+/// general power, which `general` computes over the run, elsewhere. The
+/// whole ones are written over the general ones, so that an element's power
+/// is its own operands' alone, whatever the exponents beside it.
+fn with_whole_powers<T: PowKernels>(
+    exponent: &[T],
+    base_at: impl Fn(usize) -> T + Sync,
+    rounding: Rounding,
+    general: impl FnOnce() -> Vec<T>,
+) -> Vec<T> {
+    use crate::ops::map::{SIMD_PAR_CHUNK, par_all_chunk, par_any_chunk};
+    let all = par_all_chunk(exponent, SIMD_PAR_CHUNK, &|run| {
+        run.iter().fold(true, |all, &y| all & is_whole(y.into()))
+    });
+    let mut out = if all {
+        vec![T::default(); exponent.len()]
+    } else {
+        general()
+    };
+    let any = all
+        || par_any_chunk(exponent, SIMD_PAR_CHUNK, &|run| {
+            run.iter().fold(false, |any, &y| any | is_whole(y.into()))
+        });
+    if !any {
+        return out;
+    }
+    crate::ops::map::par_out_chunks_gated(
+        &mut out,
+        crate::ops::map::PAR_CHUNK,
+        EXPENSIVE_PAR_THRESHOLD,
+        &|first, part| {
+            T::whole_powers(
+                |index| base_at(first + index),
+                |index| exponent[first + index].into(),
+                part,
+                rounding,
+            );
+        },
+    );
+    out
+}
+
+/// `base[i] ** exponent[i]` over two equal-length slices.
+fn pow_slice<T: PowKernels>(base: &[T], exponent: &[T], rounding: Rounding) -> Vec<T> {
+    with_whole_powers(
+        exponent,
+        |index| base[index],
+        rounding,
+        || T::general(base, exponent),
+    )
+}
+
+/// `base ** exponent[i]`, for one base the whole slice shares.
+fn scalar_pow<T: PowKernels>(base: T, exponent: &[T], rounding: Rounding) -> Vec<T> {
+    with_whole_powers(
+        exponent,
+        |_| base,
+        rounding,
+        || T::general_of_base(base, exponent),
+    )
 }
 
 impl PowKernels for f32 {
-    fn pow_slice(base: &[f32], exponent: &[f32]) -> Vec<f32> {
+    fn general(base: &[f32], exponent: &[f32]) -> Vec<f32> {
         let kernel = crate::ops::simd::F32Kernel::select();
         // SAFETY: `pow` writes every element of each block it is given.
         unsafe {
@@ -97,16 +231,41 @@ impl PowKernels for f32 {
         }
     }
 
-    fn pow_by_scalar(base: &[f32], exponent: f32) -> Vec<f32> {
-        // Carried in float64, where the square of a float32 is exact and the
-        // cube rounds once more before the float32 it lands on. Multiplied out
-        // in float32 the cube rounded twice, and a quarter of all inputs came
-        // back an ulp from the nearest float32 to their cube.
-        if exponent == 3.0 {
-            return unary_map(base, |x: f32| {
-                let wide = f64::from(x);
-                (wide * wide * wide) as f32
-            });
+    fn general_of_base(base: f32, exponent: &[f32]) -> Vec<f32> {
+        // `b ** y` is `exp(y * ln b)`, and `ln b` is a constant -- which makes
+        // it exactly the `exp` kernel's scaled form, with no `pow` kernel
+        // needed at all. Only for a base the logarithm answers for, and not
+        // `1`, where `ln b` is zero and `1 ** inf` would come out of
+        // `exp(inf * 0)` as NaN instead of as one.
+        if base > 0.0 && base.is_finite() && base != 1.0 {
+            let kernel = crate::ops::simd::F32Kernel::select();
+            let ln_base = (base as f64).ln();
+            // SAFETY: `exp_scaled` writes every element of each block.
+            return unsafe {
+                crate::ops::map::unary_map_blocks_threshold(
+                    exponent,
+                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                    |src, dst| kernel.exp_scaled(src, dst, ln_base),
+                )
+            };
+        }
+        unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f32| {
+            base.powf(y)
+        })
+    }
+
+    fn pow_by_scalar(base: &[f32], exponent: f32, _: Rounding) -> Vec<f32> {
+        // A whole exponent is the float32 nearest the exact power: the cube
+        // multiplied out in float32 rounded twice, and in float64 once and
+        // then again to float32.
+        if let Some(n) = whole_exponent(f64::from(exponent)) {
+            if n == 3 {
+                return unary_map(base, small_power::<3>);
+            }
+            if n == 4 {
+                return unary_map(base, small_power::<4>);
+            }
+            return whole_powers_by(base, n as f64, Rounding::Own);
         }
         if exponent == 0.5 {
             return unary_map(base, square_root_power::<f32>);
@@ -131,53 +290,52 @@ impl PowKernels for f32 {
         }
     }
 
-    fn scalar_pow(base: f32, exponent: &[f32]) -> Vec<f32> {
-        // `b ** y` is `exp(y * ln b)`, and `ln b` is a constant -- which makes
-        // it exactly the `exp` kernel's scaled form, with no `pow` kernel
-        // needed at all. Only for a base the logarithm answers for, and not
-        // `1`, where `ln b` is zero and `1 ** inf` would come out of
-        // `exp(inf * 0)` as NaN instead of as one.
-        if base > 0.0 && base.is_finite() && base != 1.0 {
-            let kernel = crate::ops::simd::F32Kernel::select();
-            let ln_base = (base as f64).ln();
-            // SAFETY: `exp_scaled` writes every element of each block.
-            return unsafe {
-                crate::ops::map::unary_map_blocks_threshold(
-                    exponent,
-                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
-                    |src, dst| kernel.exp_scaled(src, dst, ln_base),
-                )
-            };
-        }
-        unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f32| {
-            base.powf(y)
-        })
+    fn whole_powers(
+        base: impl Fn(usize) -> f32,
+        exponent: impl Fn(usize) -> f64,
+        out: &mut [f32],
+        _: Rounding,
+    ) {
+        float32_powers(|index| f64::from(base(index)), exponent, out);
     }
 }
 
-/// Float64 offers each form to the installed provider first -- a vectorized
-/// `power`, 5.7x faster than the scalar `powf` over ten thousand elements --
-/// and computes it here only if that declines.
 impl PowKernels for f64 {
-    fn pow_slice(base: &[f64], exponent: &[f64]) -> Vec<f64> {
+    fn general(base: &[f64], exponent: &[f64]) -> Vec<f64> {
         offer_binary_f64(Ufunc::Pow, base, exponent, base.len()).unwrap_or_else(|| {
             crate::ops::map::binary_map(base, exponent, |x: f64, y: f64| x.powf(y))
         })
     }
 
-    fn pow_by_scalar(base: &[f64], exponent: f64) -> Vec<f64> {
-        // Rounded once rather than twice; see `cube_one` in the kernels.
-        if exponent == 3.0 {
-            let kernel = crate::ops::simd::F32Kernel::select();
-            // SAFETY: `cube_f64` writes every element of each block.
-            return unsafe {
-                crate::ops::map::unary_map_blocks_threshold(
-                    base,
-                    crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
-                    |src, dst| kernel.cube_f64(src, dst),
-                )
-            };
+    fn general_of_base(base: f64, exponent: &[f64]) -> Vec<f64> {
+        offer_binary_f64(Ufunc::Pow, &[base], exponent, exponent.len()).unwrap_or_else(|| {
+            unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f64| {
+                base.powf(y)
+            })
+        })
+    }
+
+    fn pow_by_scalar(base: &[f64], exponent: f64, rounding: Rounding) -> Vec<f64> {
+        if let Some(n) = whole_exponent(exponent) {
+            // Rounded once rather than twice; see `cube_one` in the kernels.
+            if n == 3 && rounding == Rounding::Own {
+                let kernel = crate::ops::simd::F32Kernel::select();
+                // SAFETY: `cube_f64` writes every element of each block.
+                return unsafe {
+                    crate::ops::map::unary_map_blocks_threshold(
+                        base,
+                        crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+                        |src, dst| kernel.cube_f64(src, dst),
+                    )
+                };
+            }
+            // Any other whole exponent: the value nearest the exact power,
+            // which the transcendental one missed by an ulp one time in forty.
+            return whole_powers_by(base, exponent, rounding);
         }
+        // The square root rounds once, and in float64 it is a float32's too:
+        // the root of a float32 or an int32 is never within a float64 ulp of
+        // a float32 halfway point without being on it, which it cannot be.
         if exponent == 0.5 {
             return unary_map(base, square_root_power::<f64>);
         }
@@ -188,12 +346,22 @@ impl PowKernels for f64 {
         })
     }
 
-    fn scalar_pow(base: f64, exponent: &[f64]) -> Vec<f64> {
-        offer_binary_f64(Ufunc::Pow, &[base], exponent, exponent.len()).unwrap_or_else(|| {
-            unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f64| {
-                base.powf(y)
-            })
-        })
+    fn whole_powers(
+        base: impl Fn(usize) -> f64,
+        exponent: impl Fn(usize) -> f64,
+        out: &mut [f64],
+        rounding: Rounding,
+    ) {
+        match rounding {
+            Rounding::Own => {
+                for (index, slot) in out.iter_mut().enumerate() {
+                    if let Some(n) = whole_exponent(exponent(index)) {
+                        *slot = integer_power_of::<f64>(base(index), n);
+                    }
+                }
+            }
+            Rounding::Float32 => float32_powers(base, exponent, out),
+        }
     }
 }
 
@@ -213,11 +381,6 @@ fn square_root_power<T: num_traits::Float>(x: T) -> T {
     }
 }
 
-#[inline]
-fn pow_same_shape<T: PowKernels>(base: &[T], exponent: &[T]) -> Vec<T> {
-    T::pow_slice(base, exponent)
-}
-
 /// Element-wise power with tensor exponent and gradient support
 pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     // Check device and dtype compatibility
@@ -229,12 +392,19 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     }
 
     // An integer beside a float32 result is evaluated with it in float64;
-    // see `ops::util::widened_pair`. Two integers keep an integer power.
+    // see `ops::util::widened_pair`. Its whole powers are rounded straight
+    // to float32. Two integers keep an integer power.
     if let Some((base, exponent)) =
         crate::ops::util::widened_pair(base, exponent, BinaryOpKind::Pow)?
     {
-        return pow(&base, &exponent)?.astype(DataType::Float32);
+        return powers(&base, &exponent, Rounding::Float32)?.astype(DataType::Float32);
     }
+    powers(base, exponent, Rounding::Own)
+}
+
+/// [`pow`] of two operands on one device, its whole powers rounded as
+/// `rounding` says.
+fn powers(base: &Tensor, exponent: &Tensor, rounding: Rounding) -> Result<Tensor> {
     // Mixed dtypes promote here as they do for `+`, `*` and the rest: `**` is
     // arithmetic and the documented rule covers all of it. Refusing the pair
     // instead made `x ** y` the one operator that would not take an integer
@@ -268,7 +438,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         let dims: Vec<isize> = out_shape.dims().iter().map(|&d| d as isize).collect();
         let base_b = base.expand(dims.clone())?;
         let exp_b = exponent.expand(dims)?;
-        return pow(&base_b, &exp_b);
+        return powers(&base_b, &exp_b, rounding);
     };
 
     let output_shape = match broadcast {
@@ -305,22 +475,20 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                 ))
             })?;
             let out = match broadcast {
-                PowBroadcast::None => pow_same_shape(b, e),
-                PowBroadcast::BaseScalar => <$ty as PowKernels>::scalar_pow(b[0], e),
+                PowBroadcast::None => pow_slice(b, e, rounding),
+                PowBroadcast::BaseScalar => scalar_pow(b[0], e, rounding),
                 PowBroadcast::ExponentScalar => {
                     let exp_val = e[0];
-                    // Fast paths for the exponents that are one operation,
-                    // which avoid the transcendental `powf` entirely: `x * x`
-                    // for `x**2` and a division for `x**-1`. Each agrees with
-                    // `powf` on every input including the IEEE special values
-                    // -- each is a single correctly-rounded operation, which
-                    // is all `powf` has to perform for them. `x**3` is two,
-                    // and rounded twice; it is in `pow_by_scalar`, with the
-                    // other exponents that have a cheaper exact form. (Checked for `-1` over a million
-                    // values spanning both signs: bit-identical throughout,
-                    // including `1/±0 = ±inf` and `1/±inf = ±0`.) The gradient
-                    // is produced separately by `PowBackward`, so it is
-                    // unchanged.
+                    // The exponents that are one operation: `x * x` for
+                    // `x**2` and a division for `x**-1`, each the value
+                    // nearest the exact power, IEEE's special values
+                    // included, in the dtype it is computed in -- for a
+                    // float32 result computed in float64 they would round
+                    // twice, and take the whole power instead. `x**3` is
+                    // two operations; it is in `pow_by_scalar`, with the
+                    // other exponents that have a cheaper exact form. The
+                    // gradient is produced separately by `PowBackward`, so
+                    // it is unchanged.
                     //
                     // `-1` matters beyond `x ** -1` being written directly:
                     // `reciprocal` is defined as `powf(x, -1.0)`, so every call
@@ -331,14 +499,15 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                     // 2.35ms per million float32 elements against 0.13ms for
                     // the division, an 18x tax on an op that is one
                     // instruction.
-                    if exp_val == 2.0 {
+                    let own = rounding == Rounding::Own;
+                    if exp_val == 2.0 && own {
                         unary_map(b, |x: $ty| x * x)
                     } else if exp_val == 1.0 {
                         unary_map(b, |x: $ty| x)
-                    } else if exp_val == -1.0 {
+                    } else if exp_val == -1.0 && own {
                         unary_map(b, |x: $ty| 1.0 / x)
                     } else {
-                        <$ty as PowKernels>::pow_by_scalar(b, exp_val)
+                        <$ty as PowKernels>::pow_by_scalar(b, exp_val, rounding)
                     }
                 }
             };
