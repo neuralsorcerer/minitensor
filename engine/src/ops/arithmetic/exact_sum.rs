@@ -59,6 +59,10 @@ pub(crate) trait Element: Copy + Send + Sync + 'static {
     }
     /// [`plain_squares_lanes`] in the widest build the CPU runs.
     fn plain_squares(values: &[Self], centre: f64) -> f64;
+    /// [`plain_differences_lanes`] in the widest build the CPU runs.
+    fn plain_differences(x: &[Self], y: &[Self], euclidean: bool, shift: f64) -> f64 {
+        plain_differences_lanes(x, y, euclidean, shift)
+    }
     /// The carried total of `a[i] · b[i]`, block by block in the widest
     /// build the CPU runs, the blocks merged pairwise.
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried;
@@ -144,6 +148,21 @@ impl Element for f32 {
             return unsafe { plain_squares_avx_f32(values, centre) };
         }
         plain_squares_lanes(values, centre)
+    }
+
+    fn plain_differences(x: &[Self], y: &[Self], euclidean: bool, shift: f64) -> f64 {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx {
+            // SAFETY: avx was detected on this CPU.
+            return unsafe {
+                if euclidean {
+                    plain_differences_avx_f32::<true>(x, y, shift)
+                } else {
+                    plain_differences_avx_f32::<false>(x, y, shift)
+                }
+            };
+        }
+        plain_differences_lanes(x, y, euclidean, shift)
     }
 
     fn carried_dot(a: &[Self], b: &[Self]) -> Carried {
@@ -2434,6 +2453,82 @@ fn plain_squares_lanes<I: Element>(values: &[I], centre: f64) -> f64 {
     lanes.iter().sum()
 }
 
+/// One block's plain float64 `Σ |x - y + shift|`, or with `euclidean`
+/// `Σ (x - y + shift)²`, in [`LANES`] lanes, the values left over in lane 0
+/// and the lanes in order: each difference rounded at most twice and its
+/// square once more, and each term through at most `len / LANES + LANES`
+/// additions.
+#[inline(always)]
+fn plain_differences_lanes<I: Element>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> f64 {
+    let term = |a: &I, b: &I| {
+        let difference = (a.wide() - b.wide()) + shift;
+        if euclidean {
+            difference * difference
+        } else {
+            difference.abs()
+        }
+    };
+    let mut lanes = [0f64; LANES];
+    let (left, left_rest) = x.as_chunks::<LANES>();
+    let (right, right_rest) = y.as_chunks::<LANES>();
+    for (a, b) in left.iter().zip(right) {
+        for lane in 0..LANES {
+            lanes[lane] += term(&a[lane], &b[lane]);
+        }
+    }
+    for (a, b) in left_rest.iter().zip(right_rest) {
+        lanes[0] += term(a, b);
+    }
+    lanes.iter().sum()
+}
+
+/// [`plain_differences_lanes`] in 256-bit registers for float32 operands,
+/// each four read and widened at once: the same lanes, terms and order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn plain_differences_avx_f32<const EUCLIDEAN: bool>(x: &[f32], y: &[f32], shift: f64) -> f64 {
+    use std::arch::x86_64::{
+        _mm_loadu_ps, _mm256_add_pd, _mm256_andnot_pd, _mm256_cvtps_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    };
+    let (sign, moved) = (_mm256_set1_pd(-0.0), _mm256_set1_pd(shift));
+    let mut sums = [_mm256_setzero_pd(); 2];
+    let (left, left_rest) = x.as_chunks::<LANES>();
+    let (right, right_rest) = y.as_chunks::<LANES>();
+    for (a, b) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (a, b) = unsafe {
+                (
+                    _mm256_cvtps_pd(_mm_loadu_ps(a.as_ptr().add(4 * half))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(b.as_ptr().add(4 * half))),
+                )
+            };
+            let difference = _mm256_add_pd(_mm256_sub_pd(a, b), moved);
+            let term = if EUCLIDEAN {
+                _mm256_mul_pd(difference, difference)
+            } else {
+                _mm256_andnot_pd(sign, difference)
+            };
+            sums[half] = _mm256_add_pd(sums[half], term);
+        }
+    }
+    let mut lanes = [0f64; LANES];
+    for (half, vector) in sums.into_iter().enumerate() {
+        // SAFETY: four lanes from `4 * half` lie inside the array.
+        unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+    }
+    for (&a, &b) in left_rest.iter().zip(right_rest) {
+        let difference = (f64::from(a) - f64::from(b)) + shift;
+        lanes[0] += if EUCLIDEAN {
+            difference * difference
+        } else {
+            difference.abs()
+        };
+    }
+    lanes.iter().sum()
+}
+
 /// A short run's carried total in one lane, with nothing to merge: each
 /// value's rounding passes through one addition to the error.
 #[inline(always)]
@@ -3020,28 +3115,7 @@ fn plain_distance<I: Element, T: Output>(
     euclidean: bool,
     shift: f64,
 ) -> Option<T> {
-    let block = |xs: &[I], ys: &[I]| {
-        let mut lanes = [0f64; LANES];
-        let (left, left_rest) = xs.as_chunks::<LANES>();
-        let (right, right_rest) = ys.as_chunks::<LANES>();
-        let term = |a: &I, b: &I| {
-            let difference = (a.wide() - b.wide()) + shift;
-            if euclidean {
-                difference * difference
-            } else {
-                difference.abs()
-            }
-        };
-        for (a, b) in left.iter().zip(right) {
-            for lane in 0..LANES {
-                lanes[lane] += term(&a[lane], &b[lane]);
-            }
-        }
-        for (a, b) in left_rest.iter().zip(right_rest) {
-            lanes[0] += term(a, b);
-        }
-        lanes.iter().sum::<f64>()
-    };
+    let block = |xs: &[I], ys: &[I]| I::plain_differences(xs, ys, euclidean, shift);
     let (sum, blocks) = if x.len() <= BLOCK {
         (block(x, y), 1)
     } else {
@@ -3070,6 +3144,443 @@ fn plain_distance<I: Element, T: Output>(
     let moved = bound * (0.5 / root) * (1.0 + 2.0 * bound / sum) * (1.0 + 2f64.powi(-50))
         + root * 2f64.powi(-52);
     T::settle(root, 0.0, moved * (1.0 + 2f64.powi(-40)))
+}
+
+/// The value nearest the exact `Σ (x - y)²`, or with `taxicab`
+/// `Σ |x - y|`, over `count`: a loss's sum with a count of one, and its
+/// mean with the number of terms. NaN for no terms over none.
+///
+/// The differences are carried as [`distance`] carries them, and the total
+/// over `count` settled by [`Carried::divided`]'s bound; a float32 answer is
+/// first tried from plain float64 sums. A NaN or an infinity gives what the
+/// formula gives; where the bound cannot say, or finite operands differ by
+/// more than float64 holds, the total is formed in whole numbers and divided
+/// there.
+pub(crate) fn difference_total<I: Element, T: Output>(
+    x: &[I],
+    y: &[I],
+    taxicab: bool,
+    count: usize,
+) -> T {
+    debug_assert_eq!(x.len(), y.len());
+    if count == 0 {
+        return T::narrow(f64::NAN);
+    }
+    let euclidean = !taxicab;
+    if T::PLAIN
+        && let Some(value) = plain_total(x, y, euclidean, count)
+    {
+        return value;
+    }
+    let part = if x.len() <= BLOCK {
+        distance_block(x, y, euclidean, 0.0)
+    } else {
+        let block = |xs: &[I], ys: &[I]| distance_block(xs, ys, euclidean, 0.0);
+        let parts = dot_blocks(x, y, block);
+        DistancePart {
+            finite: parts.iter().all(|part| part.finite),
+            unsure: parts.iter().any(|part| part.unsure),
+            loose: parts.iter().map(|part| part.loose).sum(),
+            carried: pairwise_fold(
+                parts.into_iter().map(|part| part.carried).collect(),
+                Carried::default(),
+                if euclidean {
+                    Carried::merge
+                } else {
+                    Carried::merge_tracked
+                },
+            ),
+        }
+    };
+    if !part.finite {
+        let finite = |values: &[I]| values.iter().all(|value| value.wide().is_finite());
+        if finite(x) && finite(y) {
+            // Finite operands a whole float64 range apart, whose mean may
+            // still lie inside it.
+            return exact_difference_total(x, y, euclidean, count);
+        }
+        let differences = x.iter().zip(y).map(|(a, b)| a.wide() - b.wide());
+        let total: f64 = if euclidean {
+            differences.map(|d| d * d).sum()
+        } else {
+            differences.map(f64::abs).sum()
+        };
+        return T::narrow(total / count as f64);
+    }
+    let settled = (!part.unsure).then(|| {
+        // As for the 2-distance: the squares' third parts, and an allowance
+        // for errors rounded to the subnormal range.
+        let carried = if euclidean {
+            Carried {
+                slack: part.carried.slack
+                    + part.loose * (1.0 + 2f64.powi(-50))
+                    + 4.0 * x.len() as f64 * f64::from_bits(1),
+                ..part.carried
+            }
+        } else {
+            part.carried
+        };
+        carried.divided::<T>(count)
+    });
+    settled
+        .flatten()
+        .unwrap_or_else(|| exact_difference_total(x, y, euclidean, count))
+}
+
+/// [`difference_total`] of a float32 answer from plain float64 sums, when
+/// their bound settles it: within `(n + 6)u` of the total, as for
+/// [`plain_distance`], and a rounding more for the division.
+fn plain_total<I: Element, T: Output>(
+    x: &[I],
+    y: &[I],
+    euclidean: bool,
+    count: usize,
+) -> Option<T> {
+    let block = |xs: &[I], ys: &[I]| I::plain_differences(xs, ys, euclidean, 0.0);
+    let (sum, blocks) = if x.len() <= BLOCK {
+        (block(x, y), 1)
+    } else {
+        let partials = dot_blocks(x, y, block);
+        (partials.iter().sum::<f64>(), partials.len())
+    };
+    if !sum.is_finite() {
+        return None;
+    }
+    if sum == 0.0 {
+        // A rounded difference is zero only where the exact one is.
+        return Some(T::narrow(0.0));
+    }
+    let depth = (x.len() + blocks + LANES) as f64;
+    let value = sum / count as f64;
+    let bound = value * (depth + 8.0) * 2f64.powi(-52) + depth * f64::from_bits(2);
+    T::settle(value, 0.0, bound)
+}
+
+/// [`difference_total`] in whole numbers: the squares expanded into
+/// products of the operands, or the differences' magnitudes, each sign taken
+/// exactly, summed, and divided by `count` by long division.
+#[cold]
+#[inline(never)]
+fn exact_difference_total<I: Element, T: Output>(
+    x: &[I],
+    y: &[I],
+    euclidean: bool,
+    count: usize,
+) -> T {
+    let pairs = x.iter().zip(y).map(|(a, b)| (a.wide(), b.wide()));
+    let total = if euclidean {
+        Total::of_products(pairs.flat_map(|(a, b)| [(a, a), (b, b), (a, -b), (a, -b)]))
+    } else {
+        Total::of_wide(pairs.flat_map(|(a, b)| {
+            let (head, tail) = two_sum(a, -b);
+            // The exact difference's sign: its head's, or its tail's at zero.
+            let negative = head < 0.0 || (head == 0.0 && tail < 0.0);
+            if negative { [-a, b] } else { [a, -b] }
+        }))
+    };
+    match total {
+        Err(special) => T::narrow(special / count as f64),
+        Ok(total) => total.divided(count as u64),
+    }
+}
+
+/// The value nearest `(a - b)²`: the difference as a two-sum's pair
+/// `h + t`, its square `h² + 2ht + t²` with `h²` split exactly, settled by a
+/// bound on the cross term's roundings and `t²`, and otherwise summed in
+/// whole numbers. A NaN, or a difference past the range, squares as the
+/// formula squares it. A float32 answer wants operands that are float32s,
+/// whose squares' errors float64 holds.
+pub(crate) fn squared_difference<T: Output>(a: f64, b: f64) -> T {
+    let (head, tail) = two_sum(a, -b);
+    if !head.is_finite() {
+        return T::narrow(head * head);
+    }
+    let exact = || {
+        Total::of_products([(head, head), (head, tail), (head, tail), (tail, tail)].into_iter())
+            .map_or_else(T::narrow, |total| total.rounded())
+    };
+    let square = head * head;
+    if !square.is_finite() {
+        // Rounded past the range, where the exact square may lie inside it.
+        return exact();
+    }
+    let error = product_error(head, head, square);
+    if tail == 0.0 {
+        // The difference exact, its square is the pair, rounded once.
+        return T::settle(square, error, 0.0).unwrap_or_else(|| T::narrow(square));
+    }
+    let cross = 2.0 * head * tail;
+    let low = error + cross;
+    let (value, rest) = two_sum(square, low);
+    // The cross term's two roundings and `t²`, and for each part rounded in
+    // the subnormal range under the least subnormal.
+    let bound = ((cross.abs() + low.abs()) * 2f64.powi(-53) + tail * tail) * (1.0 + 2f64.powi(-50))
+        + f64::from_bits(8);
+    T::settle(value, rest, bound).unwrap_or_else(exact)
+}
+
+/// Each `(x - y)²`, the value nearest the square of the exact difference:
+/// [`squared_difference_lane`] a run at a time, in the widest build the CPU
+/// runs and across the pool for a long operand, and a run with any left
+/// open -- near a halfway point, in the subnormal range, past the range, or
+/// NaN -- again by [`reopened_run`].
+pub(crate) fn squared_differences<T: Squared>(x: &[T], y: &[T]) -> Vec<T> {
+    use std::mem::MaybeUninit;
+    assert_eq!(
+        x.len(),
+        y.len(),
+        "squared_differences: operands differ in length"
+    );
+    let fill = |start: usize, block: &mut [MaybeUninit<T>]| {
+        let end = start + block.len();
+        const RUN: usize = 256;
+        let runs = x[start..end]
+            .chunks(RUN)
+            .zip(y[start..end].chunks(RUN))
+            .zip(block.chunks_mut(RUN));
+        for ((x, y), out) in runs {
+            if T::squares_run(x, y, out) {
+                reopened_run(x, y, out);
+            }
+        }
+    };
+    // SAFETY: the chunks cover the output, and `fill` writes every element
+    // of each.
+    unsafe {
+        crate::ops::map::build_vec(x.len(), |spare| {
+            crate::ops::map::par_out_chunks(spare, 1 << 14, &fill)
+        })
+    }
+}
+
+/// A float whose squared differences [`squared_differences`] takes, the
+/// operands and the answers all of it.
+pub(crate) trait Squared: Element + Output {
+    /// [`squares_run`] in the widest build the CPU runs: each square into
+    /// `out`, and whether any was left open.
+    fn squares_run(x: &[Self], y: &[Self], out: &mut [std::mem::MaybeUninit<Self>]) -> bool;
+}
+
+impl Squared for f64 {
+    fn squares_run(x: &[Self], y: &[Self], out: &mut [std::mem::MaybeUninit<Self>]) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if fused() {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { squares_run_fma(x, y, out) };
+        }
+        squares_run::<Self, false>(x, y, out)
+    }
+}
+
+impl Squared for f32 {
+    fn squares_run(x: &[Self], y: &[Self], out: &mut [std::mem::MaybeUninit<Self>]) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2 {
+            // SAFETY: avx2 was detected on this CPU.
+            return unsafe { squares_run_avx2_f32(x, y, out) };
+        }
+        squares_run::<Self, false>(x, y, out)
+    }
+}
+
+/// [`squared_difference_lane`] over a run into `out`, and whether any was
+/// left open, gathered without a branch.
+#[inline(always)]
+fn squares_run<T: Squared, const FMA: bool>(
+    x: &[T],
+    y: &[T],
+    out: &mut [std::mem::MaybeUninit<T>],
+) -> bool {
+    let mut open = false;
+    for ((slot, a), b) in out.iter_mut().zip(x).zip(y) {
+        let (value, settled) = squared_difference_lane::<T, FMA>(a.wide(), b.wide());
+        open |= !settled;
+        slot.write(value);
+    }
+    open
+}
+
+/// A run with a square left open, every square again: from
+/// [`squared_difference_lane`] where it settles and from
+/// [`squared_difference`] where it does not.
+#[cold]
+#[inline(never)]
+fn reopened_run<T: Squared>(x: &[T], y: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    for ((slot, a), b) in out.iter_mut().zip(x).zip(y) {
+        let (a, b) = (a.wide(), b.wide());
+        let (value, settled) = squared_difference_lane::<T, false>(a, b);
+        slot.write(if settled {
+            value
+        } else {
+            squared_difference(a, b)
+        });
+    }
+}
+
+/// [`squared_difference_lane`] for float64 in 256-bit registers with fused
+/// multiply-adds, written out because the compiler kept the two-sums
+/// scalar: the cross term `2ht` added to the square's error by one fused
+/// rounding, and the square's pair settled as [`Output::settle_lanes`]
+/// settles it, within that rounding, `t²` and an allowance for the
+/// subnormal range.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn squares_run_fma(x: &[f64], y: &[f64], out: &mut [std::mem::MaybeUninit<f64>]) -> bool {
+    use std::arch::x86_64::{
+        _CMP_EQ_OQ, _CMP_LT_OQ, _mm256_add_pd, _mm256_andnot_pd, _mm256_castpd_si256,
+        _mm256_castsi256_pd, _mm256_cmp_pd, _mm256_fmadd_pd, _mm256_fmsub_pd, _mm256_loadu_pd,
+        _mm256_movemask_pd, _mm256_mul_pd, _mm256_or_pd, _mm256_set1_epi64x, _mm256_set1_pd,
+        _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_epi64, _mm256_sub_pd,
+    };
+    let sign = _mm256_set1_pd(-0.0);
+    let (zero, one) = (_mm256_setzero_pd(), _mm256_set1_epi64x(1));
+    let (unit, widen) = (
+        _mm256_set1_pd(2f64.powi(-52)),
+        _mm256_set1_pd(1.0 + 2f64.powi(-50)),
+    );
+    let (least, shy) = (
+        _mm256_set1_pd(f64::from_bits(16)),
+        _mm256_set1_pd(SHY_OF_HALF),
+    );
+    // Any lane left open, as a sign bit.
+    let mut open = zero;
+    let (left, left_rest) = x.as_chunks::<4>();
+    let (right, right_rest) = y.as_chunks::<4>();
+    let (slots, slots_rest) = out.as_chunks_mut::<4>();
+    for ((a, b), slot) in left.iter().zip(right).zip(slots.iter_mut()) {
+        // SAFETY: each chunk holds four values.
+        let (a, b) = unsafe { (_mm256_loadu_pd(a.as_ptr()), _mm256_loadu_pd(b.as_ptr())) };
+        // `a - b` and its exact error, by a two-sum.
+        let head = _mm256_sub_pd(a, b);
+        let virtual_b = _mm256_sub_pd(a, head);
+        let virtual_a = _mm256_add_pd(head, virtual_b);
+        let tail = _mm256_sub_pd(_mm256_sub_pd(a, virtual_a), _mm256_sub_pd(b, virtual_b));
+        let square = _mm256_mul_pd(head, head);
+        let error = _mm256_fmsub_pd(head, head, square);
+        let low = _mm256_fmadd_pd(_mm256_add_pd(head, head), tail, error);
+        // The pair by a fast two-sum: the square outweighs the rest.
+        let value = _mm256_add_pd(square, low);
+        let rest = _mm256_sub_pd(low, _mm256_sub_pd(value, square));
+        let bound = _mm256_mul_pd(
+            _mm256_add_pd(
+                _mm256_fmadd_pd(_mm256_andnot_pd(sign, low), unit, _mm256_mul_pd(tail, tail)),
+                least,
+            ),
+            widen,
+        );
+        // The gap to the float64 below, NaN for a zero or past the range.
+        let below = _mm256_castsi256_pd(_mm256_sub_epi64(_mm256_castpd_si256(value), one));
+        let inward = _mm256_sub_pd(value, below);
+        let clear = _mm256_cmp_pd(
+            _mm256_add_pd(_mm256_andnot_pd(sign, rest), bound),
+            _mm256_mul_pd(inward, shy),
+            _CMP_LT_OQ,
+        );
+        let settled = _mm256_or_pd(clear, _mm256_cmp_pd(head, zero, _CMP_EQ_OQ));
+        open = _mm256_or_pd(open, _mm256_andnot_pd(settled, sign));
+        // SAFETY: each chunk of the output holds four values.
+        unsafe { _mm256_storeu_pd(slot.as_mut_ptr().cast(), value) };
+    }
+    let mut any = _mm256_movemask_pd(open) != 0;
+    for ((slot, &a), &b) in slots_rest.iter_mut().zip(left_rest).zip(right_rest) {
+        let (value, settled) = squared_difference_lane::<f64, true>(a, b);
+        any |= !settled;
+        slot.write(value);
+    }
+    any
+}
+
+/// [`squared_difference_lane`] for float32 in 256-bit registers, four
+/// operands widened at once: each plain square, and whether it is clear of
+/// a float32 halfway point and of float32's subnormals.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn squares_run_avx2_f32(x: &[f32], y: &[f32], out: &mut [std::mem::MaybeUninit<f32>]) -> bool {
+    use std::arch::x86_64::{
+        _CMP_EQ_OQ, _CMP_GE_OQ, _mm_loadu_ps, _mm_storeu_ps, _mm256_and_si256, _mm256_andnot_si256,
+        _mm256_castpd_si256, _mm256_cmp_pd, _mm256_cmpeq_epi64, _mm256_cmpgt_epi64,
+        _mm256_cvtpd_ps, _mm256_cvtps_pd, _mm256_mul_pd, _mm256_or_si256, _mm256_set1_epi64x,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_setzero_si256, _mm256_sub_pd, _mm256_testz_si256,
+    };
+    let past = _mm256_set1_epi64x((1 << 29) - 1);
+    let (above, under) = (
+        _mm256_set1_epi64x((1 << 28) + 8),
+        _mm256_set1_epi64x((1 << 28) - 8),
+    );
+    let (zero, least) = (
+        _mm256_setzero_pd(),
+        _mm256_set1_pd(f64::from(f32::MIN_POSITIVE)),
+    );
+    let ones = _mm256_cmpeq_epi64(_mm256_setzero_si256(), _mm256_setzero_si256());
+    // Any lane left open, all ones.
+    let mut open = _mm256_setzero_si256();
+    let (left, left_rest) = x.as_chunks::<4>();
+    let (right, right_rest) = y.as_chunks::<4>();
+    let (slots, slots_rest) = out.as_chunks_mut::<4>();
+    for ((a, b), slot) in left.iter().zip(right).zip(slots.iter_mut()) {
+        // SAFETY: each chunk holds four values.
+        let (a, b) = unsafe {
+            (
+                _mm256_cvtps_pd(_mm_loadu_ps(a.as_ptr())),
+                _mm256_cvtps_pd(_mm_loadu_ps(b.as_ptr())),
+            )
+        };
+        let difference = _mm256_sub_pd(a, b);
+        let square = _mm256_mul_pd(difference, difference);
+        let bits = _mm256_and_si256(_mm256_castpd_si256(square), past);
+        let clear = _mm256_or_si256(
+            _mm256_cmpgt_epi64(bits, above),
+            _mm256_cmpgt_epi64(under, bits),
+        );
+        let normal = _mm256_castpd_si256(_mm256_cmp_pd(square, least, _CMP_GE_OQ));
+        let exact = _mm256_castpd_si256(_mm256_cmp_pd(difference, zero, _CMP_EQ_OQ));
+        let settled = _mm256_or_si256(_mm256_and_si256(clear, normal), exact);
+        open = _mm256_or_si256(open, _mm256_andnot_si256(settled, ones));
+        // SAFETY: each chunk of the output holds four values.
+        unsafe { _mm_storeu_ps(slot.as_mut_ptr().cast(), _mm256_cvtpd_ps(square)) };
+    }
+    let mut any = _mm256_testz_si256(open, open) == 0;
+    for ((slot, &a), &b) in slots_rest.iter_mut().zip(left_rest).zip(right_rest) {
+        let (value, settled) = squared_difference_lane::<f32, false>(f64::from(a), f64::from(b));
+        any |= !settled;
+        slot.write(value);
+    }
+    any
+}
+
+/// [`squared_difference`] without branches: the square of the exact
+/// difference's pair with its cross terms, and whether the bound settles
+/// it; for float32, the plain square and whether it is clear of a halfway
+/// point. A zero difference is exact; a NaN, and a square in the answer's
+/// subnormal range, are left open, and for float64 an infinite square.
+#[inline(always)]
+fn squared_difference_lane<T: Output, const FMA: bool>(a: f64, b: f64) -> (T, bool) {
+    if T::PLAIN {
+        // The difference and its square each rounded once in float64, which
+        // leaves the square within three float64 units of the exact one: more
+        // than eight from a float32 halfway point, the 2^28th unit past a
+        // float32, and above float32's subnormals, both narrow alike.
+        let difference = a - b;
+        let square = difference * difference;
+        let past = square.to_bits() & ((1 << 29) - 1);
+        let clear = past.abs_diff(1 << 28) > 8;
+        let normal = square >= f64::from(f32::MIN_POSITIVE);
+        return (T::narrow(square), (clear & normal) | (difference == 0.0));
+    }
+    let (head, tail) = two_sum(a, -b);
+    let square = head * head;
+    let error = if FMA {
+        head.mul_add(head, -square)
+    } else {
+        product_error(head, head, square)
+    };
+    let cross = 2.0 * head * tail;
+    let low = error + cross;
+    let (value, rest) = two_sum(square, low);
+    let bound = ((cross.abs() + low.abs()) * 2f64.powi(-53) + tail * tail) * (1.0 + 2f64.powi(-50))
+        + f64::from_bits(8);
+    let (rounded, settled) = T::settle_lanes(value, rest, bound);
+    (rounded, settled | (head == 0.0))
 }
 
 /// One block of a distance's exact differences, carried, with what the
@@ -3104,13 +3615,18 @@ fn distance_block<I: Element>(x: &[I], y: &[I], euclidean: bool, shift: f64) -> 
     }
     #[cfg(target_arch = "x86_64")]
     if fused() {
-        if euclidean
-            && shift == 0.0
+        if shift == 0.0
             && x.len() >= 2 * LANES
             && let Some((x, y)) = I::as_wide(x).zip(I::as_wide(y))
         {
             // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { euclidean_block_fma(x, y) };
+            return unsafe {
+                if euclidean {
+                    euclidean_block_fma(x, y)
+                } else {
+                    taxicab_block_avx(x, y)
+                }
+            };
         }
         // SAFETY: avx2 and fma were detected on this CPU.
         return unsafe { fused_block(x, y, euclidean, shift) };
@@ -3231,6 +3747,95 @@ fn squares_fma(
     // A value passes through three additions to its lane's error.
     let carried = finish(sums, errors, magnitudes, std::iter::empty(), 3 * x.len());
     (carried, all_finite)
+}
+
+/// [`distance_lanes`] for the unshifted 1-distance of float64 rows, in
+/// 256-bit registers, written out because the compiler kept the two-sums
+/// scalar: each difference's pair `h + t` by a two-sum, `|h|` added to its
+/// lane's sum by a two-sum, and `t` with `h`'s sign taken off added with
+/// that rounding to the lane's error -- two additions a value, which
+/// `finish` is told of. A difference's sign is its leading part's, so none
+/// is left undecided.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn taxicab_block_avx(x: &[f64], y: &[f64]) -> DistancePart {
+    use std::arch::x86_64::{
+        __m256d, _CMP_LT_OQ, _mm256_add_pd, _mm256_and_pd, _mm256_andnot_pd, _mm256_cmp_pd,
+        _mm256_loadu_pd, _mm256_movemask_pd, _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_sub_pd, _mm256_xor_pd,
+    };
+    debug_assert_eq!(x.len(), y.len());
+    let (sign, infinity) = (_mm256_set1_pd(-0.0), _mm256_set1_pd(f64::INFINITY));
+    let (mut sums, mut errors, mut magnitudes) = (
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+        [_mm256_setzero_pd(); 2],
+    );
+    // All ones while every difference is finite.
+    let mut finite = _mm256_cmp_pd(_mm256_setzero_pd(), infinity, _CMP_LT_OQ);
+    let (left, left_rest) = x.as_chunks::<LANES>();
+    let (right, right_rest) = y.as_chunks::<LANES>();
+    for (a, b) in left.iter().zip(right) {
+        for half in 0..2 {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (a, b) = unsafe {
+                (
+                    _mm256_loadu_pd(a.as_ptr().add(4 * half)),
+                    _mm256_loadu_pd(b.as_ptr().add(4 * half)),
+                )
+            };
+            // `a - b` and its exact error, by a two-sum.
+            let head = _mm256_sub_pd(a, b);
+            let virtual_b = _mm256_sub_pd(a, head);
+            let virtual_a = _mm256_add_pd(head, virtual_b);
+            let tail = _mm256_sub_pd(_mm256_sub_pd(a, virtual_a), _mm256_sub_pd(b, virtual_b));
+            let magnitude = _mm256_andnot_pd(sign, head);
+            finite = _mm256_and_pd(finite, _mm256_cmp_pd(magnitude, infinity, _CMP_LT_OQ));
+            let tail = _mm256_xor_pd(tail, _mm256_and_pd(sign, head));
+            // The magnitude into the lane's sum by a two-sum.
+            let sum = _mm256_add_pd(sums[half], magnitude);
+            let virtual_value = _mm256_sub_pd(sum, sums[half]);
+            let virtual_sum = _mm256_sub_pd(sum, virtual_value);
+            let rounding = _mm256_add_pd(
+                _mm256_sub_pd(sums[half], virtual_sum),
+                _mm256_sub_pd(magnitude, virtual_value),
+            );
+            sums[half] = sum;
+            errors[half] = _mm256_add_pd(errors[half], _mm256_add_pd(rounding, tail));
+            let size = _mm256_add_pd(
+                _mm256_andnot_pd(sign, rounding),
+                _mm256_andnot_pd(sign, tail),
+            );
+            magnitudes[half] = _mm256_add_pd(magnitudes[half], size);
+        }
+    }
+    let unpack = |vectors: [__m256d; 2]| {
+        let mut lanes = [0f64; LANES];
+        for (half, vector) in vectors.into_iter().enumerate() {
+            // SAFETY: four lanes from `4 * half` lie inside the array.
+            unsafe { _mm256_storeu_pd(lanes.as_mut_ptr().add(4 * half), vector) };
+        }
+        lanes
+    };
+    let (mut sums, mut errors, mut magnitudes) = (unpack(sums), unpack(errors), unpack(magnitudes));
+    let mut all_finite = _mm256_movemask_pd(finite) == 0b1111;
+    for (&a, &b) in left_rest.iter().zip(right_rest) {
+        let (head, tail) = two_sum(a, -b);
+        all_finite &= head.is_finite();
+        let tail = if head < 0.0 { -tail } else { tail };
+        let (sum, rounding) = two_sum(sums[0], head.abs());
+        sums[0] = sum;
+        errors[0] += rounding + tail;
+        magnitudes[0] += rounding.abs() + tail.abs();
+    }
+    // A value passes through two additions to its lane's error.
+    let carried = finish(sums, errors, magnitudes, std::iter::empty(), 2 * x.len());
+    DistancePart {
+        carried,
+        loose: 0.0,
+        finite: all_finite,
+        unsure: false,
+    }
 }
 
 /// One block of a distance in [`LANES`] lanes, each difference taken

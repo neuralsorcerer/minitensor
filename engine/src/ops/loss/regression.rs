@@ -45,7 +45,8 @@ pub(crate) fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
 /// Mean Squared Error (MSE) loss function
 ///
 /// Computes the mean squared error between predictions and targets:
-/// MSE = (1/n) * Σ(predictions - targets)²
+/// MSE = (1/n) * Σ(predictions - targets)², the float nearest the exact
+/// value, as is the sum, and each unreduced square.
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
@@ -66,27 +67,31 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     let (loss, diff_for_grad) = {
         let _guard = NoGradGuard::new();
 
-        // Compute squared differences: (predictions - targets)²
-        // Also keep the difference for gradient computation
-        let diff = sub(predictions, targets)?;
-        let diff_for_grad = diff.clone().detach();
-        let squared_diff = mul(&diff, &diff)?;
-
-        // Apply reduction
-        let n = squared_diff.numel() as f64;
-        let loss = reduce_detached(squared_diff, reduction, n, None)?;
+        // The loss is the float nearest the exact value: each square of an
+        // exact difference, or their mean or sum, rounded once. The rounded
+        // difference is only the gradient's.
+        let loss = match reduction {
+            "mean" | "sum" => exact_difference_loss(predictions, targets, false, reduction)?,
+            "none" => squared_differences(predictions, targets)?,
+            _ => return Err(invalid_reduction(reduction, false)),
+        };
+        let diff_for_grad = if needs_grad {
+            Some(sub(predictions, targets)?.detach())
+        } else {
+            None
+        };
         (loss, diff_for_grad)
     };
 
     // Set up gradient function if needed
-    if needs_grad {
+    if let Some(diff) = diff_for_grad {
         let grad_fn = Arc::new(MSELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
             input_ids: [predictions.id(), targets.id()],
             input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
             reduction: reduction.to_string(),
-            diff: diff_for_grad,
+            diff,
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
@@ -101,7 +106,8 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
 /// Mean Absolute Error (MAE) loss function
 ///
 /// Computes the mean absolute error between predictions and targets:
-/// MAE = (1/n) * Σ|predictions - targets|
+/// MAE = (1/n) * Σ|predictions - targets|, the float nearest the exact
+/// value, as is the sum.
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
@@ -123,28 +129,35 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     let (loss, sign_for_grad) = {
         let _guard = NoGradGuard::new();
 
-        // Compute absolute differences: |predictions - targets|
-        // Also compute the sign for gradient computation
-        let diff = sub(predictions, targets)?;
-        let sign_diff = sign_tensor(&diff)?;
-        let sign_for_grad = sign_diff.clone().detach();
-        let abs_diff = activation_abs(&diff.detach())?;
-
-        // Apply reduction
-        let n = abs_diff.numel() as f64;
-        let loss = reduce_detached(abs_diff, reduction, n, None)?;
+        // The mean or sum is of the exact magnitudes, rounded once, and each
+        // unreduced magnitude that of a difference rounded once already. The
+        // difference's sign is only the gradient's.
+        let diff = if needs_grad || reduction == "none" {
+            Some(sub(predictions, targets)?.detach())
+        } else {
+            None
+        };
+        let loss = match (reduction, &diff) {
+            ("mean" | "sum", _) => exact_difference_loss(predictions, targets, true, reduction)?,
+            ("none", Some(diff)) => activation_abs(diff)?,
+            _ => return Err(invalid_reduction(reduction, false)),
+        };
+        let sign_for_grad = match diff {
+            Some(diff) if needs_grad => Some(sign_tensor(&diff)?.detach()),
+            _ => None,
+        };
         (loss, sign_for_grad)
     };
 
     // Set up gradient function if needed
-    if needs_grad {
+    if let Some(sign) = sign_for_grad {
         let grad_fn = Arc::new(MAELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
             input_ids: [predictions.id(), targets.id()],
             input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
             reduction: reduction.to_string(),
-            sign: sign_for_grad,
+            sign,
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
@@ -1070,6 +1083,81 @@ pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) ->
 
 // Helper functions
 
+/// The float nearest the exact `Σ (p - t)²`, or with `taxicab` `Σ |p - t|`,
+/// for `"sum"`, or that over the element count for `"mean"`, as a 0-d tensor
+/// of the operands' float dtype; see `arithmetic::exact_sum::difference_total`.
+fn exact_difference_loss(
+    predictions: &Tensor,
+    targets: &Tensor,
+    taxicab: bool,
+    reduction: &str,
+) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::difference_total;
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let count = if reduction == "mean" { p.numel() } else { 1 };
+    let missing = || MinitensorError::internal_error("loss: a float slice");
+    let data = match p.dtype() {
+        DataType::Float32 => {
+            let (a, b) = (p.data().as_f32_slice(), t.data().as_f32_slice());
+            let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
+            let value: f32 = difference_total(a, b, taxicab, count);
+            TensorData::from_vec(vec![value], DataType::Float32, p.device())
+        }
+        DataType::Float64 => {
+            let (a, b) = (p.data().as_f64_slice(), t.data().as_f64_slice());
+            let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
+            let value: f64 = difference_total(a, b, taxicab, count);
+            TensorData::from_vec(vec![value], DataType::Float64, p.device())
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "loss takes float operands, got {other:?}"
+            )));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::scalar(),
+        p.dtype(),
+        p.device(),
+        false,
+    ))
+}
+
+/// Each `(p - t)²`, the float nearest the square of the exact difference;
+/// see `arithmetic::exact_sum::squared_differences`.
+fn squared_differences(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::squared_differences;
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let missing = || MinitensorError::internal_error("loss: a float slice");
+    let data = match p.dtype() {
+        DataType::Float32 => {
+            let (a, b) = (p.data().as_f32_slice(), t.data().as_f32_slice());
+            let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
+            let out: Vec<f32> = squared_differences(a, b);
+            TensorData::from_vec(out, DataType::Float32, p.device())
+        }
+        DataType::Float64 => {
+            let (a, b) = (p.data().as_f64_slice(), t.data().as_f64_slice());
+            let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
+            let out: Vec<f64> = squared_differences(a, b);
+            TensorData::from_vec(out, DataType::Float64, p.device())
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "loss takes float operands, got {other:?}"
+            )));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        p.shape().clone(),
+        p.dtype(),
+        p.device(),
+        false,
+    ))
+}
+
 /// Applies a loss's `reduction`, on data the caller has already detached.
 ///
 /// Every loss in this file did this itself, nine times over, and mostly
@@ -1107,9 +1195,6 @@ pub(crate) fn reduce_detached(
     }
 }
 
-/// Applies a loss's `reduction` through the ordinary differentiable ops, for
-/// the losses whose gradients come from autograd rather than from a
-/// hand-written node.
 /// Refuse a NaN or infinite loss hyperparameter.
 ///
 /// Neither is a setting: a NaN margin or eps made every loss NaN, and an
@@ -1169,6 +1254,9 @@ pub fn check_focal_parameters(alpha: f64, gamma: f64) -> Result<()> {
     Ok(())
 }
 
+/// Applies a loss's `reduction` through the ordinary differentiable ops, for
+/// the losses whose gradients come from autograd rather than from a
+/// hand-written node.
 pub(crate) fn reduce_loss(values: Tensor, reduction: &str) -> Result<Tensor> {
     match reduction {
         "mean" => mean(&values, None, false),
