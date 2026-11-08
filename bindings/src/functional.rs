@@ -693,6 +693,24 @@ pub fn cross_distances_rounded(a: &Bound<PyAny>, b: &Bound<PyAny>, p: f64) -> Py
         .map_err(_convert_error)
 }
 
+/// Each slice along `dim` over the greater of its `p`-norm and `eps`.
+///
+/// `p` is 1 or 2, and each element is the float nearest the exact
+/// quotient. Behind `normalize`, which differentiates.
+#[pyfunction]
+#[pyo3(name = "_normalized", signature = (input, p, dim, eps))]
+pub fn normalized_rounded(
+    input: &Bound<PyAny>,
+    p: f64,
+    dim: usize,
+    eps: f64,
+) -> PyResult<PyTensor> {
+    let input = borrow_tensor(input)?;
+    engine::ops::reduction::normalized_slices(input.tensor(), p, dim, eps)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
@@ -2280,6 +2298,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(scatter, parent)?)?;

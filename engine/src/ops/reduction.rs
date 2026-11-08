@@ -38,7 +38,7 @@ mod sum_prod_impl;
 pub(crate) use self::argminmax_impl::*;
 pub use self::boolean_impl::*;
 pub use self::core_impl::*;
-pub use self::distance_impl::{cross_distances, row_distances};
+pub use self::distance_impl::{cross_distances, normalized_slices, row_distances};
 pub use self::logsumexp_impl::*;
 pub(crate) use self::minmax_indices_impl::*;
 pub(crate) use self::nan_minmax_impl::*;

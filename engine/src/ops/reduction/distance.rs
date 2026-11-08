@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::{
     error::{MinitensorError, Result},
-    ops::arithmetic::exact_sum::{Element, Output, distance},
+    ops::arithmetic::exact_sum::{Element, Output, distance, normalized},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 
@@ -116,6 +116,107 @@ pub fn cross_distances(a: &Tensor, b: &Tensor, p: f64) -> Result<Tensor> {
         a.device(),
         false,
     ))
+}
+
+/// Each slice of float `tensor` along `dim` over the greater of its
+/// `p`-norm, `p` 1 or 2, and `eps` -- `eps` as the dtype holds it -- each
+/// element the float nearest the exact quotient; see
+/// `arithmetic::exact_sum::normalized`. No gradient: `normalize` gives it.
+pub fn normalized_slices(tensor: &Tensor, p: f64, dim: usize, eps: f64) -> Result<Tensor> {
+    let taxicab = match p {
+        1.0 => true,
+        2.0 => false,
+        _ => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "normalized_slices takes p = 1 or p = 2, got {p}"
+            )));
+        }
+    };
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "normalized_slices: dim {dim} is past the last of {} axes",
+            tensor.ndim()
+        )));
+    }
+    let tensor = tensor.contiguous()?;
+    let dims = tensor.shape().dims();
+    let (len, inner) = (dims[dim], dims[dim + 1..].iter().product::<usize>());
+    let missing = || MinitensorError::internal_error("normalized_slices: a float slice");
+    let mut data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let values = tensor.data().as_f32_slice().ok_or_else(missing)?;
+            let out = data.as_f32_slice_mut().ok_or_else(missing)?;
+            over_norms(values, out, len, inner, taxicab, eps);
+        }
+        DataType::Float64 => {
+            let values = tensor.data().as_f64_slice().ok_or_else(missing)?;
+            let out = data.as_f64_slice_mut().ok_or_else(missing)?;
+            over_norms(values, out, len, inner, taxicab, eps);
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "normalized_slices takes a float32 or float64 tensor, got {other:?}"
+            )));
+        }
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
+}
+
+/// [`normalized_slices`] of `values` laid out `[outer, len, inner]`, along
+/// the middle axis, into `out`, laid out the same: whole slices to a task,
+/// each gathered where it is not side by side.
+fn over_norms<T: Element + Output>(
+    values: &[T],
+    out: &mut [T],
+    len: usize,
+    inner: usize,
+    taxicab: bool,
+    eps: f64,
+) {
+    if values.is_empty() || len == 0 {
+        return;
+    }
+    let slab = len * inner;
+    let slices = values.len() / len;
+    let per_task = (TASK / len).max(1);
+    let parts = crate::parallel::Parts::of(out);
+    let task = |index: usize| {
+        let (mut scratch, mut row, mut normal) = (Vec::new(), Vec::new(), Vec::new());
+        for slice in index * per_task..((index + 1) * per_task).min(slices) {
+            let base = slice / inner * slab + slice % inner;
+            if inner == 1 {
+                // SAFETY: the slice's places are its own, inside `out`.
+                let out = unsafe { std::slice::from_raw_parts_mut(parts.start().add(base), len) };
+                normalized(&values[base..base + len], out, taxicab, eps, &mut scratch);
+                continue;
+            }
+            row.clear();
+            row.extend((0..len).map(|k| values[base + k * inner]));
+            normal.clear();
+            normal.resize(len, T::narrow(0.0));
+            normalized(&row, &mut normal, taxicab, eps, &mut scratch);
+            for (k, &value) in normal.iter().enumerate() {
+                // SAFETY: as above, a place at a time.
+                unsafe { *parts.start().add(base + k * inner) = value };
+            }
+        }
+    };
+    let tasks = slices.div_ceil(per_task);
+    // A few nanoseconds an element: worth a thread at an eighth of what a
+    // plain map waits for.
+    if values.len() < crate::ops::map::PAR_THRESHOLD / 8 {
+        (0..tasks).for_each(task);
+    } else {
+        crate::parallel::for_each_task(tasks, &task);
+    }
 }
 
 /// Whether `p` asks for the 2-distance, after checking the operands are two
