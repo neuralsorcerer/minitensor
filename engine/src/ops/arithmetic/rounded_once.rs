@@ -345,7 +345,7 @@ pub(super) struct Exact {
 }
 
 impl Exact {
-    fn integer(value: i64) -> Self {
+    pub(super) fn integer(value: i64) -> Self {
         Self {
             negative: value < 0,
             magnitude: value.unsigned_abs(),

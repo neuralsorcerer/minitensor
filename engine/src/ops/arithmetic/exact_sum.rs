@@ -46,7 +46,7 @@ const LANES: usize = 8;
 const BLOCK: usize = 8192;
 
 /// Just under one half; see `evenly_spaced`.
-const SHY_OF_HALF: f64 = 0.5 - 1.0 / (1u64 << 40) as f64;
+pub(super) const SHY_OF_HALF: f64 = 0.5 - 1.0 / (1u64 << 40) as f64;
 
 /// An element a sum reads: a float32 or a float64, each exact in float64.
 pub(crate) trait Element: Copy + Send + Sync + 'static {
@@ -3522,7 +3522,8 @@ fn reopened_run<T: Squared>(x: &[T], y: &[T], out: &mut [std::mem::MaybeUninit<T
 /// scalar: the cross term `2ht` added to the square's error by one fused
 /// rounding, and the square's pair settled as [`Output::settle_lanes`]
 /// settles it, within that rounding, `t²` and an allowance for the
-/// subnormal range.
+/// subnormal range: the least normal float64, where a subnormal operand can
+/// cost a microcode assist a vector.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 fn squares_run_fma(x: &[f64], y: &[f64], out: &mut [std::mem::MaybeUninit<f64>]) -> bool {
@@ -3539,7 +3540,7 @@ fn squares_run_fma(x: &[f64], y: &[f64], out: &mut [std::mem::MaybeUninit<f64>])
         _mm256_set1_pd(1.0 + 2f64.powi(-50)),
     );
     let (least, shy) = (
-        _mm256_set1_pd(f64::from_bits(16)),
+        _mm256_set1_pd(f64::MIN_POSITIVE),
         _mm256_set1_pd(SHY_OF_HALF),
     );
     // Any lane left open, as a sign bit.
@@ -6476,7 +6477,7 @@ fn subtract(a: &mut [u64], b: &[u64]) {
 /// nearest float64: the leading bits with whether anything lies below them
 /// marked in the last, which is at least two places below where float64
 /// rounds -- `least` is the least subnormal's exponent or below it.
-fn rounded_at<T: Output>(negative: bool, limbs: &[u64], inexact: bool, least: i32) -> T {
+pub(super) fn rounded_at<T: Output>(negative: bool, limbs: &[u64], inexact: bool, least: i32) -> T {
     let Some(top) = limbs.iter().rposition(|&limb| limb != 0) else {
         // Nothing, or less than `2^least`, which is far below the least
         // subnormal.

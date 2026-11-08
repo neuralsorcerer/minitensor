@@ -7,6 +7,8 @@
 //! Element-wise arithmetic ops. The dtype-specialized kernel bodies these
 //! delegate to live in [`crate::ops::kernels`].
 
+#[path = "arithmetic/angle.rs"]
+mod angle;
 #[path = "arithmetic/close.rs"]
 pub(crate) mod close;
 #[path = "arithmetic/difference_of_products.rs"]
@@ -24,6 +26,7 @@ mod fused;
 #[path = "arithmetic/rounded_once.rs"]
 pub(crate) mod rounded_once;
 
+pub use self::angle::{deg2rad, rad2deg};
 pub use self::difference_of_products::difference_of_products;
 pub use self::elementwise_impl::*;
 pub use self::evenly_spaced::{

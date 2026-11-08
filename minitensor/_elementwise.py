@@ -11,11 +11,15 @@ which is what most code that moves between array libraries actually writes.
 These are those names -- written once here, in terms of the operators, so
 `mt.add` cannot drift from `+`.
 
-The rest of the file is the same idea applied further out: `lerp` is one
-multiply-add, `signbit` is a `copysign` compared against zero, `square` is a
-product. Each is an arrangement, so none of them adds a kernel and each
-inherits the accuracy, the dtype rules and the gradient of what it is arranged
-from.
+The rest of the file is the same idea applied further out: `signbit` is a
+`copysign` compared against zero, `square` is a product. Each is an
+arrangement, so it adds no kernel and inherits the accuracy, the dtype rules
+and the gradient of what it is arranged from.
+
+`lerp`, `addcmul`, `addcdiv`, `deg2rad` and `rad2deg` are the exception the
+other way: arranged from the operators, each rounded at every step, and an
+element an ulp or more from the exact value was common. Each has a kernel of
+its own now that rounds once.
 
 `fmax` and `fmin` used to be here on the same grounds -- a `maximum` with the
 NaN cases picked out -- and they are the counter-example. Picking those cases
@@ -131,15 +135,22 @@ def square(input: object) -> Tensor:
 
 
 def deg2rad(input: object) -> Tensor:
-    """Degrees to radians."""
+    """Degrees to radians: each element the float nearest `input * pi / 180`.
 
-    return _atleast_tensor(input) * (_math.pi / 180.0)
+    A float32, int32 or bool input gives float32, and a float64 or int64 one
+    float64.
+    """
+
+    return _F._deg2rad(_atleast_tensor(input))
 
 
 def rad2deg(input: object) -> Tensor:
-    """Radians to degrees."""
+    """Radians to degrees: each element the float nearest `input * 180 / pi`.
 
-    return _atleast_tensor(input) * (180.0 / _math.pi)
+    The dtypes are as for `deg2rad`.
+    """
+
+    return _F._rad2deg(_atleast_tensor(input))
 
 
 # --- interpolation and fused forms ----------------------------------------

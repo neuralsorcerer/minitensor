@@ -625,6 +625,26 @@ pub fn lerp_rounded(
         .map_err(_convert_error)
 }
 
+/// Degrees to radians, each element the float nearest `input · π / 180`.
+/// Behind `deg2rad`.
+#[pyfunction]
+#[pyo3(name = "_deg2rad", signature = (input))]
+pub fn deg2rad_rounded(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    engine::ops::arithmetic::deg2rad(borrow_tensor(input)?.tensor())
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+/// Radians to degrees, each element the float nearest `input · 180 / π`.
+/// Behind `rad2deg`.
+#[pyfunction]
+#[pyo3(name = "_rad2deg", signature = (input))]
+pub fn rad2deg_rounded(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    engine::ops::arithmetic::rad2deg(borrow_tensor(input)?.tensor())
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// `input + value · tensor1 · tensor2`, each element the float nearest the
 /// exact value. Behind `addcmul`.
 #[pyfunction]
@@ -2326,6 +2346,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(weighted_mean, parent)?)?;
     parent.add_function(wrap_pyfunction!(lerp_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;

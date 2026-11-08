@@ -2371,7 +2371,12 @@ assert row_std.shape == (2, 3)
   quotient is a float even for integer operands, so `addcdiv` is always
   rounded once. An integer beside a float32 is read exactly in float64 and
   rounded once to float32. A tensor `value` takes the formula.
-- `deg2rad`, `rad2deg` — a multiplication by `pi/180` and its inverse.
+- `deg2rad`, `rad2deg` — `input * pi / 180` and `input * 180 / pi`, each
+  element the float nearest the exact angle, where a product with the
+  rounded constant -- rounded to float32 for a float32 tensor -- rounded
+  twice. A float32, int32 or bool input gives float32 and a float64 or
+  int64 one float64, an integer taken exactly; the gradient is the constant
+  times the incoming one, rounded the same way.
 - `float_power(input, exponent)` — the power computed in float64 whatever the
   inputs are, since an integer power overflows silently once the answer leaves
   the dtype's range.
