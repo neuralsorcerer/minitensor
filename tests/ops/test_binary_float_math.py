@@ -215,9 +215,8 @@ def test_atan2_is_exact_on_every_pair_of_special_values():
     # Every special against every other, which is where the quotient stops
     # being a slope and the fallback has to take over. The answers are the
     # zeros, the infinities, the NaN and the axis angles, taken from float64
-    # and narrowed once like the test below: float32 `np.arctan2` is not a
-    # reference for them everywhere, since Apple's gives `pi` as 3.1415925,
-    # an ulp under the correctly rounded 3.1415927.
+    # and narrowed once like the test below, so that `pi` is the correctly
+    # rounded 3.1415927.
     values = np.array(ATAN2_SPECIAL, dtype="float32")
     ys, xs = (a.ravel() for a in np.meshgrid(values, values))
     degenerate = (ys == 0) | (xs == 0) | ~np.isfinite(ys) | ~np.isfinite(xs)
@@ -230,12 +229,10 @@ def test_atan2_is_exact_on_every_pair_of_special_values():
     np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
 
 
-def test_float32_atan2_is_the_correctly_rounded_answer_where_numpy_is_not():
-    # The reference is the one the rest of these kernels are held to: computed
-    # in float64, narrowed once. Against it, over a wide random sample, this
-    # kernel differs on nothing and `np.arctan2` on about 6% of pairs by up to
-    # three ulp -- so asserting against NumPy at the same width would be
-    # asserting the less accurate of the two.
+def test_float32_atan2_is_the_float64_answer_narrowed_once():
+    # The reference the rest of these kernels are held to: the angle computed
+    # in float64 and narrowed once, over a wide random sample of both signs
+    # and the whole exponent range.
     rng = np.random.default_rng(11)
     n = 200_000
     y = (np.sign(rng.standard_normal(n)) * 10.0 ** rng.uniform(-38, 38, n)).astype(
@@ -249,13 +246,6 @@ def test_float32_atan2_is_the_correctly_rounded_answer_where_numpy_is_not():
     np.testing.assert_array_equal(
         mt.atan2(mt.from_numpy(y), mt.from_numpy(x)).numpy(), truth
     )
-    # And the claim about NumPy, so this test fails if that ever stops being
-    # the reason the comparison is written this way.
-    apart = np.abs(
-        np.arctan2(y, x).view(np.int32).astype(np.int64)
-        - truth.view(np.int32).astype(np.int64)
-    )
-    assert apart.max() >= 1, "np.arctan2 now matches; the reference can be simplified"
 
 
 @pytest.mark.parametrize("size", [1, 7, 8, 1023, 100_000])

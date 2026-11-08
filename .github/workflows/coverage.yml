@@ -63,12 +63,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      # The bindings' tests link against libpython, which the runner image's
+      # own Python does not ship a linkable library for.
+      - uses: actions/setup-python@v7
+        id: python
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage
       - uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Collect coverage
+        # Named, so that a build configuration cached from another Python
+        # is redone for this one.
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: Upload to Codecov
