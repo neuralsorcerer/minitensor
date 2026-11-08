@@ -2159,6 +2159,113 @@ fn exact_quotient<T: Output>(
     }
 }
 
+/// The float64 nearest `(near · a + far · b) / d`, for `a`, `b` and `d`
+/// each the exact sum of a pair, when the bound says which it is.
+///
+/// This is a linear interpolation between the samples `near` and `far`, `a`
+/// the query's distance to the far sample's position, `b` its distance to
+/// the near one's and `d` theirs apart. The leading products are split
+/// exactly, the rest carried beside with a bound, and the quotient settled
+/// as a weighted mean's is; none for an operand so far out of the range
+/// that a product's split might not be exact. A product's error is one
+/// fused multiply-add where `FMA`.
+#[inline(always)]
+pub(crate) fn interpolated<const FMA: bool>(
+    near: f64,
+    far: f64,
+    a: (f64, f64),
+    b: (f64, f64),
+    d: (f64, f64),
+) -> Option<f64> {
+    let ordinary =
+        |value: f64| value == 0.0 || (2f64.powi(-450)..=2f64.powi(450)).contains(&value.abs());
+    if !(ordinary(near) && ordinary(far) && ordinary(a.0) && ordinary(b.0)) {
+        return None;
+    }
+    let leading = near * a.0;
+    let leading_error = crate::ops::simd::product_error::<FMA>(near, a.0, leading);
+    let trailing = far * b.0;
+    let trailing_error = crate::ops::simd::product_error::<FMA>(far, b.0, trailing);
+    let (sum, rounding) = two_sum(leading, trailing);
+    let (small_near, small_far) = (near * a.1, far * b.1);
+    let tail = ((rounding + leading_error) + trailing_error) + (small_near + small_far);
+    // Four additions and the two small products, each within `u` of its
+    // result -- or of the least subnormal, for a product that small.
+    let magnitude = rounding.abs()
+        + leading_error.abs()
+        + trailing_error.abs()
+        + small_near.abs()
+        + small_far.abs();
+    let lost = |x: f64, y: f64| x != 0.0 && y != 0.0 && (x * y).abs() < 2f64.powi(-1021);
+    let underflow = if lost(near, a.1) || lost(far, b.1) {
+        2.0 * f64::from_bits(1)
+    } else {
+        0.0
+    };
+    let numerator = Carried {
+        sum,
+        error: tail,
+        slack: magnitude * 2f64.powi(-50) + underflow,
+    };
+    ratio_settled::<FMA>(numerator, d)
+}
+
+/// The float64 nearest `N / (d.0 + d.1)` for the total `numerator` carries
+/// and a two-sum's pair `d`, when the bound says which it is.
+///
+/// As [`quotient_settled`] settles a quotient, with the divisor exact and
+/// one division: the leading quotient from the divisor's reciprocal, within
+/// two roundings of `n1 / d1`, so that `n1` less its product with `d1` is
+/// exact; the residual's few roundings; and the correction, the residual by
+/// the reciprocal, which is within `2.0001u` of the residual over the whole
+/// divisor.
+#[inline(always)]
+fn ratio_settled<const FMA: bool>(numerator: Carried, d: (f64, f64)) -> Option<f64> {
+    let (n1, n2) = two_sum(numerator.sum, numerator.error);
+    let (d1, d2) = d;
+    let sn = numerator.slack;
+    if !(d1.is_finite() && d1 != 0.0) || d2.abs() > d1.abs() * 2f64.powi(-52) {
+        return None;
+    }
+    if n1 == 0.0 && n2 == 0.0 && sn == 0.0 {
+        return Some(0.0 / d1);
+    }
+    let ordinary = |value: f64| (2f64.powi(-900)..=2f64.powi(900)).contains(&value.abs());
+    let inverse = 1.0 / d1;
+    let quotient = n1 * inverse;
+    if !(ordinary(n1) && ordinary(d1) && ordinary(quotient)) {
+        return None;
+    }
+    let product = quotient * d1;
+    let product_rounding = crate::ops::simd::product_error::<FMA>(quotient, d1, product);
+    let leading = n1 - product;
+    let first = leading - product_rounding;
+    let second = first + n2;
+    let third = quotient * d2;
+    let residual = second - third;
+    let rounding = (first.abs() + second.abs() + third.abs() + residual.abs()) * 2f64.powi(-52)
+        + f64::from_bits(4);
+    let correction = residual * inverse;
+    // At least the reciprocal of the whole divisor's magnitude.
+    let scale = inverse.abs() * (1.0 + 2f64.powi(-50));
+    let bound = ((rounding + sn) * scale
+        + residual.abs() * scale * 2f64.powi(-50)
+        + correction.abs() * 2f64.powi(-52))
+        * (1.0 + 2f64.powi(-40));
+    let (value, rest) = two_sum(quotient, correction);
+    f64::settle(value, rest, bound)
+}
+
+/// The float64 nearest the exact `Σ a[i] · b[i] / Σ divisor`, finite
+/// operands all; see [`exact_quotient`].
+pub(crate) fn exact_ratio(a: &[f64], b: &[f64], divisor: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    exact_quotient(
+        a.iter().copied().zip(b.iter().copied()),
+        divisor.iter().copied(),
+    )
+}
+
 /// The float32 nearest `sqrt(Σ values[i]²)`.
 ///
 /// Each square of a float32 is exact in float64, so the squares are first

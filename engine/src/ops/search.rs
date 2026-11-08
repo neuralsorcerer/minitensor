@@ -37,6 +37,10 @@ use crate::{
 use std::hint::select_unpredictable;
 use std::sync::Arc;
 
+#[path = "search/interp.rs"]
+mod interp_impl;
+pub use self::interp_impl::interp;
+
 /// Where `value` belongs in an already-sorted `sequence`.
 ///
 /// `right` picks which end of a run of equals to answer with: `false` gives the

@@ -27,12 +27,14 @@ from ._shape import (
     _atleast_tensor,
     _beside,
     _flat,
+    _is_typed,
     _normalize_axis,
     _normalize_axis_tuple,
     _operand_pair,
     _promote_pair,
     _promoted_dtype,
 )
+from ._shape import as_tensor as _as_tensor
 from ._shape import broadcast_shapes as _broadcast_shapes
 from ._shape import broadcast_tensors as _broadcast_tensors
 from .autograd import Function as _Function
@@ -1106,6 +1108,125 @@ def _percentile_fraction(q: object, name: str) -> object:
     return fractions / 100.0
 
 
+def _float64_operand(value: object) -> Tensor:
+    """`value` in float64: a tensor or an array widened from the dtype it
+    carries, and a Python number or list read at float64, which holds it --
+    not at the default dtype first, which may not."""
+
+    if _is_typed(value):
+        return _atleast_tensor(value).astype("float64")
+    return _as_tensor(value, dtype="float64")
+
+
+class _Interp(_Function):
+    """Piecewise linear interpolation, each value rounded once, with the
+    gradient of the exact interpolation."""
+
+    @staticmethod
+    def forward(ctx, query, points, values, left, right, period):
+        ctx.save_for_backward(query, points, values)
+        ctx.left, ctx.right, ctx.period = left, right, period
+        return _F._interp(query, points, values, left, right, period)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        query, points, values = ctx.saved_tensors
+        flat = query.detach().reshape(-1)
+        xp, fp = points.detach(), values.detach()
+        grad = grad_output.astype("float64").reshape(-1)
+        count = xp.shape[0]
+        zeros = Tensor.full(list(flat.shape), 0.0, dtype="float64")
+        ones = Tensor.full(list(flat.shape), 1.0, dtype="float64")
+
+        def masked(condition, tensor):
+            return _F.where(condition, tensor, zeros)
+
+        if ctx.period is None:
+            first = _F.narrow(xp, 0, 0, 1)
+            last = _F.narrow(xp, 0, count - 1, 1)
+            below, above = flat < first, flat > last
+            if count == 1:
+                # One sample is its own value on it, and the ends' beside it.
+                weight = flat == first
+                if ctx.left is None:
+                    weight = weight | below
+                if ctx.right is None:
+                    weight = weight | above
+                grad_values = _F.sum(masked(weight, grad)).reshape([1])
+                return (
+                    zeros.reshape(list(query.shape)),
+                    Tensor.full([1], 0.0, dtype="float64"),
+                    grad_values,
+                    *[None] * 3,
+                )
+            places, samples, at = xp, fp, flat
+            inside = _F.logical_and(flat >= first, flat <= last)
+        else:
+            # The samples in order on one period, the last again a period
+            # before the first and the first a period past the last.
+            span = ctx.period
+            wrapped = xp - _F.floor(xp / span) * span
+            order = _F.argsort(wrapped, None, False, True)
+            ordered = _F.index_select(wrapped, 0, order)
+            places = _F.cat(
+                [
+                    _F.narrow(ordered, 0, count - 1, 1) - span,
+                    ordered,
+                    _F.narrow(ordered, 0, 0, 1) + span,
+                ]
+            )
+            owners = _F.cat(
+                [_F.narrow(order, 0, count - 1, 1), order, _F.narrow(order, 0, 0, 1)]
+            )
+            samples = _F.index_select(fp, 0, owners)
+            at = flat - _F.floor(flat / span) * span
+            inside = _F.isfinite(flat)
+
+        size = places.shape[0]
+        upper = _F.clamp(_F.searchsorted(places, at, True).astype("int64"), 1, size - 1)
+        lower = upper - 1
+        x_lo = _F.index_select(places, 0, lower)
+        x_hi = _F.index_select(places, 0, upper)
+        y_lo = _F.index_select(samples, 0, lower)
+        y_hi = _F.index_select(samples, 0, upper)
+        width = x_hi - x_lo
+        # Samples at one place, where the value is the later one's.
+        flat_segment = width == 0.0
+        width = _F.where(flat_segment, ones, width)
+        share_hi = _F.where(flat_segment, ones, (at - x_lo) / width)
+        share_lo = _F.where(flat_segment, zeros, (x_hi - at) / width)
+        slope = _F.where(flat_segment, zeros, (y_hi - y_lo) / width)
+        if ctx.period is not None:
+            lower = _F.index_select(owners, 0, lower)
+            upper = _F.index_select(owners, 0, upper)
+
+        grad_query = masked(inside, grad * slope)
+        grad_values = _F.bincount(
+            lower, masked(inside, grad * share_lo), count
+        ) + _F.bincount(upper, masked(inside, grad * share_hi), count)
+        # Moving a sample's position moves the segments either side of it.
+        grad_points = _F.bincount(
+            lower, masked(inside, -grad * slope * share_lo), count
+        ) + _F.bincount(upper, masked(inside, -grad * slope * share_hi), count)
+        if ctx.period is None:
+            # Held at an end sample's value beyond it, unless told otherwise.
+            start = lower * 0
+            if ctx.left is None:
+                grad_values = grad_values + _F.bincount(
+                    start, masked(below, grad), count
+                )
+            if ctx.right is None:
+                grad_values = grad_values + _F.bincount(
+                    start + (count - 1), masked(above, grad), count
+                )
+        return (
+            grad_query.reshape(list(query.shape)),
+            grad_points,
+            grad_values,
+            *[None] * 3,
+        )
+
+
 def interp(
     x: object,
     xp: object,
@@ -1118,16 +1239,20 @@ def interp(
 
     `xp` must increase. Each point is placed between two samples by binary
     search rather than by scanning, so this is `n log m` in the sample count
-    and works on a whole tensor of query points at once.
+    and works on a whole tensor of query points at once. Each value is the
+    float64 nearest the exact interpolation, and a point on a sample is that
+    sample's value -- the last of several at one position. A tensor or an
+    array is widened to float64 from its own dtype; a Python number or list is
+    read at float64.
 
     Outside the sample range the value is held at the end point, or at `left` /
     `right` when those are given. `period` instead wraps both the queries and
-    the samples onto one period, so the ends join up.
+    the samples onto one period exactly, so the ends join up.
     """
 
-    query = _require_float(_atleast_tensor(x).astype("float64"), "interp")
-    points = _require_float(_atleast_tensor(xp).astype("float64"), "interp").reshape(-1)
-    values = _require_float(_atleast_tensor(fp).astype("float64"), "interp").reshape(-1)
+    query = _float64_operand(x)
+    points = _float64_operand(xp).reshape(-1)
+    values = _float64_operand(fp).reshape(-1)
 
     if points.shape[0] != values.shape[0]:
         raise ValueError(
@@ -1137,93 +1262,14 @@ def interp(
     if points.shape[0] == 0:
         raise ValueError("interp needs at least one sample point")
 
+    span = None
     if period is not None:
-        span = builtins.float(period)
-        if span == 0.0:
-            raise ValueError("interp requires a non-zero period")
-        span = builtins.abs(span)
-        # Wrap both onto `[0, period)`, then repeat the first sample past the
-        # end and the last one before the start so the wrap has neighbours to
-        # interpolate between.
-        query = query - _F.floor(query / span) * span
-        points = points - _F.floor(points / span) * span
-        order = _F.argsort(points)
-        points = _F.index_select(points, 0, order)
-        values = _F.index_select(values, 0, order)
-        points = _F.cat(
-            [
-                _F.narrow(points, 0, points.shape[0] - 1, 1) - span,
-                points,
-                _F.narrow(points, 0, 0, 1) + span,
-            ]
-        )
-        values = _F.cat(
-            [
-                _F.narrow(values, 0, values.shape[0] - 1, 1),
-                values,
-                _F.narrow(values, 0, 0, 1),
-            ]
-        )
-
-    if points.shape[0] == 1:
-        # One sample is the same value everywhere -- there is no segment to
-        # interpolate along, and both ends of the range are that sample.
-        held = _F.index_select(values, 0, _atleast_tensor([0]).astype("int64"))
-        return held * Tensor.full(list(query.shape), 1.0, dtype="float64")
-
-    count = points.shape[0]
-    # `right=True` puts a query that lands exactly on a sample at that sample's
-    # own segment, so an exact hit returns its value exactly rather than to
-    # within a rounding of the slope.
-    upper = _F.clamp(
-        _F.searchsorted(points, query.reshape(-1), True).astype("int64"), 1, count - 1
-    )
-    lower = upper - 1
-    x_lo = _F.index_select(points, 0, lower)
-    x_hi = _F.index_select(points, 0, upper)
-    y_lo = _F.index_select(values, 0, lower)
-    y_hi = _F.index_select(values, 0, upper)
-    slope = (y_hi - y_lo) / (x_hi - x_lo)
-    flat = query.reshape(-1)
-    result = y_lo + slope * (flat - x_lo)
-
-    if period is None:
-        first = builtins.float(
-            _F.index_select(points, 0, _atleast_tensor([0]).astype("int64")).item()
-        )
-        last = builtins.float(
-            _F.index_select(
-                points, 0, _atleast_tensor([count - 1]).astype("int64")
-            ).item()
-        )
-        low_value = (
-            builtins.float(left)
-            if left is not None
-            else builtins.float(
-                _F.index_select(values, 0, _atleast_tensor([0]).astype("int64")).item()
-            )
-        )
-        high_value = (
-            builtins.float(right)
-            if right is not None
-            else builtins.float(
-                _F.index_select(
-                    values, 0, _atleast_tensor([count - 1]).astype("int64")
-                ).item()
-            )
-        )
-        result = _F.where(
-            flat < first,
-            Tensor.full(list(flat.shape), low_value, dtype="float64"),
-            result,
-        )
-        result = _F.where(
-            flat > last,
-            Tensor.full(list(flat.shape), high_value, dtype="float64"),
-            result,
-        )
-
-    return result.reshape(list(query.shape))
+        span = builtins.abs(builtins.float(period))
+        if span == 0.0 or not _math.isfinite(span):
+            raise ValueError("interp requires a finite, non-zero period")
+    low = None if left is None else builtins.float(left)
+    high = None if right is None else builtins.float(right)
+    return _Interp.apply(query, points, values, low, high, span)
 
 
 def digitize(input: object, bins: object, right: bool = False) -> Tensor:

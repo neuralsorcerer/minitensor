@@ -662,6 +662,35 @@ pub fn trapezoid_rounded(
     .map_err(_convert_error)
 }
 
+/// Piecewise linear interpolation of float64 samples at float64 queries,
+/// each value the float64 nearest the exact one. Behind `interp`.
+#[pyfunction]
+#[pyo3(name = "_interp", signature = (query, points, values, left, right, period))]
+pub fn interp_rounded(
+    query: &Bound<PyAny>,
+    points: &Bound<PyAny>,
+    values: &Bound<PyAny>,
+    left: Option<f64>,
+    right: Option<f64>,
+    period: Option<f64>,
+) -> PyResult<PyTensor> {
+    let (query, points, values) = (
+        borrow_tensor(query)?,
+        borrow_tensor(points)?,
+        borrow_tensor(values)?,
+    );
+    engine::ops::search::interp(
+        query.tensor(),
+        points.tensor(),
+        values.tensor(),
+        left,
+        right,
+        period,
+    )
+    .map(PyTensor::from_tensor)
+    .map_err(_convert_error)
+}
+
 /// Degrees to radians, each element the float nearest `input · π / 180`.
 /// Behind `deg2rad`.
 #[pyfunction]
@@ -2385,6 +2414,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(add_scaled_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(trapezoid_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(interp_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
