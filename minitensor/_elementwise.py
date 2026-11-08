@@ -74,15 +74,58 @@ def _lead(input: object, other: object) -> Tensor:
 # --- the operators, as functions ------------------------------------------
 
 
-def add(input: object, other: object, alpha: float = 1) -> Tensor:
-    """`input + alpha * other`, element-wise with broadcasting."""
+def _add_scaled(input: object, other: object, alpha: object) -> Tensor | None:
+    """`input + alpha * other` with each float element rounded once, or
+    `None` for operands that keep the formula: a non-numeric `alpha`,
+    integers, or an integer `other` with an integral `alpha`, whose formula
+    is exact or rounds once already."""
 
+    if not _number(alpha) or isinstance(alpha, bool):
+        return None
+    # A literal beside a tensor is read as an operator beside it reads it: at
+    # the tensor's width, or an integer the width does not hold exactly.
+    if isinstance(input, Tensor) and isinstance(other, Tensor):
+        start = input
+    elif isinstance(input, Tensor) and not _is_typed(other):
+        start, other = input, input._operand(other, exact=True)
+    elif isinstance(other, Tensor) and not _is_typed(input):
+        start = other._operand(input, exact=True)
+    else:
+        start, other = _operands([input, other])
+    if not _floating(start, other):
+        return None
+    if "float" not in str(other.dtype) and float(alpha).is_integer():
+        # An integer times an integral `alpha` is an exact integer, which the
+        # operator adds rounding once -- int64s past 2^53 included.
+        return None
+    return _F._add_scaled(start, other, float(alpha))
+
+
+def add(input: object, other: object, alpha: float = 1) -> Tensor:
+    """`input + alpha * other`, element-wise with broadcasting.
+
+    With an `alpha` other than one, each float element is the float nearest
+    the exact value, `alpha` read at the result's width as a literal beside
+    it is, where the product and the sum each rounded.
+    """
+
+    if alpha != 1:
+        scaled = _add_scaled(input, other, alpha)
+        if scaled is not None:
+            return scaled
     return _lead(input, other) + _scaled(other, alpha)
 
 
 def sub(input: object, other: object, alpha: float = 1) -> Tensor:
-    """`input - alpha * other`, element-wise with broadcasting."""
+    """`input - alpha * other`, element-wise with broadcasting.
 
+    Rounded once as `add` is.
+    """
+
+    if alpha != 1:
+        scaled = _add_scaled(input, other, -alpha) if _number(alpha) else None
+        if scaled is not None:
+            return scaled
     return _lead(input, other) - _scaled(other, alpha)
 
 

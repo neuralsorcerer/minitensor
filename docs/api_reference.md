@@ -2344,8 +2344,12 @@ assert row_std.shape == (2, 3)
 - `add(input, other, alpha=1)`, `sub(...)`, `mul`, `div(input, other, rounding_mode=None)`,
   `neg` — the operators as free functions, and as methods. `a + b` always
   worked; `mt.add(a, b)` and `a.add(b)` are what most code that moves between
-  array libraries actually writes. `alpha` scales the second operand,
-  `rounding_mode` picks `"floor"` or `"trunc"` instead of the exact quotient.
+  array libraries actually writes. `alpha` scales the second operand, and
+  each float element of `input + alpha * other` is the float nearest the
+  exact value, `alpha` read at the result's width as a literal beside it is,
+  where the product and the sum each rounded; an integer literal the width
+  does not hold is read exactly, as the operators read it. `rounding_mode`
+  picks `"floor"` or `"trunc"` instead of the exact quotient.
 - `square(input)` — a product, not `pow(input, 2)`: the general power goes
   through `exp(2 log x)` for a non-integral exponent and is both slower and less
   exact than a multiplication, which is exact for every input.

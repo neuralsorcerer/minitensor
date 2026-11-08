@@ -238,11 +238,16 @@ impl PyTensor {
     /// `comparison` the full width a comparison reads it at. The Python
     /// helpers that join a value onto a tensor, or test one against it, read
     /// it through here rather than restating the rule, so `insert(x, 1, 7)`
-    /// and `x + 7` agree on what `7` is beside an int32 `x`.
-    #[pyo3(signature = (value, comparison=false))]
-    fn _operand(&self, value: &Bound<PyAny>, comparison: bool) -> PyResult<Self> {
+    /// and `x + 7` agree on what `7` is beside an int32 `x`. With `exact`, a
+    /// Python int, or a list of them, that this float tensor's dtype does not
+    /// hold is the int64 it is, as arithmetic reads it -- for a helper that
+    /// computes with the value rather than storing it.
+    #[pyo3(signature = (value, comparison=false, exact=false))]
+    fn _operand(&self, value: &Bound<PyAny>, comparison: bool, exact: bool) -> PyResult<Self> {
         let tensor = if comparison {
             comparison_operands_from_py(&self.inner, value, false)?.1
+        } else if exact {
+            arithmetic_operands_from_py(&self.inner, value, false)?.1
         } else {
             tensor_from_py_value(&self.inner, value)?
         };

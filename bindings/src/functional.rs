@@ -625,6 +625,21 @@ pub fn lerp_rounded(
         .map_err(_convert_error)
 }
 
+/// `input + alpha · other`, each element the float nearest the exact value,
+/// `alpha` read at the result's width. Behind `add` and `sub`.
+#[pyfunction]
+#[pyo3(name = "_add_scaled", signature = (input, other, alpha))]
+pub fn add_scaled_rounded(
+    input: &Bound<PyAny>,
+    other: &Bound<PyAny>,
+    alpha: f64,
+) -> PyResult<PyTensor> {
+    let (input, other) = (borrow_tensor(input)?, borrow_tensor(other)?);
+    engine::ops::arithmetic::add_scaled(input.tensor(), other.tensor(), alpha)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// Degrees to radians, each element the float nearest `input · π / 180`.
 /// Behind `deg2rad`.
 #[pyfunction]
@@ -2346,6 +2361,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(weighted_mean, parent)?)?;
     parent.add_function(wrap_pyfunction!(lerp_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(add_scaled_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
