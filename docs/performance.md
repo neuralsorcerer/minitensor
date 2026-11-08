@@ -177,10 +177,12 @@ installed NumPy ships rather than with anything in this library.
 
 ## Where a dense product is computed
 
-A single large `float32` or `float64` product does not run on this library's
-own kernel. It runs on the BLAS that `numpy` already brought -- OpenBLAS on the
-wheels -- on the buffers the engine allocated, with nothing copied on the way
-in or out. Every install has `numpy` in it, every install of `numpy` has a
+A single large `float64` product does not run on this library's own kernel,
+and neither does a `float32` one, which is carried as the float64 product of
+its operands widened and each entry rounded from it to the float32 nearest
+its exact dot. It runs on the BLAS that `numpy` already brought -- OpenBLAS on
+the wheels -- on the buffers the engine allocated, with nothing copied on the
+way in or out but the widened operands of a float32 product. Every install has `numpy` in it, every install of `numpy` has a
 tuned BLAS in it, and that BLAS is per-architecture assembly selected at load
 time from a table of implementations. A portable Rust kernel does not close
 that gap.
@@ -197,6 +199,13 @@ release build. Ratios above 1 mean MiniTensor is slower:
 | 512x2048 @ 2048x512 | float32 | 2.05x | 1.06x |
 | 1024x1024 @ 1024x1024 | float64 | 1.80x | 1.13x |
 | 2048x2048 @ 2048x2048 | float64 | 1.85x | 1.09x |
+
+The float32 rows were measured before a float32 product was rounded once.
+Each now costs the float64 product and a pass either side of it -- widening
+the operands and taking their rows' and columns' norms, and narrowing each
+entry against its bound -- three and a half times the float32 product on a
+large matrix, and four to five times on a small one or a stack of them; the
+float32 figures for `nn.Linear` below are from before as well.
 
 A product with a single row or column -- a matrix times a vector, or a vector
 times a matrix -- is not handed over. Each of its entries is a dot product,

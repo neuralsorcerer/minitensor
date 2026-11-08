@@ -126,8 +126,8 @@ fn check_extents(grad: usize, grad_needs: usize, other: usize, other_needs: usiz
 
 impl GradientFunction for LinearBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        use crate::ops::linalg::{gemm_f32, gemm_f64, gemm_tn_f32, gemm_tn_f64};
-        use crate::ops::provider::{Gemm, Storage, offer_gemm_f32, offer_gemm_f64};
+        use crate::ops::linalg::{gemm_f64, gemm_tn_f64};
+        use crate::ops::provider::{Gemm, Storage, offer_gemm_f64};
         use crate::tensor::{DataType, Shape, TensorData};
         use std::sync::Arc;
 
@@ -190,7 +190,29 @@ impl GradientFunction for LinearBackward {
                 }
                 match grad_output.dtype() {
                     DataType::Float32 => {
-                        run!(as_f32_slice, as_f32_slice_mut, gemm_f32, offer_gemm_f32)
+                        let g = grad_output.data().as_f32_slice().ok_or_else(|| {
+                            MinitensorError::internal_error("linear backward: grad dtype")
+                        })?;
+                        let w = self.weight.data().as_f32_slice().ok_or_else(|| {
+                            MinitensorError::internal_error("linear backward: weight dtype")
+                        })?;
+                        check_extents(
+                            g.len(),
+                            rows * out_features,
+                            w.len(),
+                            out_features * in_features,
+                        )?;
+                        crate::ops::linalg::rounded_products_f32(
+                            1,
+                            rows,
+                            out_features,
+                            in_features,
+                            g,
+                            Storage::RowMajor,
+                            w,
+                            Storage::RowMajor,
+                            data.as_f32_slice_mut().unwrap(),
+                        )?;
                     }
                     DataType::Float64 => {
                         run!(as_f64_slice, as_f64_slice_mut, gemm_f64, offer_gemm_f64)
@@ -259,7 +281,24 @@ impl GradientFunction for LinearBackward {
                 }
                 match grad_output.dtype() {
                     DataType::Float32 => {
-                        run!(as_f32_slice, as_f32_slice_mut, gemm_tn_f32, offer_gemm_f32)
+                        let g = grad_output.data().as_f32_slice().ok_or_else(|| {
+                            MinitensorError::internal_error("linear backward: grad dtype")
+                        })?;
+                        let x = self.input.data().as_f32_slice().ok_or_else(|| {
+                            MinitensorError::internal_error("linear backward: input dtype")
+                        })?;
+                        check_extents(g.len(), rows * out_features, x.len(), rows * in_features)?;
+                        crate::ops::linalg::rounded_products_f32(
+                            1,
+                            out_features,
+                            rows,
+                            in_features,
+                            g,
+                            Storage::Transposed,
+                            x,
+                            Storage::RowMajor,
+                            data.as_f32_slice_mut().unwrap(),
+                        )?;
                     }
                     DataType::Float64 => {
                         run!(as_f64_slice, as_f64_slice_mut, gemm_tn_f64, offer_gemm_f64)

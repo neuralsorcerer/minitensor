@@ -1203,14 +1203,33 @@ macro_rules! stored_gemm {
     };
 }
 
-stored_gemm!(
-    stored_gemm_f32,
-    f32,
-    crate::ops::provider::offer_gemm_f32,
-    gemm_f32,
-    gemm_nt_f32,
-    gemm_tn_f32
-);
+/// `out[b] = lhs[b] @ rhs[b]` for float32, as [`stored_gemm_f64`] takes them,
+/// every entry the float32 nearest its exact dot; see
+/// [`crate::ops::linalg::rounded_products_f32`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stored_gemm_f32(
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    lhs: &[f32],
+    lhs_storage: crate::ops::provider::Storage,
+    rhs: &[f32],
+    rhs_storage: crate::ops::provider::Storage,
+    out: &mut [f32],
+) -> Result<()> {
+    crate::ops::linalg::rounded_products_f32(
+        batch,
+        m,
+        k,
+        n,
+        lhs,
+        lhs_storage,
+        rhs,
+        rhs_storage,
+        out,
+    )
+}
 stored_gemm!(
     stored_gemm_f64,
     f64,
@@ -1257,13 +1276,14 @@ pub(crate) unsafe fn gemm_f64(
     unsafe { gemm_strided_f64(m, k, n, a, k, 1, b, n, 1, c) }
 }
 
-/// The whole product on the calling thread; see the module note on why a
-/// batched matmul that already fills the pool uses this.
+/// The whole product on the calling thread, which the split one is checked
+/// against: a float32 product whose entries are rounded once is
+/// [`crate::ops::linalg::rounded_products_f32`].
 ///
 /// # Safety
 ///
 /// As [`gemm_f32`].
-#[cfg(not(feature = "blas"))]
+#[cfg(all(test, not(feature = "blas")))]
 #[inline]
 pub(crate) unsafe fn gemm_serial_f32(
     m: usize,
@@ -1276,7 +1296,8 @@ pub(crate) unsafe fn gemm_serial_f32(
     unsafe { gemm_strided_serial_f32(m, k, n, a, k, 1, b, n, 1, c, n) }
 }
 
-/// See [`gemm_serial_f32`].
+/// The whole product on the calling thread; see the module note on why a
+/// batched matmul that already fills the pool uses this.
 ///
 /// # Safety
 ///
@@ -1297,24 +1318,6 @@ pub(crate) unsafe fn gemm_serial_f64(
 /// With a BLAS underneath there is no splitting to opt out of: a BLAS threads
 /// its own GEMM, and dividing the call first would only fight it. So the
 /// "serial" entry point is the same call.
-///
-/// # Safety
-///
-/// As [`gemm_f32`].
-#[cfg(feature = "blas")]
-#[inline]
-pub(crate) unsafe fn gemm_serial_f32(
-    m: usize,
-    k: usize,
-    n: usize,
-    a: *const f32,
-    b: *const f32,
-    c: *mut f32,
-) {
-    unsafe { gemm_f32(m, k, n, a, b, c) }
-}
-
-/// See [`gemm_serial_f32`].
 ///
 /// # Safety
 ///

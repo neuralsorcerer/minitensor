@@ -642,6 +642,8 @@ where
     Ok(())
 }
 
+/// Each entry the float32 nearest its exact dot; see
+/// [`crate::ops::linalg::rounded_products_f32`].
 fn optimized_matmul_f32(
     lhs_data: &[f32],
     rhs_data: &[f32],
@@ -649,96 +651,28 @@ fn optimized_matmul_f32(
     lhs_shape: &Shape,
     rhs_shape: &Shape,
 ) -> Result<()> {
+    use crate::ops::provider::Storage;
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
     let m = lhs_dims[lhs_dims.len() - 2];
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
-
     if m == 0 || k == 0 || n == 0 {
         // Nothing to compute for zero-sized dimensions
         return Ok(());
     }
-
     let batch = lhs_data.len() / (m * k);
-    // Every path below hands these buffers to a GEMM as raw pointers sized by
-    // the shapes, so the storage is checked against them rather than trusted.
-    assert!(
-        lhs_data.len() == batch * m * k
-            && rhs_data.len() == batch * k * n
-            && output_data.len() == batch * m * n,
-        "matmul buffers do not match their shapes"
-    );
-    if batch == 1 {
-        // A single whole product, offered to the provider, which sees the
-        // dimensions and declines anything too small to pay for the call. The
-        // batched case is offered too, just below.
-        if crate::ops::provider::offer_gemm_f32(crate::ops::provider::Gemm {
-            batch: 1,
-            m,
-            k,
-            n,
-            lhs: lhs_data,
-            lhs_storage: crate::ops::provider::Storage::RowMajor,
-            rhs: rhs_data,
-            rhs_storage: crate::ops::provider::Storage::RowMajor,
-            out: output_data,
-        }) {
-            return Ok(());
-        }
-        // One product, so `gemm_f32` is the one that decides whether to spread
-        // it across the pool.
-        unsafe {
-            gemm_f32(
-                m,
-                k,
-                n,
-                lhs_data.as_ptr(),
-                rhs_data.as_ptr(),
-                output_data.as_mut_ptr(),
-            )
-        };
-    } else if crate::ops::provider::offer_gemm_f32(crate::ops::provider::Gemm {
+    crate::ops::linalg::rounded_products_f32(
         batch,
         m,
         k,
         n,
-        lhs: lhs_data,
-        lhs_storage: crate::ops::provider::Storage::RowMajor,
-        rhs: rhs_data,
-        rhs_storage: crate::ops::provider::Storage::RowMajor,
-        out: output_data,
-    }) {
-        // A stack of matrices, offered whole. This has to come before either
-        // branch below: the rayon one cannot reach a provider at all (they are
-        // withheld from worker threads, see `ops::provider`), and the serial
-        // one would pay the crossing once per matrix, which at a batch of 256
-        // costs more than the whole product.
-    } else if batch >= crate::parallel::current_num_threads() {
-        // The batch axis alone already fills the pool, so each element runs
-        // whole rather than being subdivided again inside its own task.
-        par_out_chunks(output_data, m * n, &|start, chunk| {
-            let b = start / (m * n);
-            let a = &lhs_data[b * m * k..(b + 1) * m * k];
-            let r = &rhs_data[b * k * n..(b + 1) * k * n];
-            unsafe {
-                gemm_serial_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
-            }
-        });
-    } else {
-        // Too few batch elements to keep every thread busy; walk them in turn
-        // and let each product split itself.
-        for b in 0..batch {
-            let a = &lhs_data[b * m * k..(b + 1) * m * k];
-            let r = &rhs_data[b * k * n..(b + 1) * k * n];
-            let chunk = &mut output_data[b * m * n..(b + 1) * m * n];
-            unsafe {
-                gemm_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
-            }
-        }
-    }
-
-    Ok(())
+        lhs_data,
+        Storage::RowMajor,
+        rhs_data,
+        Storage::RowMajor,
+        output_data,
+    )
 }
 
 fn optimized_matmul_f64(

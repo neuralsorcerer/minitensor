@@ -8,9 +8,11 @@
 //!
 //! The engine's kernels are the right thing to run almost everywhere, and the
 //! exceptions are specific and measured: a single large dense product in
-//! `float32` or `float64`, where a tuned BLAS wins by 1.6-2.3x, and the float64
-//! transcendentals, where the engine calls scalar `libm` and NumPy runs
-//! vectorized loops that are both faster and at least as accurate.
+//! `float64`, where a tuned BLAS wins by 1.6-2.3x -- a `float32` product among
+//! them, carried as the float64 product of its operands widened, from which
+//! each entry is rounded once -- and the float64 transcendentals, where the
+//! engine calls scalar `libm` and NumPy runs vectorized loops that are both
+//! faster and at least as accurate.
 //!
 //! The library already ships next to both: `numpy`, which every install pulls
 //! in, carries a full OpenBLAS and those loops. Reaching them costs nothing but
@@ -165,7 +167,9 @@ impl Ufunc {
 /// that. An element-wise `out` arrives uninitialized, and is read only if the
 /// provider says it wrote every element of it.
 pub trait Provider: Send + Sync {
-    fn gemm_f32(&self, request: Gemm<'_, f32>) -> bool;
+    /// A float64 product. Float32 ones are not offered: each entry of one
+    /// is the float32 nearest its exact dot, which a float64 product of the
+    /// operands widened carries, and is offered as that.
     fn gemm_f64(&self, request: Gemm<'_, f64>) -> bool;
 
     /// `out[i] = op(input[i])` for every `i`, or `false` having promised
@@ -228,25 +232,17 @@ pub(crate) fn provider() -> Option<&'static dyn Provider> {
     PROVIDER.get().map(|boxed| boxed.as_ref())
 }
 
-/// Offer one `f32` product; `false` means compute it here.
+/// Offer one `f64` product; `false` means compute it here.
 ///
-/// The two of these are what a call site uses. They read as one condition --
-/// "unless somebody else did it" -- which is what a GEMM call site wants
-/// wrapped around it, rather than three lines of plumbing repeated at each.
+/// This is what a call site uses. It reads as one condition -- "unless
+/// somebody else did it" -- which is what a GEMM call site wants wrapped
+/// around it, rather than three lines of plumbing repeated at each.
 ///
 /// A product with a single row or column is never offered. It is a set of dot
 /// products, which the library computes as `dot` does -- for float32, carried
 /// in float64 and rounded once -- so that `a @ b` of two vectors is `dot(a,
 /// b)` and a matrix times a vector is correctly rounded; another library's
 /// kernel would fold each one its own way.
-#[inline]
-pub(crate) fn offer_gemm_f32(request: Gemm<'_, f32>) -> bool {
-    request.m != 1
-        && request.n != 1
-        && provider().is_some_and(|provider| provider.gemm_f32(request))
-}
-
-/// Offer one `f64` product; see [`offer_gemm_f32`].
 #[inline]
 pub(crate) fn offer_gemm_f64(request: Gemm<'_, f64>) -> bool {
     request.m != 1

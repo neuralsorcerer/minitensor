@@ -76,19 +76,16 @@ impl Recorder {
 }
 
 impl Provider for Recorder {
-    fn gemm_f32(&self, request: Gemm<'_, f32>) -> bool {
-        Self::record(&request);
-        if request.k != HANDLED_K {
-            return false;
-        }
-        request.out.fill(SENTINEL);
-        true
-    }
-
+    /// A float32 product reaches here too, as the float64 product of its
+    /// operands widened.
     fn gemm_f64(&self, request: Gemm<'_, f64>) -> bool {
         Self::record(&request);
         f64_calls().fetch_add(1, Ordering::Relaxed);
-        false
+        if request.k != HANDLED_K {
+            return false;
+        }
+        request.out.fill(f64::from(SENTINEL));
+        true
     }
 
     fn unary_f64(&self, op: Ufunc, input: &[f64], out: &mut [MaybeUninit<f64>]) -> bool {
@@ -385,7 +382,7 @@ fn handling_the_product_is_honoured() {
 
     assert_eq!(taken().len(), 1);
     // Nonsense, but the provider's nonsense: it said it had computed the
-    // product, so nothing recomputed it.
+    // float64 product, so nothing recomputed it, and it narrowed to itself.
     assert_eq!(out.data().as_f32_slice().unwrap(), vec![SENTINEL; m * n]);
 }
 

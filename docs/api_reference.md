@@ -1653,14 +1653,26 @@ float64 nearest the exact one in nine dots of ten of ordinary data, and
 `0.1 * 0.1 + 0.2 * 0.2` was rounded three times. Such a product is a set of
 dot products and costs what reading the matrix costs in float32; carried
 exactly, a float64 one costs two to three times a plain sum of its products.
-A `matmul`, `mm` or `bmm` with more than one row and column is not rounded
-once: it accumulates in the operands' own precision, as a matrix product
-conventionally does, which leaves a few ulps of error in a typical entry and
-more where the sum cancels. Carried as a dot is, it would cost two to three
-times as long on the operation that dominates a training step. Where a
-float32 product needs more, float64 operands take its error far below a
-float32 ulp, and where one entry has to be exact, it is the `dot` of its row
-and column.
+A float32 `matmul`, `mm`, `bmm` or `@` with more than one row and column
+gives each entry as the float32 nearest its exact dot too, batched or
+broadcast, its operands read in the layouts they are stored in, and so do a
+dense layer without a bias and the gradients these products hand back. The
+operands are widened to float64, where each product of two float32s is
+exact, and multiplied there -- by the installed provider, where there is one
+-- so each entry is off its exact dot only by the roundings of its sums:
+under `k · 2^-53` of the product of its row's and its column's 2-norms for
+`k` terms, whatever order they were added in. Where both ends of that bound
+narrow to one float32, so does the exact entry; where they do not -- about
+one entry in two thousand of ordinary data a thousand deep, more where an
+entry cancels far below its terms -- the entry is the exact dot of its row
+and column. Accumulated in float32, nine entries in ten of such a product
+were other than that float. It costs the float64 product and a pass either
+side of it: three and a half times the float32 product it replaces on a
+large matrix, and four to five times on a small one or a stack of them. A float64 product with more than one
+row and column still accumulates in float64, as a matrix product
+conventionally does, which leaves a few ulps of error in a typical entry
+and more where the sum cancels; where one of its entries has to be exact,
+it is the `dot` of its row and column.
 
 `cross(other, dim=None)` of two float tensors takes each component,
 `x * y - z * w`, rounded once, in the wider of the two dtypes. Each product

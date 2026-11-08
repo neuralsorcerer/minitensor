@@ -8,10 +8,11 @@
 //! faster than the engine.
 //!
 //! Two kinds of work cross, both measured rather than assumed. A dense product
-//! goes to the BLAS `numpy` brought: on a single large `float32` or `float64`
-//! product it beats the engine's own kernel by 1.6-2.3x, which is not a gap a
-//! portable Rust kernel closes -- it is per-architecture assembly, chosen at
-//! load time from a table of them. And the float64 transcendentals go to
+//! goes to the BLAS `numpy` brought: on a single large `float64` product -- a
+//! `float32` one is offered as the float64 product of its operands widened,
+//! and each entry rounded once from it -- it beats the engine's own kernel by
+//! 1.6-2.3x, which is not a gap a portable Rust kernel closes -- it is
+//! per-architecture assembly, chosen at load time from a table of them. And the float64 transcendentals go to
 //! `numpy`'s ufuncs, listed in [`UFUNC_ORDER`] with the measurements that put
 //! them there: in float64 the engine has nothing but scalar `libm` for them,
 //! where `numpy` runs vectorized loops that are faster and as accurate.
@@ -284,10 +285,6 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
 
 #[cfg(not(feature = "blas"))]
 impl Provider for Numpy {
-    fn gemm_f32(&self, mut request: Gemm<'_, f32>) -> bool {
-        matrix_product(&mut request)
-    }
-
     fn gemm_f64(&self, mut request: Gemm<'_, f64>) -> bool {
         matrix_product(&mut request)
     }
@@ -577,17 +574,10 @@ static QUIET: PyOnceLock<(Py<PyAny>, Py<PyAny>)> = PyOnceLock::new();
 #[cfg(not(feature = "blas"))]
 /// A value of `T` to re-zero a partly written output with.
 ///
-/// `Element` does not require `num_traits::Zero` and the two float types are
-/// the only ones that reach here, so this is the whole of it.
+/// `Element` does not require `num_traits::Zero` and float64 is the only type
+/// that reaches here, so this is the whole of it.
 trait Zero {
     fn zero() -> Self;
-}
-
-#[cfg(not(feature = "blas"))]
-impl Zero for f32 {
-    fn zero() -> Self {
-        0.0
-    }
 }
 
 #[cfg(not(feature = "blas"))]

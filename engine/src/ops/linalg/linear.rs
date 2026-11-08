@@ -6,7 +6,7 @@
 
 //! `input @ weight^T + bias`, the affine map behind every dense layer.
 
-use super::matmul_impl::{gemm_nt_f32, gemm_nt_f64};
+use super::matmul_impl::gemm_nt_f64;
 use crate::autograd::with_grad_fn;
 use crate::{
     autograd::LinearBackward,
@@ -132,7 +132,28 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
         }
         match input.dtype() {
             DataType::Float32 => {
-                forward!(as_f32_slice, as_f32_slice_mut, gemm_nt_f32, offer_gemm_f32)
+                // Each entry the float32 nearest its exact dot; see
+                // `rounded_products_f32`.
+                let a = input.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("linear: unexpected input dtype")
+                })?;
+                let b = weight.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("linear: unexpected weight dtype")
+                })?;
+                let c = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("linear: unexpected output dtype")
+                })?;
+                crate::ops::linalg::rounded_products_f32(
+                    1,
+                    rows,
+                    in_features,
+                    out_features,
+                    a,
+                    crate::ops::provider::Storage::RowMajor,
+                    b,
+                    crate::ops::provider::Storage::Transposed,
+                    c,
+                )?;
             }
             DataType::Float64 => {
                 forward!(as_f64_slice, as_f64_slice_mut, gemm_nt_f64, offer_gemm_f64)
