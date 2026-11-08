@@ -3221,6 +3221,13 @@ loss like any other input. Class indices, being integers, never do, and
 neither do the `+1`/`-1` labels of `hinge_embedding_loss`, which select a
 branch rather than enter one.
 
+An integer target of a regression loss -- `mse_loss`, `l1_loss`, `huber_loss`,
+`smooth_l1_loss` and `log_cosh_loss` -- is the integer it is, as it is in
+arithmetic: the loss is of the difference from that integer, rounded once,
+where casting the target to the predictions' dtype first rounded any past
+2^24 for float32 predictions, or 2^53 for float64 ones. A Python int, or a
+list of them, is read the same way.
+
 ```python
 import minitensor as mt
 from minitensor import functional as F

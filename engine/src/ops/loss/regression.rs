@@ -57,7 +57,7 @@ pub(crate) fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
 /// * `Result<Tensor>` - The computed MSE loss
 pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
-    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     let needs_grad = manual_backward_needed(&[predictions, targets]);
@@ -118,7 +118,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
 /// * `Result<Tensor>` - The computed MAE loss
 pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
-    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     // The forward is computed on detached data (the exact gradient is provided
@@ -968,7 +968,7 @@ pub fn huber_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     // Validate inputs
-    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     check_huber_delta(delta)?;
@@ -1067,7 +1067,7 @@ pub fn smooth_l1_loss(
 /// * `targets` - Ground truth targets tensor
 /// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
 pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
-    let (predictions, targets) = loss_operands(predictions, targets)?;
+    let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     let diff = sub(predictions, targets)?;
@@ -1085,33 +1085,48 @@ pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) ->
 
 /// The float nearest the exact `Σ (p - t)²`, or with `taxicab` `Σ |p - t|`,
 /// for `"sum"`, or that over the element count for `"mean"`, as a 0-d tensor
-/// of the operands' float dtype; see `arithmetic::exact_sum::difference_total`.
+/// of the predictions' float dtype; see
+/// `arithmetic::exact_sum::difference_total`. An integer target is taken
+/// exactly, beside the predictions widened to float64.
 fn exact_difference_loss(
     predictions: &Tensor,
     targets: &Tensor,
     taxicab: bool,
     reduction: &str,
 ) -> Result<Tensor> {
-    use crate::ops::arithmetic::exact_sum::difference_total;
+    use crate::ops::arithmetic::exact_sum::{difference_total, integer_difference_total};
     let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
     let count = if reduction == "mean" { p.numel() } else { 1 };
-    let missing = || MinitensorError::internal_error("loss: a float slice");
-    let data = match p.dtype() {
-        DataType::Float32 => {
+    let missing = || MinitensorError::internal_error("loss: a typed slice");
+    let data = match (p.dtype(), t.dtype()) {
+        (DataType::Float32, DataType::Float32) => {
             let (a, b) = (p.data().as_f32_slice(), t.data().as_f32_slice());
             let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
             let value: f32 = difference_total(a, b, taxicab, count);
             TensorData::from_vec(vec![value], DataType::Float32, p.device())
         }
-        DataType::Float64 => {
+        (DataType::Float64, DataType::Float64) => {
             let (a, b) = (p.data().as_f64_slice(), t.data().as_f64_slice());
             let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
             let value: f64 = difference_total(a, b, taxicab, count);
             TensorData::from_vec(vec![value], DataType::Float64, p.device())
         }
-        other => {
+        (DataType::Float32, DataType::Int32 | DataType::Int64) => {
+            let (wide, (highs, lows)) = (widened(&p)?, integer_parts(&t)?);
+            let value: f32 =
+                integer_difference_total(&wide, &highs, lows.as_deref(), taxicab, count);
+            TensorData::from_vec(vec![value], DataType::Float32, p.device())
+        }
+        (DataType::Float64, DataType::Int32 | DataType::Int64) => {
+            let (wide, (highs, lows)) = (widened(&p)?, integer_parts(&t)?);
+            let value: f64 =
+                integer_difference_total(&wide, &highs, lows.as_deref(), taxicab, count);
+            TensorData::from_vec(vec![value], DataType::Float64, p.device())
+        }
+        (prediction, target) => {
             return Err(MinitensorError::invalid_operation(format!(
-                "loss takes float operands, got {other:?}"
+                "loss takes float predictions beside float or integer targets, got \
+                 {prediction:?} and {target:?}"
             )));
         }
     };
@@ -1125,27 +1140,39 @@ fn exact_difference_loss(
 }
 
 /// Each `(p - t)²`, the float nearest the square of the exact difference;
-/// see `arithmetic::exact_sum::squared_differences`.
+/// see `arithmetic::exact_sum::squared_differences`. An integer target is
+/// taken exactly, as by [`exact_difference_loss`].
 fn squared_differences(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-    use crate::ops::arithmetic::exact_sum::squared_differences;
+    use crate::ops::arithmetic::exact_sum::{integer_squared_differences, squared_differences};
     let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
-    let missing = || MinitensorError::internal_error("loss: a float slice");
-    let data = match p.dtype() {
-        DataType::Float32 => {
+    let missing = || MinitensorError::internal_error("loss: a typed slice");
+    let data = match (p.dtype(), t.dtype()) {
+        (DataType::Float32, DataType::Float32) => {
             let (a, b) = (p.data().as_f32_slice(), t.data().as_f32_slice());
             let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
             let out: Vec<f32> = squared_differences(a, b);
             TensorData::from_vec(out, DataType::Float32, p.device())
         }
-        DataType::Float64 => {
+        (DataType::Float64, DataType::Float64) => {
             let (a, b) = (p.data().as_f64_slice(), t.data().as_f64_slice());
             let (a, b) = (a.ok_or_else(missing)?, b.ok_or_else(missing)?);
             let out: Vec<f64> = squared_differences(a, b);
             TensorData::from_vec(out, DataType::Float64, p.device())
         }
-        other => {
+        (DataType::Float32, DataType::Int32 | DataType::Int64) => {
+            let (wide, (highs, lows)) = (widened(&p)?, integer_parts(&t)?);
+            let out: Vec<f32> = integer_squared_differences(&wide, &highs, lows.as_deref());
+            TensorData::from_vec(out, DataType::Float32, p.device())
+        }
+        (DataType::Float64, DataType::Int32 | DataType::Int64) => {
+            let (wide, (highs, lows)) = (widened(&p)?, integer_parts(&t)?);
+            let out: Vec<f64> = integer_squared_differences(&wide, &highs, lows.as_deref());
+            TensorData::from_vec(out, DataType::Float64, p.device())
+        }
+        (prediction, target) => {
             return Err(MinitensorError::invalid_operation(format!(
-                "loss takes float operands, got {other:?}"
+                "loss takes float predictions beside float or integer targets, got \
+                 {prediction:?} and {target:?}"
             )));
         }
     };
@@ -1156,6 +1183,47 @@ fn squared_differences(predictions: &Tensor, targets: &Tensor) -> Result<Tensor>
         p.device(),
         false,
     ))
+}
+
+/// A contiguous float tensor's values in float64, which holds each exactly.
+fn widened(tensor: &Tensor) -> Result<Vec<f64>> {
+    let missing = || MinitensorError::internal_error("loss: a float slice");
+    Ok(match tensor.dtype() {
+        DataType::Float32 => {
+            let values = tensor.data().as_f32_slice().ok_or_else(missing)?;
+            values.iter().map(|&value| f64::from(value)).collect()
+        }
+        _ => tensor.data().as_f64_slice().ok_or_else(missing)?.to_vec(),
+    })
+}
+
+/// A contiguous integer tensor's values as float64s whose sums they are
+/// exactly: each value's nearest float64, and what that leaves beside it
+/// where any value lies past 2^53.
+fn integer_parts(tensor: &Tensor) -> Result<(Vec<f64>, Option<Vec<f64>>)> {
+    let missing = || MinitensorError::internal_error("loss: an integer slice");
+    if tensor.dtype() == DataType::Int32 {
+        let values = tensor.data().as_i32_slice().ok_or_else(missing)?;
+        return Ok((values.iter().map(|&value| f64::from(value)).collect(), None));
+    }
+    let values = tensor.data().as_i64_slice().ok_or_else(missing)?;
+    let highs: Vec<f64> = values.iter().map(|&value| value as f64).collect();
+    let limit = 1i64 << 53;
+    if values
+        .iter()
+        .all(|&value| (-limit..=limit).contains(&value))
+    {
+        return Ok((highs, None));
+    }
+    // The nearest float64 is within 2^10 of an int64, so the remainder is
+    // exact; and as a float64 it can reach 2^63, which no int64 holds, so
+    // the remainder is taken in 128 bits.
+    let lows = values
+        .iter()
+        .zip(&highs)
+        .map(|(&value, &high)| (i128::from(value) - high as i128) as f64)
+        .collect();
+    Ok((highs, Some(lows)))
 }
 
 /// Applies a loss's `reduction`, on data the caller has already detached.
@@ -1312,6 +1380,26 @@ fn loss_operands<'a>(
     predictions: &'a Tensor,
     targets: &'a Tensor,
 ) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>)> {
+    operands(predictions, targets, false)
+}
+
+/// [`loss_operands`] for a loss of the difference alone, which leaves an
+/// int32 or int64 target as it is: `predictions - targets` then rounds the
+/// exact difference once, where the cast rounded the target first -- past
+/// 2^24 for float32 predictions, and past 2^53 for float64 ones -- and a
+/// target one above a prediction could lose nothing.
+fn difference_operands<'a>(
+    predictions: &'a Tensor,
+    targets: &'a Tensor,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>)> {
+    operands(predictions, targets, true)
+}
+
+fn operands<'a>(
+    predictions: &'a Tensor,
+    targets: &'a Tensor,
+    keep_integer_targets: bool,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>)> {
     // Check device compatibility
     if predictions.device() != targets.device() {
         return Err(MinitensorError::device_mismatch(
@@ -1342,7 +1430,13 @@ fn loss_operands<'a>(
             Cow::Owned(tensor.astype(common)?)
         })
     };
-    Ok((cast(predictions)?, cast(targets)?))
+    let integer = matches!(targets.dtype(), DataType::Int32 | DataType::Int64);
+    let targets = if keep_integer_targets && integer {
+        Cow::Borrowed(targets)
+    } else {
+        cast(targets)?
+    };
+    Ok((cast(predictions)?, targets))
 }
 
 /// Validate that classification loss function inputs are compatible

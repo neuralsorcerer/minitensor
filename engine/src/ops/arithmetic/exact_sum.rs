@@ -3319,6 +3319,106 @@ pub(crate) fn squared_difference<T: Output>(a: f64, b: f64) -> T {
     T::settle(value, rest, bound).unwrap_or_else(exact)
 }
 
+/// [`difference_total`] of float64s `x` less integers, each the exact sum
+/// of its `highs` value and, where any integer lies past 2^53, its `lows`
+/// value.
+pub(crate) fn integer_difference_total<T: Output>(
+    x: &[f64],
+    highs: &[f64],
+    lows: Option<&[f64]>,
+    taxicab: bool,
+    count: usize,
+) -> T {
+    let Some(lows) = lows else {
+        return difference_total(x, highs, taxicab, count);
+    };
+    if count == 0 {
+        return T::narrow(f64::NAN);
+    }
+    let terms = x
+        .iter()
+        .zip(highs)
+        .zip(lows)
+        .map(|((&a, &high), &low)| (a, high, low));
+    if !x.iter().all(|value| value.is_finite()) {
+        // A NaN, or an infinity, as the formula gives it.
+        let total: f64 = terms
+            .map(|(a, high, low)| {
+                let difference = (a - high) - low;
+                if taxicab {
+                    difference.abs()
+                } else {
+                    difference * difference
+                }
+            })
+            .sum();
+        return T::narrow(total / count as f64);
+    }
+    let total = if taxicab {
+        Total::of_wide(terms.flat_map(|(a, high, low)| {
+            if is_negative(&[a, -high, -low]) {
+                [-a, high, low]
+            } else {
+                [a, -high, -low]
+            }
+        }))
+    } else {
+        // `(a - h - l)²` multiplied out.
+        Total::of_products(terms.flat_map(|(a, high, low)| {
+            [
+                (a, a),
+                (high, high),
+                (low, low),
+                (a, -high),
+                (a, -high),
+                (a, -low),
+                (a, -low),
+                (high, low),
+                (high, low),
+            ]
+        }))
+    };
+    total.map_or_else(T::narrow, |total| total.divided(count as u64))
+}
+
+/// [`squared_difference`] of each float64 in `x` less an integer, given as
+/// for [`integer_difference_total`].
+pub(crate) fn integer_squared_differences<T: Output>(
+    x: &[f64],
+    highs: &[f64],
+    lows: Option<&[f64]>,
+) -> Vec<T> {
+    let Some(lows) = lows else {
+        return crate::ops::map::binary_map(x, highs, squared_difference::<T>);
+    };
+    x.iter()
+        .zip(highs)
+        .zip(lows)
+        .map(|((&a, &high), &low)| {
+            if low == 0.0 || !a.is_finite() {
+                // The integer exact in float64, or a NaN or an infinity,
+                // which the remainder does not move.
+                return squared_difference(a, high);
+            }
+            Total::of_products(
+                [
+                    (a, a),
+                    (high, high),
+                    (low, low),
+                    (a, -high),
+                    (a, -high),
+                    (a, -low),
+                    (a, -low),
+                    (high, low),
+                    (high, low),
+                ]
+                .into_iter(),
+            )
+            .map_or_else(T::narrow, |total| total.rounded())
+        })
+        .collect()
+}
+
 /// Each `(x - y)²`, the value nearest the square of the exact difference:
 /// [`squared_difference_lane`] a run at a time, in the widest build the CPU
 /// runs and across the pool for a long operand, and a run with any left

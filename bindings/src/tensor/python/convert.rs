@@ -703,6 +703,32 @@ pub(crate) fn operands_from_py(values: &[Bound<PyAny>]) -> PyResult<Vec<Tensor>>
         .collect()
 }
 
+/// [`operands_from_py`] for the operands of a loss of their difference: a
+/// Python int, or a list of them, that the first typed operand's float dtype
+/// does not hold is the int64 tensor it is, as arithmetic reads it -- see
+/// [`exact_integers_beside_float`] -- so that the loss is of the exact
+/// difference, where `mse_loss(float32_x, [16777217])` was of `16777216`.
+pub(crate) fn difference_operands_from_py(values: &[Bound<PyAny>]) -> PyResult<Vec<Tensor>> {
+    let mut tensors = operands_from_py(values)?;
+    let typed = |value: &Bound<PyAny>| typed_operand(value).is_some();
+    let Some(reference) = values
+        .iter()
+        .zip(&tensors)
+        .find(|(value, _)| typed(value))
+        .map(|(_, tensor)| tensor.clone())
+    else {
+        return Ok(tensors);
+    };
+    for (value, tensor) in values.iter().zip(tensors.iter_mut()) {
+        if !typed(value)
+            && let Some(integers) = exact_integers_beside_float(&reference, value)?
+        {
+            *tensor = integers;
+        }
+    }
+    Ok(tensors)
+}
+
 /// A Python int outside int64, as [`engine::ops::compare_with_wide_integer`]
 /// takes one: the float64 nearest it -- the largest finite one past them all
 /// -- and how that float compares with it. `None` for anything else.

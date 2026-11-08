@@ -92,6 +92,19 @@ fn loss_operands<const N: usize>(values: [&Bound<'_, PyAny>; N]) -> PyResult<[en
         .unwrap_or_else(|_| unreachable!("one tensor per operand")))
 }
 
+/// [`loss_operands`] for a loss of the difference of its operands, whose
+/// integer literals are read exactly; see
+/// [`crate::tensor::difference_operands_from_py`].
+fn difference_loss_operands(
+    input: &Bound<'_, PyAny>,
+    target: &Bound<'_, PyAny>,
+) -> PyResult<[engine::Tensor; 2]> {
+    let tensors = crate::tensor::difference_operands_from_py(&[input.clone(), target.clone()])?;
+    Ok(tensors
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one tensor per operand")))
+}
+
 /// A classification operand, typed by what it holds: class indices are
 /// integers whatever the scores beside them are.
 fn class_operand(value: &Bound<'_, PyAny>) -> PyResult<engine::Tensor> {
@@ -747,7 +760,7 @@ fn mse_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let [prediction, target_tensor] = difference_loss_operands(input, target)?;
     let loss = MSELoss::new(reduction);
     let result = loss
         .forward(&prediction, &target_tensor)
@@ -764,7 +777,7 @@ fn smooth_l1_loss_functional(
     reduction: &str,
     beta: f64,
 ) -> PyResult<PyTensor> {
-    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let [prediction, target_tensor] = difference_loss_operands(input, target)?;
     // The op validates beta; huber and smooth-l1 differ by a factor of beta and
     // coincide only at 1.0, so this must not just forward to `huber_loss_op`.
     let result =
@@ -781,7 +794,7 @@ fn huber_loss_functional(
     reduction: &str,
     delta: f64,
 ) -> PyResult<PyTensor> {
-    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let [prediction, target_tensor] = difference_loss_operands(input, target)?;
     let result =
         huber_loss_op(&prediction, &target_tensor, delta, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -795,7 +808,7 @@ fn l1_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let [prediction, target_tensor] = difference_loss_operands(input, target)?;
     let result = mae_loss_op(&prediction, &target_tensor, reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -989,7 +1002,7 @@ fn log_cosh_loss_functional(
     target: &Bound<PyAny>,
     reduction: &str,
 ) -> PyResult<PyTensor> {
-    let [prediction, target_tensor] = loss_operands([input, target])?;
+    let [prediction, target_tensor] = difference_loss_operands(input, target)?;
     let loss = LogCoshLoss::new(reduction);
     let result = loss
         .forward(&prediction, &target_tensor)
