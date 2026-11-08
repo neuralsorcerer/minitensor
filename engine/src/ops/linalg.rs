@@ -44,7 +44,9 @@ pub use self::linear_impl::*;
 pub use self::lu_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;
-pub(crate) use self::rounded_product_impl::rounded_products_f32;
+pub(crate) use self::rounded_product_impl::{
+    Affine, rounded_affine_products_f32, rounded_products_f32,
+};
 pub use self::sliding_impl::sliding_products;
 pub use self::svd_impl::*;
 pub(crate) use self::triangular_impl::*;

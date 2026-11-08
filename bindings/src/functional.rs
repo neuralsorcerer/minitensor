@@ -794,6 +794,27 @@ pub fn addcdiv_rounded(
         .map_err(_convert_error)
 }
 
+/// `beta · input + alpha · (mat1 @ mat2)` for float32 operands, each entry
+/// the float32 nearest its exact value. Behind `addmm` and `baddbmm`.
+#[pyfunction]
+#[pyo3(name = "_affine_product", signature = (input, mat1, mat2, beta, alpha))]
+pub fn affine_product_rounded(
+    input: &Bound<PyAny>,
+    mat1: &Bound<PyAny>,
+    mat2: &Bound<PyAny>,
+    beta: f32,
+    alpha: f32,
+) -> PyResult<PyTensor> {
+    let (input, mat1, mat2) = (
+        borrow_tensor(input)?,
+        borrow_tensor(mat1)?,
+        borrow_tensor(mat2)?,
+    );
+    engine::ops::linalg::affine_product(input.tensor(), mat1.tensor(), mat2.tensor(), beta, alpha)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// The `p`-distance, `p` 1 or 2, between corresponding rows of `a` and `b`
 /// with every difference shifted by `shift`, each rounded once. Behind the
 /// distance functions, which broadcast and differentiate.
@@ -2463,6 +2484,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(affine_product_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;

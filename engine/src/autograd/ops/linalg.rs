@@ -103,9 +103,14 @@ impl GradientFunction for VecdotBackward {
 pub struct LinearBackward {
     pub input: Tensor,
     pub weight: Tensor,
-    pub input_ids: [TensorId; 2],
+    /// The input's and the weight's, then the bias's where it was added in
+    /// the product's kernel and takes a gradient.
+    pub input_ids: smallvec::SmallVec<[TensorId; 3]>,
     pub input_requires_grad: bool,
     pub weight_requires_grad: bool,
+    /// The shape of a bias added in the product's kernel that takes a
+    /// gradient: the incoming one summed over every row.
+    pub bias_shape: Option<crate::tensor::Shape>,
 }
 
 /// Refuse a GEMM operand whose storage does not cover its shape.
@@ -320,6 +325,179 @@ impl GradientFunction for LinearBackward {
             accumulate_grad(&mut gradients, self.input_ids[1], grad_weight)?;
         }
 
+        if let Some(shape) = &self.bias_shape {
+            // Each entry the sum of its column of the incoming gradient,
+            // rounded once as a sum along an axis is.
+            let rows_by_features =
+                grad_output.reshape(crate::tensor::Shape::new(vec![rows, out_features]))?;
+            let grad_bias = crate::ops::reduction::sum(&rows_by_features, Some(vec![0]), false)?
+                .reshape(shape.clone())?
+                .detach();
+            accumulate_grad(&mut gradients, self.input_ids[2], grad_bias)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// The gradient of `beta · input + alpha · (mat1 @ mat2)` for float32
+/// operands; see [`crate::ops::linalg::affine_product`]. Each gradient is
+/// rounded once too: the products' scaled by `alpha` in their own kernel,
+/// and the input's -- the incoming gradient summed over the axes it was
+/// broadcast along -- scaled by `beta` the same way.
+pub struct AffineProductBackward {
+    pub mat1: Tensor,
+    pub mat2: Tensor,
+    pub input_shape: crate::tensor::Shape,
+    pub alpha: f32,
+    pub beta: f32,
+    pub input_ids: [TensorId; 3],
+    pub requires: [bool; 3],
+}
+
+impl AffineProductBackward {
+    /// `scale · (lhs @ rhs)` rounded once, the operands read in the layouts
+    /// given, `batch` products of `(m, k)` by `(k, n)`.
+    #[allow(clippy::too_many_arguments)]
+    fn scaled_product(
+        &self,
+        (batch, m, k, n): (usize, usize, usize, usize),
+        lhs: (&[f32], crate::ops::provider::Storage),
+        rhs: (&[f32], crate::ops::provider::Storage),
+        scale: f32,
+        dims: Vec<usize>,
+        device: crate::device::Device,
+    ) -> Result<Tensor> {
+        use crate::tensor::{DataType, Shape, TensorData};
+        let mut data = TensorData::try_zeros_on_device(batch * m * n, DataType::Float32, device)?;
+        let out = data
+            .as_f32_slice_mut()
+            .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))?;
+        crate::ops::linalg::rounded_affine_products_f32(
+            batch,
+            m,
+            k,
+            n,
+            lhs,
+            rhs,
+            Some(crate::ops::linalg::Affine {
+                alpha: scale,
+                beta: 0.0,
+                values: &[0.0],
+                strides: [0, 0, 0],
+            }),
+            out,
+        )?;
+        Ok(Tensor::new(
+            std::sync::Arc::new(data),
+            Shape::new(dims),
+            DataType::Float32,
+            device,
+            false,
+        ))
+    }
+}
+
+impl GradientFunction for AffineProductBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::provider::Storage::{RowMajor, Transposed};
+        let mut gradients = FxHashMap::default();
+        let grad = grad_output.contiguous()?;
+        let g = grad
+            .data()
+            .as_f32_slice()
+            .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))?;
+        let (left, right) = (self.mat1.shape().dims(), self.mat2.shape().dims());
+        let batched = left.len() == 3;
+        let batch = if batched { left[0] } else { 1 };
+        let (m, k, n) = (
+            left[left.len() - 2],
+            left[left.len() - 1],
+            right[right.len() - 1],
+        );
+        let device = grad.device();
+        if g.len() != batch * m * n {
+            return Err(MinitensorError::internal_error(format!(
+                "affine product backward: a gradient of {} elements for {batch} products of \
+                 ({m}, {n})",
+                g.len()
+            )));
+        }
+        let lead = |rest: &[usize]| -> Vec<usize> {
+            if batched {
+                [&[batch][..], rest].concat()
+            } else {
+                rest.to_vec()
+            }
+        };
+        let f32s = |t: &Tensor| {
+            t.data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))
+                .map(<[f32]>::to_vec)
+        };
+        if self.requires[1] {
+            // `alpha · grad @ mat2^T`, `mat2` read across its storage.
+            let rhs = f32s(&self.mat2)?;
+            let product = self.scaled_product(
+                (batch, m, n, k),
+                (g, RowMajor),
+                (&rhs, Transposed),
+                self.alpha,
+                lead(&[m, k]),
+                device,
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[1], product)?;
+        }
+        if self.requires[2] {
+            // `alpha · mat1^T @ grad`.
+            let lhs = f32s(&self.mat1)?;
+            let product = self.scaled_product(
+                (batch, k, m, n),
+                (&lhs, Transposed),
+                (g, RowMajor),
+                self.alpha,
+                lead(&[k, n]),
+                device,
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[2], product)?;
+        }
+        if self.requires[0] {
+            // The axes the input was broadcast along, laid first and summed
+            // as a row of ones times the rest, scaled by `beta` with them.
+            let out_dims = grad.shape().dims().to_vec();
+            let target = self.input_shape.dims();
+            let extra = out_dims.len() - target.len();
+            let summed: Vec<usize> = (0..out_dims.len())
+                .filter(|&axis| axis < extra || (target[axis - extra] == 1 && out_dims[axis] != 1))
+                .collect();
+            let kept: Vec<usize> = (0..out_dims.len())
+                .filter(|axis| !summed.contains(axis))
+                .collect();
+            let order: Vec<isize> = summed
+                .iter()
+                .chain(&kept)
+                .map(|&axis| axis as isize)
+                .collect();
+            let laid = grad.permute(order)?.contiguous()?;
+            let rows: usize = summed.iter().map(|&axis| out_dims[axis]).product();
+            let columns: usize = kept.iter().map(|&axis| out_dims[axis]).product();
+            let ones = vec![1.0f32; rows];
+            let values = f32s(&laid)?;
+            let product = self.scaled_product(
+                (1, 1, rows, columns),
+                (&ones, RowMajor),
+                (&values, RowMajor),
+                self.beta,
+                target.to_vec(),
+                device,
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[0], product)?;
+        }
         Ok(gradients)
     }
 

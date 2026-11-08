@@ -188,7 +188,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `vecmat(input, other)` | `(..., m)` times `(..., m, n)`, giving `(..., n)` -- `matvec` from the other side. |
 | `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
 | `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
-| `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
+| `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. For float32 operands, and scales a float32 holds, each entry is the float32 nearest the exact value, `input` broadcasting to the product -- where composed, the product, each scaling and the sum rounded -- and so is each gradient: the matrices' scaled products, and the input's sum over the axes it was broadcast along, scaled. Other dtypes and scales take the composed form. |
 | `inverse(input)` | The inverse of each square matrix in the stack -- a second name for `inv`. For `inverse(A) @ b`, ask `solve(lhs, rhs)` instead -- same answer, without forming the inverse, faster and better conditioned. |
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- a second name for `pinv`, with a fixed threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
@@ -1656,7 +1656,8 @@ exactly, a float64 one costs two to three times a plain sum of its products.
 A float32 `matmul`, `mm`, `bmm` or `@` with more than one row and column
 gives each entry as the float32 nearest its exact dot too, batched or
 broadcast, its operands read in the layouts they are stored in, and so do a
-dense layer without a bias and the gradients these products hand back. The
+dense layer and the gradients these products hand back, and `addmm` and
+`baddbmm`, whose scaled product and addend are rounded together once. The
 operands are widened to float64, where each product of two float32s is
 exact, and multiplied there -- by the installed provider, where there is one
 -- so each entry is off its exact dot only by the roundings of its sums:
@@ -3194,7 +3195,7 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 
 | Function | Purpose |
 | --- | --- |
-| `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. |
+| `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. For float32, each entry is the float32 nearest its exact value, the bias added to the exact dot before the one rounding -- a bias of one value per output feature, `[out]` or with leading ones; any other broadcasts as `+` does -- and the bias's gradient is each column of the incoming one summed, rounded once. |
 | `conv2d(input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. `padding` is zeros per side, or by name: `"valid"` for none, and `"same"` for enough that a stride-1 output keeps the input's height and width. `"same"` needs `dilation * (kernel - 1)` zeros per axis, and an odd total puts its extra zero after the axis; it is refused with any other stride, where no single size is kept. |
 | `conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on, and the same named paddings. |
 | `max_pool1d(input, kernel_size, stride=None, padding=0, return_indices=False)` | 1-D max pooling; `stride` defaults to `kernel_size`. With `return_indices` the result is `(values, indices)`, each index the position along the axis its maximum came from. |

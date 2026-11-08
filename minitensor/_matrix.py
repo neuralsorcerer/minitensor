@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math as _math
 import operator as _operator
+import struct as _struct
 
 from . import _core as _C
 from ._elementwise import signbit as _signbit
@@ -227,23 +228,75 @@ def tensordot(input: object, other: object, dims: object = 2) -> Tensor:
     return product.reshape(result_shape)
 
 
+def _float32_holds(value: float) -> bool:
+    """Whether a float32 is exactly `value`."""
+
+    try:
+        return _struct.unpack("f", _struct.pack("f", value))[0] == value
+    except (OverflowError, _struct.error):
+        return False
+
+
+def _rounded_affine(
+    base: Tensor, left: Tensor, right: Tensor, beta: object, alpha: object
+) -> Tensor | None:
+    """`beta * base + alpha * (left @ right)` with each entry the float32
+    nearest its exact value, or None where the operands are not float32 or
+    a scale is not exactly a float32, which the composed form takes."""
+
+    exact = all(
+        isinstance(scale, (int, float))
+        and not isinstance(scale, bool)
+        and _math.isfinite(scale)
+        and _float32_holds(scale)
+        for scale in (beta, alpha)
+    )
+    if not exact or any(str(t.dtype) != "float32" for t in (base, left, right)):
+        return None
+    out = list(left.shape[:-1]) + [right.shape[-1]]
+    shape = list(base.shape)
+    if len(shape) > len(out) or any(
+        size not in (1, full) for size, full in zip(reversed(shape), reversed(out))
+    ):
+        return None
+    return _C.functional._affine_product(base, left, right, float(beta), float(alpha))
+
+
 def addmm(
     input: object, mat1: object, mat2: object, beta: float = 1, alpha: float = 1
 ) -> Tensor:
     """`beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer
-    is written in."""
+    is written in. For float32 operands and scales each entry is the float32
+    nearest the exact value, where the composed form rounded at the product,
+    each scaling and the sum."""
 
-    return _atleast_tensor(input) * beta + mm(mat1, mat2) * alpha
+    base = _atleast_tensor(input)
+    left, right = _operand_pair(mat1, mat2)
+    left = _require_rank(left, 2, "mm", "first operand")
+    right = _require_rank(right, 2, "mm", "second operand")
+    if left.shape[1] == right.shape[0]:
+        fused = _rounded_affine(base, left, right, beta, alpha)
+        if fused is not None:
+            return fused
+    return base * beta + mm(left, right) * alpha
 
 
 def baddbmm(
     input: object, batch1: object, batch2: object, beta: float = 1, alpha: float = 1
 ) -> Tensor:
-    """`beta * input + alpha * (batch1 @ batch2)` over a batch of matrices."""
+    """`beta * input + alpha * (batch1 @ batch2)` over a batch of matrices.
+
+    Each entry of float32 operands is rounded once, as `addmm`'s is.
+    """
 
     left = _require_rank(_atleast_tensor(batch1), 3, "baddbmm", "first batch")
     right = _require_rank(_atleast_tensor(batch2), 3, "baddbmm", "second batch")
-    return _atleast_tensor(input) * beta + _F.bmm(left, right) * alpha
+    base = _atleast_tensor(input)
+    if left.shape[0] == right.shape[0] and left.shape[2] == right.shape[1]:
+        fused = _rounded_affine(base, left, right, beta, alpha)
+        if fused is not None:
+            return fused
+    return base * beta + _F.bmm(left, right) * alpha
 
 
 # --- inverses ---------------------------------------------------------------

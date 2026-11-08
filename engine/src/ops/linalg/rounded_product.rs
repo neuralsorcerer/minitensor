@@ -27,7 +27,7 @@
 //! entries the bound alone would leave open.
 
 use crate::error::{MinitensorError, Result};
-use crate::ops::arithmetic::exact_sum::dot_f32;
+use crate::ops::arithmetic::exact_sum::{dot_f32, exact_dot_to};
 use crate::ops::provider::Storage;
 
 /// Float64's unit roundoff, `2^-53`.
@@ -63,6 +63,66 @@ pub(crate) fn rounded_products_f32(
     rhs_storage: Storage,
     out: &mut [f32],
 ) -> Result<()> {
+    rounded_affine_products_f32(
+        batch,
+        m,
+        k,
+        n,
+        (lhs, lhs_storage),
+        (rhs, rhs_storage),
+        None,
+        out,
+    )
+}
+
+/// What each entry `dot` of a product is taken to before it is rounded:
+/// `alpha · dot + beta · c`, with `c` the addend of entry `(b, i, j)` at
+/// `strides[0] · b + strides[1] · i + strides[2] · j` in `values` -- a stride
+/// of zero broadcasting it along that axis.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Affine<'a> {
+    pub(crate) alpha: f32,
+    pub(crate) beta: f32,
+    pub(crate) values: &'a [f32],
+    pub(crate) strides: [usize; 3],
+}
+
+/// [`rounded_products_f32`] with each entry taken to `alpha · dot + beta ·
+/// c` by `affine`, where there is one, the float32 nearest that exactly: a
+/// bias added and a product scaled, rounded once rather than at each step.
+///
+/// The float64 value is `alpha · dot` rounded, plus `beta · c`, exact for
+/// two float32s, rounded: off the exact one by `|alpha|` times the dot's
+/// bound, and the roundings of the two, which the margin [`settles`] keeps
+/// for its own covers. An entry left open is the exact sum of `(alpha ·
+/// a_l) · b_l`, each first factor exact, and `beta · c`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rounded_affine_products_f32(
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    (lhs, lhs_storage): (&[f32], Storage),
+    (rhs, rhs_storage): (&[f32], Storage),
+    affine: Option<Affine<'_>>,
+    out: &mut [f32],
+) -> Result<()> {
+    let addend_reach = affine.map_or(0, |affine| {
+        let [b, i, j] = affine.strides;
+        b * batch.saturating_sub(1) + i * m.saturating_sub(1) + j * n.saturating_sub(1)
+    });
+    if affine.is_some_and(|affine| !out.is_empty() && addend_reach >= affine.values.len()) {
+        return Err(MinitensorError::internal_error(format!(
+            "a product's addend holds {} elements where its strides reach {addend_reach}",
+            affine.map_or(0, |affine| affine.values.len())
+        )));
+    }
+    let addend = |product: usize, i: usize, j: usize| {
+        affine.map_or(0.0, |affine| {
+            let [b, row, column] = affine.strides;
+            f64::from(affine.values[b * product + row * i + column * j])
+        })
+    };
     if lhs.len() != batch * m * k || rhs.len() != batch * k * n || out.len() != batch * m * n {
         return Err(MinitensorError::internal_error(format!(
             "product buffers hold {}, {} and {} elements where {batch} products of ({m}, {k}) \
@@ -79,10 +139,23 @@ pub(crate) fn rounded_products_f32(
         return Ok(());
     }
     if k == 0 {
-        out.fill(0.0);
+        // An empty dot is a zero, so each entry is `alpha · 0 + beta · c`.
+        for (index, slot) in out.iter_mut().enumerate() {
+            let (product, i, j) = (index / (m * n), index / n % m, index % n);
+            *slot = match affine {
+                None => 0.0,
+                Some(affine) => exact_dot_to::<f32>(
+                    [
+                        (f64::from(affine.alpha), 0.0),
+                        (f64::from(affine.beta), addend(product, i, j)),
+                    ]
+                    .into_iter(),
+                ),
+            };
+        }
         return Ok(());
     }
-    if m == 1 || n == 1 {
+    if (m == 1 || n == 1) && affine.is_none() {
         return single_rows_or_columns(batch, m, k, n, lhs, lhs_storage, rhs, rhs_storage, out);
     }
 
@@ -132,21 +205,42 @@ pub(crate) fn rounded_products_f32(
     let whole = 2f64.powi(53) * (1.0 - 2f64.powi(-18));
     let column_grains: Vec<std::sync::OnceLock<f64>> =
         (0..batch * n).map(|_| std::sync::OnceLock::new()).collect();
+    let (alpha, beta) = affine.map_or((1.0, 0.0), |affine| {
+        (f64::from(affine.alpha), f64::from(affine.beta))
+    });
     let decide = |start: usize, part: &mut [f32]| {
+        let mut taken = vec![0.0f64; if affine.is_some() { n } else { 0 }];
         for (offset, row) in part.chunks_mut(n).enumerate() {
             let index = start / n + offset;
             let (product, i) = (index / m, index % m);
-            let values = &wide[index * n..(index + 1) * n];
+            let dots = &wide[index * n..(index + 1) * n];
             let norms = &rhs_norms[product * n..(product + 1) * n];
             let row_scale = scale * lhs_norms[index];
             // Every entry narrowed, and whether any is left open, in a pass
             // the compiler can take in vector lanes; the open ones, one in
             // some thousands, are taken again below.
             let mut open = false;
-            for ((slot, &value), &norm) in row.iter_mut().zip(values).zip(norms) {
-                *slot = value as f32;
-                open |= !settles(value, row_scale * norm);
-            }
+            let values: &[f64] = if affine.is_some() {
+                let row_scale = row_scale * alpha.abs();
+                for (j, ((slot, value), (&dot, &norm))) in row
+                    .iter_mut()
+                    .zip(taken.iter_mut())
+                    .zip(dots.iter().zip(norms))
+                    .enumerate()
+                {
+                    let scaled = alpha * dot;
+                    *value = scaled + beta * addend(product, i, j);
+                    *slot = *value as f32;
+                    open |= !settles(*value, row_scale * norm + scaled.abs() * 2f64.powi(-52));
+                }
+                &taken
+            } else {
+                for ((slot, &value), &norm) in row.iter_mut().zip(dots).zip(norms) {
+                    *slot = value as f32;
+                    open |= !settles(value, row_scale * norm);
+                }
+                dots
+            };
             if !open {
                 continue;
             }
@@ -157,21 +251,42 @@ pub(crate) fn rounded_products_f32(
             let row_grain = whole * grain_of(lhs_row.iter().copied());
             let mut column = Vec::with_capacity(k);
             for (j, slot) in row.iter_mut().enumerate() {
-                if settles(values[j], row_scale * norms[j]) {
+                let bound = row_scale * alpha.abs() * norms[j]
+                    + if affine.is_some() {
+                        (alpha * dots[j]).abs() * 2f64.powi(-52)
+                    } else {
+                        0.0
+                    };
+                if settles(values[j], bound) {
                     continue;
                 }
                 let column_grain = *column_grains[product * n + j].get_or_init(|| {
                     grain_of((0..k).map(|l| right[rhs_at(rhs_storage, k, n, l, j)]))
                 });
-                // A sum that took no rounding is the exact entry, a zero a
-                // positive one, as a dot's is.
+                // A sum that took no rounding is the exact dot, a zero a
+                // positive one, as a dot's is; the entry is then its scaled
+                // sum with the addend, two exact products.
                 if lhs_norms[index] * norms[j] < row_grain * column_grain {
-                    *slot = values[j] as f32 + 0.0;
+                    *slot = match affine {
+                        None => dots[j] as f32 + 0.0,
+                        Some(_) => exact_dot_to::<f32>(
+                            [(alpha, dots[j]), (beta, addend(product, i, j))].into_iter(),
+                        ),
+                    };
                     continue;
                 }
                 column.clear();
                 column.extend((0..k).map(|l| right[rhs_at(rhs_storage, k, n, l, j)]));
-                *slot = dot_f32(&lhs_row, &column);
+                *slot = match affine {
+                    None => dot_f32(&lhs_row, &column),
+                    Some(_) => exact_dot_to::<f32>(
+                        lhs_row
+                            .iter()
+                            .zip(&column)
+                            .map(|(&a, &b)| (alpha * f64::from(a), f64::from(b)))
+                            .chain(std::iter::once((beta, addend(product, i, j)))),
+                    ),
+                };
             }
         }
     };
@@ -486,6 +601,68 @@ mod tests {
                         want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         "{batch} x ({m}, {k}) @ ({k}, {n}), {lhs_storage:?} by {rhs_storage:?}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_scaled_product_with_an_addend_rounds_once() {
+        for (batch, m, k, n) in [(1, 6, 200, 7), (2, 1, 30, 5), (2, 4, 3, 1), (1, 5, 0, 3)] {
+            let lhs = values(41 + k as u64, batch * m * k);
+            let rhs = values(43 + n as u64, batch * k * n);
+            let bias = values(47, n);
+            let full = values(53, batch * m * n);
+            for (alpha, beta) in [(1.0f32, 1.0f32), (-0.7, 2.5), (3.0, 0.0), (0.0, 1.0)] {
+                for (addend, strides) in [
+                    (&bias[..], [0, 0, 1]),
+                    (&full[..], [m * n, n, 1]),
+                    (&full[..1], [0, 0, 0]),
+                ] {
+                    let affine = Affine {
+                        alpha,
+                        beta,
+                        values: addend,
+                        strides,
+                    };
+                    let mut out = vec![f32::NAN; batch * m * n];
+                    rounded_affine_products_f32(
+                        batch,
+                        m,
+                        k,
+                        n,
+                        (&lhs, Storage::RowMajor),
+                        (&rhs, Storage::Transposed),
+                        Some(affine),
+                        &mut out,
+                    )
+                    .unwrap();
+                    for product in 0..batch {
+                        for i in 0..m {
+                            for j in 0..n {
+                                let c =
+                                    addend[strides[0] * product + strides[1] * i + strides[2] * j];
+                                let want: f32 = exact_dot_to(
+                                    (0..k)
+                                        .map(|l| {
+                                            (
+                                                f64::from(alpha)
+                                                    * f64::from(lhs[product * m * k + i * k + l]),
+                                                f64::from(rhs[product * k * n + j * k + l]),
+                                            )
+                                        })
+                                        .chain([(f64::from(beta), f64::from(c))]),
+                                );
+                                let got = out[product * m * n + i * n + j];
+                                assert_eq!(
+                                    got.to_bits(),
+                                    want.to_bits(),
+                                    "{batch} x ({m}, {k}, {n}), alpha {alpha}, beta {beta}, \
+                                     strides {strides:?}: ({product}, {i}, {j})"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

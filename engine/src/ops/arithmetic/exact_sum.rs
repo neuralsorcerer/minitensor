@@ -1688,6 +1688,20 @@ pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     })
 }
 
+/// The value nearest the exact sum of the products of `pairs`, `+0` for one
+/// that cancels; or, where an operand is not finite, what the products make
+/// added one by one: NaN for a NaN, a product of an infinity and a zero, or
+/// infinite products of both signs, and an infinity for infinite products
+/// of one sign.
+#[cold]
+#[inline(never)]
+pub(crate) fn exact_dot_to<T: Output>(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> T {
+    match Total::of_products(pairs) {
+        Err(special) => T::narrow(special),
+        Ok(total) => total.rounded(),
+    }
+}
+
 /// The float32 nearest every number within `bound` of `value`, when that is
 /// one float32.
 pub(crate) fn settle_f32(value: f64, bound: f64) -> Option<f32> {
