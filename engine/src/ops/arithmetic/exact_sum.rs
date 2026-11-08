@@ -204,6 +204,19 @@ pub(crate) trait Output: Target + Send + Sync + PartialEq {
     fn exact_pair(sum: f64, error: f64) -> Self;
     /// The value as a float64, which holds it exactly.
     fn widen(self) -> f64;
+    /// The value nearest an exact total within `bound` of `value + rest`,
+    /// a two-sum's pair, where that reaches the halfway point between two
+    /// values: `side(high, low)` says how the total compares with the
+    /// halfway point `high + low` nearest the pair -- a float64 pair, the
+    /// low part zero or a power of two -- or that it cannot, and a tie goes
+    /// to the even value. None where the bound reaches past the two values
+    /// either side of that point.
+    fn split(
+        value: f64,
+        rest: f64,
+        bound: f64,
+        side: impl Fn(f64, f64) -> Option<std::cmp::Ordering>,
+    ) -> Option<Self>;
 }
 
 impl Output for f64 {
@@ -240,6 +253,35 @@ impl Output for f64 {
         let inward = (value - f64::from_bits(value.to_bits().wrapping_sub(1))).abs();
         let clear = rest.abs() + bound < inward * SHY_OF_HALF && value != 0.0;
         (value, value.is_finite() & ((bound == 0.0) | clear))
+    }
+
+    fn split(
+        value: f64,
+        rest: f64,
+        bound: f64,
+        side: impl Fn(f64, f64) -> Option<std::cmp::Ordering>,
+    ) -> Option<Self> {
+        if !value.is_finite() || value == 0.0 || rest == 0.0 {
+            return None;
+        }
+        let neighbour = if rest > 0.0 {
+            value.next_up()
+        } else {
+            value.next_down()
+        };
+        // Half the gap to the neighbour, a power of two; within half of it
+        // of the pair, the total lies between the halfway points beyond the
+        // two, `rest` being at most the gap above `value` over two.
+        let half = (neighbour - value) * 0.5;
+        if !neighbour.is_finite() || neighbour == 0.0 || bound >= half.abs() * 0.5 {
+            return None;
+        }
+        Some(match side(value, half)? {
+            std::cmp::Ordering::Equal if value.to_bits() & 1 == 0 => value,
+            std::cmp::Ordering::Equal => neighbour,
+            order if (order == std::cmp::Ordering::Greater) == (half > 0.0) => neighbour,
+            _ => value,
+        })
     }
 }
 
@@ -321,6 +363,65 @@ impl Output for f32 {
         let signed = f32::from_bits(narrow.to_bits() | (sign >> 32) as u32);
         (signed, (narrow < f32::MAX) & clear)
     }
+
+    fn split(
+        value: f64,
+        rest: f64,
+        bound: f64,
+        side: impl Fn(f64, f64) -> Option<std::cmp::Ordering>,
+    ) -> Option<Self> {
+        let narrow = value as f32;
+        if !narrow.is_finite() || narrow.abs() == f32::MAX {
+            return None;
+        }
+        let back = f64::from(narrow);
+        // The halfway point nearest the pair, exact in float64, and the
+        // float32 past it.
+        let toward = (value - back) + rest;
+        let other = if toward > 0.0 {
+            narrow.next_up()
+        } else {
+            narrow.next_down()
+        };
+        let halfway = (back + f64::from(other)) * 0.5;
+        let gap = (f64::from(other) - back).abs();
+        // The total between `narrow` and `other`, so one of them.
+        if (back + toward - halfway).abs() + bound >= gap * 0.5 {
+            return None;
+        }
+        Some(match side(halfway, 0.0)? {
+            std::cmp::Ordering::Equal if narrow.to_bits() & 1 == 0 => narrow,
+            std::cmp::Ordering::Equal => other,
+            order if (order == std::cmp::Ordering::Greater) == (f64::from(other) > back) => other,
+            _ => narrow,
+        })
+    }
+}
+
+/// The sign of the exact sum of a few finite floats, by growing them into an
+/// expansion of parts that do not overlap, smallest first, whose largest
+/// nonzero part carries the sign; none for a sum past the largest float on
+/// the way.
+fn expansion_sign(terms: &[f64]) -> Option<std::cmp::Ordering> {
+    let mut parts = [0f64; 8];
+    debug_assert!(terms.len() <= parts.len());
+    for (count, &term) in terms.iter().enumerate() {
+        let mut carry = term;
+        for part in &mut parts[..count] {
+            let (sum, error) = two_sum(carry, *part);
+            *part = error;
+            carry = sum;
+        }
+        parts[count] = carry;
+    }
+    let parts = &parts[..terms.len()];
+    if !parts.iter().all(|part| part.is_finite()) {
+        return None;
+    }
+    let largest = parts.iter().rev().find(|&&part| part != 0.0).copied();
+    Some(largest.map_or(std::cmp::Ordering::Equal, |part| {
+        part.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
+    }))
 }
 
 /// A float64 total carried as `sum + error`, within `slack` of the exact
@@ -2122,9 +2223,10 @@ fn quotient_settled<T: Output>(numerator: Carried, denominator: Carried) -> Opti
     let third = quotient * d2;
     let residual = second - third;
     // Each of the four rounded within `u` of its result, and the last
-    // product, which may be a subnormal, within the least subnormal.
+    // product, which may be a subnormal, within the least subnormal -- added
+    // only where it may be, since arithmetic on a subnormal is slow.
     let rounding = (first.abs() + second.abs() + third.abs() + residual.abs()) * 2f64.powi(-52)
-        + f64::from_bits(4);
+        + underflow_allowance(d2, third);
     let off = rounding + sn + quotient.abs() * sd;
     let correction = residual / d1;
     let divisor = d1.abs() * (1.0 - 2f64.powi(-29));
@@ -2133,6 +2235,18 @@ fn quotient_settled<T: Output>(numerator: Carried, denominator: Carried) -> Opti
         * (1.0 + 2f64.powi(-40));
     let (value, rest) = two_sum(quotient, correction);
     T::settle(value, rest, bound)
+}
+
+/// What a quotient's product with a divisor's low part `low` may have lost
+/// to underflow, as `product`: up to the least subnormal four times over
+/// for a product that small, and nothing otherwise.
+#[inline(always)]
+fn underflow_allowance(low: f64, product: f64) -> f64 {
+    if low != 0.0 && product.abs() < f64::MIN_POSITIVE {
+        f64::from_bits(4)
+    } else {
+        0.0
+    }
 }
 
 /// The value nearest the exact `Σ x · y / Σ w` over `pairs` and `weights`;
@@ -2207,10 +2321,10 @@ pub(crate) fn interpolated<const FMA: bool>(
         error: tail,
         slack: magnitude * 2f64.powi(-50) + underflow,
     };
-    ratio_settled::<FMA>(numerator, d)
+    ratio_settled::<f64, FMA>(numerator, d)
 }
 
-/// The float64 nearest `N / (d.0 + d.1)` for the total `numerator` carries
+/// The value nearest `N / (d.0 + d.1)` for the total `numerator` carries
 /// and a two-sum's pair `d`, when the bound says which it is.
 ///
 /// As [`quotient_settled`] settles a quotient, with the divisor exact and
@@ -2220,7 +2334,10 @@ pub(crate) fn interpolated<const FMA: bool>(
 /// the reciprocal, which is within `2.0001u` of the residual over the whole
 /// divisor.
 #[inline(always)]
-fn ratio_settled<const FMA: bool>(numerator: Carried, d: (f64, f64)) -> Option<f64> {
+pub(crate) fn ratio_settled<T: Output, const FMA: bool>(
+    numerator: Carried,
+    d: (f64, f64),
+) -> Option<T> {
     let (n1, n2) = two_sum(numerator.sum, numerator.error);
     let (d1, d2) = d;
     let sn = numerator.slack;
@@ -2228,9 +2345,18 @@ fn ratio_settled<const FMA: bool>(numerator: Carried, d: (f64, f64)) -> Option<f
         return None;
     }
     if n1 == 0.0 && n2 == 0.0 && sn == 0.0 {
-        return Some(0.0 / d1);
+        return Some(T::narrow(0.0 / d1));
     }
     let ordinary = |value: f64| (2f64.powi(-900)..=2f64.powi(900)).contains(&value.abs());
+    if d2 == 0.0 && d1.to_bits() & ((1 << 52) - 1) == 0 && ordinary(d1) && ordinary(n1) {
+        // A power of two: the pair over it is exact, a halfway point
+        // included, which no bound above zero could settle.
+        let scale = 1.0 / d1;
+        let (value, rest) = (n1 * scale, n2 * scale);
+        if ordinary(value) && (rest == 0.0 || rest.abs() >= f64::MIN_POSITIVE) {
+            return T::settle(value, rest, sn * scale.abs());
+        }
+    }
     let inverse = 1.0 / d1;
     let quotient = n1 * inverse;
     if !(ordinary(n1) && ordinary(d1) && ordinary(quotient)) {
@@ -2244,7 +2370,7 @@ fn ratio_settled<const FMA: bool>(numerator: Carried, d: (f64, f64)) -> Option<f
     let third = quotient * d2;
     let residual = second - third;
     let rounding = (first.abs() + second.abs() + third.abs() + residual.abs()) * 2f64.powi(-52)
-        + f64::from_bits(4);
+        + underflow_allowance(d2, third);
     let correction = residual * inverse;
     // At least the reciprocal of the whole divisor's magnitude.
     let scale = inverse.abs() * (1.0 + 2f64.powi(-50));
@@ -2253,7 +2379,200 @@ fn ratio_settled<const FMA: bool>(numerator: Carried, d: (f64, f64)) -> Option<f
         + correction.abs() * 2f64.powi(-52))
         * (1.0 + 2f64.powi(-40));
     let (value, rest) = two_sum(quotient, correction);
-    f64::settle(value, rest, bound)
+    T::settle(value, rest, bound).or_else(|| {
+        // An exact numerator over an exact divisor lands on a halfway point
+        // more often than a bound can tell: which side of it the quotient
+        // lies on is the sign of the numerator less the point times the
+        // divisor, every product of which is exact.
+        if sn != 0.0 || d2 != 0.0 {
+            return None;
+        }
+        T::split(value, rest, bound, |high, low| {
+            let product = high * d1;
+            let error = crate::ops::simd::product_error::<FMA>(high, d1, product);
+            let sign = expansion_sign(&[n1, n2, -product, -error, -(low * d1)])?;
+            Some(if d1 < 0.0 { sign.reverse() } else { sign })
+        })
+    })
+}
+
+/// The value nearest `(x - y) / divisor` of finite floats, when the bound
+/// says which it is: the difference a two-sum's exact pair over the
+/// divisor, as [`ratio_settled`] settles it.
+#[inline(always)]
+pub(crate) fn difference_over<T: Output, const FMA: bool>(
+    x: f64,
+    y: f64,
+    divisor: f64,
+) -> Option<T> {
+    let (sum, error) = two_sum(x, -y);
+    if !sum.is_finite() {
+        return None;
+    }
+    let difference = Carried {
+        sum,
+        error,
+        slack: 0.0,
+    };
+    ratio_settled::<T, FMA>(difference, (divisor, 0.0))
+}
+
+/// A product of three exact pairs, `x.0 + x.1` each, negated where
+/// `negative`: a term of [`ratio_of_products`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Product {
+    pub(crate) factors: [(f64, f64); 3],
+    pub(crate) negative: bool,
+}
+
+impl Product {
+    pub(crate) fn new(factors: [(f64, f64); 3], negative: bool) -> Self {
+        Self { factors, negative }
+    }
+}
+
+/// The value nearest the exact `Σ numerator / Σ denominator`, of products
+/// of pairs of finite floats: each product carried with its leading part
+/// split exactly and the quotient settled by a bound, or both sums taken
+/// exactly where the bound cannot say. A product's error is one fused
+/// multiply-add where `FMA`.
+#[inline(always)]
+pub(crate) fn ratio_of_products<T: Output, const FMA: bool>(
+    numerator: &[Product],
+    denominator: &[Product],
+) -> T {
+    match (
+        carried_products::<FMA>(numerator),
+        carried_products::<FMA>(denominator),
+    ) {
+        (Some(numerator), Some(denominator)) => {
+            let (d1, d2) = two_sum(denominator.sum, denominator.error);
+            if denominator.slack == 0.0 && d2 == 0.0 {
+                // A divisor that is one float exactly: by its reciprocal,
+                // and exactly over a power of two, a halfway point included.
+                ratio_settled::<T, FMA>(numerator, (d1, 0.0))
+            } else {
+                quotient_settled(numerator, denominator)
+            }
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| exact_ratio_of_products(numerator, denominator))
+}
+
+/// The sum of `products` carried, each product's pairs normalized by a
+/// two-sum: `a b c = (a1 + a2)(b1 + b2)(c1 + c2)` is its leading part
+/// `a1 b1 c1` split exactly, the three terms with one low part, and what is
+/// left, below `4.01u²` of the leading part, with the roundings of the
+/// terms, below `26u²` of it, allowed for -- none at all for a product with
+/// no low part and an exact leading pair, which is then exact, and the
+/// products added with what their errors' sums drop tracked, so that exact
+/// products make an exact total. None for a factor or a partial product
+/// out of the range where the splits are exact.
+#[inline(always)]
+fn carried_products<const FMA: bool>(products: &[Product]) -> Option<Carried> {
+    let ordinary =
+        |value: f64| value == 0.0 || (2f64.powi(-900)..=2f64.powi(900)).contains(&value.abs());
+    let mut total = Carried::default();
+    for product in products {
+        let [a, b, c] = product.factors.map(|(high, low)| two_sum(high, low));
+        let leading = a.0 * b.0;
+        let whole = leading * c.0;
+        let lost = |product: f64, x: f64, y: f64| product == 0.0 && x != 0.0 && y != 0.0;
+        if !(ordinary(a.0)
+            && ordinary(b.0)
+            && ordinary(c.0)
+            && ordinary(leading)
+            && ordinary(whole))
+            || lost(leading, a.0, b.0)
+            || lost(whole, leading, c.0)
+        {
+            return None;
+        }
+        let leading_error = crate::ops::simd::product_error::<FMA>(a.0, b.0, leading);
+        let whole_error = crate::ops::simd::product_error::<FMA>(leading, c.0, whole);
+        let tail = whole_error
+            + leading_error * c.0
+            + leading * c.1
+            + (a.0 * b.1) * c.0
+            + (a.1 * b.0) * c.0;
+        let exact = exact_tail::<FMA>(a, b, c, leading, leading_error, whole_error, tail);
+        let sign = if product.negative { -1.0 } else { 1.0 };
+        total = total.merge_tracked(Carried {
+            sum: sign * whole,
+            error: sign * tail,
+            slack: if exact {
+                0.0
+            } else {
+                whole.abs() * 2f64.powi(-98)
+            },
+        });
+    }
+    Some(total)
+}
+
+/// Whether a product's tail in [`carried_products`] is its exact rest: so
+/// where at most one of the leading pair's error and the three low parts is
+/// not zero, so that nothing is dropped, and the one term that makes, and
+/// its sum with the leading part's own error, round to nothing.
+#[inline(always)]
+fn exact_tail<const FMA: bool>(
+    a: (f64, f64),
+    b: (f64, f64),
+    c: (f64, f64),
+    leading: f64,
+    leading_error: f64,
+    whole_error: f64,
+    tail: f64,
+) -> bool {
+    let lows = [leading_error, a.1, b.1, c.1];
+    let exact = |x: f64, y: f64, product: f64| {
+        product.abs() >= 2f64.powi(-968)
+            && crate::ops::simd::product_error::<FMA>(x, y, product) == 0.0
+    };
+    let term = match lows.iter().filter(|&&low| low != 0.0).count() {
+        0 => return tail == whole_error,
+        1 => {
+            if leading_error != 0.0 {
+                let term = leading_error * c.0;
+                exact(leading_error, c.0, term).then_some(term)
+            } else if c.1 != 0.0 {
+                let term = leading * c.1;
+                exact(leading, c.1, term).then_some(term)
+            } else {
+                let (x, y) = if b.1 != 0.0 { (a.0, b.1) } else { (a.1, b.0) };
+                let partial = x * y;
+                let term = partial * c.0;
+                (exact(x, y, partial) && exact(partial, c.0, term)).then_some(term)
+            }
+        }
+        _ => None,
+    };
+    term.is_some_and(|term| two_sum(whole_error, term).1 == 0.0)
+}
+
+/// [`ratio_of_products`] where the bound cannot decide: every product of a
+/// part of each pair, exactly.
+#[cold]
+#[inline(never)]
+fn exact_ratio_of_products<T: Output>(numerator: &[Product], denominator: &[Product]) -> T {
+    let expand = |products: &[Product]| {
+        let mut terms = Vec::with_capacity(8 * products.len());
+        for product in products {
+            let [a, b, c] = product.factors;
+            for x in [a.0, a.1] {
+                for y in [b.0, b.1] {
+                    for z in [c.0, c.1] {
+                        if x != 0.0 && y != 0.0 && z != 0.0 {
+                            terms.push((if product.negative { -x } else { x }, y, z));
+                        }
+                    }
+                }
+            }
+        }
+        Total::of_terms(&terms)
+    };
+    expand(numerator).quotient(expand(denominator))
 }
 
 /// The float64 nearest the exact `Σ a[i] · b[i] / Σ divisor`, finite

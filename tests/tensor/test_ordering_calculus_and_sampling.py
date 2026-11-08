@@ -8,7 +8,8 @@
 
 `unflatten`, `msort`, the three splits, `kthvalue` and `combinations` are
 rearrangements of `reshape`, `sort` and `tensor_split`. `gradient` is the
-numerical derivative of data, pinned to `numpy.gradient` in every mode it has.
+numerical derivative of data, each value the exact stencil rounded once, in
+every mode it has.
 The three draws are transformations of `rand` and `randn`, so what is checked
 of them is the distribution they produce, over enough samples for the answer to
 mean something.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -224,6 +226,45 @@ def test_gradient_matches_numpy_with_uneven_coordinates(edge_order):
     )
 
 
+def _exact_gradient(values, coordinates, edge_order):
+    """The exact stencils at uneven coordinates, rounded once; NaN where a
+    stencil reads a sample that is not finite."""
+
+    f = [Fraction(float(v)) if np.isfinite(v) else None for v in values]
+    x = [Fraction(float(v)) for v in coordinates]
+    n = len(f)
+
+    def stencil(indices, weights):
+        if any(f[i] is None for i in indices):
+            return math.nan
+        return float(sum(w * f[i] for w, i in zip(weights, indices)))
+
+    out = []
+    for i in range(n):
+        if 0 < i < n - 1:
+            one, two = x[i] - x[i - 1], x[i + 1] - x[i]
+            d = one * two * (one + two)
+            weights = [-two * two / d, (two * two - one * one) / d, one * one / d]
+            out.append(stencil([i - 1, i, i + 1], weights))
+        elif edge_order == 1:
+            a, b = (0, 1) if i == 0 else (n - 2, n - 1)
+            width = x[b] - x[a]
+            out.append(stencil([a, b], [-1 / width, 1 / width]))
+        elif i == 0:
+            one, two = x[1] - x[0], x[2] - x[1]
+            t = one + two
+            d = one * two * t
+            weights = [-(2 * one * two + two * two) / d, t * t / d, -one * one / d]
+            out.append(stencil([0, 1, 2], weights))
+        else:
+            one, two = x[n - 2] - x[n - 3], x[n - 1] - x[n - 2]
+            t = one + two
+            d = one * two * t
+            weights = [two * two / d, -t * t / d, (2 * one * two + one * one) / d]
+            out.append(stencil([n - 3, n - 2, n - 1], weights))
+    return np.array(out)
+
+
 @pytest.mark.parametrize("edge_order", [1, 2])
 @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
 def test_a_missing_sample_stays_where_it_was_put(bad, edge_order):
@@ -233,8 +274,8 @@ def test_a_missing_sample_stays_where_it_was_put(bad, edge_order):
     spread one bad sample to both of its neighbours, which a central
     difference never reads: `gradient([1, nan, 3, 4])` answered
     `[nan, nan, nan, 1]` where the derivative at the second point is
-    `(3 - 1) / 2`. NumPy reports that number, and separates the uniform case
-    for the same reason."""
+    `(3 - 1) / 2`. The even stencil is kept for an even grid for that
+    reason."""
     values = np.array([1.0, bad, 3.0, 4.0, 5.0, 6.0])
 
     np.testing.assert_array_equal(
@@ -243,12 +284,16 @@ def test_a_missing_sample_stays_where_it_was_put(bad, edge_order):
     )
 
     # Uneven coordinates keep the general stencil, where the middle weight is
-    # not zero and the contamination is arithmetic rather than an artefact.
-    # NumPy spreads it there too, and the two still agree.
-    np.testing.assert_array_equal(
-        mt.gradient(_t(values), _t(UNEVEN), edge_order=edge_order).numpy(),
-        np.gradient(values, UNEVEN, edge_order=edge_order),
-    )
+    # not zero and the contamination is arithmetic rather than an artefact:
+    # the bad sample reaches its neighbours, and the rest are the exact
+    # stencils, rounded once.
+    got = mt.gradient(_t(values), _t(UNEVEN), edge_order=edge_order).numpy()
+    spread = np.gradient(values, UNEVEN, edge_order=edge_order)
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(spread))
+    np.testing.assert_array_equal(np.isinf(got), np.isinf(spread))
+    finite = np.isfinite(spread)
+    want = _exact_gradient(values, UNEVEN, edge_order)
+    assert got[finite].tolist() == want[finite].tolist()
 
 
 @pytest.mark.parametrize("edge_order", [1, 2])
@@ -268,15 +313,11 @@ def test_the_two_paths_agree_on_the_grid_they_share(edge_order):
 @pytest.mark.parametrize("edge_order", [1, 2])
 @pytest.mark.parametrize("spacing", ["none", "step", "uniform", "uneven"])
 def test_gradient_agrees_whether_or_not_a_gradient_is_tracked(
-    dtype, edge_order, spacing, monkeypatch
+    dtype, edge_order, spacing
 ):
-    """Untracked and large enough, the derivative is NumPy's `gradient` over a
-    view; tracked, it is built from engine slices so autograd can follow it.
-    Both implement NumPy's stencils, and must give the same bits -- NaN and
-    infinity included, which is where the two stencils part ways. The size
-    threshold is lowered so these small inputs take the NumPy path."""
-
-    monkeypatch.setattr(mt._calculus, "_NUMPY_FROM_BYTES", 0)
+    """Tracked or not, the derivative is the same rounded-once stencil, and
+    must give the same bits -- NaN and infinity included, which is where the
+    even and uneven stencils part ways."""
 
     rng = np.random.default_rng(29)
     values = rng.standard_normal((5, 9)) * 10

@@ -25,6 +25,8 @@ pub(crate) mod exact_sum;
 mod fused;
 #[path = "arithmetic/rounded_once.rs"]
 pub(crate) mod rounded_once;
+#[path = "arithmetic/stencil.rs"]
+mod stencil;
 
 pub use self::angle::{deg2rad, rad2deg};
 pub use self::difference_of_products::difference_of_products;
@@ -33,3 +35,4 @@ pub use self::evenly_spaced::{
     evenly_spaced_data, evenly_spaced_point, stepped_data, stepped_point,
 };
 pub use self::fused::{add_scaled, addcdiv, addcmul, lerp};
+pub use self::stencil::finite_differences;
