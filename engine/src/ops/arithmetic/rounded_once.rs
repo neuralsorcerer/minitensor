@@ -129,7 +129,7 @@ fn sum_of_three(a: f64, b: f64, c: f64) -> f64 {
 
 /// `x + y` and its exact rounding error.
 #[inline(always)]
-pub(super) fn two_sum(x: f64, y: f64) -> (f64, f64) {
+pub(crate) fn two_sum(x: f64, y: f64) -> (f64, f64) {
     let sum = x + y;
     let virtual_y = sum - x;
     let virtual_x = sum - virtual_y;
@@ -139,7 +139,7 @@ pub(super) fn two_sum(x: f64, y: f64) -> (f64, f64) {
 /// The exact error of `product`, the float64 nearest `x * y`, from both
 /// operands split into halves whose products float64 holds exactly.
 #[inline(always)]
-pub(super) fn product_error(x: f64, y: f64, product: f64) -> f64 {
+pub(crate) fn product_error(x: f64, y: f64, product: f64) -> f64 {
     let split = |value: f64| {
         let scaled = 134_217_729.0 * value;
         let high = scaled - (scaled - value);

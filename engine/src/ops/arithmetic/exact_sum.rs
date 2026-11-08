@@ -4172,6 +4172,14 @@ fn trimmed(limbs: &[u64], least: i32) -> (&[u64], i32) {
     (&limbs[low..high], least + 64 * low as i32)
 }
 
+/// Whether the exact sum of `terms`, all finite, is negative.
+#[cold]
+pub(crate) fn is_negative(terms: &[f64]) -> bool {
+    let total = Total::of_wide(terms.iter().copied()).expect("finite terms");
+    let (negative, limbs, _) = total.difference();
+    negative && limbs.iter().any(|&limb| limb != 0)
+}
+
 /// The float32 nearest `sqrt(x² + y²)`.
 ///
 /// The squares of float32s are exact in float64, so the float64 root of

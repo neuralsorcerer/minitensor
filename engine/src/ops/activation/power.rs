@@ -493,6 +493,11 @@ fn rsqrt_f32(tensor: &Tensor) -> Result<TensorData> {
     // far finer than float32 can show -- so the one rounding at the end is
     // the only one that matters. Taking the root and the reciprocal in
     // float64 instead does the same, at twice the cost of this.
+    //
+    // That rounding could still fall the wrong side of a halfway point were
+    // the exact answer within a few float64 ulps of one, and no positive
+    // float32 has one that near: every one of them, checked against the
+    // exact answer, comes out the float32 nearest it.
     let out = unary_map(input_data, |v: f32| {
         let estimate = v.sqrt().recip();
         let (x, r) = (f64::from(v), f64::from(estimate));
@@ -515,15 +520,170 @@ fn rsqrt_f32(tensor: &Tensor) -> Result<TensorData> {
 }
 
 fn rsqrt_f64(tensor: &Tensor) -> Result<TensorData> {
+    use std::mem::MaybeUninit;
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
-    let out = unary_map(input_data, |v: f64| v.sqrt().recip());
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn block_fma(input: &[f64], out: &mut [MaybeUninit<f64>]) {
+        rsqrt_f64_block::<true>(input, out);
+    }
+    let fill = |start: usize, block: &mut [MaybeUninit<f64>]| {
+        let input = &input_data[start..start + block.len()];
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            // SAFETY: avx2 and fma were detected on this CPU.
+            return unsafe { block_fma(input, block) };
+        }
+        rsqrt_f64_block::<false>(input, block);
+    };
+    // SAFETY: the chunks cover the output, and `fill` writes every element
+    // of each.
+    let out: Vec<f64> = unsafe {
+        crate::ops::map::build_vec(input_data.len(), |spare| {
+            crate::ops::map::par_out_chunks(spare, 1 << 14, &fill)
+        })
+    };
     Ok(TensorData::from_vec::<f64>(
         out,
         DataType::Float64,
         tensor.device(),
     ))
+}
+
+/// [`rsqrt_f64_lane`] over a block, with fused multiply-adds for the
+/// two-products where `FMA`, and the few its bound leaves open decided by
+/// [`rsqrt_f64_exact`].
+#[inline(always)]
+fn rsqrt_f64_block<const FMA: bool>(input: &[f64], out: &mut [std::mem::MaybeUninit<f64>]) {
+    // Whether any was left open, gathered without a branch.
+    let mut open = false;
+    for (slot, &x) in out.iter_mut().zip(input) {
+        let value = rsqrt_f64_lane::<FMA>(x);
+        open |= value.is_nan() & (x > 0.0);
+        slot.write(value);
+    }
+    if !open {
+        return;
+    }
+    for (slot, &x) in out.iter_mut().zip(input) {
+        // SAFETY: written above.
+        let value = unsafe { slot.assume_init() };
+        if value.is_nan() && x > 0.0 {
+            slot.write(rsqrt_f64_exact(x));
+        }
+    }
+}
+
+/// The float64 nearest `1 / sqrt(x)`, or NaN where the bound cannot say it
+/// for a positive finite `x`, which [`rsqrt_f64_exact`] then decides.
+///
+/// The root and the reciprocal each round, which left answers up to an ulp
+/// out. With `r` their result, `e = 1 - x r²` is formed from two-products
+/// -- `1 - x p` exact by Sterbenz's lemma, `x p`'s error and `x q` within
+/// `2u` of `e` -- and `r + r e (1/2 + 3e/8)` is the answer to within
+/// `2^-51 |e| + 2^-106` of `r`, the step's roundings and what it leaves out
+/// with `|e|` under `2^-50`; the bound takes `2^-50 |e| + 2^-100`. Taken for `x` in `[2^-960, 2^960]`, where the
+/// two-products are exact; zero, an infinity, NaN and a negative are as the
+/// root and the reciprocal give them.
+#[inline(always)]
+fn rsqrt_f64_lane<const FMA: bool>(x: f64) -> f64 {
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
+    let error = |a: f64, b: f64, product: f64| {
+        if FMA {
+            a.mul_add(b, -product)
+        } else {
+            product_error(a, b, product)
+        }
+    };
+    let estimate = x.sqrt().recip();
+    let r = estimate;
+    let p = r * r;
+    let q = error(r, r, p);
+    let xp = x * p;
+    let e = ((1.0 - xp) - error(x, p, xp)) - x * q;
+    let delta = r * e * (0.5 + 0.375 * e);
+    let (value, rest) = two_sum(r, delta);
+    let bound = r * (e.abs() * 2f64.powi(-50) + 2f64.powi(-100));
+    // The gap to the float on the side toward zero, the smaller of the two.
+    let inward = value - f64::from_bits(value.to_bits().wrapping_sub(1));
+    let settled = rest.abs() + bound < inward * (0.5 - 2f64.powi(-40));
+    let ordinary = (2f64.powi(-960)..=2f64.powi(960)).contains(&x);
+    if !(estimate > 0.0 && estimate.is_finite()) {
+        estimate
+    } else if ordinary && settled {
+        value
+    } else {
+        f64::NAN
+    }
+}
+
+/// The float64 nearest `1 / sqrt(x)` for a positive finite `x`, decided
+/// exactly.
+///
+/// `x = m 4^k` with `m` in `[1, 4)`, and the answer is `rsqrt(m) / 2^k`,
+/// exactly, as it lies in the normal range. For `m` the step of
+/// [`rsqrt_f64_lane`] gives a float, and the midpoint `y + s` toward the
+/// rest of it is placed by the sign of `m (y + s)² - 1`, summed exactly
+/// from eight float64 terms: `m y²` as two two-products of the halves of
+/// `y²`, `2 m y s` from the two-product `m y` times the power of two `2s`,
+/// `m s²` exactly, and `-1`. It is never zero: an answer on a midpoint
+/// would need `m` to be one over the square of a 54-bit number.
+#[cold]
+#[inline(never)]
+fn rsqrt_f64_exact(x: f64) -> f64 {
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
+    // `x = m · 2^(2k)`, `m` in `[1, 4)`, each power applied as two in range.
+    let exponent = {
+        let biased = ((x.to_bits() >> 52) & 0x7ff) as i32;
+        if biased == 0 {
+            let scaled = x * 2f64.powi(64);
+            (((scaled.to_bits() >> 52) & 0x7ff) as i32) - 1023 - 64
+        } else {
+            biased - 1023
+        }
+    };
+    let k = exponent.div_euclid(2);
+    let power = |shift: i32| f64::from_bits(((shift + 1023) as u64) << 52);
+    let (first, second) = (power(-k), power(-k));
+    let m = x * first * second;
+    let r = m.sqrt().recip();
+    let p = r * r;
+    let q = product_error(r, r, p);
+    let mp = m * p;
+    let e = ((1.0 - mp) - product_error(m, p, mp)) - m * q;
+    let (y, rest) = two_sum(r, r * e * (0.5 + 0.375 * e));
+    let neighbour = if rest > 0.0 {
+        y.next_up()
+    } else {
+        y.next_down()
+    };
+    let s = (neighbour - y) * 0.5;
+    let square = y * y;
+    let square_low = product_error(y, y, square);
+    let (a, b) = (m * square, m * square_low);
+    let my = m * y;
+    let terms = [
+        a,
+        product_error(m, square, a),
+        b,
+        product_error(m, square_low, b),
+        my * (2.0 * s),
+        product_error(m, y, my) * (2.0 * s),
+        m * (s * s),
+        -1.0,
+    ];
+    let below_one = crate::ops::arithmetic::exact_sum::is_negative(&terms);
+    let (upper, lower) = if neighbour > y {
+        (neighbour, y)
+    } else {
+        (y, neighbour)
+    };
+    let answer = if below_one { upper } else { lower };
+    // Back by `2^k`, in the normal range.
+    let back = power(k / 2) * power(k - k / 2);
+    answer / back
 }
 
 fn abs_f32(tensor: &Tensor) -> Result<TensorData> {
@@ -1331,6 +1491,17 @@ mod rounding_and_clip_tests {
     use crate::tensor::{Shape, TensorData};
     use std::sync::Arc;
 
+    fn f64_tensor(data: Vec<f64>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        Tensor::new(
+            Arc::new(TensorData::from_vec(data, DataType::Float64, Device::cpu())),
+            shape,
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        )
+    }
+
     fn f32_tensor(data: Vec<f32>) -> Tensor {
         let shape = Shape::new(vec![data.len()]);
         Tensor::new(
@@ -1376,6 +1547,78 @@ mod rounding_and_clip_tests {
             std::cmp::Ordering::Less
         } else {
             product.cmp(&(1u128 << (-power)))
+        }
+    }
+
+    /// The exact midpoint of two neighbouring positive float64s, as an odd
+    /// whole number times a power of two.
+    fn midpoint_parts(a: f64, b: f64) -> (u128, i32) {
+        let ((p, e), (q, f)) = (exact_parts(a), exact_parts(b));
+        let least = e.min(f);
+        let sum = (p << (e - least)) + (q << (f - least));
+        let zeros = sum.trailing_zeros();
+        (sum >> zeros, least - 1 + zeros as i32)
+    }
+
+    /// `bound^2 * x` against 1, decided exactly: `bound` a midpoint of two
+    /// float64s, 54 bits, and `x` a float64, so the product has at most 161
+    /// bits, taken in three 64-bit limbs.
+    fn squared_times_against_one_f64((m, e): (u128, i32), x: f64) -> std::cmp::Ordering {
+        let (n, f) = exact_parts(x);
+        let square = m * m;
+        let (low, high) = (square & u128::from(u64::MAX), square >> 64);
+        let first = low * n;
+        let second = high * n + (first >> 64);
+        let limbs = [first as u64, second as u64, (second >> 64) as u64];
+        let power = 2 * e + f;
+        // The product is `limbs · 2^power`; one is `2^0`.
+        let bits = |limbs: &[u64; 3]| {
+            limbs.iter().rposition(|&limb| limb != 0).map_or(0, |top| {
+                64 * top as i32 + 64 - limbs[top].leading_zeros() as i32
+            })
+        };
+        let top = bits(&limbs) + power;
+        if top != 1 {
+            // The product's leading bit lies above or below one's.
+            return top.cmp(&1);
+        }
+        // Leading bits level: the product is one only when it is a power of
+        // two, and above it otherwise.
+        let ones: u32 = limbs.iter().map(|limb| limb.count_ones()).sum();
+        if ones == 1 {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    }
+
+    #[test]
+    fn float64_rsqrt_is_correctly_rounded() {
+        // A spread of positive float64 bit patterns, subnormals and both ends
+        // of the range included, and the neighbours of powers of four.
+        let mut inputs: Vec<f64> = (1..0x7ff0_0000_0000_0000_u64)
+            .step_by(0x0000_3d09_0000_0f7b)
+            .map(f64::from_bits)
+            .collect();
+        for power in -537..=511 {
+            let four = 4f64.powi(power);
+            inputs.extend([four, four.next_up(), four.next_down(), four * 2.0]);
+        }
+        inputs.extend([f64::MIN_POSITIVE, f64::from_bits(1), f64::MAX, 3.0, 0.5]);
+        inputs.retain(|x| *x > 0.0 && x.is_finite());
+        let output = rsqrt(&f64_tensor(inputs.clone())).unwrap();
+        let answers = output.data().as_f64_slice().unwrap();
+        for (&x, &r) in inputs.iter().zip(answers) {
+            assert!(r.is_finite() && r > 0.0, "rsqrt({x:e}) = {r:e}");
+            let (low, high) = (
+                midpoint_parts(r.next_down(), r),
+                midpoint_parts(r, r.next_up()),
+            );
+            assert!(
+                squared_times_against_one_f64(low, x).is_le()
+                    && squared_times_against_one_f64(high, x).is_ge(),
+                "rsqrt({x:e}) = {r:e} is not the nearest float64"
+            );
         }
     }
 
