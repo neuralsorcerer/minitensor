@@ -979,50 +979,10 @@ pub(crate) fn reduce_axis_exactly<I: Element, T: Output>(
     let outer = out.len() / inner;
     let slab = len * inner;
     let bands = inner.div_ceil(COLUMNS);
-    let parts = if outer * bands >= SPREAD {
-        1
+    let (merged, parts, rows_per_part) = if T::PLAIN {
+        band_totals::<I, true>(input, outer, len, inner, 0..len, parallel)
     } else {
-        let rows = (BLOCK / inner.min(COLUMNS)).max(64);
-        len.div_ceil(rows)
-    };
-    let rows_per_part = len.div_ceil(parts);
-    let task = |nth: usize| {
-        let (o, rest) = (nth / (bands * parts), nth % (bands * parts));
-        let (band, part) = (rest / parts, rest % parts);
-        let columns = band * COLUMNS..((band + 1) * COLUMNS).min(inner);
-        let rows = part * rows_per_part..((part + 1) * rows_per_part).min(len);
-        let slab = &input[o * slab..(o + 1) * slab];
-        if T::PLAIN {
-            columns_part::<I, true>(slab, inner, rows, columns)
-        } else {
-            columns_part::<I, false>(slab, inner, rows, columns)
-        }
-    };
-    let tasks = outer * bands * parts;
-    let partials: Vec<Vec<Carried>> = if parallel {
-        crate::parallel::map_tasks(tasks, &task)
-    } else {
-        (0..tasks).map(task).collect()
-    };
-    // Each band's parts merged pairwise, a band's columns side by side.
-    let merged: Vec<Vec<Carried>> = if parts == 1 {
-        partials
-    } else {
-        let mut partials = partials.into_iter();
-        (0..outer * bands)
-            .map(|_| {
-                let group: Vec<Vec<Carried>> = partials.by_ref().take(parts).collect();
-                if T::PLAIN {
-                    pairwise_fold_vectors(group, |a, b| Carried {
-                        sum: a.sum + b.sum,
-                        error: 0.0,
-                        slack: a.slack + b.slack,
-                    })
-                } else {
-                    pairwise_fold_vectors(group, Carried::merge)
-                }
-            })
-            .collect()
+        band_totals::<I, false>(input, outer, len, inner, 0..len, parallel)
     };
     let output = |index: usize| {
         let (o, column) = (index / inner, index % inner);
@@ -1034,19 +994,9 @@ pub(crate) fn reduce_axis_exactly<I: Element, T: Output>(
         };
         let total = merged[o * bands + band][offset];
         if T::PLAIN {
-            // A value passes through its lane's additions -- a part's rows
-            // over the rows a pass takes, and the rows left over -- the merge
-            // of its column's lanes, and the merge of the parts, pairwise.
-            let (sum, magnitude) = (total.sum, total.slack);
-            let width = COLUMNS.min(inner - band * COLUMNS);
-            let group = if width == inner {
-                (64 / width).max(1)
-            } else {
-                1
-            };
-            let depth = (rows_per_part / group + 2 * group + parts.ilog2() as usize + 18) as f64;
+            let bound = plain_column_bound(total.slack, inner, band, parts, rows_per_part);
             return reduction
-                .settled_plain(sum, magnitude * depth * 2f64.powi(-52), len)
+                .settled_plain(total.sum, bound, len)
                 .unwrap_or_else(|| reduction.of_values(&gathered(), false));
         }
         reduction
@@ -1064,6 +1014,92 @@ pub(crate) fn reduce_axis_exactly<I: Element, T: Output>(
             *slot = output(index);
         }
     }
+}
+
+/// How far a plain column total of [`band_totals`] can be from the exact
+/// one, from the `magnitude` it carries: a value passes through its lane's
+/// additions -- a part's rows over the rows a pass takes, and the rows left
+/// over -- the merge of its column's lanes, and the merge of the parts,
+/// pairwise.
+fn plain_column_bound(
+    magnitude: f64,
+    inner: usize,
+    band: usize,
+    parts: usize,
+    rows_per_part: usize,
+) -> f64 {
+    let width = COLUMNS.min(inner - band * COLUMNS);
+    let group = if width == inner {
+        (64 / width).max(1)
+    } else {
+        1
+    };
+    let depth = (rows_per_part / group + 2 * group + parts.ilog2() as usize + 18) as f64;
+    magnitude * depth * 2f64.powi(-52)
+}
+
+/// The carried totals over `rows` of every column of `input`, laid out
+/// `[outer, len, inner]`, indexed by `o * bands + band` and then by column
+/// within the band; with `PLAIN`, as [`columns_part`] gives them.
+///
+/// A task takes a band of up to [`COLUMNS`] columns, and where there are
+/// too few bands to spread across the pool the rows are cut into parts,
+/// merged pairwise in order. Also the number of parts and the rows a part
+/// takes, which a plain total's bound counts.
+fn band_totals<I: Element, const PLAIN: bool>(
+    input: &[I],
+    outer: usize,
+    len: usize,
+    inner: usize,
+    rows: std::ops::Range<usize>,
+    parallel: bool,
+) -> (Vec<Vec<Carried>>, usize, usize) {
+    let slab = len * inner;
+    let bands = inner.div_ceil(COLUMNS);
+    let count = rows.len();
+    let parts = if outer * bands >= SPREAD {
+        1
+    } else {
+        let per_part = (BLOCK / inner.min(COLUMNS)).max(64);
+        count.div_ceil(per_part).max(1)
+    };
+    let rows_per_part = count.div_ceil(parts);
+    let task = |nth: usize| {
+        let (o, rest) = (nth / (bands * parts), nth % (bands * parts));
+        let (band, part) = (rest / parts, rest % parts);
+        let columns = band * COLUMNS..((band + 1) * COLUMNS).min(inner);
+        let first = rows.start + part * rows_per_part;
+        let part_rows = first..(first + rows_per_part).min(rows.end);
+        let slab = &input[o * slab..(o + 1) * slab];
+        columns_part::<I, PLAIN>(slab, inner, part_rows, columns)
+    };
+    let tasks = outer * bands * parts;
+    let partials: Vec<Vec<Carried>> = if parallel {
+        crate::parallel::map_tasks(tasks, &task)
+    } else {
+        (0..tasks).map(task).collect()
+    };
+    // Each band's parts merged pairwise, a band's columns side by side.
+    let merged = if parts == 1 {
+        partials
+    } else {
+        let mut partials = partials.into_iter();
+        (0..outer * bands)
+            .map(|_| {
+                let group: Vec<Vec<Carried>> = partials.by_ref().take(parts).collect();
+                if PLAIN {
+                    pairwise_fold_vectors(group, |a, b| Carried {
+                        sum: a.sum + b.sum,
+                        error: 0.0,
+                        slack: a.slack + b.slack,
+                    })
+                } else {
+                    pairwise_fold_vectors(group, Carried::merge)
+                }
+            })
+            .collect()
+    };
+    (merged, parts, rows_per_part)
 }
 
 /// The carried totals of `columns` over `rows` of a `[len, inner]` slab, in
@@ -1718,6 +1754,270 @@ fn settled_dot(
 #[inline(never)]
 fn exact_dot_f64(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> f64 {
     Total::of_products(pairs).map_or_else(|special| special, |total| total.rounded())
+}
+
+/// A float dtype a trapezoidal integral is rounded to.
+pub(crate) trait Trapezoid: Element + Output {
+    /// The most that a product of two of it, or half of a float64 total of
+    /// them, can lose carried in float64 below the normals: nothing for a
+    /// float32, whose products and halves float64 holds exactly.
+    const LOSS: f64;
+}
+
+impl Trapezoid for f32 {
+    const LOSS: f64 = 0.0;
+}
+
+impl Trapezoid for f64 {
+    const LOSS: f64 = f64::from_bits(1);
+}
+
+/// The value nearest the trapezoidal integral of `y`, `step` apart.
+///
+/// It is `step` times the samples' total with each end halved: the total
+/// carried as a sum is, and the product formed with its exact rounding and a
+/// bound; where the bound cannot say which value is nearest, the products
+/// are taken exactly. A NaN or an infinity among the samples or as the step
+/// gives what the intervals' own formula gives in float64. Across the pool
+/// for a long run, as a sum is.
+pub(crate) fn trapezoid_spaced<T: Trapezoid>(y: &[T], step: T) -> T {
+    let n = y.len();
+    if n < 2 {
+        return T::narrow(0.0);
+    }
+    let interior = &y[1..n - 1];
+    if T::PLAIN {
+        // A plain float64 total, within its bound, settles a float32.
+        let (sum, slack) = plain_with(interior, true);
+        let plain = Carried {
+            sum,
+            error: 0.0,
+            slack,
+        };
+        if let Some(value) = spaced_settled(plain, y[0], y[n - 1], step) {
+            return value;
+        }
+    }
+    spaced_settled(carried_with(interior, true), y[0], y[n - 1], step)
+        .unwrap_or_else(|| spaced_exactly(y, step))
+}
+
+/// [`trapezoid_spaced`] of each column of `input`, laid out `[outer, len,
+/// inner]` with `len` at least two, into `out`, laid out `[outer, inner]`:
+/// each column's interior totalled as a sum along an axis totals it, a band
+/// of columns row by row.
+pub(crate) fn trapezoid_spaced_columns<T: Trapezoid>(
+    input: &[T],
+    len: usize,
+    inner: usize,
+    step: T,
+    out: &mut [T],
+) {
+    debug_assert!(len >= 2 && input.len() == out.len() * len);
+    let outer = out.len() / inner;
+    let parallel = input.len() >= crate::ops::map::PAR_THRESHOLD;
+    let rows = 1..len - 1;
+    let (totals, parts, rows_per_part) = if T::PLAIN {
+        band_totals::<T, true>(input, outer, len, inner, rows, parallel)
+    } else {
+        band_totals::<T, false>(input, outer, len, inner, rows, parallel)
+    };
+    let bands = inner.div_ceil(COLUMNS);
+    let output = |index: usize| {
+        let (o, column) = (index / inner, index % inner);
+        let (band, offset) = (column / COLUMNS, column % COLUMNS);
+        let start = o * len * inner + column;
+        let at = |row: usize| input[start + row * inner];
+        let total = totals[o * bands + band][offset];
+        let interior = if T::PLAIN {
+            Carried {
+                sum: total.sum,
+                error: 0.0,
+                slack: plain_column_bound(total.slack, inner, band, parts, rows_per_part),
+            }
+        } else {
+            total
+        };
+        spaced_settled(interior, at(0), at(len - 1), step).unwrap_or_else(|| {
+            let run: Vec<T> = (0..len).map(at).collect();
+            trapezoid_spaced(&run, step)
+        })
+    };
+    if parallel {
+        crate::ops::map::par_out_chunks(out, crate::ops::map::PAR_CHUNK, &|first, chunk| {
+            for (offset, slot) in chunk.iter_mut().enumerate() {
+                *slot = output(first + offset);
+            }
+        });
+    } else {
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = output(index);
+        }
+    }
+}
+
+/// The value nearest `step` times the carried `interior` with half of
+/// `first` and of `last` added, when the bound says which it is: not for a
+/// NaN or an infinity, nor a total or a step so far out of the range that
+/// the product's rounding might not be exact.
+fn spaced_settled<T: Trapezoid>(interior: Carried, first: T, last: T, step: T) -> Option<T> {
+    let step = step.wide();
+    // The ends' sum and its rounding, each halved: exactly, but for a last
+    // bit below the normals, which the slack allows for.
+    let (ends, rounding) = two_sum(first.wide(), last.wide());
+    let half = |value: f64| {
+        let halved = 0.5 * value;
+        (halved, if halved * 2.0 == value { 0.0 } else { T::LOSS })
+    };
+    let ((sum, lost), (error, also_lost)) = (half(ends), half(rounding));
+    let total = interior.merge(Carried {
+        sum,
+        error,
+        slack: lost + also_lost,
+    });
+    if !(step.is_finite() && total.sum.is_finite() && total.error.is_finite()) {
+        return None;
+    }
+    if step == 0.0 || (total.sum == 0.0 && total.error == 0.0 && total.slack == 0.0) {
+        return Some(T::narrow(0.0));
+    }
+    let (value, rest) = two_sum(total.sum, total.error);
+    let product = value * step;
+    let ordinary = |v: f64| (v.abs() >= 2f64.powi(-900)) & (v.abs() <= 2f64.powi(900));
+    if !(ordinary(value) && ordinary(step) && ordinary(product)) {
+        return None;
+    }
+    // `step · (value + rest)` is `product` and its exact rounding, and the
+    // rest's product, which rounds once, as does the tail they make; the
+    // carried total's slack scales with the step.
+    let carried = rest * step;
+    let tail = product_error(value, step, product) + carried;
+    let (sum, rest) = two_sum(product, tail);
+    let bound = total.slack * step.abs() * (1.0 + 2f64.powi(-50))
+        + (carried.abs() + tail.abs()) * 2f64.powi(-52)
+        + T::LOSS;
+    T::settle(sum, rest, bound)
+}
+
+/// [`trapezoid_spaced`] where the bound cannot decide: the intervals' own
+/// formula in float64 for a NaN or an infinity, and otherwise the exact sum
+/// of the samples' products with their weights -- half a step at each end
+/// and a step inside, or for a step too small to halve, twice the integral
+/// halved in whole numbers.
+#[cold]
+#[inline(never)]
+fn spaced_exactly<T: Trapezoid>(y: &[T], step: T) -> T {
+    let (n, step) = (y.len(), step.wide());
+    if !(step.is_finite() && y.iter().all(|value| value.wide().is_finite())) {
+        let total: f64 = y
+            .windows(2)
+            .map(|pair| step * ((pair[0].wide() + pair[1].wide()) * 0.5))
+            .sum();
+        return T::narrow(total);
+    }
+    let ends = [y[0], y[n - 1]].into_iter().map(Element::wide);
+    let inside = y[1..n - 1].iter().map(|value| value.wide());
+    let half = 0.5 * step;
+    let total = if half * 2.0 == step {
+        let pairs = ends
+            .map(move |v| (half, v))
+            .chain(inside.map(move |v| (step, v)));
+        Total::of_products(pairs).map(|total| total.rounded())
+    } else {
+        let twice = 2.0 * step;
+        let pairs = ends
+            .map(move |v| (step, v))
+            .chain(inside.map(move |v| (twice, v)));
+        Total::of_products(pairs).map(|total| total.divided(2))
+    };
+    total.unwrap_or_else(T::narrow)
+}
+
+/// The value nearest the trapezoidal integral of `y` at the positions `x`.
+///
+/// `Σ (x[i+1] - x[i]) (y[i] + y[i+1]) / 2` telescopes to half of
+/// `x[n-1] y[n-1] - x[0] y[0] + Σ (x[i+1] y[i] - x[i] y[i+1])`, every term a
+/// product of a position and a sample: two dots of the samples with the
+/// positions a place along, carried as a dot is, their difference halved
+/// with a bound; where it cannot say which value is nearest, the products
+/// are taken exactly. A NaN or an infinity among the samples or the
+/// positions, whose telescoped terms would cancel, gives what the
+/// intervals' own formula gives in float64.
+pub(crate) fn trapezoid_at<T: Trapezoid>(y: &[T], x: &[T]) -> T {
+    let n = y.len();
+    debug_assert_eq!(n, x.len());
+    if n < 2 {
+        return T::narrow(0.0);
+    }
+    let ahead = T::carried_dot(&x[1..], &y[..n - 1]);
+    let behind = T::carried_dot(&x[..n - 1], &y[1..]);
+    let ends = T::carried_dot(&[x[n - 1], T::narrow(-x[0].wide())], &[y[n - 1], y[0]]);
+    let total = ahead
+        .merge(Carried {
+            sum: -behind.sum,
+            error: -behind.error,
+            slack: behind.slack,
+        })
+        .merge(ends);
+    if !(total.sum.is_finite() && total.error.is_finite()) {
+        return at_exactly(y, x);
+    }
+    let halved = |slack: f64| {
+        let (value, rest) = two_sum(total.sum, total.error);
+        if value == 0.0 && slack == 0.0 {
+            return Some(T::narrow(0.0));
+        }
+        // Halved exactly, but for a last bit of `rest` below the normals.
+        (value.abs() >= 2f64.powi(-1000))
+            .then(|| T::settle(0.5 * value, 0.5 * rest, 0.5 * slack + T::LOSS))
+            .flatten()
+    };
+    // As for a dot: a product's error is exact unless the product lies
+    // within `2^-968` of zero, where it may have lost a subnormal's last bit,
+    // which the first bound allows for in every product; a total that bound
+    // cannot settle is settled without it when no product is that small.
+    let tiny = |a: T, b: T| {
+        let (a, b) = (a.wide(), b.wide());
+        a != 0.0 && b != 0.0 && (a * b).abs() < 2f64.powi(-968)
+    };
+    halved(total.slack + 2.0 * n as f64 * T::LOSS)
+        .or_else(|| {
+            let small = T::LOSS != 0.0
+                && (tiny(x[0], y[0])
+                    || tiny(x[n - 1], y[n - 1])
+                    || (0..n - 1).any(|i| tiny(x[i + 1], y[i]) || tiny(x[i], y[i + 1])));
+            if small { None } else { halved(total.slack) }
+        })
+        .unwrap_or_else(|| at_exactly(y, x))
+}
+
+/// [`trapezoid_at`] where the bound cannot decide: the intervals' own
+/// formula in float64 for a NaN or an infinity, and otherwise the exact sum
+/// of the telescoped products, halved in whole numbers.
+#[cold]
+#[inline(never)]
+fn at_exactly<T: Trapezoid>(y: &[T], x: &[T]) -> T {
+    let n = y.len();
+    let finite = |values: &[T]| values.iter().all(|value| value.wide().is_finite());
+    if !(finite(y) && finite(x)) {
+        let total: f64 = (0..n - 1)
+            .map(|i| (x[i + 1].wide() - x[i].wide()) * ((y[i].wide() + y[i + 1].wide()) * 0.5))
+            .sum();
+        return T::narrow(total);
+    }
+    let ends = [
+        (x[n - 1].wide(), y[n - 1].wide()),
+        (-x[0].wide(), y[0].wide()),
+    ];
+    let inside = (0..n - 1).flat_map(move |i| {
+        [
+            (x[i + 1].wide(), y[i].wide()),
+            (-x[i].wide(), y[i + 1].wide()),
+        ]
+    });
+    Total::of_products(ends.into_iter().chain(inside))
+        .map(|total| total.divided(2))
+        .unwrap_or_else(T::narrow)
 }
 
 /// The value nearest `Σ values[i] · weights[i] / Σ weights[i]`.

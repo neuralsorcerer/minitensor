@@ -640,6 +640,28 @@ pub fn add_scaled_rounded(
         .map_err(_convert_error)
 }
 
+/// The trapezoidal integral along `axis`, at `positions` or `step` apart,
+/// each the float nearest the exact integral. Behind `trapezoid`.
+#[pyfunction]
+#[pyo3(name = "_trapezoid", signature = (values, positions, step, axis))]
+pub fn trapezoid_rounded(
+    values: &Bound<PyAny>,
+    positions: Option<&Bound<PyAny>>,
+    step: f64,
+    axis: usize,
+) -> PyResult<PyTensor> {
+    let values = borrow_tensor(values)?;
+    let positions = positions.map(borrow_tensor).transpose()?;
+    engine::ops::reduction::trapezoid_integral(
+        values.tensor(),
+        positions.as_ref().map(|positions| positions.tensor()),
+        step,
+        axis,
+    )
+    .map(PyTensor::from_tensor)
+    .map_err(_convert_error)
+}
+
 /// Degrees to radians, each element the float nearest `input · π / 180`.
 /// Behind `deg2rad`.
 #[pyfunction]
@@ -2362,6 +2384,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(lerp_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcmul_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(add_scaled_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(trapezoid_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(deg2rad_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(rad2deg_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(addcdiv_rounded, parent)?)?;

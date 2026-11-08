@@ -578,13 +578,70 @@ def _nth_difference(tensor: Tensor, order: int, axis: int) -> Tensor:
     return tensor
 
 
+class _Trapezoid(_Function):
+    """The trapezoidal integral along an axis, rounded once, with the
+    gradient of the exact integral."""
+
+    @staticmethod
+    def forward(ctx, values, positions, step, axis):
+        ctx.save_for_backward(values)
+        ctx.positions, ctx.step, ctx.axis = positions, step, axis
+        return _F._trapezoid(values, positions, step, axis)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (values,) = ctx.saved_tensors
+        axis, length = ctx.axis, values.shape[ctx.axis]
+        dtype = str(values.dtype)
+        grad = grad_output.unsqueeze(axis)
+        along = [1] * values.ndim()
+        along[axis] = length
+        if ctx.positions is None:
+            # Half a step at each end and a whole one inside.
+            weights = [ctx.step] * length
+            weights[0] = weights[-1] = ctx.step / 2
+            weights = Tensor(weights, dtype=dtype).reshape(along)
+            return grad * weights, None, None, None
+        positions = ctx.positions.detach()
+        shared = positions.shape != values.shape
+        if shared:
+            positions = positions.reshape(along)
+        widths = diff(positions, 1, axis)
+        edge = _F.narrow(widths, axis, 0, 1) * 0.0
+        # Each sample's weight: half the intervals either side of it.
+        weights = (_F.cat([edge, widths], axis) + _F.cat([widths, edge], axis)) * 0.5
+        grad_values = grad * weights
+        grad_positions = None
+        if ctx.needs_input_grad[1]:
+            samples = values.detach()
+            heights = (
+                _F.narrow(samples, axis, 0, length - 1)
+                + _F.narrow(samples, axis, 1, length - 1)
+            ) * 0.5
+            edge = _F.narrow(heights, axis, 0, 1) * 0.0
+            # A position moves its interval on the left one way and the one
+            # on its right the other.
+            moving = _F.cat([edge, heights], axis) - _F.cat([heights, edge], axis)
+            grad_positions = grad * moving
+            if shared:
+                others = [index for index in range(values.ndim()) if index != axis]
+                if others:
+                    grad_positions = _F.sum(grad_positions, others)
+                grad_positions = grad_positions.reshape([length])
+        return grad_values, grad_positions, None, None
+
+
 def trapezoid(
     y: object, x: object | None = None, dx: float = 1.0, dim: int = -1
 ) -> Tensor:
     """The trapezoidal integral of `y` along `dim`.
 
-    With `x` given, the sample spacing comes from it and may be uneven; with
-    only `dx`, the samples are taken as evenly spaced.
+    With `x` given, the sample spacing comes from it and may be uneven: a 1-D
+    `x` is shared by every slice along `dim`, and any other broadcasts against
+    `y` with a position for each sample. With only `dx`, the samples are
+    evenly spaced, `dx` read at the samples' width as a number beside them is.
+    Each integral is the float nearest the exact one, not the heights, the
+    widths, their products and their sum each rounded on the way.
     """
 
     values = _require_float(_atleast_tensor(y), "trapezoid")
@@ -599,27 +656,32 @@ def trapezoid(
         return _F.sum(_F.narrow(values, axis, 0, 0), [axis])
 
     if x is None:
-        # Evenly spaced, every interior sample is shared by two intervals and
-        # each end by one, so the integral is the whole sum less half of each
-        # end. One reduction, where averaging neighbours first copied the
-        # tensor twice and passed over it three more times: 8.5ms for a
-        # million float64 samples.
-        ends = _F.narrow(values, axis, 0, 1) + _F.narrow(values, axis, length - 1, 1)
-        return (_F.sum(values, [axis]) - _F.sum(ends, [axis]) * 0.5) * float(dx)
-
-    left = _F.narrow(values, axis, 0, length - 1)
-    right = _F.narrow(values, axis, 1, length - 1)
-    heights = (left + right) * 0.5
+        return _Trapezoid.apply(values, None, float(dx), axis)
 
     positions = _require_float(_atleast_tensor(x), "trapezoid")
-    if positions.ndim() == 1 and values.ndim() > 1:
-        # A shared 1-D coordinate: give it the axis it measures and let the
-        # widths broadcast over the rest.
-        shape = [1] * values.ndim()
-        shape[axis] = positions.shape[0]
-        positions = positions.reshape(shape)
-    widths = diff(positions, 1, axis)
-    return _F.sum(heights * widths, [axis])
+    dtype = _promoted_dtype(values, positions)
+    values, positions = values.astype(dtype), positions.astype(dtype)
+    # A 1-D coordinate is shared by every slice, along the axis it measures;
+    # any other broadcasts against `y`, keeping a position for each sample.
+    # Either way `dim` names an axis of `y`, counted from the end once
+    # broadcasting has put axes in front.
+    from_end = values.ndim() - axis
+    if positions.ndim() == 1:
+        given = positions.shape[0]
+    elif positions.ndim() >= from_end:
+        given = positions.shape[positions.ndim() - from_end]
+    else:
+        given = None
+    if given != length:
+        raise ValueError(
+            f"trapezoid needs a position for each of the {length} samples along "
+            f"dim {dim}, got positions shaped {list(positions.shape)}"
+        )
+    if positions.ndim() > 1:
+        values, positions = _broadcast_tensors(values, positions)
+        values, positions = values.contiguous(), positions.contiguous()
+        axis = values.ndim() - from_end
+    return _Trapezoid.apply(values, positions, float(dx), axis)
 
 
 # `trapz` is the other common name, and enough code says it for the alias to
