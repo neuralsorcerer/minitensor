@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::{
     error::{MinitensorError, Result},
-    ops::arithmetic::exact_sum::{Element, Output, distance, normalized},
+    ops::arithmetic::exact_sum::{Element, Output, cosine, distance, normalized},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 
@@ -213,6 +213,114 @@ fn over_norms<T: Element + Output>(
     // A few nanoseconds an element: worth a thread at an eighth of what a
     // plain map waits for.
     if values.len() < crate::ops::map::PAR_THRESHOLD / 8 {
+        (0..tasks).for_each(task);
+    } else {
+        crate::parallel::for_each_task(tasks, &task);
+    }
+}
+
+/// The cosine of the angle between each pair of corresponding slices of `a`
+/// and `b` along `dim`, each norm floored at `eps` -- as the dtype holds it,
+/// and no floor where that is not positive -- each the float nearest the
+/// exact cosine; see `arithmetic::exact_sum::cosine`. `a` and `b` share a
+/// shape and a float dtype; the result drops `dim`. No gradient:
+/// `cosine_similarity` gives it.
+pub fn cosine_slices(a: &Tensor, b: &Tensor, dim: usize, eps: f64) -> Result<Tensor> {
+    check(a, b, 2.0, "cosine_slices")?;
+    if a.shape() != b.shape() || dim >= a.ndim() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "cosine_slices takes two tensors of one shape and an axis of it, got {:?}, {:?} \
+             and axis {dim}",
+            a.shape().dims(),
+            b.shape().dims()
+        )));
+    }
+    let (a, b) = (a.contiguous()?, b.contiguous()?);
+    let dims = a.shape().dims();
+    let (len, inner) = (dims[dim], dims[dim + 1..].iter().product::<usize>());
+    let mut kept = dims.to_vec();
+    kept.remove(dim);
+    let count = kept.iter().product::<usize>();
+    let missing = || MinitensorError::internal_error("cosine_slices: a float slice");
+    let mut data = TensorData::uninitialized_on_device(count, a.dtype(), a.device());
+    if a.dtype() == DataType::Float32 {
+        let (x, y) = (a.data().as_f32_slice(), b.data().as_f32_slice());
+        let out = data.as_f32_slice_mut().ok_or_else(missing)?;
+        over_pairs(
+            x.ok_or_else(missing)?,
+            y.ok_or_else(missing)?,
+            out,
+            len,
+            inner,
+            eps,
+        );
+    } else {
+        let (x, y) = (a.data().as_f64_slice(), b.data().as_f64_slice());
+        let out = data.as_f64_slice_mut().ok_or_else(missing)?;
+        over_pairs(
+            x.ok_or_else(missing)?,
+            y.ok_or_else(missing)?,
+            out,
+            len,
+            inner,
+            eps,
+        );
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(kept),
+        a.dtype(),
+        a.device(),
+        false,
+    ))
+}
+
+/// [`cosine_slices`] of `a` and `b` laid out `[outer, len, inner]`, along
+/// the middle axis, into `out`, laid out `[outer, inner]`: whole pairs of
+/// slices to a task, each gathered where it is not side by side.
+fn over_pairs<T: Element + Output>(
+    a: &[T],
+    b: &[T],
+    out: &mut [T],
+    len: usize,
+    inner: usize,
+    eps: f64,
+) {
+    if out.is_empty() {
+        return;
+    }
+    let mut scratch = (Vec::new(), Vec::new());
+    if len == 0 {
+        // Empty slices, every cosine the same one.
+        out.fill(cosine::<T, T>(&[], &[], eps, &mut scratch));
+        return;
+    }
+    let slices = out.len();
+    let per_task = (TASK / len).max(1);
+    let parts = crate::parallel::Parts::of(out);
+    let task = |index: usize| {
+        let mut scratch = (Vec::new(), Vec::new());
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for slice in index * per_task..((index + 1) * per_task).min(slices) {
+            let base = slice / inner * len * inner + slice % inner;
+            let value = if inner == 1 {
+                let span = base..base + len;
+                cosine(&a[span.clone()], &b[span], eps, &mut scratch)
+            } else {
+                left.clear();
+                left.extend((0..len).map(|k| a[base + k * inner]));
+                right.clear();
+                right.extend((0..len).map(|k| b[base + k * inner]));
+                cosine(&left, &right, eps, &mut scratch)
+            };
+            // SAFETY: each slice's cosine has its own place inside `out`.
+            unsafe { *parts.start().add(slice) = value };
+        }
+    };
+    let tasks = slices.div_ceil(per_task);
+    // A few nanoseconds an element: worth a thread at an eighth of what a
+    // plain map waits for.
+    if a.len() < crate::ops::map::PAR_THRESHOLD / 8 {
         (0..tasks).for_each(task);
     } else {
         crate::parallel::for_each_task(tasks, &task);

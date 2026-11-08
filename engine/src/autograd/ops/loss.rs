@@ -969,3 +969,67 @@ impl GradientFunction for CtcLossBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+
+/// Gradient function for `cosine_similarity`: of the cosine
+/// `c = a · b / (A B)`, `A` and `B` the operands' norms each floored at
+/// `floor`, which moves with `a` by `b / (A B)` and, where its norm is above
+/// the floor, by `-c a / A²` -- and with `b` the same way round.
+pub struct CosineSimilarityBackward {
+    /// The operands broadcast to one shape.
+    pub a: Tensor,
+    pub b: Tensor,
+    /// The cosines: the broadcast shape without `axis`.
+    pub cosine: Tensor,
+    pub axis: usize,
+    pub floor: f64,
+    /// The operands' own shapes, which their gradients are summed back to.
+    pub shapes: [Shape; 2],
+    pub input_ids: [TensorId; 2],
+    pub input_requires_grad: [bool; 2],
+}
+
+impl GradientFunction for CosineSimilarityBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+        let (dtype, device) = (self.a.dtype(), self.a.device());
+        let mut kept = self.a.shape().dims().to_vec();
+        kept[self.axis] = 1;
+        let kept = Shape::new(kept);
+        let grad = grad_output.reshape(kept.clone())?;
+        let cosine = self.cosine.reshape(kept)?;
+        let axes = Some(vec![self.axis as isize]);
+        let floor = create_scalar_tensor(self.floor, dtype, device)?;
+        let zero = create_scalar_tensor(0.0, dtype, device)?;
+        let norm_a = reduction::norm(&self.a, 2.0, axes.clone(), true)?;
+        let norm_b = reduction::norm(&self.b, 2.0, axes, true)?;
+        let length_a = crate::ops::minmax::maximum(&norm_a, &floor)?;
+        let length_b = crate::ops::minmax::maximum(&norm_b, &floor)?;
+        let lengths = arithmetic::mul(&length_a, &length_b)?;
+        let share = |this: &Tensor, other: &Tensor, norm: &Tensor, length: &Tensor| {
+            let across = arithmetic::div(other, &lengths)?;
+            let along = arithmetic::div(
+                &arithmetic::mul(&cosine, this)?,
+                &arithmetic::mul(length, length)?,
+            )?;
+            let moving = crate::ops::comparison::gt(norm, &floor)?;
+            let along = crate::ops::selection::where_op(&moving, &along, &zero)?;
+            arithmetic::mul(&grad, &arithmetic::sub(&across, &along)?)
+        };
+        if self.input_requires_grad[0] {
+            let full = share(&self.a, &self.b, &norm_a, &length_a)?;
+            let grad = reduce_gradient_for_broadcasting(&full, &self.shapes[0])?;
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let full = share(&self.b, &self.a, &norm_b, &length_b)?;
+            let grad = reduce_gradient_for_broadcasting(&full, &self.shapes[1])?;
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}

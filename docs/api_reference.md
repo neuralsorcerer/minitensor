@@ -2569,9 +2569,11 @@ assert row_std.shape == (2, 3)
 - `cosine_similarity(input, other, dim=1, eps=1e-8)` — the cosine of the angle
   between them along `dim`. Each norm is floored at `eps` on its own rather
   than their product being floored once, which is what keeps a zero vector
-  paired with a long one inside `[-1, 1]`. Each operand is divided by its
-  norm before they are multiplied, so neither the product of the norms nor the
-  dot product leaves the float range for vectors whose cosine is in it.
+  paired with a long one inside `[-1, 1]`. Each cosine is the float nearest
+  the exact dot over the exact norms so floored, `eps` as the dtype holds it:
+  a vector with itself is exactly one, two at right angles exactly zero, and
+  vectors whose squares or products pass either end of the float range are
+  taken like any other. A NaN or an infinity in either vector makes NaN.
 - `softplus(input, beta=1.0, threshold=None)` is `log1p(exp(beta * x)) / beta`,
   evaluated as `max(beta * x, 0) + log1p(exp(-|beta * x|))` so that it cannot
   overflow and returns `x` itself where that is the answer. A `threshold` takes

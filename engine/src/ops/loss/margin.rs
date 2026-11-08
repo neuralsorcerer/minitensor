@@ -12,14 +12,21 @@
 //! hand-written backward node would be a second derivation of arithmetic that
 //! is already differentiated -- two places to be wrong instead of one, for a
 //! forward that costs a few passes over a batch-sized tensor.
+//!
+//! The cosine is the exception. Rounded once, it is one kernel rather than a
+//! composition, and records its own backward.
 
+use std::sync::Arc;
+
+use super::regression_impl::manual_backward_needed;
 use crate::{
+    autograd::{CosineSimilarityBackward, NoGradGuard, with_grad_fn},
     error::{MinitensorError, Result},
     ops::{
         activation::{relu, softplus},
-        arithmetic::{add, div, mul, neg, sub},
+        arithmetic::{add, mul, neg, sub},
         loss::{check_finite_parameter, reduce_loss},
-        reduction::{norm, sum},
+        reduction::norm,
         selection::where_op,
         util::create_scalar_tensor,
     },
@@ -115,6 +122,14 @@ fn align(lhs: &Tensor, rhs: &Tensor) -> Result<(Tensor, Tensor, Shape)> {
 /// Each norm is floored at `eps` on its own rather than their product being
 /// floored once: that is what keeps a zero vector paired with a long one from
 /// reporting a similarity far outside `[-1, 1]`.
+///
+/// Each cosine is the float nearest the exact dot over the exact floored
+/// norms, `eps` as the dtype holds it; see
+/// `arithmetic::exact_sum::cosine`. Formed from ordinary operations -- each
+/// operand over its own norm, and their products summed -- every step
+/// rounded on its own, and one cosine in four or so of a few hundred random
+/// pairs was an ulp or more out. The gradient is the quotient's, taken in
+/// [`CosineSimilarityBackward`].
 pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Result<Tensor> {
     let [x1, x2] = float_operands("cosine_similarity", 2, [x1, x2])?;
     let (x1, x2) = (&x1, &x2);
@@ -126,21 +141,28 @@ pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Resu
         )));
     }
 
-    let (a, b, shape) = align(x1, x2)?;
-    let axis = crate::ops::normalize_dim(dim, shape.ndim())?;
-    let reduce = Some(vec![axis as isize]);
-
-    // Each operand over its own norm, and then their dot product: the same
-    // number as the dot product over the two norms, with every term at most
-    // one in magnitude. As written the other way the dot product overflowed
-    // or underflowed on its own, though the norms were taken safely and the
-    // answer is scale-free: in float32 two equal vectors of 1e20 came out
-    // NaN, and two of 1e-25 under a floor below them at 0 rather than their
-    // cosine.
-    let floor = scalar(eps, &a)?;
-    let norm_a = crate::ops::minmax::maximum(&norm(&a, 2.0, reduce.clone(), true)?, &floor)?;
-    let norm_b = crate::ops::minmax::maximum(&norm(&b, 2.0, reduce.clone(), true)?, &floor)?;
-    sum(&mul(&div(&a, &norm_a)?, &div(&b, &norm_b)?)?, reduce, false)
+    let needs_grad = manual_backward_needed(&[x1, x2]);
+    let (a, b, axis, cosine) = {
+        let _guard = NoGradGuard::new();
+        let (a, b, shape) = align(x1, x2)?;
+        let axis = crate::ops::normalize_dim(dim, shape.ndim())?;
+        let cosine = crate::ops::reduction::cosine_slices(&a, &b, axis, eps)?;
+        (a, b, axis, cosine)
+    };
+    if !needs_grad {
+        return Ok(cosine);
+    }
+    let grad_fn = Arc::new(CosineSimilarityBackward {
+        a: a.detach(),
+        b: b.detach(),
+        cosine: cosine.clone(),
+        axis,
+        floor: eps,
+        shapes: [x1.shape().clone(), x2.shape().clone()],
+        input_ids: [x1.id(), x2.id()],
+        input_requires_grad: [x1.requires_grad(), x2.requires_grad()],
+    });
+    with_grad_fn(cosine.requires_grad_(true), grad_fn)
 }
 
 /// `||x1 - x2||_p` along the last dimension, the distance the triplet loss

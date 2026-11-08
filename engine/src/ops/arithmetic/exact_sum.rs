@@ -3460,8 +3460,10 @@ pub(crate) fn normalized<I: Element, T: Output>(
     ) {
         normalized_with::<I, T, true>(values, out, taxicab, floor, scratch);
     }
+    // A float32 answer comes from plain float64 sums nearly always, and has
+    // no use for a second build of the rest.
     #[cfg(target_arch = "x86_64")]
-    if fused() {
+    if fused() && !T::PLAIN {
         // SAFETY: avx2 and fma were detected on this CPU.
         return unsafe { with_fma(values, out, taxicab, floor, scratch) };
     }
@@ -3784,6 +3786,382 @@ fn exact_normalized<I: Element, T: Output>(values: &[I], out: &mut [T], taxicab:
     for (slot, value) in out.iter_mut().zip(values) {
         *slot = quotient_by_norm(value.wide(), total.clone(), taxicab);
     }
+}
+
+/// The cosine of the angle between `a` and `b`: their dot over the product
+/// of their 2-norms, each norm floored at `floor` as the output's dtype
+/// holds it -- no floor where that is not positive -- the value nearest the
+/// exact quotient; `scratch` is room for the two scaled into range.
+///
+/// A float32 answer is first taken from plain float64 sums, by
+/// [`plain_cosine`]. Otherwise the dot and the two sums of squares are
+/// carried -- over the values as they stand where the sums of squares are
+/// far inside the range, or else over copies scaled by powers of two, which
+/// leave the cosine where it is, to bring each largest magnitude into
+/// `[1, 2)` -- each norm rooted as [`root_parts`] roots it, each floor
+/// decided, exactly where the bound cannot say, and the quotient formed as a
+/// pair and settled by a bound. Where it cannot be, the cosine is formed in
+/// whole numbers by [`exact_cosine`]. A NaN or an infinity among the values
+/// makes NaN, a dot that is exactly zero `+0`, and a zero norm with no floor
+/// NaN.
+pub(crate) fn cosine<I: Element, T: Output>(
+    a: &[I],
+    b: &[I],
+    floor: f64,
+    scratch: &mut (Vec<f64>, Vec<f64>),
+) -> T {
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn with_fma<I: Element, T: Output>(
+        a: &[I],
+        b: &[I],
+        floor: f64,
+        scratch: &mut (Vec<f64>, Vec<f64>),
+    ) -> T {
+        cosine_with::<I, T, true>(a, b, floor, scratch)
+    }
+    // As for `normalized`: one build for a float32 answer.
+    #[cfg(target_arch = "x86_64")]
+    if fused() && !T::PLAIN {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { with_fma(a, b, floor, scratch) };
+    }
+    cosine_with::<I, T, false>(a, b, floor, scratch)
+}
+
+/// [`cosine`], the products' errors by a fused multiply-add where `FMA`.
+#[inline(always)]
+fn cosine_with<I: Element, T: Output, const FMA: bool>(
+    a: &[I],
+    b: &[I],
+    floor: f64,
+    scratch: &mut (Vec<f64>, Vec<f64>),
+) -> T {
+    debug_assert_eq!(a.len(), b.len());
+    // The floor as the output's dtype holds it, and zero for none.
+    let floor = T::narrow(floor).widen();
+    let floor = if floor > 0.0 { floor } else { 0.0 };
+    if T::PLAIN
+        && let Some(value) = plain_cosine(a, b, floor)
+    {
+        return value;
+    }
+    let range = f64::from_bits((1023 - 800) << 52)..=f64::from_bits((1023 + 800) << 52);
+    let direct = (a.len() < 1 << 40)
+        .then(|| (I::carried_dot(a, a), I::carried_dot(b, b)))
+        .filter(|(squares_a, squares_b)| {
+            range.contains(&(squares_a.sum + squares_a.error))
+                && range.contains(&(squares_b.sum + squares_b.error))
+        });
+    let carried = match direct {
+        Some((squares_a, squares_b)) => {
+            let dot = I::carried_dot(a, b);
+            // The dot is exactly zero where nothing was dropped from it and
+            // no product of two values that are not zero was small enough
+            // to lose bits.
+            if exactly_zero(dot)
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| whole_product(x.wide(), y.wide()))
+            {
+                return T::narrow(0.0);
+            }
+            Scaled {
+                dot,
+                squares: [squares_a, squares_b],
+                scales: [(1.0, 1.0); 2],
+            }
+        }
+        None => {
+            if a.len() >= 1 << 40 {
+                return exact_cosine(a, b, floor);
+            }
+            let (largest_a, special_a) = largest(a);
+            let (largest_b, special_b) = largest(b);
+            if special_a || special_b {
+                return T::narrow(f64::NAN);
+            }
+            if largest_a == 0.0 || largest_b == 0.0 {
+                // A zero vector: a zero dot, over a floored norm or over
+                // nothing.
+                return T::narrow(if floor > 0.0 { 0.0 } else { f64::NAN });
+            }
+            let (left, right) = scratch;
+            let shift_a = scaled_into(a, largest_a, left);
+            let shift_b = scaled_into(b, largest_b, right);
+            let dot = f64::carried_dot(left, right);
+            // As above, a scaled copy that lost a value's bits counted as
+            // too small.
+            if exactly_zero(dot)
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .zip(a.iter().zip(b))
+                    .all(|((x, y), (p, q))| {
+                        p.wide() == 0.0 || q.wide() == 0.0 || (x * y).abs() >= 2f64.powi(-968)
+                    })
+            {
+                return T::narrow(0.0);
+            }
+            Scaled {
+                dot,
+                squares: [f64::carried_dot(left, left), f64::carried_dot(right, right)],
+                scales: [shift_a, shift_b],
+            }
+        }
+    };
+    carried
+        .settled::<I, T, FMA>(a, b, floor)
+        .unwrap_or_else(|| exact_cosine(a, b, floor))
+}
+
+/// The carried dot and sums of squares of two vectors, each scaled by a
+/// power of two, the product of the two in `scales` that [`scaled_into`]
+/// applied.
+struct Scaled {
+    dot: Carried,
+    squares: [Carried; 2],
+    scales: [(f64, f64); 2],
+}
+
+impl Scaled {
+    /// The cosine of the vectors `a` and `b` these carry, when the bounds
+    /// settle it.
+    ///
+    /// Each norm is `n1 + n2` within its bound, or the floor scaled as its
+    /// vector was, exactly; the dot `d1 + d2` within its slack. The product
+    /// of the norms is taken as a pair `p1 + p2` within `9u²` of their
+    /// product, and the quotient as `q1 + q2`, `q1 = d1 / p1` with its exact
+    /// remainder, within `32u²` of the pair's quotient: `2^-99` covers both
+    /// with room. What the carried parts leave out adds their relative
+    /// bounds, each held under `2^-40` so that their products are covered
+    /// by a factor `1 + 2^-37`.
+    #[inline(always)]
+    fn settled<I: Element, T: Output, const FMA: bool>(
+        self,
+        a: &[I],
+        b: &[I],
+        floor: f64,
+    ) -> Option<T> {
+        // What the small values could add, their bits or their products'
+        // errors lost among the subnormals.
+        let lost = a.len() as f64 * f64::from_bits(4);
+        let norm = |squares: Carried, scale: (f64, f64), values: &[I]| -> Option<(f64, f64, f64)> {
+            let squares = Carried {
+                slack: squares.slack + lost,
+                ..squares
+            };
+            let (norm, rest, bound, ordinary) = root_parts::<FMA>(squares);
+            if !ordinary {
+                return None;
+            }
+            let limit = floor * scale.0 * scale.1;
+            let (low, high) = (
+                (norm - bound) * (1.0 - 2f64.powi(-50)),
+                (norm + bound) * (1.0 + 2f64.powi(-50)),
+            );
+            let below = if limit > high {
+                true
+            } else if limit < low {
+                false
+            } else {
+                below_floor(values, false, floor)
+            };
+            if !below {
+                return Some((norm, rest, bound));
+            }
+            // The floor scaled exactly, and far enough inside the range for
+            // the quotient's remainders.
+            (limit >= 2f64.powi(-400) && limit <= 2f64.powi(400)).then_some((limit, 0.0, 0.0))
+        };
+        let (n1, n2, bound_a) = norm(self.squares[0], self.scales[0], a)?;
+        let (m1, m2, bound_b) = norm(self.squares[1], self.scales[1], b)?;
+        let (d1, d2) = two_sum(self.dot.sum, self.dot.error);
+        // Clear of underflow in the remainders below, and not zero.
+        let clear = d1.abs() >= 2f64.powi(-900);
+        if !clear {
+            return None;
+        }
+        let relative = |bound: f64, value: f64| bound / value.abs() * (1.0 + 2f64.powi(-40));
+        let parts =
+            relative(self.dot.slack + lost, d1) + relative(bound_a, n1) + relative(bound_b, m1);
+        let known = parts <= 2f64.powi(-40);
+        if !known {
+            return None;
+        }
+        let p1 = n1 * m1;
+        let e1 = if FMA {
+            n1.mul_add(m1, -p1)
+        } else {
+            product_error(n1, m1, p1)
+        };
+        let p2 = e1 + (n1 * m2 + n2 * m1);
+        let q1 = d1 / p1;
+        // `d1 - q1 p1`, exact with a fused multiply-add and within a
+        // rounding of itself otherwise.
+        let remainder = if FMA {
+            (-q1).mul_add(p1, d1)
+        } else {
+            let product = q1 * p1;
+            (d1 - product) - product_error(q1, p1, product)
+        };
+        let q2 = ((remainder + d2) - q1 * p2) / p1;
+        let (value, rest) = two_sum(q1, q2);
+        let ordinary = value.abs() >= 2f64.powi(-900);
+        if !ordinary {
+            return None;
+        }
+        let bound = value.abs()
+            * (parts * (1.0 + 2f64.powi(-37)) + 2f64.powi(-99))
+            * (1.0 + 2f64.powi(-40));
+        T::settle(value, rest, bound)
+    }
+}
+
+/// Whether a carried total is exactly what it carries, and that is zero.
+fn exactly_zero(carried: Carried) -> bool {
+    carried.sum == 0.0 && carried.error == 0.0 && carried.slack == 0.0
+}
+
+/// Whether the product of `x` and `y` is zero or large enough that its
+/// error, split off by a fused multiply-add, is exact.
+fn whole_product(x: f64, y: f64) -> bool {
+    x == 0.0 || y == 0.0 || (x * y).abs() >= 2f64.powi(-968)
+}
+
+/// The largest magnitude among `values`, and whether any is NaN or
+/// infinite.
+fn largest<I: Element>(values: &[I]) -> (f64, bool) {
+    let (mut largest, mut special) = (0f64, false);
+    for value in values {
+        let magnitude = value.wide().abs();
+        largest = if magnitude > largest {
+            magnitude
+        } else {
+            largest
+        };
+        special |= !magnitude.is_finite();
+    }
+    (largest, special)
+}
+
+/// `values` times the power of two that brings `largest`, theirs, into
+/// `[1, 2)`, into `out`; that power, which may itself lie past the range,
+/// as the two in the normal range it is applied as.
+fn scaled_into<I: Element>(values: &[I], largest: f64, out: &mut Vec<f64>) -> (f64, f64) {
+    let shift = binary_exponent(largest);
+    let power = |shift: i32| f64::from_bits(((shift + 1023) as u64) << 52);
+    let (first, second) = (power(-shift / 2), power(-shift - (-shift / 2)));
+    out.clear();
+    out.extend(values.iter().map(|value| value.wide() * first * second));
+    (first, second)
+}
+
+/// [`cosine`] for a float32 answer from plain float64 sums, the floor
+/// already in the output's dtype, where they settle it.
+///
+/// The dot and the sums of squares are added in lanes, each within
+/// `(n + 2)u` of the sum of its terms' magnitudes -- the dot's, by Cauchy
+/// and Schwarz, at most the product of the norms -- so the dot over the
+/// floored norms is within `(n + 2)u` of the exact one's numerator over
+/// them, and the norms move it by their own `(n / 2 + 2)u` each. Rounding is
+/// monotonic, so a cosine whose two ends narrow alike, both on its side of
+/// zero, is that one.
+#[inline(always)]
+fn plain_cosine<I: Element, T: Output>(a: &[I], b: &[I], floor: f64) -> Option<T> {
+    debug_assert!(T::PLAIN);
+    const U: f64 = 1.0 / (1u64 << 53) as f64;
+    let (mut dot, mut left, mut right) = ([0f64; LANES], [0f64; LANES], [0f64; LANES]);
+    let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for lane in 0..LANES {
+            let (x, y) = (x[lane].wide(), y[lane].wide());
+            dot[lane] += x * y;
+            left[lane] += x * x;
+            right[lane] += y * y;
+        }
+    }
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        let (x, y) = (x.wide(), y.wide());
+        dot[0] += x * y;
+        left[0] += x * x;
+        right[0] += y * y;
+    }
+    let (dot, left, right): (f64, f64, f64) =
+        (dot.iter().sum(), left.iter().sum(), right.iter().sum());
+    let range = f64::from_bits((1023 - 900) << 52)..=f64::from_bits((1023 + 900) << 52);
+    let spread = (a.len() as f64 + 2.0) * U * 1.01;
+    if !(range.contains(&left) && range.contains(&right) && spread <= 2f64.powi(-20)) {
+        return None;
+    }
+    // Each norm within `spread / 2` and a rounding of itself; twice that
+    // either side of the floor leaves no doubt which applies.
+    let wobble = spread + 2.0 * U;
+    let length = |squares: f64| {
+        let norm = squares.sqrt();
+        if floor < norm * (1.0 - 2.0 * wobble) {
+            Some(norm)
+        } else if floor > norm * (1.0 + 2.0 * wobble) {
+            Some(floor)
+        } else {
+            None
+        }
+    };
+    let quotient = dot / (length(left)? * length(right)?);
+    let bound = (spread + quotient.abs() * (2.0 * wobble + 4.0 * U)) * 1.01;
+    let rounded = T::narrow(quotient);
+    (bound < quotient.abs()
+        && T::narrow(quotient - bound) == rounded
+        && T::narrow(quotient + bound) == rounded)
+        .then_some(rounded)
+}
+
+/// [`cosine`] formed in whole numbers: the root of the dot's square over the
+/// product of the squared norms -- each the exact sum of the squares, or the
+/// floor's square where that is larger -- signed as the dot is; NaN for a
+/// value that is not finite.
+#[cold]
+#[inline(never)]
+fn exact_cosine<I: Element, T: Output>(a: &[I], b: &[I], floor: f64) -> T {
+    let products =
+        |x: &[I], y: &[I]| Total::of_products(x.iter().zip(y).map(|(x, y)| (x.wide(), y.wide())));
+    let (Ok(dot), Ok(squares_a), Ok(squares_b)) = (products(a, b), products(a, a), products(b, b))
+    else {
+        return T::narrow(f64::NAN);
+    };
+    let floored = |values: &[I], squares: Total| {
+        if floor > 0.0 && below_floor(values, false, floor) {
+            Total::of_products(std::iter::once((floor, floor))).expect("a finite floor")
+        } else {
+            squares
+        }
+    };
+    let (negative, dot, dot_least) = dot.difference();
+    let (_, squares_a, least_a) = floored(a, squares_a).difference();
+    let (_, squares_b, least_b) = floored(b, squares_b).difference();
+    let (dot, dot_least) = trimmed(&dot, dot_least);
+    let (squares_a, least_a) = trimmed(&squares_a, least_a);
+    let (squares_b, least_b) = trimmed(&squares_b, least_b);
+    let numerator = Total::of_magnitude(product_of(dot, dot), 2 * dot_least);
+    let denominator = Total::of_magnitude(product_of(squares_a, squares_b), least_a + least_b);
+    let magnitude: T = numerator.quotient_root(denominator);
+    if negative {
+        T::narrow(-magnitude.widen())
+    } else {
+        magnitude
+    }
+}
+
+/// A magnitude's limbs from its lowest that is not zero to its highest, and
+/// the exponent of the first's least significant bit.
+fn trimmed(limbs: &[u64], least: i32) -> (&[u64], i32) {
+    let low = limbs.iter().position(|&limb| limb != 0).unwrap_or(0);
+    let high = limbs
+        .iter()
+        .rposition(|&limb| limb != 0)
+        .map_or(low, |top| top + 1);
+    (&limbs[low..high], least + 64 * low as i32)
 }
 
 /// The float32 nearest `sqrt(x² + y²)`.
@@ -5048,6 +5426,16 @@ impl Total {
             }
         }
         Ok(total)
+    }
+
+    /// A sum that is the magnitude `limbs`, from `2^least` up.
+    fn of_magnitude(limbs: Vec<u64>, least: i32) -> Self {
+        let negative = vec![0; limbs.len()];
+        Self {
+            positive: limbs,
+            negative,
+            least,
+        }
     }
 
     /// The exact sum of the products of `pairs`, or the answer itself when

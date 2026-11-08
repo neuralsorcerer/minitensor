@@ -1494,7 +1494,7 @@ pub fn softmin(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     tensor.softmin(dim)
 }
 
-/// Cosine of the angle between `input` and `other` along `dim`. Each norm is floored at `eps` on its own, so a zero vector reports a similarity of zero rather than one far outside `[-1, 1]`.
+/// Cosine of the angle between `input` and `other` along `dim`. Each norm is floored at `eps` on its own, so a zero vector reports a similarity of zero rather than one far outside `[-1, 1]`; each cosine is the float nearest the exact dot over the exact norms so floored, `eps` as the dtype holds it.
 #[pyfunction]
 #[pyo3(signature = (input, other, dim=1, eps=1e-8))]
 pub fn cosine_similarity(
