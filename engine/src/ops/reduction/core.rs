@@ -926,6 +926,9 @@ pub(crate) fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) {
     values.fill(value);
 }
 
+/// Where the `q`-th quantile of `len` sorted values lies: the ranks either
+/// side of the float64 nearest `q · (len - 1)`, the nearer one, and how far
+/// past the lower one it is -- exactly, the position less its floor.
 #[derive(Clone, Copy)]
 pub(crate) struct QuantilePosition {
     pub(crate) lower_idx: usize,
@@ -942,6 +945,16 @@ pub(crate) fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<Quantile
     positions
 }
 
+/// The position of the `q`-th quantile among `len` sorted values: the
+/// float64 nearest `q · (len - 1)`, whose floor and ceiling are the ranks
+/// read and whose fraction past the floor, exact in float64, the weight.
+///
+/// The position is rounded once, as the quantile's definition takes it: the
+/// float64 `q` is a decimal's neighbour, and its exact product with the
+/// count lands a hair to one side of a whole number that the decimal lands
+/// on -- the 0.1 quantile of eleven values a hair past rank 1 -- where the
+/// rounded one lands on it. The interpolation at that position is exact;
+/// see [`linear_quantile`].
 #[inline(always)]
 pub(crate) fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePosition {
     if len <= 1 {
@@ -966,6 +979,25 @@ pub(crate) fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePositio
         nearest_idx,
         weight,
     }
+}
+
+/// The linear quantile `lower + weight · (upper - lower)` between
+/// neighbouring sorted values, rounded once to `T` by `exact_sum::lerp_of`,
+/// where the formula rounded the gap, the product and the sum -- and a
+/// float32 result a fourth time, narrowed from float64. An infinite
+/// endpoint, and equal ones, as [`linear_between`] takes them.
+pub(crate) fn linear_quantile<T: crate::ops::arithmetic::exact_sum::Output>(
+    lower: f64,
+    upper: f64,
+    weight: f64,
+) -> T {
+    if lower == upper || weight == 0.0 {
+        return T::narrow(lower);
+    }
+    if !(lower.is_finite() && upper.is_finite()) {
+        return T::narrow(linear_between(lower, upper, weight));
+    }
+    crate::ops::arithmetic::exact_sum::lerp_of::<T, false>(lower, upper, weight)
 }
 
 #[inline(always)]
@@ -1156,6 +1188,8 @@ fn nanquantile_all(
 /// selection well-defined regardless.
 pub(crate) trait TotalCmp: num_traits::Float + Copy {
     fn total_order(&self, other: &Self) -> Ordering;
+    /// [`linear_quantile`] between two of these, rounded once to this dtype.
+    fn linear(lower: Self, upper: Self, position: &QuantilePosition) -> Self;
 }
 
 impl TotalCmp for f32 {
@@ -1163,12 +1197,20 @@ impl TotalCmp for f32 {
     fn total_order(&self, other: &Self) -> Ordering {
         self.total_cmp(other)
     }
+
+    fn linear(lower: Self, upper: Self, position: &QuantilePosition) -> Self {
+        linear_quantile(f64::from(lower), f64::from(upper), position.weight)
+    }
 }
 
 impl TotalCmp for f64 {
     #[inline]
     fn total_order(&self, other: &Self) -> Ordering {
         self.total_cmp(other)
+    }
+
+    fn linear(lower: Self, upper: Self, position: &QuantilePosition) -> Self {
+        linear_quantile(lower, upper, position.weight)
     }
 }
 
@@ -1307,7 +1349,11 @@ pub(crate) fn quantile_from_unsorted<T: TotalCmp>(
         QuantileInterpolation::Lower => select_rank(values, position.lower_idx),
         QuantileInterpolation::Higher => select_rank(values, position.upper_idx),
         QuantileInterpolation::Nearest => select_rank(values, position.nearest_idx),
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+        QuantileInterpolation::Linear => {
+            let (lower, upper) = select_rank_pair(values, position.lower_idx, position.upper_idx);
+            T::linear(lower, upper, &position)
+        }
+        QuantileInterpolation::Midpoint => {
             let (lower, upper) = select_rank_pair(values, position.lower_idx, position.upper_idx);
             let interpolated = interpolation.interpolate(
                 lower.to_f64().unwrap_or(f64::NAN),
@@ -1329,7 +1375,12 @@ pub(crate) fn quantile_from_sorted_position<T: TotalCmp>(
         QuantileInterpolation::Lower => values[position.lower_idx],
         QuantileInterpolation::Higher => values[position.upper_idx],
         QuantileInterpolation::Nearest => values[position.nearest_idx],
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+        QuantileInterpolation::Linear => T::linear(
+            values[position.lower_idx],
+            values[position.upper_idx],
+            position,
+        ),
+        QuantileInterpolation::Midpoint => {
             let lower = values[position.lower_idx].to_f64().unwrap_or(f64::NAN);
             let upper = values[position.upper_idx].to_f64().unwrap_or(f64::NAN);
             T::from(interpolation.interpolate(lower, upper, position.weight)).unwrap_or_else(T::nan)

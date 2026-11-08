@@ -407,25 +407,18 @@ fn quantile_grad_coeffs(
     if len <= 1 {
         return (0, 0, 1.0, 0.0);
     }
-    let pos = q * (len - 1) as f64;
-    let lower = pos.floor() as usize;
-    let upper = pos.ceil() as usize;
-    let weight = (pos - lower as f64).clamp(0.0, 1.0);
+    // The forward's own position, so that the gradient reaches the ranks
+    // the value was read from, ties at a half included.
+    let position = crate::ops::reduction::quantile_position_for_len_q(len, q);
+    let (lower, upper) = (position.lower_idx, position.upper_idx);
+    let weight = position.weight;
     match interp {
         Qi::Linear => (lower, upper, 1.0 - weight, weight),
         Qi::Lower => (lower, upper, 1.0, 0.0),
         Qi::Higher => (lower, upper, 0.0, 1.0),
         Qi::Midpoint => (lower, upper, 0.5, 0.5),
         Qi::Nearest => {
-            // Ties at weight == 0.5 round to the even index.
-            let nearest = if weight < 0.5 {
-                lower
-            } else if weight > 0.5 {
-                upper
-            } else {
-                lower + (lower & 1)
-            };
-            if nearest == lower {
+            if position.nearest_idx == lower {
                 (lower, upper, 1.0, 0.0)
             } else {
                 (lower, upper, 0.0, 1.0)

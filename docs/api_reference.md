@@ -2307,6 +2307,12 @@ first `NaN` in the slice rather than a number it did not return. Use
 `quantile(0.5)` / `nanquantile(0.5)` when you want the interpolated
 definition, or `nanmedian` to skip `NaN` entirely.
 
+A `quantile` reads its ranks off the float64 nearest `q * (n - 1)`, so that
+the `0.1` quantile of eleven values sits on the second of them as the decimal
+does, and its `"linear"` value between the two ranks is the float nearest the
+exact interpolation at that position, where `lower + (upper - lower) * weight`
+rounded the gap, the product and the sum.
+
 `nanmedian(dim=None, keepdim=False)` is available as a tensor method,
 functional helper, and top-level helper. It ignores `NaN` values in floating
 point tensors, returns `NaN` for all-NaN or empty reduced slices without
