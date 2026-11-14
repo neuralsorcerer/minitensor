@@ -93,7 +93,8 @@ float_pair!(
     /// sum of squares cannot overflow for operands past the square root of
     /// the dtype's range. Its magnitude is at most `1 / hypot`, so it is 0
     /// at an infinite point, where `inf / inf` would read NaN.
-    ATAN2_D_Y, |y, x| {
+    ATAN2_D_Y,
+    |y, x| {
         let h = y.hypot(x);
         if h.is_infinite() { 0.0 } else { (x / h) / h }
     }
@@ -101,7 +102,8 @@ float_pair!(
 float_pair!(
     /// `d/dx atan2(y, x) = -y / (x^2 + y^2)`, grouped and bounded as in
     /// `ATAN2_D_Y`.
-    ATAN2_D_X, |y, x| {
+    ATAN2_D_X,
+    |y, x| {
         let h = y.hypot(x);
         if h.is_infinite() { 0.0 } else { (-y / h) / h }
     }
@@ -219,7 +221,9 @@ float_kernel!(
     /// `+0.0`, which is the order every other part of this crate already sorts
     /// them in, and the answer does not depend on where in a buffer the
     /// operands sat.
-    fmax_f32, fmax_f64, |x, y| {
+    fmax_f32,
+    fmax_f64,
+    |x, y| {
         // `y >= x` is false when either is NaN, so the `x.is_nan()` test is
         // what picks `y` when only `x` is -- and when both are, which gives
         // NaN either way. Two comparisons and a select, no branch.
@@ -229,17 +233,27 @@ float_kernel!(
         // `+0.0` while `-0.0 + -0.0` is `-0.0` -- which is the rule, spelled
         // as arithmetic. A chain of comparisons instead cost four times as
         // much: 0.47ms over a million float32 against 2.01.
-        if x == 0.0 && y == 0.0 { x + y } else { extremum }
+        if x == 0.0 && y == 0.0 {
+            x + y
+        } else {
+            extremum
+        }
     }
 );
 float_kernel!(
     /// The smaller of two values, ignoring a NaN in either. See [`FMAX`], and
     /// note that the tie goes the other way: `fmin(-0.0, +0.0)` is `-0.0`.
-    fmin_f32, fmin_f64, |x, y| {
+    fmin_f32,
+    fmin_f64,
+    |x, y| {
         let extremum = if y <= x || x.is_nan() { y } else { x };
         // Mirrors `FMAX`, negated: `fmin` wants `-0.0` wherever `fmax` wants
         // `+0.0`, and negating both operands turns one rule into the other.
-        if x == 0.0 && y == 0.0 { -((-x) + (-y)) } else { extremum }
+        if x == 0.0 && y == 0.0 {
+            -((-x) + (-y))
+        } else {
+            extremum
+        }
     }
 );
 float_pair!(
@@ -250,7 +264,8 @@ float_pair!(
     /// which one is "returned" is unobservable, while the derivative has to
     /// pick a side and the first operand is the conventional one. It is also
     /// the side the five passes this replaces picked, so no gradient moves.
-    FMAX_D_X, |x, y| {
+    FMAX_D_X,
+    |x, y| {
         if x.is_nan() {
             0.0
         } else if y.is_nan() || x >= y {
@@ -262,7 +277,8 @@ float_pair!(
 );
 float_pair!(
     /// `d/dy fmax(x, y)`, the complement of [`FMAX_D_X`].
-    FMAX_D_Y, |x, y| {
+    FMAX_D_Y,
+    |x, y| {
         if x.is_nan() {
             1.0
         } else if y.is_nan() || x >= y {
@@ -274,7 +290,8 @@ float_pair!(
 );
 float_pair!(
     /// `d/dx fmin(x, y)`. See [`FMAX_D_X`].
-    FMIN_D_X, |x, y| {
+    FMIN_D_X,
+    |x, y| {
         if x.is_nan() {
             0.0
         } else if y.is_nan() || x <= y {
@@ -286,7 +303,8 @@ float_pair!(
 );
 float_pair!(
     /// `d/dy fmin(x, y)`, the complement of [`FMIN_D_X`].
-    FMIN_D_Y, |x, y| {
+    FMIN_D_Y,
+    |x, y| {
         if x.is_nan() {
             1.0
         } else if y.is_nan() || x <= y {
@@ -303,14 +321,16 @@ float_pair!(
     /// `d/dx hypot(x, y) = x / hypot(x, y)`. The origin is a cone point with
     /// no derivative; it takes the zero subgradient, as `norm` does at the
     /// same point, rather than the `0 / 0` the formula reads there.
-    HYPOT_D_X, |x, y| {
+    HYPOT_D_X,
+    |x, y| {
         let h = x.hypot(y);
         if h == 0.0 { 0.0 } else { x / h }
     }
 );
 float_pair!(
     /// `d/dy hypot(x, y) = y / hypot(x, y)`, 0 at the origin as in `HYPOT_D_X`.
-    HYPOT_D_Y, |x, y| {
+    HYPOT_D_Y,
+    |x, y| {
         let h = x.hypot(y);
         if h == 0.0 { 0.0 } else { y / h }
     }
@@ -321,17 +341,21 @@ float_pair!(
 float_kernel!(
     /// The magnitude of `x` with the sign of `y`, signed zeros and NaN
     /// included -- `copysign(1, -0.0)` is `-1`.
-    copysign_f32, copysign_f64, |x, y| x.copysign(y)
+    copysign_f32,
+    copysign_f64,
+    |x, y| x.copysign(y)
 );
 float_pair!(
     /// `d/dx copysign(x, y)` is `+1` where the sign is kept and `-1` where it
     /// is flipped. `signum` reads the sign bit, so `-0.0` counts as negative.
-    COPYSIGN_D_X, |x, y| x.signum() * y.signum()
+    COPYSIGN_D_X,
+    |x, y| x.signum() * y.signum()
 );
 float_pair!(
     /// `copysign` does not vary with the *magnitude* of `y`, only with its
     /// sign bit, which no derivative can see.
-    COPYSIGN_D_Y, |_x, _y| 0.0
+    COPYSIGN_D_Y,
+    |_x, _y| 0.0
 );
 
 // --- xlogy -----------------------------------------------------------------
@@ -343,7 +367,9 @@ float_kernel!(
     /// plain product gives `0 * -inf = NaN` at `x = 0, y = 0`, which is the
     /// case those formulas hit most. A NaN `y` still poisons the result, since
     /// then there is no limit to take.
-    xlogy_f32, xlogy_f64, |x, y| {
+    xlogy_f32,
+    xlogy_f64,
+    |x, y| {
         if x == 0.0 && !y.is_nan() {
             0.0
         } else {
@@ -353,14 +379,14 @@ float_kernel!(
 );
 float_pair!(
     /// `d/dx (x log y) = log y`.
-    XLOGY_D_X, |_x, y| y.ln()
+    XLOGY_D_X,
+    |_x, y| y.ln()
 );
 float_pair!(
     /// `d/dy (x log y) = x / y`, and 0 wherever `x` is zero: the value is the
     /// constant 0 along `y` there, though `x / y` reads `0 / 0` at `y = 0`.
-    XLOGY_D_Y, |x, y| {
-        if x == 0.0 && !y.is_nan() { 0.0 } else { x / y }
-    }
+    XLOGY_D_Y,
+    |x, y| if x == 0.0 && !y.is_nan() { 0.0 } else { x / y }
 );
 
 // --- heaviside -------------------------------------------------------------
@@ -371,7 +397,9 @@ float_kernel!(
     /// is the one convention never agrees on.
     ///
     /// A NaN input stays NaN; it is on neither side of the step.
-    heaviside_f32, heaviside_f64, |x, at_zero| {
+    heaviside_f32,
+    heaviside_f64,
+    |x, at_zero| {
         if x < 0.0 {
             0.0
         } else if x > 0.0 {
@@ -387,12 +415,14 @@ float_pair!(
     /// The step is flat wherever it is defined, so the gradient with respect
     /// to the input is zero everywhere the derivative exists -- and the
     /// jump at zero has no finite derivative to report.
-    HEAVISIDE_D_X, |_x, _at_zero| 0.0
+    HEAVISIDE_D_X,
+    |_x, _at_zero| 0.0
 );
 float_pair!(
     /// The second operand is the value taken at exactly zero, so it reaches
     /// the output there and nowhere else.
-    HEAVISIDE_D_AT_ZERO, |x, _at_zero| if x == 0.0 { 1.0 } else { 0.0 }
+    HEAVISIDE_D_AT_ZERO,
+    |x, _at_zero| if x == 0.0 { 1.0 } else { 0.0 }
 );
 
 // --- nextafter -------------------------------------------------------------
@@ -440,12 +470,14 @@ float_pair!(
     /// `nextafter(x, y)` differs from `x` by a single ulp, so as a
     /// real-valued function it is the identity and this is its slope. The
     /// step itself is below anything a derivative can see.
-    NEXTAFTER_D_FROM, |_x, _y| 1.0
+    NEXTAFTER_D_FROM,
+    |_x, _y| 1.0
 );
 float_pair!(
     /// Only the *direction* of the second operand reaches the answer, and no
     /// derivative can see a direction.
-    NEXTAFTER_D_TOWARDS, |_x, _y| 0.0
+    NEXTAFTER_D_TOWARDS,
+    |_x, _y| 0.0
 );
 
 // --- ldexp -----------------------------------------------------------------

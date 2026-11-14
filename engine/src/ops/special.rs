@@ -85,14 +85,16 @@ macro_rules! wide_grad_kernel {
 unit_kernel!(
     /// The real cube root. Float32 goes through the vectorized kernel and
     /// never reaches this arm; see [`cbrt`].
-    CBRT, |x, _p| x.cbrt()
+    CBRT,
+    |x, _p| x.cbrt()
 );
 unit_grad_kernel!(
     /// `d/dx x^(1/3) = 1 / (3 x^(2/3))`, written through the root rather than
     /// through a second fractional power so it is defined for a negative `x`
     /// -- and infinite at zero, where the curve is vertical and that is the
     /// honest answer.
-    CBRT_D, |x, g, _p| {
+    CBRT_D,
+    |x, g, _p| {
         let root = x.cbrt();
         g / (3.0 * root * root)
     }
@@ -147,12 +149,14 @@ unit_kernel!(
     /// `2^x`. Float64 takes the hardware's own base-2 exponential; float32
     /// goes through the vectorized `exp` kernel scaled by `ln 2` and never
     /// reaches this arm. See [`exp2`].
-    EXP2, |x, _p| x.exp2()
+    EXP2,
+    |x, _p| x.exp2()
 );
 unit_grad_kernel!(
     /// `d/dx 2^x = 2^x ln 2`, with `ln 2` arriving as a parameter so it is
     /// converted to the working width once per call, not once per element.
-    EXP2_D, |x, g, p| g * x.exp2() * p[0]
+    EXP2_D,
+    |x, g, p| g * x.exp2() * p[0]
 );
 
 /// `2^x`, element-wise.
@@ -257,7 +261,8 @@ const LOGIT: UnitKernel = {
 unit_grad_kernel!(
     /// `d/dx logit(x) = 1 / (x(1 - x))`, and zero wherever the clamp took
     /// over: there the output does not vary with the input at all.
-    LOGIT_D, |x, g, p| {
+    LOGIT_D,
+    |x, g, p| {
         if !p[0].is_nan() && (x < p[0] || x > 1.0 - p[0]) {
             0.0
         } else {
@@ -412,14 +417,14 @@ unit_grad_kernel!(
     /// `pi u (-1/3 + u^2/30 - u^4/840 + u^6/45360)` computes the same value
     /// with no cancellation at all; its first dropped term is `u^8 / 1330560`
     /// relative to the leading one, under 1e-14 at the cutoff.
-    SINC_D, |x, g, p| {
+    SINC_D,
+    |x, g, p| {
         let pi = p[0];
         let u = pi * x;
         let derivative = if u.abs() < 0.1 {
             let square = u * u;
             pi * u
-                * (-1.0 / 3.0
-                    + square * (1.0 / 30.0 + square * (-1.0 / 840.0 + square / 45360.0)))
+                * (-1.0 / 3.0 + square * (1.0 / 30.0 + square * (-1.0 / 840.0 + square / 45360.0)))
         } else if x.is_infinite() {
             0.0
         } else {
@@ -451,19 +456,23 @@ pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
 wide_kernel!(
     /// `log |gamma(x)|`, which stays finite where `gamma` itself overflows:
     /// `gamma(200)` is past the top of float64 and its logarithm is 857.
-    LGAMMA, |x, _p| libm::lgamma(x)
+    LGAMMA,
+    |x, _p| libm::lgamma(x)
 );
 wide_grad_kernel!(
     /// `d/dx log gamma(x) = digamma(x)`, which is the definition of digamma.
-    LGAMMA_D, |x, g, _p| g * digamma_scalar(x)
+    LGAMMA_D,
+    |x, g, _p| g * digamma_scalar(x)
 );
 wide_kernel!(
     /// `digamma(x)`, the logarithmic derivative of the gamma function.
-    DIGAMMA, |x, _p| digamma_scalar(x)
+    DIGAMMA,
+    |x, _p| digamma_scalar(x)
 );
 wide_grad_kernel!(
     /// `d/dx digamma(x) = trigamma(x)`.
-    DIGAMMA_D, |x, g, _p| g * trigamma(x)
+    DIGAMMA_D,
+    |x, g, _p| g * trigamma(x)
 );
 
 /// The Bernoulli numbers `B_2j` for `j = 1..=7`, which are the coefficients of
@@ -895,7 +904,8 @@ pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
 
 wide_kernel!(
     /// `polygamma(order, x)`, with the order carried as a parameter.
-    POLYGAMMA, |x, p| polygamma_scalar(p[0] as u32, x)
+    POLYGAMMA,
+    |x, p| polygamma_scalar(p[0] as u32, x)
 );
 wide_grad_kernel!(
     /// `d/dx polygamma(n, x) = polygamma(n + 1, x)`.
@@ -903,7 +913,8 @@ wide_grad_kernel!(
     /// The derivative of a polygamma is the next one, so the chain rule needs
     /// no second formula and no finite difference -- which is also why the
     /// order is capped one below where the factorial stops fitting.
-    POLYGAMMA_D, |x, g, p| g * polygamma_scalar(p[0] as u32 + 1, x)
+    POLYGAMMA_D,
+    |x, g, p| g * polygamma_scalar(p[0] as u32 + 1, x)
 );
 
 /// `polygamma(order, input)`, the `order`-th derivative of `digamma`.
@@ -1318,19 +1329,23 @@ macro_rules! bessel_grad_kernel {
 
 bessel_kernel!(
     /// `I_0(x)`, the modified Bessel function of the first kind, order zero.
-    I0, |x, series| i0_with(x, series)
+    I0,
+    |x, series| i0_with(x, series)
 );
 bessel_grad_kernel!(
     /// `d/dx I_0(x) = I_1(x)`.
-    I0_D, |x, g, series| g * i1_with(x, series)
+    I0_D,
+    |x, g, series| g * i1_with(x, series)
 );
 bessel_kernel!(
     /// `I_1(x)`, the modified Bessel function of the first kind, order one.
-    I1, |x, series| i1_with(x, series)
+    I1,
+    |x, series| i1_with(x, series)
 );
 bessel_grad_kernel!(
     /// `d/dx I_1(x) = I_0(x) - I_1(x) / x`, and `1/2` at the origin.
-    I1_D, |x, g, series| if x.is_infinite() {
+    I1_D,
+    |x, g, series| if x.is_infinite() {
         // `inf * (0 - 0)`; the slope grows without bound either way.
         g * f64::INFINITY
     } else {
@@ -1339,12 +1354,14 @@ bessel_grad_kernel!(
 );
 bessel_kernel!(
     /// `exp(-|x|) I_0(x)`, which stays under one where `I_0` overflows.
-    I0E, |x, series| i0e_with(x, series)
+    I0E,
+    |x, series| i0e_with(x, series)
 );
 bessel_grad_kernel!(
     /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`; past the
     /// crossover, the asymptotic series' own slope, odd as `i0e` is even.
-    I0E_D, |x, g, series| {
+    I0E_D,
+    |x, g, series| {
         if x.abs() >= BESSEL_CROSSOVER {
             g * direction(x) * scaled_bessel_asymptotic_slope(0, x.abs())
         } else {
@@ -1354,12 +1371,14 @@ bessel_grad_kernel!(
 );
 bessel_kernel!(
     /// `exp(-|x|) I_1(x)`.
-    I1E, |x, series| i1e_with(x, series)
+    I1E,
+    |x, series| i1e_with(x, series)
 );
 bessel_grad_kernel!(
     /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`; past
     /// the crossover, the asymptotic series' own slope, even as `i1e` is odd.
-    I1E_D, |x, g, series| {
+    I1E_D,
+    |x, g, series| {
         if x.abs() >= BESSEL_CROSSOVER {
             g * scaled_bessel_asymptotic_slope(1, x.abs())
         } else {
@@ -1529,7 +1548,8 @@ fn erfcx_derivative(x: f64) -> f64 {
 
 wide_kernel!(
     /// `exp(x^2) erfc(x)`, which stays finite where `erfc` has underflowed.
-    ERFCX, |x, _p| erfcx_scalar(x)
+    ERFCX,
+    |x, _p| erfcx_scalar(x)
 );
 wide_grad_kernel!(
     /// `d/dx erfcx(x) = 2 x erfcx(x) - 2/sqrt(pi)`.
@@ -1537,7 +1557,8 @@ wide_grad_kernel!(
     /// From differentiating the product: the `exp(x^2)` contributes the first
     /// term and `erfc` the second, and the second is a constant because
     /// `erfc'(x) = -2/sqrt(pi) exp(-x^2)` cancels the scaling exactly.
-    ERFCX_D, |x, g, _p| g * erfcx_derivative(x)
+    ERFCX_D,
+    |x, g, _p| g * erfcx_derivative(x)
 );
 
 /// `erfcx(input)`, `exp(x**2) erfc(x)`.

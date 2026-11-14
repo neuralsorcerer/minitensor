@@ -28,8 +28,9 @@ matrixmultiply = { workspace = true }
 smallvec = { workspace = true }
 rustc-hash = { workspace = true }
 
-# System information
-num_cpus = { workspace = true }
+# System information. `num_cpus` is read only by the `hardware` subsystem, so
+# it is built with that feature rather than into every configuration.
+num_cpus = { workspace = true, optional = true }
 libc = { workspace = true }
 
 # Random number generation
@@ -72,7 +73,7 @@ cpu = []
 # Hardware profiling/optimizer subsystem (`engine::hardware`). On by default
 # for compatibility; not used by any tensor/autograd execution path, so
 # `default-features = false` builds can drop it (with `cpu` re-enabled).
-hardware = []
+hardware = ["dep:num_cpus"]
 # Debugging/introspection utilities (`engine::debug`): tensor inspector, graph
 # visualizer, memory tracker, op profiler. On by default for compatibility (the
 # Python bindings expose them); not used by any tensor/autograd execution path,

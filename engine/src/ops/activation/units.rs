@@ -133,7 +133,8 @@ macro_rules! stable_sigmoid {
 
 unit_kernel!(
     /// `x` clamped to `[p[0], p[1]]`. NaN survives, as it does for `clamp`.
-    HARDTANH, |x, p| if x < p[0] {
+    HARDTANH,
+    |x, p| if x < p[0] {
         p[0]
     } else if x > p[1] {
         p[1]
@@ -145,7 +146,8 @@ unit_grad_kernel!(
     /// Flat outside the bounds, so the gradient is the incoming one strictly
     /// inside them and zero elsewhere -- the endpoints included, where the
     /// one-sided derivatives disagree.
-    HARDTANH_D, |x, g, p| if x > p[0] && x < p[1] { g } else { 0.0 }
+    HARDTANH_D,
+    |x, g, p| if x > p[0] && x < p[1] { g } else { 0.0 }
 );
 
 // --- hardsigmoid and hardswish ---------------------------------------------
@@ -153,7 +155,8 @@ unit_grad_kernel!(
 unit_kernel!(
     /// The piecewise-linear stand-in for `sigmoid`: `0` below -3, `1` above 3,
     /// `x/6 + 1/2` between. No exponential, which is the point of it.
-    HARDSIGMOID, |x, _p| if x <= -3.0 {
+    HARDSIGMOID,
+    |x, _p| if x <= -3.0 {
         0.0
     } else if x >= 3.0 {
         1.0
@@ -163,11 +166,8 @@ unit_kernel!(
 );
 unit_grad_kernel!(
     /// `1/6` on the sloped segment, zero on the flats.
-    HARDSIGMOID_D, |x, g, _p| if x > -3.0 && x < 3.0 {
-        g / 6.0
-    } else {
-        0.0
-    }
+    HARDSIGMOID_D,
+    |x, g, _p| if x > -3.0 && x < 3.0 { g / 6.0 } else { 0.0 }
 );
 
 /// `x * hardsigmoid(x)`: the piecewise-linear stand-in for `silu`.
@@ -203,7 +203,8 @@ const HARDSWISH: UnitKernel = {
 unit_grad_kernel!(
     /// `d/dx x(x+3)/6 = (2x+3)/6` on the quadratic segment; `0` and `1` on the
     /// flats either side.
-    HARDSWISH_D, |x, g, _p| if x <= -3.0 {
+    HARDSWISH_D,
+    |x, g, _p| if x <= -3.0 {
         0.0
     } else if x >= 3.0 {
         g
@@ -218,18 +219,21 @@ unit_kernel!(
     /// `x` where it exceeds `p[0]`, the replacement `p[1]` elsewhere. Asked
     /// as `x <= p[0]` so that NaN, which fails every comparison, is passed
     /// through rather than replaced.
-    THRESHOLD, |x, p| if x <= p[0] { p[1] } else { x }
+    THRESHOLD,
+    |x, p| if x <= p[0] { p[1] } else { x }
 );
 unit_grad_kernel!(
     /// The replacement does not depend on `x`, so nothing flows through it.
-    THRESHOLD_D, |x, g, p| if x > p[0] { g } else { 0.0 }
+    THRESHOLD_D,
+    |x, g, p| if x > p[0] { g } else { 0.0 }
 );
 
 unit_kernel!(
     /// Shrinks towards zero by `p[0]`, and flattens the band `[-p[0], p[0]]`.
     /// Unlike `hardshrink` this is continuous: it subtracts the threshold
     /// rather than leaving the value where it was.
-    SOFTSHRINK, |x, p| if x.abs() <= p[0] {
+    SOFTSHRINK,
+    |x, p| if x.abs() <= p[0] {
         0.0
     } else if x > 0.0 {
         x - p[0]
@@ -241,11 +245,8 @@ unit_kernel!(
 );
 unit_grad_kernel!(
     /// A unit slope outside the band, zero inside it.
-    SOFTSHRINK_D, |x, g, p| if x > p[0] || x < -p[0] {
-        g
-    } else {
-        0.0
-    }
+    SOFTSHRINK_D,
+    |x, g, p| if x > p[0] || x < -p[0] { g } else { 0.0 }
 );
 
 // --- tanhshrink, mish, celu, logsigmoid ------------------------------------
@@ -314,7 +315,8 @@ const TANHSHRINK: UnitKernel = {
 unit_grad_kernel!(
     /// `1 - sech^2(x) = tanh^2(x)`, written as the square so no second
     /// transcendental is needed.
-    TANHSHRINK_D, |x, g, _p| {
+    TANHSHRINK_D,
+    |x, g, _p| {
         let t = x.tanh();
         g * t * t
     }
@@ -377,7 +379,8 @@ unit_kernel!(
     /// `max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`, with `alpha` in
     /// `p[0]`. Unlike `elu` it is continuously differentiable at zero for
     /// every `alpha`, since the exponential is scaled to meet slope 1 there.
-    CELU, |x, p| if x > 0.0 {
+    CELU,
+    |x, p| if x > 0.0 {
         x
     } else {
         p[0] * (x / p[0]).exp_m1()
@@ -386,11 +389,8 @@ unit_kernel!(
 unit_grad_kernel!(
     /// `1` above zero and `exp(x / alpha)` below, which agree at zero -- that
     /// is what distinguishes `celu` from `elu`.
-    CELU_D, |x, g, p| if x > 0.0 {
-        g
-    } else {
-        g * (x / p[0]).exp()
-    }
+    CELU_D,
+    |x, g, p| if x > 0.0 { g } else { g * (x / p[0]).exp() }
 );
 
 // `logsigmoid`'s value kernel is not declared here. `-softplus(-x)` has a
@@ -400,7 +400,8 @@ unit_grad_kernel!(
 // nothing evaluates. The gradient has no such kernel and stays.
 unit_grad_kernel!(
     /// `d/dx log(sigmoid(x)) = 1 - sigmoid(x) = sigmoid(-x)`.
-    LOGSIGMOID_D, |x, g, _p| g * stable_sigmoid!(-x)
+    LOGSIGMOID_D,
+    |x, g, _p| g * stable_sigmoid!(-x)
 );
 
 /// Applies one value kernel over a float tensor.

@@ -436,7 +436,8 @@ vector_f32!(
     /// see `ops::special::exp2` for why that is the accurate spelling and not the
     /// naive one.
     exp2_f32,
-    exp_scaled, std::f64::consts::LN_2
+    exp_scaled,
+    std::f64::consts::LN_2
 );
 
 vector_f32!(

@@ -377,27 +377,39 @@ macro_rules! rounding_kernel {
 
 rounding_kernel!(
     /// Element-wise `floor` over a block of f32. `param` is ignored.
-    floor_f32_blocks, f32, |x| x.floor()
+    floor_f32_blocks,
+    f32,
+    |x| x.floor()
 );
 rounding_kernel!(
     /// Element-wise `floor` over a block of f64. `param` is ignored.
-    floor_f64_blocks, f64, |x| x.floor()
+    floor_f64_blocks,
+    f64,
+    |x| x.floor()
 );
 rounding_kernel!(
     /// Element-wise `ceil` over a block of f32. `param` is ignored.
-    ceil_f32_blocks, f32, |x| x.ceil()
+    ceil_f32_blocks,
+    f32,
+    |x| x.ceil()
 );
 rounding_kernel!(
     /// Element-wise `ceil` over a block of f64. `param` is ignored.
-    ceil_f64_blocks, f64, |x| x.ceil()
+    ceil_f64_blocks,
+    f64,
+    |x| x.ceil()
 );
 rounding_kernel!(
     /// Element-wise `trunc` over a block of f32. `param` is ignored.
-    trunc_f32_blocks, f32, |x| x.trunc()
+    trunc_f32_blocks,
+    f32,
+    |x| x.trunc()
 );
 rounding_kernel!(
     /// Element-wise `trunc` over a block of f64. `param` is ignored.
-    trunc_f64_blocks, f64, |x| x.trunc()
+    trunc_f64_blocks,
+    f64,
+    |x| x.trunc()
 );
 rounding_kernel!(
     /// Element-wise fractional part of a block of f32. `param` is ignored.
@@ -405,11 +417,15 @@ rounding_kernel!(
     /// `x - trunc(x)` is exact in floating point -- both terms share an
     /// exponent range -- so this is the same value `sub(x, trunc(x))` would
     /// give, in one pass over the buffer instead of two.
-    frac_f32_blocks, f32, |x| x - x.trunc()
+    frac_f32_blocks,
+    f32,
+    |x| x - x.trunc()
 );
 rounding_kernel!(
     /// Element-wise fractional part of a block of f64. `param` is ignored.
-    frac_f64_blocks, f64, |x| x - x.trunc()
+    frac_f64_blocks,
+    f64,
+    |x| x - x.trunc()
 );
 rounding_kernel!(
     /// Round a block of f32 to the nearest integer, halves to even. `param`
@@ -417,11 +433,15 @@ rounding_kernel!(
     ///
     /// The zero-decimal case of `round`, where no scaling is needed and the
     /// rounding instruction is the whole of it.
-    round_even_f32_blocks, f32, |x| x.round_ties_even()
+    round_even_f32_blocks,
+    f32,
+    |x| x.round_ties_even()
 );
 rounding_kernel!(
     /// [`round_even_f32_blocks`] for f64. `param` is ignored.
-    round_even_f64_blocks, f64, |x| x.round_ties_even()
+    round_even_f64_blocks,
+    f64,
+    |x| x.round_ties_even()
 );
 
 /// The float sum every reduction in the library bottoms out in: `LANES`
@@ -560,12 +580,20 @@ macro_rules! float_sum_kernel {
 
 float_sum_kernel!(
     /// Sum an f32 slice. See [`float_sum_kernel`].
-    simd_sum_f32, simd_sum_f32_by, f32, 8, |v| v
+    simd_sum_f32,
+    simd_sum_f32_by,
+    f32,
+    8,
+    |v| v
 );
 
 float_sum_kernel!(
     /// Sum an f64 slice. See [`float_sum_kernel`].
-    simd_sum_f64, simd_sum_f64_by, f64, 4, |v| v
+    simd_sum_f64,
+    simd_sum_f64_by,
+    f64,
+    4,
+    |v| v
 );
 
 float_sum_kernel!(
@@ -573,12 +601,20 @@ float_sum_kernel!(
     /// identity rather than taking a different path, so the loop still
     /// vectorizes and the result matches [`simd_sum_f32`] exactly when there is
     /// no NaN to skip.
-    simd_nansum_f32, simd_nansum_f32_by, f32, 8, |v: f32| if v.is_nan() { 0.0 } else { v }
+    simd_nansum_f32,
+    simd_nansum_f32_by,
+    f32,
+    8,
+    |v: f32| if v.is_nan() { 0.0 } else { v }
 );
 
 float_sum_kernel!(
     /// [`simd_nansum_f32`] in double precision.
-    simd_nansum_f64, simd_nansum_f64_by, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
+    simd_nansum_f64,
+    simd_nansum_f64_by,
+    f64,
+    4,
+    |v: f64| if v.is_nan() { 0.0 } else { v }
 );
 
 /// The sum of an f32 run in double precision, each element widened as it is
