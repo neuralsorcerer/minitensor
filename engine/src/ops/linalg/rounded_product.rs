@@ -102,10 +102,51 @@ pub(crate) fn rounded_affine_products_f32(
     m: usize,
     k: usize,
     n: usize,
+    lhs: (&[f32], Storage),
+    rhs: (&[f32], Storage),
+    affine: Option<Affine<'_>>,
+    out: &mut [f32],
+) -> Result<()> {
+    rounded_affine_products_with(batch, m, k, n, lhs, rhs, affine, out, Multiply::Offered)
+}
+
+/// [`rounded_affine_products_f32`] through the engine's own kernels only:
+/// for a product that is one of a run its caller takes back to back, as a
+/// convolution takes a block of positions at a time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rounded_affine_products_in_engine_f32(
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    lhs: (&[f32], Storage),
+    rhs: (&[f32], Storage),
+    affine: Option<Affine<'_>>,
+    out: &mut [f32],
+) -> Result<()> {
+    rounded_affine_products_with(batch, m, k, n, lhs, rhs, affine, out, Multiply::InEngine)
+}
+
+/// Where a rounded product's float64 product is taken.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Multiply {
+    /// Offered to the installed provider first.
+    Offered,
+    /// By the engine's own kernels.
+    InEngine,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rounded_affine_products_with(
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
     (lhs, lhs_storage): (&[f32], Storage),
     (rhs, rhs_storage): (&[f32], Storage),
     affine: Option<Affine<'_>>,
     out: &mut [f32],
+    multiply: Multiply,
 ) -> Result<()> {
     let addend_reach = affine.map_or(0, |affine| {
         let [b, i, j] = affine.strides;
@@ -180,7 +221,11 @@ pub(crate) fn rounded_affine_products_f32(
         Storage::Transposed => row_norms(rhs, k, serial(rhs.len())),
     };
     let mut wide = vec![0.0f64; batch * m * n];
-    super::stored_gemm_f64(
+    let product = match multiply {
+        Multiply::Offered => super::stored_gemm_f64,
+        Multiply::InEngine => super::engine_gemm_f64,
+    };
+    product(
         batch,
         m,
         k,
@@ -305,7 +350,7 @@ pub(crate) fn rounded_affine_products_f32(
 /// nothing. A zero or a non-finite value is left to the exact dot, whose
 /// sign and special values are the rule everywhere else a dot is taken.
 #[inline(always)]
-fn settles(value: f64, bound: f64) -> bool {
+pub(crate) fn settles(value: f64, bound: f64) -> bool {
     // The bound and the roundings of `value ± reach` both inside `reach`.
     let reach = (bound + value.abs() * 2f64.powi(-51)) * (1.0 + 2f64.powi(-20));
     let low = (value - reach) as f32;
@@ -367,7 +412,7 @@ fn grain(value: f32) -> f32 {
 
 /// The least of the [`grain`]s of `values`: the greatest power of two every
 /// one of them is a whole multiple of.
-fn grain_of(values: impl Iterator<Item = f32>) -> f64 {
+pub(crate) fn grain_of(values: impl Iterator<Item = f32>) -> f64 {
     f64::from(values.map(grain).fold(f32::INFINITY, f32::min))
 }
 

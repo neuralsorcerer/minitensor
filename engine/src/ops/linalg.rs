@@ -45,7 +45,8 @@ pub use self::lu_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;
 pub(crate) use self::rounded_product_impl::{
-    Affine, rounded_affine_products_f32, rounded_products_f32,
+    Affine, grain_of, rounded_affine_products_f32, rounded_affine_products_in_engine_f32,
+    rounded_products_f32, settles,
 };
 pub use self::sliding_impl::sliding_products;
 pub use self::svd_impl::*;

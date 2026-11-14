@@ -15,19 +15,41 @@ use crate::{
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+mod rounded;
+
 /// The floating-point types convolution is implemented for.
 ///
-/// Convolution lowers to im2col + GEMM in both directions, so the only things
-/// that vary with the dtype are the slice accessors and which BLAS entry point
-/// to call. Capturing that in one trait lets the forward and both gradient
-/// kernels be written once instead of once per dtype -- which is why they were
-/// f32-only: nobody wanted to copy them.
+/// A float64 convolution lowers to im2col + GEMM in both directions, so what
+/// varies with the dtype there is the slice accessors and which BLAS entry
+/// point to call; capturing that in one trait lets the forward and both
+/// gradient kernels be written once. A float32 one rounds each entry once from
+/// its exact value instead, which [`rounded`] does with the same lowering and
+/// the same direct paths, and the three operations below are where the two
+/// part.
 pub(crate) trait ConvScalar:
     Copy + Default + Send + Sync + std::ops::AddAssign + std::ops::Mul<Output = Self>
 {
     const DTYPE: DataType;
     fn slice(data: &TensorData) -> Option<&[Self]>;
     fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData;
+    /// The convolution of `input` by `weight`, `bias` added to each output
+    /// channel; `[N, C_out, OH, OW]` from `[N, C_in, H, W]`.
+    fn convolve(
+        input: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>>;
+    /// [`scatter_columns`], `bias` added to each channel of the grid it
+    /// writes.
+    fn scatter(
+        source: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Vec<Self>;
+    /// [`column_weight_gradient`].
+    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self>;
     /// Row-major `C[m, n] = A[m, k] @ B[k, n]`.
     ///
     /// # Safety
@@ -74,6 +96,25 @@ impl ConvScalar for f32 {
     unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_nt_f32(m, k, n, a, b, c) }
     }
+    fn convolve(
+        input: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>> {
+        rounded::convolve(input, weight, bias, geometry)
+    }
+    fn scatter(
+        source: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Vec<Self> {
+        rounded::scatter(source, weight, bias, geometry)
+    }
+    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self> {
+        rounded::weight_gradient(image, source, geometry)
+    }
 }
 
 impl ConvScalar for f64 {
@@ -97,6 +138,35 @@ impl ConvScalar for f64 {
     #[inline]
     unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_nt_f64(m, k, n, a, b, c) }
+    }
+    fn convolve(
+        input: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>> {
+        Ok(convolve_plain(input, weight, bias, geometry))
+    }
+    fn scatter(
+        source: &[Self],
+        weight: &[Self],
+        bias: Option<&[Self]>,
+        geometry: &ConvGeometry,
+    ) -> Vec<Self> {
+        let mut values = scatter_columns(source, weight, geometry);
+        if let Some(added) = bias {
+            let plane = (geometry.input_height * geometry.input_width).max(1);
+            par_out_chunks(&mut values, plane, &|start, row| {
+                let shift = added[(start / plane) % geometry.in_channels];
+                for slot in row.iter_mut() {
+                    *slot += shift;
+                }
+            });
+        }
+        values
+    }
+    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self> {
+        column_weight_gradient(image, source, geometry)
     }
 }
 
@@ -586,21 +656,14 @@ pub fn conv_transpose2d(
             let kernel = <$ty as ConvScalar>::slice(weight_view.data()).ok_or_else(|| {
                 MinitensorError::internal_error("conv_transpose2d: weight dtype does not match")
             })?;
-            let mut values = scatter_columns::<$ty>(signal, kernel, &geometry);
-            if let Some(b) = bias {
-                let bias_view = b.contiguous()?;
-                let added = <$ty as ConvScalar>::slice(bias_view.data()).ok_or_else(|| {
+            let bias_view = bias.map(|b| b.contiguous()).transpose()?;
+            let added = match &bias_view {
+                Some(b) => Some(<$ty as ConvScalar>::slice(b.data()).ok_or_else(|| {
                     MinitensorError::internal_error("conv_transpose2d: bias dtype does not match")
-                })?;
-                let plane = output_height * output_width;
-                par_out_chunks(&mut values, plane.max(1), &|start, row| {
-                    let channel = (start / plane.max(1)) % out_channels;
-                    let shift = added[channel];
-                    for slot in row.iter_mut() {
-                        *slot += shift;
-                    }
-                });
-            }
+                })?),
+                None => None,
+            };
+            let values = <$ty as ConvScalar>::scatter(signal, kernel, added, &geometry);
             <$ty as ConvScalar>::into_tensor_data(values, input.device())
         }};
     }
@@ -723,6 +786,7 @@ pub fn conv_transpose1d(
 
 /// The shape parameters a convolution kernel needs, gathered so the generic
 /// body does not take a dozen positional arguments.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ConvGeometry {
     pub batch_size: usize,
     pub in_channels: usize,
@@ -1041,28 +1105,6 @@ pub(crate) fn column_weight_gradient<T: ConvScalar>(
         first = last;
     }
     gradient
-}
-
-/// Sum a `[N, C, H, W]` signal down to one value per channel -- what a bias
-/// gradient is, in both directions.
-pub(crate) fn channel_sums<T: ConvScalar>(
-    source: &[T],
-    batch: usize,
-    channels: usize,
-    plane: usize,
-) -> Vec<T> {
-    let mut sums = vec![T::default(); channels];
-    par_out_chunks(&mut sums, 1, &|channel, slot| {
-        let mut total = T::default();
-        for n in 0..batch {
-            let base = (n * channels + channel) * plane;
-            for offset in 0..plane {
-                total += source[base + offset];
-            }
-        }
-        slot[0] = total;
-    });
-    sums
 }
 
 /// Lower output positions `[first, last)` into `cols`, one row per
@@ -1588,33 +1630,14 @@ fn direct_plane<T: ConvScalar>(
 /// GEMM reads it back.
 const COL_BLOCK_BYTES: usize = 8 << 20;
 
-/// im2col + GEMM forward pass, for one element type.
-///
-/// Lower each output position's receptive field into a column of `cols`
-/// (`[K, N*out_h*out_w]`, `K = C_in*kH*kW`), then a single matrix multiply
-/// `weight[C_out, K] @ cols` produces `[C_out, N*out_h*out_w]`, which is
-/// scattered (with bias) into the `[N, C_out, out_h, out_w]` output. `weight`
-/// is already laid out as `[C_out, K]`, so it needs no repacking. This routes
-/// the arithmetic through the tuned GEMM instead of a naive per-output
-/// accumulation, and produces the same cross-correlation result.
+/// The forward pass, for one element type: the operands' storage handed to
+/// [`ConvScalar::convolve`].
 fn conv2d_forward<T: ConvScalar>(
     input: &Tensor,
     weight: &Tensor,
     bias: Option<&Tensor>,
     geom: ConvGeometry,
 ) -> Result<TensorData> {
-    let ConvGeometry {
-        batch_size,
-        in_channels,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height,
-        output_width,
-        groups,
-        ..
-    } = geom;
-
     let input_data = T::slice(input.data())
         .ok_or_else(|| MinitensorError::invalid_operation("Expected float input data"))?;
     let weight_data = T::slice(weight.data())
@@ -1626,6 +1649,37 @@ fn conv2d_forward<T: ConvScalar>(
         ),
         None => None,
     };
+    let output = T::convolve(input_data, weight_data, bias_data, &geom)?;
+    Ok(T::into_tensor_data(output, input.device()))
+}
+
+/// im2col + GEMM forward pass, accumulated in the element type: float64's
+/// [`ConvScalar::convolve`].
+///
+/// Lower each output position's receptive field into a column of `cols`
+/// (`[K, N*out_h*out_w]`, `K = C_in*kH*kW`), then a single matrix multiply
+/// `weight[C_out, K] @ cols` produces `[C_out, N*out_h*out_w]`, which is
+/// scattered (with bias) into the `[N, C_out, out_h, out_w]` output. `weight`
+/// is already laid out as `[C_out, K]`, so it needs no repacking. This routes
+/// the arithmetic through the tuned GEMM instead of a naive per-output
+/// accumulation, and produces the same cross-correlation result.
+fn convolve_plain<T: ConvScalar>(
+    input_data: &[T],
+    weight_data: &[T],
+    bias_data: Option<&[T]>,
+    geom: &ConvGeometry,
+) -> Vec<T> {
+    let ConvGeometry {
+        batch_size,
+        in_channels,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        groups,
+        ..
+    } = *geom;
 
     let ohw = output_height * output_width;
     let k_dim = in_channels * kernel_h * kernel_w;
@@ -1640,11 +1694,11 @@ fn conv2d_forward<T: ConvScalar>(
 
     let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
 
-    if direct_pays(&geom) {
+    if direct_pays(geom) {
         if !output_vec.is_empty() {
-            conv2d_direct(&mut output_vec, input_data, weight_data, bias_data, &geom);
+            conv2d_direct(&mut output_vec, input_data, weight_data, bias_data, geom);
         }
-        return Ok(T::into_tensor_data(output_vec, input.device()));
+        return output_vec;
     }
 
     if !output_vec.is_empty() {
@@ -1686,7 +1740,7 @@ fn conv2d_forward<T: ConvScalar>(
             let last = (first + block_n).min(positions_total);
             let width = last - first;
 
-            lower_positions::<T>(input_data, &mut cols, first, last, &geom);
+            lower_positions::<T>(input_data, &mut cols, first, last, geom);
 
             for g in 0..groups {
                 // SAFETY: within group `g`, `weight_data` offset by
@@ -1740,7 +1794,7 @@ fn conv2d_forward<T: ConvScalar>(
         }
     }
 
-    Ok(T::into_tensor_data(output_vec, input.device()))
+    output_vec
 }
 
 #[cfg(test)]

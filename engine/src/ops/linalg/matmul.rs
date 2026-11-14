@@ -1239,6 +1239,25 @@ stored_gemm!(
     gemm_tn_f64
 );
 
+/// Never takes a product: what [`engine_gemm_f64`] offers to.
+fn decline_gemm_f64(_request: crate::ops::provider::Gemm<'_, f64>) -> bool {
+    false
+}
+
+// `stored_gemm_f64` through the engine's own kernels only, for a product
+// that is one of a run its caller takes back to back with passes of its own
+// between them: a convolution's blocks offered to a provider ran slower than
+// on these kernels, its threads beside the engine's pool costing the passes
+// either side more than they saved the product.
+stored_gemm!(
+    engine_gemm_f64,
+    f64,
+    decline_gemm_f64,
+    gemm_f64,
+    gemm_nt_f64,
+    gemm_tn_f64
+);
+
 /// `c = a * b`, everything row-major and contiguous. The common case.
 ///
 /// # Safety

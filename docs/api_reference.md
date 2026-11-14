@@ -3196,8 +3196,10 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | Function | Purpose |
 | --- | --- |
 | `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. For float32, each entry is the float32 nearest its exact value, the bias added to the exact dot before the one rounding -- a bias of one value per output feature, `[out]` or with leading ones; any other broadcasts as `+` does -- and the bias's gradient is each column of the incoming one summed, rounded once. |
-| `conv2d(input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. `padding` is zeros per side, or by name: `"valid"` for none, and `"same"` for enough that a stride-1 output keeps the input's height and width. `"same"` needs `dilation * (kernel - 1)` zeros per axis, and an odd total puts its extra zero after the axis; it is refused with any other stride, where no single size is kept. |
-| `conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on, and the same named paddings. |
+| `conv2d(input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. `padding` is zeros per side, or by name: `"valid"` for none, and `"same"` for enough that a stride-1 output keeps the input's height and width. `"same"` needs `dilation * (kernel - 1)` zeros per axis, and an odd total puts its extra zero after the axis; it is refused with any other stride, where no single size is kept. For float32, each entry of the output is the float32 nearest its exact value -- the sum of its taps' products with the bias added before the one rounding -- and so is each entry of the gradients of the input, the weight and the bias; see the note under this table. |
+| `conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on, the same named paddings, and the same rounding. |
+| `conv_transpose2d(input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=1)` | 2-D transposed convolution: each input position scattered across a neighbourhood of the output, which grows the grid where `conv2d` shrinks it -- the map a convolution's input gradient performs, run forwards. `weight` is `[C_in, C_out / groups, kH, kW]`, input channels first. The output is `(H - 1) * stride - 2 * padding + dilation * (kH - 1) + output_padding + 1` high, and as wide by the same rule; `output_padding` picks among the input sizes that convolve to one output size, and must be smaller than `stride`. Float32 or Float64 CPU tensors of one dtype; for float32 the output and each gradient are rounded once, as `conv2d`'s are. |
+| `conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0, dilation=1, groups=1)` | 1-D transposed convolution over `[N, C_in, L]` with a `[C_in, C_out / groups, K]` kernel, built on `conv_transpose2d`. |
 | `max_pool1d(input, kernel_size, stride=None, padding=0, return_indices=False)` | 1-D max pooling; `stride` defaults to `kernel_size`. With `return_indices` the result is `(values, indices)`, each index the position along the axis its maximum came from. |
 | `max_unpool1d(input, indices, kernel_size, stride=None, padding=0, output_size=None)` | Scatter a pooled signal back to the positions `max_pool1d(..., return_indices=True)` reported, zero elsewhere. |
 | `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling. |
@@ -3246,6 +3248,28 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `affine_grid(theta, size, align_corners=False)` | The sampling grid an affine transform describes, for `grid_sample`. `theta` is `(n, 2, 3)` over an `(n, c, h, w)` output or `(n, 3, 4)` over an `(n, c, d, h, w)` one. Feeding the result to `grid_sample` is a spatial transformer, and the gradient reaches `theta`, which is what lets the transform be learned. `align_corners` must match what `grid_sample` is then given. |
 | `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only two, so a 3-D convolution is the same product with a rank-three kernel. |
 | `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged; fold a tensor of ones and divide to average. |
+
+A float32 convolution -- `conv2d`, `conv1d`, `conv_transpose2d`,
+`conv_transpose1d` and the layers built on them -- gives each entry of its
+output as the float32 nearest its exact value, the bias added to the exact sum
+of its taps' products before the one rounding, and each entry of the gradients
+it hands back the same way: the input's, the weight's -- a sum over every
+position of every image -- and the bias's. Accumulated in float32, most
+entries of each came out other than that float. Every product of two float32s
+is exact in float64, so the sums are taken there, through the lowered columns
+or straight from the input as before, and are off the exact ones only by the
+roundings of their additions, which a bound on the magnitudes of the terms
+limits. An entry both ends of whose bound narrow to one float32 is that float;
+the rest -- one in some thousands of ordinary data, more where a sum cancels
+far below its terms -- are the exact sum of their own products. A sum of whole
+numbers or of a few short values, which lands on a halfway point often, and
+one that cancels to zero are exact as they stand; a zero is a positive one.
+The answer is the same on either path and for any number of threads. It costs
+two to four times the float32 arithmetic it replaces. A float64 convolution
+accumulates in float64, as a float64 matrix product does, though its bias's
+gradient, a plain sum, is rounded once; and `conv3d` adds the two-dimensional
+convolutions of its depth taps, each rounded once, and then its bias, so its
+entries are rounded once per depth tap and once more.
 
 A target that is a score -- a probability, a soft label, a per-class
 distribution -- receives a gradient whenever it requires one: the regression

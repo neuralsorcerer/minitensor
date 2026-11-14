@@ -271,7 +271,11 @@ for them:
   only pays when the multiply shares it across many output channels; with one,
   each group was a GEMM with a single row, and a 3x3 depthwise layer over
   `[16, 32, 56, 56]` took 55.9ms forward and backward. It, and both of its
-  gradients, now go straight from the input, in 4.8ms.
+  gradients, now go straight from the input, in 4.8ms. Those figures are of a
+  convolution accumulated in float32. A float32 convolution now gives each
+  entry of its output and of its gradients as the float32 nearest its exact
+  value, which takes the sums in float64 and each entry against a bound: two
+  to four times the float32 arithmetic on either path.
 
 The boundary is reachable from Python, and is meant for measuring rather than
 tuning: `minitensor._core.dispatch.gemm_thresholds()` reports it and
