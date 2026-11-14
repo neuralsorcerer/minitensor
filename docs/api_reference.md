@@ -154,7 +154,7 @@ of convenience aliases.
 | `take(input, index)` | The elements at flat positions `index`, shaped like `index`. Reads the tensor in row-major order whatever its shape; negative positions count from the end. |
 | `put(input, index, source, accumulate=False)` | The write direction of `take`: `input` with `source` written at the flat positions `index` names, read row-major over the whole tensor and counting negative positions from the end. `accumulate` adds into the target instead of overwriting, which is also what decides what a repeated position means. |
 | `take_along_dim(input, indices, dim=None)` | One element per position, its `dim` coordinate coming from `indices`. With `dim` omitted both are flattened first, which is what makes `take_along_dim(x, x.argsort())` reorder a whole tensor. |
-| `index_add(input, dim, index, source, alpha=1.0)` | Add `alpha * source` into the slices `index` names. Repeated indices accumulate. |
+| `index_add(input, dim, index, source, alpha=1.0)` | Add `alpha * source` into the slices `index` names. Repeated indices accumulate, each float destination the value nearest the exact sum of what it held and what was added to it. |
 | `index_copy(input, dim, index, source)` | Write `source` over the slices `index` names. A repeated index leaves whichever write landed last. |
 | `index_fill(input, dim, index, value)` | Set the slices `index` names to `value`. |
 | `masked_scatter(input, mask, source)` | Fill the positions `mask` selects with the leading elements of a flattened `source`, in order -- a positional write, where `masked_fill` writes one value everywhere. A source of another dtype is refused rather than promoted, so the write cannot change the dtype of the tensor it writes into. |
@@ -1263,9 +1263,11 @@ Duplicate indices are the interesting case, and the two behave differently:
 
 - `scatter_add` accumulates every value addressed at a destination, which is
   what makes it the natural spelling for segment sums and embedding-style
-  gradient accumulation. Because float addition is not associative, the
-  accumulation order is fixed rather than left to thread scheduling, so repeated
-  runs are bit-for-bit identical.
+  gradient accumulation. A float destination is the value nearest the exact
+  sum of what it held and everything addressed to it, rounded once: added one
+  at a time, it took a rounding for each value past the first and depended on
+  the order they arrived in. So the result does not depend on that order, nor
+  on how the work was split across threads.
 - `scatter` keeps the last write. The order is defined rather than left to
   scheduling, and the gradient follows it —
   a source element whose value was overwritten receives exactly zero, as does
@@ -1282,10 +1284,25 @@ want.
 `include_self` decides whether a destination's existing value takes part in the
 reduction. With it off, a written destination starts from the reduction's
 identity — zero for a sum, one for a product, an infinity for an extremum —
-rather than from what it held. It changes nothing for replacement, which
-overwrites either way, nor for summation, where starting from zero and adding to
-a zero agree. A destination *nothing* writes to keeps its value regardless: it is
-not seeded, not averaged, and not reduced.
+rather than from what it held, so a sum without it is of what arrived alone and
+the destination's own value takes no gradient there. It changes nothing for
+replacement, which overwrites either way. A destination *nothing* writes to
+keeps its value regardless: it is not seeded, not averaged, and not reduced.
+
+A float `"sum"` or `"mean"` is rounded once at each destination, as
+`scatter_add` is: the exact sum of what arrives, with the destination's own
+value when it takes part, and for a mean that sum over the count -- where the
+sum was rounded at each value and the mean divided it and rounded again. What
+is built on them follows: `index_add` with `alpha=1`, an accumulating `put`,
+`fold`, and `embedding_bag`'s `"sum"` and `"mean"`. A destination one value
+arrives at is one addition, as it always was, and a zero is negative only when
+every value added to it is a negative zero. With another `alpha`, `index_add`
+rounds each scaled value and then their sum.
+
+The gradients that are sums of the entries reading one position are rounded
+once the same way: `gather`'s, `index_select`'s and so an embedding's where a
+row is looked up several times, `repeat_interleave`'s, and that of a value
+broadcast into an assignment.
 
 `"mean"` over an integer tensor is refused rather than truncated. Every other
 reduction works on integers.
@@ -3247,7 +3264,7 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `lp_pool2d(input, norm_type, kernel_size, stride=None)` | The same over 2-D windows. |
 | `affine_grid(theta, size, align_corners=False)` | The sampling grid an affine transform describes, for `grid_sample`. `theta` is `(n, 2, 3)` over an `(n, c, h, w)` output or `(n, 3, 4)` over an `(n, c, d, h, w)` one. Feeding the result to `grid_sample` is a spatial transformer, and the gradient reaches `theta`, which is what lets the transform be learned. `align_corners` must match what `grid_sample` is then given. |
 | `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only two, so a 3-D convolution is the same product with a rank-three kernel. |
-| `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged; fold a tensor of ones and divide to average. |
+| `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged, each the float nearest the exact sum of the blocks that cover it; fold a tensor of ones and divide to average. |
 
 A float32 convolution -- `conv2d`, `conv1d`, `conv_transpose2d`,
 `conv_transpose1d` and the layers built on them -- gives each entry of its

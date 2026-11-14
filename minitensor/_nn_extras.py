@@ -930,13 +930,12 @@ def embedding_bag(
         # with nothing in it is never written to and keeps the zero.
         return _F.scatter_reduce(target, 0, scattered, rows, "amax", False)
 
-    summed = _F.scatter_add(target, 0, scattered, rows)
     if mode == "sum":
-        return summed
-    counts = _F.bincount(bag_of, None, bags).reshape(bags, 1).astype(str(rows.dtype))
-    # An empty bag has nothing to average, and zero over one is the zero its
-    # sum already is.
-    return summed / _F.clamp(counts, 1.0, None)
+        return _F.scatter_add(target, 0, scattered, rows)
+    # Each bag's exact sum over its count, rounded once, where dividing the
+    # rounded sum rounded again. An empty bag has nothing to average, is never
+    # written to, and keeps the zero.
+    return _F.scatter_reduce(target, 0, scattered, rows, "mean", False)
 
 
 def channel_shuffle(input: object, groups: int) -> Tensor:

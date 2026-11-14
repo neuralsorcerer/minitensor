@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::arithmetic::exact_sum::{Scatter, add_scattered, add_scattered_rows};
 use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::{ScatterAddBackward, ScatterBackward, ScatterReduceBackward},
@@ -230,9 +231,9 @@ pub(crate) fn surviving_writers(layout: &ScatterLayout, outer: usize) -> Vec<usi
 /// combining with whatever is already there according to `reduce`.
 ///
 /// `include_self` decides whether the destination's existing value takes part.
-/// It changes nothing for `Replace`, which overwrites regardless, and nothing
-/// for `Sum`, where starting from zero and adding to zero agree -- so it is only
-/// ever consulted for the other three.
+/// It changes nothing for `Replace`, which overwrites regardless; for every
+/// other reduction a destination that does not take part is reduced from what
+/// arrives alone, and one nothing arrives at keeps its value either way.
 fn scatter_impl(
     tensor: &Tensor,
     dim: isize,
@@ -302,6 +303,61 @@ fn scatter_impl(
         }};
     }
 
+    // An index that names whole slices -- every entry of a row of it, in
+    // every run, the same -- adds rows into rows, which are summed a column
+    // at a time: `index_add`'s shape, and a segment sum's.
+    let whole_rows: Option<Vec<usize>> = (reduce == Reduction::Sum
+        && include_self
+        && inner > 1
+        && idx_chunk != 0
+        && layout.indices.chunks_exact(idx_chunk).all(|run| {
+            run.chunks_exact(inner)
+                .zip(layout.indices.chunks_exact(inner))
+                .all(|(row, first)| row.iter().all(|&at| at == first[0]))
+        }))
+    .then(|| {
+        layout.indices[..idx_chunk]
+            .chunks_exact(inner)
+            .map(|row| row[0] as usize)
+            .collect()
+    });
+
+    // A float sum or mean: each destination rounded once from the exact
+    // total of what arrives there, where adding a value at a time rounded at
+    // each.
+    macro_rules! scatter_totals {
+        ($ty:ty, $slice:ident, $mut_slice:ident) => {{
+            let base = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation("Tensor data access failed for scatter")
+            })?;
+            let updates = src.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation("Source data access failed for scatter")
+            })?;
+            let mut out = TensorData::from_vec::<$ty>(base.to_vec(), dtype, device);
+            {
+                let dst = out.$mut_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to write scatter output")
+                })?;
+                if let Some(row_of) = &whole_rows {
+                    add_scattered_rows(dst, updates, inner, layout.input_dim, row_of);
+                } else {
+                    let shape = Scatter {
+                        chunk: in_chunk,
+                        rows: layout.index_dim,
+                        inner,
+                        own: include_self,
+                        mean: reduce == Reduction::Mean,
+                    };
+                    add_scattered(dst, shape, |o, i, j| {
+                        let pos = o * idx_chunk + i * inner + j;
+                        (layout.indices[pos] as usize * inner + j, updates[pos])
+                    });
+                }
+            }
+            out
+        }};
+    }
+
     // Where each written destination starts when it is not to count itself.
     fn seed_of<T: Seedable>(reduce: Reduction, include_self: bool) -> Option<T> {
         if include_self {
@@ -356,7 +412,10 @@ fn scatter_impl(
         };
     }
 
+    let totalled = matches!(reduce, Reduction::Sum | Reduction::Mean);
     let data = match dtype {
+        DataType::Float32 if totalled => scatter_totals!(f32, as_f32_slice, as_f32_slice_mut),
+        DataType::Float64 if totalled => scatter_totals!(f64, as_f64_slice, as_f64_slice_mut),
         DataType::Float32 => dispatch!(f32, as_f32_slice, as_f32_slice_mut),
         DataType::Float64 => dispatch!(f64, as_f64_slice, as_f64_slice_mut),
         DataType::Int32 => dispatch!(i32, as_i32_slice, as_i32_slice_mut),
@@ -379,34 +438,13 @@ fn scatter_impl(
 
     let outer: usize = tensor.shape().dims()[..layout.dim].iter().product();
 
-    // `Mean` accumulates as a sum and divides here, because the divisor is not
-    // known until every contribution has arrived. A destination nothing wrote
-    // keeps its own value and is not divided -- its count is zero, and averaging
-    // an untouched entry would change a value nobody scattered to.
-    let mut data = data;
-    if reduce == Reduction::Mean {
-        let counts = contribution_counts(&layout, outer, include_self);
-        macro_rules! average {
-            ($accessor_mut:ident, $ty:ty) => {{
-                let out = data.$accessor_mut().ok_or_else(|| {
-                    MinitensorError::internal_error("scatter_reduce: dtype does not match")
-                })?;
-                for (slot, &count) in out.iter_mut().zip(&counts) {
-                    if count > 0 {
-                        *slot /= count as $ty;
-                    }
-                }
-            }};
-        }
-        match dtype {
-            DataType::Float32 => average!(as_f32_slice_mut, f32),
-            DataType::Float64 => average!(as_f64_slice_mut, f64),
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "scatter_reduce with \"mean\" requires a floating point tensor",
-                ));
-            }
-        }
+    // A mean is of floats: the kernel above took each destination's exact
+    // total over the count of what arrived, its own value counted when it
+    // joined. A destination nothing wrote keeps its own value.
+    if reduce == Reduction::Mean && !dtype.is_float() {
+        return Err(MinitensorError::invalid_operation(
+            "scatter_reduce with \"mean\" requires a floating point tensor",
+        ));
     }
 
     let output = Tensor::new(
@@ -434,12 +472,16 @@ fn scatter_impl(
             return with_grad_fn(output, grad_fn);
         }
         if reduce == Reduction::Sum {
+            // A sum that left the destination's own value out replaced it
+            // wherever something arrived.
+            let replaced = (!include_self).then(|| surviving_writers(&layout, outer));
             let grad_fn = Arc::new(ScatterAddBackward {
                 input_ids: [tensor.id(), src.id()],
                 input_requires_grad: [tensor.requires_grad(), src.requires_grad()],
                 src_shape: src.shape().clone(),
                 dim: layout.dim,
                 indices: layout.indices,
+                replaced,
             });
             output = with_grad_fn(output, grad_fn)?;
         } else {
@@ -484,52 +526,12 @@ pub fn scatter(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Res
 /// destination is accumulated there, which is what makes it the natural way to
 /// express segment sums and embedding-style gradient accumulation.
 ///
-/// Float addition is not associative, so an accumulation order that varied with
-/// thread scheduling would make results irreproducible run to run. Tasks here
-/// own disjoint destination chunks and walk each chunk in index order, so the
-/// result is bit-for-bit deterministic.
+/// A float destination is the value nearest the exact sum of what it held
+/// and everything addressed to it, rounded once, so the result does not depend
+/// on the order the values arrive in or on how the work was split. Integers
+/// wrap, as their addition does.
 pub fn scatter_add(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
     scatter_impl(tensor, dim, index, src, Reduction::Sum, true)
-}
-
-/// How many values arrived at each destination, plus one for the destination
-/// itself when it counted.
-///
-/// `Mean` needs this to divide by, and its gradient needs the same numbers, so
-/// they are computed once and handed to both.
-pub(crate) fn contribution_counts(
-    layout: &ScatterLayout,
-    outer: usize,
-    include_self: bool,
-) -> Vec<i64> {
-    let ScatterLayout {
-        inner,
-        input_dim,
-        index_dim,
-        indices,
-        ..
-    } = layout;
-    let mut counts = vec![0i64; outer * input_dim * inner];
-    for o in 0..outer {
-        let idx = &indices[o * index_dim * inner..(o + 1) * index_dim * inner];
-        let block = &mut counts[o * input_dim * inner..(o + 1) * input_dim * inner];
-        for i in 0..*index_dim {
-            for j in 0..*inner {
-                block[idx[i * inner + j] as usize * inner + j] += 1;
-            }
-        }
-        if include_self {
-            // A destination nothing wrote keeps its own value and is not
-            // averaged, so it stays at zero rather than becoming one -- the
-            // division below skips it entirely.
-            for slot in block.iter_mut() {
-                if *slot > 0 {
-                    *slot += 1;
-                }
-            }
-        }
-    }
-    counts
 }
 
 /// Read `input` at the positions named by `index`, combining what arrives at
@@ -540,8 +542,8 @@ pub(crate) fn contribution_counts(
 /// gradients are the two the library already had.
 ///
 /// `include_self` decides whether a destination's existing value takes part in
-/// the reduction. It changes nothing for replacement, which overwrites anyway,
-/// nor for summation, where starting from zero and adding to a zero agree.
+/// the reduction. It changes nothing for replacement, which overwrites anyway;
+/// a sum without it is of what arrived alone.
 pub fn scatter_reduce(
     tensor: &Tensor,
     dim: isize,

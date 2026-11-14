@@ -7,6 +7,7 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
+    ops::arithmetic::exact_sum::{Scatter, add_scattered, add_scattered_rows},
     ops::map::{PAR_CHUNK, par_out_chunks},
     ops::reduction,
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -67,7 +68,10 @@ where
 /// `indices[i]` is the source position (along `dim`) that produced output row `i`
 /// for every outer/inner coordinate. This is the shared backward for
 /// `index_select` and `slice` (and, transitively, `narrow`/`flip`/`roll`).
-/// Duplicated source indices accumulate, matching the forward gather semantics.
+/// A source position selected several times receives the sum of the rows it
+/// produced, each value the one nearest that sum exactly: rounded once
+/// however many rows there were, where adding them a row at a time rounded
+/// at each.
 fn index_select_backward_grad(
     grad_output: &Tensor,
     input_shape: &[usize],
@@ -83,9 +87,6 @@ fn index_select_backward_grad(
     let out_dim = indices.len();
 
     if numel != 0 && out_dim != 0 && inner != 0 {
-        let in_chunk = dim_size * inner;
-        let out_chunk = out_dim * inner;
-
         macro_rules! fill {
             ($slice:ident, $mut_slice:ident) => {{
                 let go = grad_output.data().$slice().ok_or_else(|| {
@@ -94,17 +95,7 @@ fn index_select_backward_grad(
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for index backward")
                 })?;
-                par_out_chunks(gi, in_chunk, &|start, gi_chunk| {
-                    let o = start / in_chunk;
-                    let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
-                    for (i, &idx) in indices.iter().enumerate() {
-                        let dst = idx * inner;
-                        let src = i * inner;
-                        for j in 0..inner {
-                            gi_chunk[dst + j] += go_chunk[src + j];
-                        }
-                    }
-                });
+                add_scattered_rows(gi, go, inner, dim_size, indices);
             }};
         }
 
@@ -131,7 +122,8 @@ fn index_select_backward_grad(
 /// Scatter-add `grad_output` back to the input positions named by a full `index`
 /// tensor (`gather` backward, also reused by min/max/sort/topk along a dim). The
 /// `index` slice is laid out identically to `grad_output`; entry `index[..]` is
-/// the source coordinate along `dim`. Colliding indices accumulate.
+/// the source coordinate along `dim`. A position several entries name receives
+/// the sum of their gradients, rounded once from the exact one.
 fn gather_backward_grad(
     grad_output: &Tensor,
     input_shape: &[usize],
@@ -162,17 +154,16 @@ fn gather_backward_grad(
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for gather backward")
                 })?;
-                par_out_chunks(gi, in_chunk, &|start, gi_chunk| {
-                    let o = start / in_chunk;
-                    let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
-                    let idx_chunk = &index[o * out_chunk..(o + 1) * out_chunk];
-                    for i in 0..out_dim {
-                        for j in 0..inner {
-                            let pos = i * inner + j;
-                            let src_idx = idx_chunk[pos] as usize;
-                            gi_chunk[src_idx * inner + j] += go_chunk[pos];
-                        }
-                    }
+                let shape = Scatter {
+                    chunk: in_chunk,
+                    rows: out_dim,
+                    inner,
+                    own: true,
+                    mean: false,
+                };
+                add_scattered(gi, shape, |o, i, j| {
+                    let pos = o * out_chunk + i * inner + j;
+                    (index[pos] as usize * inner + j, go[pos])
                 });
             }};
         }
@@ -553,10 +544,20 @@ impl GradientFunction for AssignBackward {
                     accumulate_grad(&mut gradients, target, kept)?;
                 }
                 if let Some((value, shape, value_dtype)) = &self.value {
+                    // An element broadcast to several positions receives the
+                    // sum of their gradients, rounded once.
                     let mut received = vec![0.0 as $ty; shape.numel()];
-                    for &(position, element) in &self.written {
-                        received[element] += flowing[position];
-                    }
+                    let scatter = Scatter {
+                        chunk: received.len(),
+                        rows: self.written.len(),
+                        inner: 1,
+                        own: true,
+                        mean: false,
+                    };
+                    add_scattered(&mut received, scatter, |_, i, _| {
+                        let (position, element) = self.written[i];
+                        (element, flowing[position])
+                    });
                     let received = tensor(TensorData::from_vec(received, dtype, device), shape);
                     accumulate_grad(&mut gradients, *value, received.astype(*value_dtype)?)?;
                 }
@@ -638,13 +639,18 @@ impl GradientFunction for IndexBackward {
     }
 }
 
-/// Gradient function for `scatter_add`.
+/// Gradient function for `scatter_add`, and for a scattered sum that leaves
+/// the destination's own value out.
 ///
 /// `out = input.clone(); out[index] += src`, so the input passes its gradient
 /// through untouched — every original value still contributes exactly once —
 /// while each source element collects the gradient at the slot it was added to.
 /// Duplicate indices need no special handling: addition is linear, so several
 /// sources landing on one slot all see that slot's gradient.
+///
+/// A sum that does not count the destination itself holds only what arrived
+/// wherever anything did, so the input's value there no longer reaches the
+/// result and its gradient there is zero: `replaced` marks those slots.
 pub struct ScatterAddBackward {
     /// [input, src]. Both must be listed: the engine walks this to reach each
     /// operand's own grad_fn, so omitting `src` silently truncates the graph
@@ -655,6 +661,9 @@ pub struct ScatterAddBackward {
     pub src_shape: Shape,
     pub dim: usize,
     pub indices: Vec<i64>,
+    /// For a sum that left the destination's own value out: per slot, a
+    /// writer that reached it, or `usize::MAX` for a slot nothing reached.
+    pub replaced: Option<Vec<usize>>,
 }
 
 impl GradientFunction for ScatterAddBackward {
@@ -662,7 +671,11 @@ impl GradientFunction for ScatterAddBackward {
         let mut gradients = FxHashMap::default();
 
         if self.input_requires_grad[0] {
-            accumulate_grad(&mut gradients, self.input_ids[0], grad_output.clone())?;
+            let kept = match &self.replaced {
+                Some(writers) => crate::ops::shape_ops::mask_overwritten(grad_output, writers)?,
+                None => grad_output.clone(),
+            };
+            accumulate_grad(&mut gradients, self.input_ids[0], kept)?;
         }
 
         if self.input_requires_grad[1] {
@@ -828,13 +841,29 @@ pub(crate) fn repeat_interleave_backward_impl(
         }};
     }
 
+    // A float element repeated several times receives the sum of its
+    // copies' gradients, rounded once: its copies are the rows that reach it.
+    macro_rules! summed_copies {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = grad_output.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave backward: gradient tensor must be contiguous".to_string(),
+                )
+            })?;
+            let row_of: Vec<usize> = repeats
+                .iter()
+                .enumerate()
+                .flat_map(|(row, &copies)| std::iter::repeat_n(row, copies))
+                .collect();
+            let mut dst = vec![<$ty>::default(); numel];
+            add_scattered_rows(&mut dst, src, inner, dim_size, &row_of);
+            TensorData::$from_vec(dst, device)
+        }};
+    }
+
     let data = match dtype {
-        DataType::Float32 => {
-            repeat_interleave_backward_impl_inner!(f32, as_f32_slice, from_vec_f32)
-        }
-        DataType::Float64 => {
-            repeat_interleave_backward_impl_inner!(f64, as_f64_slice, from_vec_f64)
-        }
+        DataType::Float32 => summed_copies!(f32, as_f32_slice, from_vec_f32),
+        DataType::Float64 => summed_copies!(f64, as_f64_slice, from_vec_f64),
         DataType::Int32 => repeat_interleave_backward_impl_inner!(i32, as_i32_slice, from_vec_i32),
         DataType::Int64 => repeat_interleave_backward_impl_inner!(i64, as_i64_slice, from_vec_i64),
         DataType::Bool => {

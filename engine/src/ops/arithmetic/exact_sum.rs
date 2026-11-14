@@ -41,6 +41,10 @@ use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 mod covariance;
 pub(crate) use self::covariance::{Refusal, Sample, covariances};
 
+#[path = "exact_scatter.rs"]
+mod scatter;
+pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows};
+
 /// Lanes a run is added in, and values per block a task takes.
 const LANES: usize = 8;
 const BLOCK: usize = 8192;
