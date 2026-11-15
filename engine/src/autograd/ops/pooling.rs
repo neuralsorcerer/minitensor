@@ -12,7 +12,7 @@
 //! plane of the gradient and no two tasks touch the same element.
 
 use super::*;
-use crate::ops::arithmetic::exact_sum::{Element, Output, Tallies, sum_to};
+use crate::ops::arithmetic::exact_sum::{Element, Output, Tallies, sum_to, weighted_quotient};
 use crate::ops::conv::ConvScalar;
 use crate::ops::map::par_out_chunks;
 use crate::ops::pooling::{Extents, FixedWindow, average};
@@ -115,55 +115,104 @@ impl GradientFunction for GridSampleBackward {
     }
 }
 
-macro_rules! interpolate_backward {
-    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
-        fn $name(
-            grad_output: &Tensor,
-            planes: usize,
-            in_h: usize,
-            in_w: usize,
-            rows: &crate::ops::interpolate::AxisMap,
-            cols: &crate::ops::interpolate::AxisMap,
-        ) -> Result<TensorData> {
-            let grad = grad_output.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error("interpolate backward: mismatched dtype")
-            })?;
-            let (out_h, out_w) = (rows.len(), cols.len());
-            let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-            let mut values = vec![0 as $ty; planes * plane_in];
-            if plane_in == 0 || plane_out == 0 {
-                return Ok(TensorData::$from_vec(values, grad_output.device()));
-            }
-
-            // One task per plane: several output positions read the same source,
-            // so the scatter inside a plane is serial, but planes are disjoint.
-            par_out_chunks(&mut values, plane_in, &|first, image| {
-                let base = (first / plane_in) * plane_out;
-                for oh in 0..out_h {
-                    let (top, bottom) = (rows.lower(oh) * in_w, rows.upper(oh) * in_w);
-                    let row_weight = rows.weight(oh) as $ty;
-                    for ow in 0..out_w {
-                        let (left, right) = (cols.lower(ow), cols.upper(ow));
-                        let column_weight = cols.weight(ow) as $ty;
-                        let share = grad[base + oh * out_w + ow];
-                        // The four coefficients the forward multiplied by, in
-                        // the same order it formed them.
-                        let upper_share = share * row_weight;
-                        let lower_share = share - upper_share;
-                        image[top + left] += lower_share * (1.0 as $ty - column_weight);
-                        image[top + right] += lower_share * column_weight;
-                        image[bottom + left] += upper_share * (1.0 as $ty - column_weight);
-                        image[bottom + right] += upper_share * column_weight;
+/// The gradient an interpolation's input takes from `flowing`: for each
+/// cell, the value nearest the exact sum, over the outputs that read it, of
+/// each output's gradient times the weight it read the cell with, rounded
+/// once.
+///
+/// Every weight is a whole coefficient over the product of the axes'
+/// denominators, so a cell's gradient is a sum of whole multiples of
+/// gradients over that one number: the multiples are added into a two-sum
+/// for each cell, each exactly -- a float32 gradient times a coefficient
+/// under 2^29 is exact in float64, and any other carries the error of its
+/// product beside it -- and each cell divided once. A cell the bound leaves
+/// open is summed exactly from the outputs that read it.
+fn interpolation_gradient<T: Element + Output + Default>(
+    flowing: &[T],
+    planes: usize,
+    in_h: usize,
+    in_w: usize,
+    rows: &crate::ops::interpolate::AxisMap,
+    cols: &crate::ops::interpolate::AxisMap,
+) -> Vec<T> {
+    use crate::ops::interpolate::plane_taps;
+    let (out_h, out_w) = (rows.len(), cols.len());
+    let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
+    let mut gradient = vec![T::default(); planes * plane_in];
+    if plane_in == 0 || plane_out == 0 {
+        return gradient;
+    }
+    let divisor = rows.denominator() * cols.denominator();
+    // A float32 times a whole number under 2^29 is exact in float64.
+    let wide = !(std::mem::size_of::<T>() == 4 && divisor < 1 << 29);
+    let (lines, columns) = (rows.widened(), cols.widened());
+    let counts = vec![divisor as f64; plane_in];
+    let band = average::slices_per_task(planes, plane_in) * plane_in;
+    par_out_chunks(&mut gradient, band, &|first, part| {
+        let (mut tallies, mut open) = (Tallies::new(plane_in), Vec::new());
+        for (index, cells) in part.chunks_mut(plane_in).enumerate() {
+            let flowing = &flowing[(first / plane_in + index) * plane_out..][..plane_out];
+            tallies.clear(0.0);
+            for (oh, row) in flowing.chunks(out_w).enumerate() {
+                let (top, bottom) = (lines.lower[oh] * in_w, lines.upper[oh] * in_w);
+                let (above, below) = (lines.low[oh], lines.high[oh]);
+                for (ow, &share) in row.iter().enumerate() {
+                    let share = share.wide();
+                    if share == 0.0 {
+                        continue;
+                    }
+                    let (left, right) = (columns.lower[ow], columns.upper[ow]);
+                    let (before, after) = (columns.low[ow], columns.high[ow]);
+                    for (cell, coefficient) in [
+                        (top + left, above * before),
+                        (top + right, above * after),
+                        (bottom + left, below * before),
+                        (bottom + right, below * after),
+                    ] {
+                        if coefficient == 0.0 {
+                            continue;
+                        }
+                        let product = coefficient * share;
+                        if wide {
+                            let lost = crate::ops::simd::product_error::<false>(
+                                coefficient,
+                                share,
+                                product,
+                            );
+                            // A product that underflows may lose a little more.
+                            let missing = if product.abs() < 2f64.powi(-960) {
+                                4.0 * f64::from_bits(1)
+                            } else {
+                                0.0
+                            };
+                            tallies.add_pair(cell, 1, (product, lost), missing);
+                        } else {
+                            tallies.add_at(cell, product);
+                        }
                     }
                 }
-            });
-            Ok(TensorData::$from_vec(values, grad_output.device()))
+            }
+            open.clear();
+            tallies.means_into(0, &counts, cells, &mut open);
+            for &cell in &open {
+                let mut terms: Vec<(u64, T)> = Vec::new();
+                let (ih, iw) = (cell / in_w, cell % in_w);
+                for oh in (0..out_h).filter(|&oh| rows.taps(oh).iter().any(|t| t.0 == ih)) {
+                    for ow in (0..out_w).filter(|&ow| cols.taps(ow).iter().any(|t| t.0 == iw)) {
+                        let share = flowing[oh * out_w + ow];
+                        for (at, coefficient) in plane_taps(rows, cols, oh, ow, in_w) {
+                            if at == cell {
+                                terms.push((coefficient, share));
+                            }
+                        }
+                    }
+                }
+                cells[cell] = weighted_quotient(terms.iter().copied(), divisor);
+            }
         }
-    };
+    });
+    gradient
 }
-
-interpolate_backward!(interpolate_backward_f32, f32, as_f32_slice, from_vec_f32);
-interpolate_backward!(interpolate_backward_f64, f64, as_f64_slice, from_vec_f64);
 
 impl GradientFunction for InterpolateBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
@@ -184,9 +233,19 @@ impl GradientFunction for InterpolateBackward {
         let cols = crate::ops::interpolate::axis_map(in_w, out_w, self.mode, self.align_corners);
 
         let grad = grad_output.contiguous()?;
+        let mismatched =
+            || MinitensorError::internal_error("interpolate backward: mismatched dtype");
         let data = match grad.dtype() {
-            DataType::Float32 => interpolate_backward_f32(&grad, planes, in_h, in_w, &rows, &cols)?,
-            DataType::Float64 => interpolate_backward_f64(&grad, planes, in_h, in_w, &rows, &cols)?,
+            DataType::Float32 => {
+                let flowing = grad.data().as_f32_slice().ok_or_else(mismatched)?;
+                let cells = interpolation_gradient(flowing, planes, in_h, in_w, &rows, &cols);
+                TensorData::from_vec_f32(cells, grad.device())
+            }
+            DataType::Float64 => {
+                let flowing = grad.data().as_f64_slice().ok_or_else(mismatched)?;
+                let cells = interpolation_gradient(flowing, planes, in_h, in_w, &rows, &cols);
+                TensorData::from_vec_f64(cells, grad.device())
+            }
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "interpolate backward only supports floating point tensors",

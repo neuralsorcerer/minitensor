@@ -342,6 +342,62 @@ pub(crate) fn sum_over<I: Element, T: Output>(values: &[I], count: u64) -> T {
     }
 }
 
+/// The value nearest `Σ c · x / divisor` over `terms`, each a whole
+/// coefficient `c` and a value `x`, and a whole `divisor`, rounded once.
+///
+/// Each product is carried as its float64 and the exact error a split
+/// finds, the products are added by two-sums, and the quotient is settled
+/// from that pair, a halfway point included where nothing was dropped; the
+/// whole is taken exactly where the bound does not settle it, or where a
+/// value is not finite. A coefficient of zero contributes nothing, not even
+/// to a value that is not finite.
+pub(crate) fn weighted_quotient<T: Element + Output>(
+    terms: impl Iterator<Item = (u64, T)> + Clone,
+    divisor: u64,
+) -> T {
+    // A float32 times a whole number under 2^29 is exact in float64.
+    let narrow = std::mem::size_of::<T>() == 4;
+    let (mut sum, mut error, mut slack) = (0.0f64, 0.0f64, 0.0f64);
+    let mut finite = true;
+    for (coefficient, value) in terms.clone() {
+        if coefficient == 0 {
+            continue;
+        }
+        let (c, x) = (coefficient as f64, value.wide());
+        finite &= x.is_finite();
+        let product = c * x;
+        let lost = if narrow && coefficient < 1 << 29 {
+            0.0
+        } else {
+            // Exact but where the product underflows, which the slack takes.
+            if product.abs() < 2f64.powi(-960) {
+                slack += 4.0 * f64::from_bits(1);
+            }
+            crate::ops::simd::product_error::<false>(c, x, product)
+        };
+        let (total, rounding) = two_sum(sum, product);
+        sum = total;
+        let (carried, first) = two_sum(error, rounding);
+        let (carried, second) = two_sum(carried, lost);
+        error = carried;
+        slack += 2.0 * (first.abs() + second.abs());
+    }
+    let exact_divisor = divisor < 1 << 53;
+    if finite && exact_divisor {
+        let numerator = Carried { sum, error, slack };
+        if let Some(value) = ratio_settled::<T, false>(numerator, (divisor as f64, 0.0)) {
+            return value;
+        }
+    }
+    let pairs = terms
+        .filter(|&(coefficient, _)| coefficient != 0)
+        .map(|(coefficient, value)| (coefficient as f64, value.wide()));
+    match Total::of_products(pairs) {
+        Err(special) => T::narrow(special),
+        Ok(total) => total.quotient(Total::of_magnitude(vec![divisor], 0)),
+    }
+}
+
 /// `limbs *= factor`, a magnitude in little-endian 64-bit limbs.
 fn times(limbs: &mut Vec<u64>, factor: u64) {
     let mut carry = 0u128;
@@ -493,6 +549,36 @@ mod tests {
             f64::INFINITY
         );
         assert!(sum_over::<f64, f64>(&[f64::NAN, 1.0], 4).is_nan());
+    }
+
+    #[test]
+    fn weighted_quotients_round_once() {
+        let step = f32::EPSILON;
+        let quotient = |terms: &[(u64, f32)], divisor: u64| {
+            weighted_quotient::<f32>(terms.iter().copied(), divisor)
+        };
+        // Halfway points, to the even float either side.
+        assert_eq!(quotient(&[(1, 1.0), (1, 1.0 + step)], 2), 1.0);
+        assert_eq!(
+            quotient(&[(1, 1.0 + step), (1, 1.0 + 2.0 * step)], 2),
+            1.0 + 2.0 * step
+        );
+        // Three quarters of one and a quarter of the float after it: under
+        // halfway, so one.
+        assert_eq!(quotient(&[(3, 1.0), (1, 1.0 + step)], 4), 1.0);
+        // Whole coefficients past 2^29 carry the errors of their products.
+        let big = (1u64 << 40) + 1;
+        assert_eq!(quotient(&[(big, 1.0 + step), (big, -1.0)], big), step);
+        // A coefficient of zero takes nothing from an infinity beside it.
+        assert_eq!(quotient(&[(4, 2.5), (0, f32::INFINITY)], 4), 2.5);
+        assert_eq!(quotient(&[(1, f32::INFINITY), (3, 1.0)], 4), f32::INFINITY);
+        assert!(quotient(&[(1, f32::INFINITY), (1, f32::NEG_INFINITY)], 2).is_nan());
+        // Products past the range of float64 whose quotient is not.
+        let wide = weighted_quotient::<f64>([(2, f64::MAX), (2, f64::MAX)].into_iter(), 4);
+        assert_eq!(wide, f64::MAX);
+        // Cancelling to an exact zero: a positive one.
+        let zero = weighted_quotient::<f64>([(3, 1.5), (1, -4.5)].into_iter(), 7);
+        assert_eq!(zero.to_bits(), 0.0f64.to_bits());
     }
 
     #[test]

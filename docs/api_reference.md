@@ -3386,10 +3386,15 @@ warp or a deformable convolution trainable, because the network can learn where
 to look rather than only what to do with what it found. `interpolate` resamples
 onto a regular grid it works out for you; this takes the grid as an argument.
 That grid's positions are fractions of whole numbers -- the lower sample an
-exact quotient, its weight the remainder over the denominator, rounded once --
-so a weight is right to its own last bit however far along the axis it falls,
-where one taken from a rounded position was good to twelve digits a few
-thousand samples in.
+exact quotient, its weight the remainder over the denominator, kept exactly --
+so a weight is right however far along the axis it falls, where one taken from
+a rounded position was good to twelve digits a few thousand samples in. Each
+output of `interpolate` in `"linear"` and `"bilinear"` modes is then the float
+nearest the exact weighted sum of its sources, rounded once, and each entry of
+its gradient the float nearest the exact sum of the shares the outputs reading
+it send back; formed as interpolations in the element type, an output took a
+rounding at each step, and the gradient one for each share. An output on a
+sample is that sample, whatever its neighbour holds.
 
 - `input` is `(batch, channels, height, width)` or
   `(batch, channels, depth, height, width)`. `grid` matches its rank and holds

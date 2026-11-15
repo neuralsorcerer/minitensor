@@ -43,7 +43,7 @@ pub(crate) use self::covariance::{Refusal, Sample, covariances};
 
 #[path = "exact_pool.rs"]
 mod pool;
-pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over};
+pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotient};
 
 #[path = "exact_scatter.rs"]
 mod scatter;
