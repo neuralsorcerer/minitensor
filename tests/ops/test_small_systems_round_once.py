@@ -4,7 +4,7 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""A determinant of order two or three, and each entry of an inverse or a
+"""A determinant of order two to four, and each entry of an inverse or a
 solution of that order, is the float nearest its exact value.
 
 Taken by elimination -- each pivot, product and update rounded -- the
@@ -103,7 +103,7 @@ def _matrices(rng, n, count, dtype):
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("n", [2, 3])
+@pytest.mark.parametrize("n", [2, 3, 4])
 def test_det_is_the_nearest_float(dtype, n):
     stack = _matrices(np.random.default_rng(n), n, 30, dtype)
     got = mt.det(mt.tensor(stack)).numpy()
@@ -112,7 +112,7 @@ def test_det_is_the_nearest_float(dtype, n):
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("n", [2, 3])
+@pytest.mark.parametrize("n", [2, 3, 4])
 def test_inverse_and_solution_are_the_nearest_floats(dtype, n):
     rng = np.random.default_rng(10 + n)
     stack = _matrices(rng, n, 24, dtype)
@@ -150,24 +150,45 @@ def test_whole_numbers_give_whole_numbers():
         mt.inv(mt.tensor(np.array([[1.0, 2.0], [3.0, 4.0]]))).numpy(),
         [[-2.0, 1.0], [1.5, -0.5]],
     )
+    # A quarter turn and a translation: the inverse is the turn's transpose
+    # and the translation turned back.
+    move = np.array(
+        [
+            [0.0, -1.0, 0.0, 3.0],
+            [1.0, 0.0, 0.0, -2.0],
+            [0.0, 0.0, 1.0, 5.0],
+            [0, 0, 0, 1],
+        ]
+    )
+    assert mt.det(mt.tensor(move)).item() == 1.0
+    np.testing.assert_array_equal(
+        mt.inv(mt.tensor(move)).numpy(),
+        [
+            [0.0, 1.0, 0.0, 2.0],
+            [-1.0, 0.0, 0.0, 3.0],
+            [0.0, 0.0, 1.0, -5.0],
+            [0, 0, 0, 1],
+        ],
+    )
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_an_exactly_singular_matrix_is_singular(dtype):
-    # Elimination leaves this one a last pivot of 6.7e-16 in float64.
-    singular = mt.tensor(np.arange(1.0, 10.0).reshape(3, 3).astype(dtype))
+@pytest.mark.parametrize("n", [3, 4])
+def test_an_exactly_singular_matrix_is_singular(dtype, n):
+    # Elimination leaves the first a last pivot of 6.7e-16 in float64.
+    singular = mt.tensor(np.arange(1.0, n * n + 1).reshape(n, n).astype(dtype))
     assert mt.det(singular).item() == 0.0
     sign, log = mt.slogdet(singular)
     assert sign.item() == 0.0 and log.item() == -math.inf
     with pytest.raises(Exception, match="singular"):
         mt.inv(singular)
     with pytest.raises(Exception, match="singular"):
-        mt.solve(singular, mt.tensor(np.ones(3, dtype=dtype)))
+        mt.solve(singular, mt.tensor(np.ones(n, dtype=dtype)))
 
 
 def test_slogdet_takes_the_exact_determinant():
     rng = np.random.default_rng(4)
-    for n in (2, 3):
+    for n in (2, 3, 4):
         stack = _matrices(rng, n, 30, "float64")
         sign, log = mt.slogdet(mt.tensor(stack))
         for k, matrix in enumerate(stack):
@@ -190,7 +211,7 @@ def test_slogdet_takes_the_exact_determinant():
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_the_det_gradient_is_the_scaled_cofactor_matrix(dtype):
     rng = np.random.default_rng(6)
-    for n in (2, 3):
+    for n in (2, 3, 4):
         matrix = rng.standard_normal((n, n)).astype(dtype)
         x = mt.tensor(matrix, requires_grad=True)
         (mt.det(x) * 3.0).backward()

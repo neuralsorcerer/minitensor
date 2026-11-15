@@ -7010,6 +7010,42 @@ impl Total {
         total
     }
 
+    /// The exact sum of the products of `terms`, four finite factors each.
+    #[cold]
+    #[inline(never)]
+    fn of_quads(terms: &[[f64; 4]]) -> Self {
+        // Every product of four finite float64s is a whole multiple of
+        // `2^-4296` below `2^4096`, bit 8392 here; the carries take a limb.
+        let least = 4 * LEAST;
+        let mut total = Self::empty(least, (8392 + 64) / 64 + 2);
+        for factors in terms {
+            let exact = factors.map(|value| Exact::float(value).expect("finite"));
+            let first = u128::from(exact[0].magnitude) * u128::from(exact[1].magnitude);
+            let second = u128::from(exact[2].magnitude) * u128::from(exact[3].magnitude);
+            if first == 0 || second == 0 {
+                continue;
+            }
+            let negative = exact.iter().filter(|factor| factor.negative).count() % 2 == 1;
+            let limbs = if negative {
+                &mut total.negative
+            } else {
+                &mut total.positive
+            };
+            let shift = (exact.iter().map(|factor| factor.exponent).sum::<i32>() - least) as usize;
+            // Two products of at most 106 bits, each in two halves: the four
+            // products of halves at their places.
+            let (a, b) = (
+                (first as u64, (first >> 64) as u64),
+                (second as u64, (second >> 64) as u64),
+            );
+            add_shifted(limbs, u128::from(a.0) * u128::from(b.0), shift);
+            add_shifted(limbs, u128::from(a.0) * u128::from(b.1), shift + 64);
+            add_shifted(limbs, u128::from(a.1) * u128::from(b.0), shift + 64);
+            add_shifted(limbs, u128::from(a.1) * u128::from(b.1), shift + 128);
+        }
+        total
+    }
+
     /// The value nearest this sum over `divisor`'s: sixty-six bits of the
     /// quotient by long division, with whether a remainder is left marked
     /// below them. An infinity of this sum's sign over an exact zero, and NaN

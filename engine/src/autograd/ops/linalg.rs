@@ -817,8 +817,8 @@ impl GradientFunction for DetBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        // Of order two or three, each cofactor is a difference of products,
-        // and its product with the incoming gradient is rounded once.
+        // Of order two to four, each cofactor is a sum of products of the
+        // entries, and its product with the incoming gradient is rounded once.
         if let Some(grad) = crate::ops::linalg::small_det_gradient(&self.input, grad_output)? {
             accumulate_grad(&mut gradients, self.input_id, grad)?;
             return Ok(gradients);

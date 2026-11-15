@@ -175,7 +175,7 @@ fn batch_tensor(
 /// module note on overflow.
 pub fn det(tensor: &Tensor) -> Result<Tensor> {
     let (batch_dims, n) = square_layout(tensor, "det")?;
-    if (n == 2 || n == 3)
+    if (2..=4).contains(&n)
         && let Some(output) = small_det(tensor, &batch_dims, n)?
     {
         // Rounded once from the exact determinant, in the input's dtype.
@@ -233,7 +233,7 @@ fn finite(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
 }
 
-/// [`det`] of matrices of order two or three: each the float nearest the
+/// [`det`] of matrices of order two to four: each the float nearest the
 /// exact determinant. None where a value is not finite, which elimination
 /// answers.
 fn small_det(tensor: &Tensor, batch_dims: &[usize], n: usize) -> Result<Option<Tensor>> {
@@ -265,13 +265,13 @@ fn small_det(tensor: &Tensor, batch_dims: &[usize], n: usize) -> Result<Option<T
     with_det_gradient(tensor, output).map(Some)
 }
 
-/// The gradient of [`det`] for matrices of order two or three: the incoming
+/// The gradient of [`det`] for matrices of order two to four: the incoming
 /// gradient times each cofactor, each entry the float nearest its exact
 /// value. None for other orders, or where a value is not finite.
 pub(crate) fn small_det_gradient(input: &Tensor, grad_output: &Tensor) -> Result<Option<Tensor>> {
     let dims = input.shape().dims();
     let n = dims[dims.len() - 1];
-    if !(n == 2 || n == 3) {
+    if !(2..=4).contains(&n) {
         return Ok(None);
     }
     let entries = wide_entries(input)?;
@@ -306,7 +306,7 @@ pub(crate) fn small_det_gradient(input: &Tensor, grad_output: &Tensor) -> Result
 }
 
 /// Whether [`crate::ops::linalg::solve`] takes `lhs x = rhs` by
-/// [`small_solutions`]: square float matrices of order two or three, and every
+/// [`small_solutions`]: square float matrices of order two to four, and every
 /// value finite.
 pub(crate) fn small_order(lhs: &Tensor, rhs: &Tensor) -> Result<bool> {
     let dims = lhs.shape().dims();
@@ -315,13 +315,13 @@ pub(crate) fn small_order(lhs: &Tensor, rhs: &Tensor) -> Result<bool> {
         return Ok(false);
     }
     let n = dims[dims.len() - 1];
-    if dims[dims.len() - 2] != n || !(n == 2 || n == 3) {
+    if dims[dims.len() - 2] != n || !(2..=4).contains(&n) {
         return Ok(false);
     }
     Ok(finite(&wide_entries(lhs)?) && finite(&wide_entries(rhs)?))
 }
 
-/// The solutions of systems of order two or three into `out`, the
+/// The solutions of systems of order two to four into `out`, the
 /// operands broadcast against each other: each entry the float nearest its
 /// exact value, a quotient of two determinants by Cramer's rule, in the
 /// operands' dtype. A system with an exactly singular matrix is refused,
@@ -400,12 +400,12 @@ pub fn slogdet(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
     let dtype = tensor.dtype();
     let device = tensor.device();
 
-    // Of order two or three, the sign and the singularity are the exact
+    // Of order two to four, the sign and the singularity are the exact
     // determinant's, as `det`'s are, and the logarithm is taken of it;
     // elimination stands in for a matrix holding a value that is not
     // finite, and for one whose determinant float64 cannot reach even
     // scaled, and runs only where one does.
-    let exact = if n == 2 || n == 3 {
+    let exact = if (2..=4).contains(&n) {
         let entries = wide_entries(tensor)?;
         let mut exact = vec![None; batch];
         crate::ops::map::par_out_chunks(&mut exact, 1 << 10, &|start, part| {
