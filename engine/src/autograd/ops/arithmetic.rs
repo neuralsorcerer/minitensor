@@ -1063,6 +1063,12 @@ pub struct FloatBinaryBackward {
     /// `d(out)/d(lhs)` and `d(out)/d(rhs)`, as functions of the two promoted
     /// operands.
     pub partials: [FloatBinaryKernel; 2],
+    /// Whether the partials choose a side, one where it was chosen and zero
+    /// where it was not, as `fmax`'s and `fmin`'s do. The gradient is then
+    /// selected rather than multiplied: the side not chosen takes nothing, an
+    /// infinite or NaN gradient included, as with `maximum`, where the
+    /// product made it `0 · inf`, NaN.
+    pub selecting: bool,
 }
 
 impl GradientFunction for FloatBinaryBackward {
@@ -1075,7 +1081,13 @@ impl GradientFunction for FloatBinaryBackward {
                 continue;
             }
             let partial = float_binary_tensor(&self.lhs, &self.rhs, self.partials[side])?;
-            let contribution = arithmetic::mul(&partial, grad_output)?;
+            let contribution = if self.selecting {
+                let zero = create_scalar_tensor(0.0, grad_output.dtype(), grad_output.device())?;
+                let chosen = crate::ops::comparison::ne(&partial, &zero)?;
+                crate::ops::selection::where_op(&chosen, grad_output, &zero)?
+            } else {
+                arithmetic::mul(&partial, grad_output)?
+            };
             let grad = reduce_gradient_for_broadcasting(
                 &contribution,
                 &Shape::new(self.input_shapes[side].clone()),

@@ -2462,7 +2462,9 @@ assert row_std.shape == (2, 3)
   have a name too.
 - `fmax(input, other)`, `fmin(...)` — the extrema *ignoring* NaN, where
   `maximum`/`minimum` propagate it. NaN survives only where both operands are
-  NaN and there is genuinely nothing to compare.
+  NaN and there is genuinely nothing to compare. The gradient goes to the
+  operand chosen, and the other takes nothing, an infinite gradient included,
+  as with `maximum`/`minimum`.
 - `isposinf`, `isneginf` — the two halves of `isinf`.
 - `isreal` — true everywhere, NaN included: every dtype here is real. The name
   exists because generic numeric code asks, and a missing attribute is a

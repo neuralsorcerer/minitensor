@@ -706,7 +706,7 @@ where
     N: Fn(f32, f32) -> f32 + Send + Sync,
     W: Fn(f64, f64) -> f64 + Send + Sync,
 {
-    float_binary_with(lhs, rhs, partials, |l, r, dtype, shape| {
+    float_binary_with(lhs, rhs, partials, false, |l, r, dtype, shape| {
         float_binary_data_with(l, r, dtype, shape, narrow, wide)
     })
 }
@@ -715,6 +715,9 @@ where
 /// when neither needs broadcasting, go through
 /// [`crate::ops::map::binary_map_selecting`] and so get the AVX-512 build.
 /// `fmin` and `fmax` are three compares and three selects a lane.
+///
+/// Its partials are one for the side chosen and zero for the other, and its
+/// backward selects rather than multiplies: see [`FloatBinaryBackward`].
 fn float_binary_selecting<N, W>(
     lhs: &Tensor,
     rhs: &Tensor,
@@ -727,7 +730,7 @@ where
     W: Fn(f64, f64) -> f64 + Send + Sync,
 {
     use crate::ops::map::binary_map_selecting;
-    float_binary_with(lhs, rhs, partials, |l, r, dtype, shape| {
+    float_binary_with(lhs, rhs, partials, true, |l, r, dtype, shape| {
         if l.shape().dims() == shape.dims() && r.shape().dims() == shape.dims() {
             let device = l.device();
             if let (Some(a), Some(b)) = (l.data().as_f32_slice(), r.data().as_f32_slice()) {
@@ -744,11 +747,13 @@ where
 }
 
 /// The part every float binary op shares: promote and broadcast the operands,
-/// compute the forward with `data`, and record the backward from `partials`.
+/// compute the forward with `data`, and record the backward from `partials`,
+/// `selecting` for a pair of partials that choose a side.
 fn float_binary_with<D>(
     lhs: &Tensor,
     rhs: &Tensor,
     partials: [FloatBinaryKernel; 2],
+    selecting: bool,
     data: D,
 ) -> Result<Tensor>
 where
@@ -768,7 +773,7 @@ where
         dtype,
         output_shape,
         output_data,
-        partials,
+        (partials, selecting),
     )
 }
 
@@ -856,7 +861,7 @@ where
         dtype,
         output_shape,
         output_data,
-        partials,
+        (partials, false),
     )
 }
 
@@ -889,7 +894,7 @@ fn attach_float_binary_grad(
     dtype: DataType,
     output_shape: Shape,
     output_data: TensorData,
-    partials: [FloatBinaryKernel; 2],
+    (partials, selecting): ([FloatBinaryKernel; 2], bool),
 ) -> Result<Tensor> {
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
     let output = Tensor::new(
@@ -910,6 +915,7 @@ fn attach_float_binary_grad(
                 input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
                 partials,
+                selecting,
             }),
         );
     }
@@ -1081,12 +1087,18 @@ pub fn hypot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         let roots = float_binary_mono(&lhs, &rhs, hypot_f32, narrowed, [HYPOT_D_X, HYPOT_D_Y])?;
         return roots.astype(DataType::Float32);
     }
-    float_binary_with(lhs, rhs, [HYPOT_D_X, HYPOT_D_Y], |l, r, dtype, shape| {
-        if dtype == DataType::Float64 {
-            return hypot_data_f64(l, r, shape);
-        }
-        float_binary_data_with(l, r, dtype, shape, hypot_f32, hypot_f64::<NATIVE_FMA>)
-    })
+    float_binary_with(
+        lhs,
+        rhs,
+        [HYPOT_D_X, HYPOT_D_Y],
+        false,
+        |l, r, dtype, shape| {
+            if dtype == DataType::Float64 {
+                return hypot_data_f64(l, r, shape);
+            }
+            float_binary_data_with(l, r, dtype, shape, hypot_f32, hypot_f64::<NATIVE_FMA>)
+        },
+    )
 }
 
 /// Whether a fused multiply-add is an instruction on every CPU of the

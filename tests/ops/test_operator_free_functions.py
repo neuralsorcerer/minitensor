@@ -836,3 +836,31 @@ def test_maximum_and_minimum_agree_between_the_two_paths(dtype):
         np.testing.assert_array_equal(
             broadcast.view(bits), same_shape.view(bits), err_msg=name
         )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "name,plain", [("fmax", "maximum"), ("fmin", "minimum")], ids=["fmax", "fmin"]
+)
+def test_the_side_fmax_and_fmin_did_not_choose_takes_no_gradient(dtype, name, plain):
+    # The gradient was each side's partial, one or zero, times the incoming
+    # gradient, so the side not chosen took `0 * inf`, NaN, from an infinite
+    # one -- where `maximum` and `minimum`, the same choice wherever there is
+    # no NaN, select it and give zero.
+    left = np.array([1.0, -2.0, 3.0, np.nan, 5.0], dtype=dtype)
+    right = np.array([0.5, 4.0, 3.0, 2.0, np.nan], dtype=dtype)
+    for g in (math.inf, -math.inf, math.nan):
+        upstream = mt.tensor(np.full(5, g, dtype=dtype))
+        grads = {}
+        for op in (name, plain):
+            x = mt.tensor(left, requires_grad=True)
+            y = mt.tensor(right, requires_grad=True)
+            (getattr(mt, op)(x, y) * upstream).sum().backward()
+            grads[op] = (x.grad.numpy(), y.grad.numpy())
+        x_grad, y_grad = grads[name]
+        # Where neither operand is NaN the two functions make the same choice.
+        for got, want in zip(grads[name], grads[plain]):
+            np.testing.assert_array_equal(got[:3], want[:3])
+        # Beside a NaN, the number is chosen and the NaN takes nothing.
+        assert x_grad[3] == 0.0 and y_grad[4] == 0.0
+        np.testing.assert_array_equal([y_grad[3], x_grad[4]], [g, g])
