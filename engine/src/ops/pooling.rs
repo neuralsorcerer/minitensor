@@ -15,7 +15,7 @@
 use crate::autograd::with_grad_fn;
 use crate::ops::map::{par_out_chunks, par_out_chunks2};
 use crate::{
-    autograd::{AvgPool2dBackward, MaxPool2dBackward},
+    autograd::{AvgPool2dBackward, AvgPool3dBackward, MaxPool2dBackward},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -58,13 +58,11 @@ struct PoolGeometry {
 impl PoolGeometry {
     /// The planes an average pool reads and writes.
     fn extents(&self) -> Extents {
-        Extents {
-            planes: self.batch * self.channels,
-            in_h: self.in_h,
-            in_w: self.in_w,
-            out_h: self.out_h,
-            out_w: self.out_w,
-        }
+        Extents::planar(
+            self.batch * self.channels,
+            (self.in_h, self.in_w),
+            (self.out_h, self.out_w),
+        )
     }
 }
 
@@ -773,12 +771,7 @@ pub fn avg_pool2d(
 
     let mismatched = || MinitensorError::internal_error("avg_pool2d received a mismatched dtype");
     let extents = geometry.extents();
-    let window = FixedWindow {
-        kernel,
-        stride,
-        padding,
-        count_include_pad,
-    };
+    let window = FixedWindow::planar(kernel, stride, padding, count_include_pad);
     let data = match input.dtype() {
         DataType::Float32 => {
             let values = input.data().as_f32_slice().ok_or_else(mismatched)?;
@@ -817,6 +810,85 @@ pub fn avg_pool2d(
         output = with_grad_fn(output, grad_fn)?;
     }
 
+    Ok(output)
+}
+
+/// Average pooling over a 5-D `[N, C, D, H, W]` input: each mean the value
+/// nearest the exact sum of its window over the divisor, rounded once.
+///
+/// `kernel`, `stride` and `padding` are along the depth, the height and the
+/// width, and `count_include_pad` selects whether padded cells count towards
+/// the divisor. The padding may not exceed half the window along any axis.
+pub fn avg_pool3d(
+    input: &Tensor,
+    kernel: [usize; 3],
+    stride: [usize; 3],
+    padding: [usize; 3],
+    count_include_pad: bool,
+) -> Result<Tensor> {
+    if input.ndim() != 5 {
+        return Err(MinitensorError::invalid_operation(
+            "avg_pool3d expects a 5D input tensor [N, C, D, H, W]",
+        ));
+    }
+    if (0..3).any(|axis| padding[axis] * 2 > kernel[axis]) {
+        return Err(MinitensorError::invalid_argument(
+            "avg_pool3d padding must not exceed half the window size",
+        ));
+    }
+    let dims = input.shape().dims();
+    let mut out = [0; 3];
+    for axis in 0..3 {
+        out[axis] = pooled_extent(dims[2 + axis], kernel[axis], stride[axis], padding[axis])?;
+    }
+    let extents = Extents {
+        volumes: dims[0] * dims[1],
+        in_d: dims[2],
+        in_h: dims[3],
+        in_w: dims[4],
+        out_d: out[0],
+        out_h: out[1],
+        out_w: out[2],
+    };
+    let window = FixedWindow {
+        kernel,
+        stride,
+        padding,
+        count_include_pad,
+    };
+    let mismatched = || MinitensorError::internal_error("avg_pool3d received a mismatched dtype");
+    let data = match input.dtype() {
+        DataType::Float32 => {
+            let values = input.data().as_f32_slice().ok_or_else(mismatched)?;
+            TensorData::from_vec_f32(average::pooled(values, extents, &window), input.device())
+        }
+        DataType::Float64 => {
+            let values = input.data().as_f64_slice().ok_or_else(mismatched)?;
+            TensorData::from_vec_f64(average::pooled(values, extents, &window), input.device())
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "avg_pool3d only supports float32 and float64 tensors",
+            ));
+        }
+    };
+
+    let out_shape = Shape::new(vec![dims[0], dims[1], out[0], out[1], out[2]]);
+    let mut output = Tensor::new(
+        Arc::new(data),
+        out_shape,
+        input.dtype(),
+        input.device(),
+        input.requires_grad(),
+    );
+    if input.requires_grad() {
+        let grad_fn = Arc::new(AvgPool3dBackward {
+            input_id: input.id(),
+            input_shape: dims.to_vec(),
+            window,
+        });
+        output = with_grad_fn(output, grad_fn)?;
+    }
     Ok(output)
 }
 

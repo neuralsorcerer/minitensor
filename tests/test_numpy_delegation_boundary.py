@@ -178,10 +178,6 @@ _MIXES_NUMPY_WITH_TENSORS = {
         _f32((1, 2, 4, 4, 4)), _f32((3, 2, 2, 2, 2))
     ),
     "max_pool3d": lambda: mt.functional.max_pool3d(_f32((1, 2, 4, 4, 4)), 2),
-    "avg_pool3d": lambda: mt.functional.avg_pool3d(_f32((1, 2, 4, 4, 4)), 2),
-    "local_response_norm": lambda: mt.functional.local_response_norm(
-        _f32((1, 4, 3, 3)), 3
-    ),
     "affine_grid": lambda: mt.functional.affine_grid(
         _f32((1, 2, 3), fill=1.0), (1, 1, 3, 3)
     ),

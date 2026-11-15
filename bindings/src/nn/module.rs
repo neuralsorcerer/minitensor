@@ -56,9 +56,9 @@ use engine::ops::loss::{
 use engine::ops::pooling::{
     adaptive_avg_pool1d as adaptive_avg_pool1d_op, adaptive_avg_pool2d as adaptive_avg_pool2d_op,
     adaptive_max_pool1d as adaptive_max_pool1d_op, adaptive_max_pool2d as adaptive_max_pool2d_op,
-    avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, max_pool1d as max_pool1d_op,
-    max_pool1d_with_indices as max_pool1d_with_indices_op, max_pool2d as max_pool2d_op,
-    max_pool2d_with_indices as max_pool2d_with_indices_op,
+    avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, avg_pool3d as avg_pool3d_op,
+    max_pool1d as max_pool1d_op, max_pool1d_with_indices as max_pool1d_with_indices_op,
+    max_pool2d as max_pool2d_op, max_pool2d_with_indices as max_pool2d_with_indices_op,
 };
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializedModel};
 use pyo3::PyClassInitializer;
@@ -655,6 +655,28 @@ fn avg_pool2d(
     let result = avg_pool2d_op(
         input_tensor.tensor(),
         kernel,
+        stride,
+        padding,
+        count_include_pad,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Mean of each 3-D window: `kernel_size`, `stride` and `padding` each a value for the depth, the height and the width.
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride, padding, count_include_pad=true))]
+fn avg_pool3d(
+    input: &Bound<PyAny>,
+    kernel_size: [usize; 3],
+    stride: [usize; 3],
+    padding: [usize; 3],
+    count_include_pad: bool,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let result = avg_pool3d_op(
+        input_tensor.tensor(),
+        kernel_size,
         stride,
         padding,
         count_include_pad,

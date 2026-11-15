@@ -13,7 +13,9 @@ past the first and one more. The gradient of a cell is the sum, over the
 windows that read it, of each window's gradient over its divisor; divided
 window by window and then added, it took a rounding for each. Both are now
 rounded once -- for fixed windows with a stride and padding, the padding
-counted or not, for adaptive windows of uneven sizes, and for the 1-D forms.
+counted or not, for adaptive windows of uneven sizes, for the 1-D forms, and
+for windows of volumes, which were pooled a depth tap at a time and the taps
+added and scaled.
 """
 
 from __future__ import annotations
@@ -96,6 +98,35 @@ def _exact(x, g, rows, cols, fixed_divisor, dtype):
             for a in range(x.shape[2]):
                 for b in range(x.shape[3]):
                     gradient[n, c, a, b] = _nearest(shares[a][b], dtype)
+    return means, gradient
+
+
+def _exact_volume(x, g, depths, rows, cols, fixed_divisor, dtype):
+    """As `_exact`, for windows of volumes: `depths`, `rows` and `cols` the
+    positions each slice, row and column of windows reads."""
+
+    x = np.asarray(x)
+    g = np.asarray(g)
+    means = np.zeros(x.shape[:2] + (len(depths), len(rows), len(cols)), dtype=dtype)
+    gradient = np.zeros(x.shape, dtype=dtype)
+    for n in range(x.shape[0]):
+        for c in range(x.shape[1]):
+            shares = {}
+            for i, d in enumerate(depths):
+                for j, r in enumerate(rows):
+                    for k, s in enumerate(cols):
+                        cells = [(a, b, e) for a in d for b in r for e in s]
+                        divisor = fixed_divisor or len(cells)
+                        total = sum(
+                            (Fraction(float(x[(n, c) + cell])) for cell in cells),
+                            Fraction(0),
+                        )
+                        means[n, c, i, j, k] = _nearest(total / divisor, dtype)
+                        share = Fraction(float(g[n, c, i, j, k])) / divisor
+                        for cell in cells:
+                            shares[cell] = shares.get(cell, Fraction(0)) + share
+            for cell in np.ndindex(*x.shape[2:]):
+                gradient[(n, c) + cell] = _nearest(shares.get(cell, Fraction(0)), dtype)
     return means, gradient
 
 
@@ -250,6 +281,57 @@ def test_one_dimensional_adaptive_windows_round_once(dtype, length, out):
     )
     _same(means, want_means[:, :, 0, :], "means")
     _same(gradient, want_gradient[:, :, 0, :], "gradient")
+
+
+VOLUMES = [
+    # input, kernel, stride, padding, count_include_pad
+    ((4, 5, 6), (2, 3, 3), (1, 1, 2), (1, 1, 1), True),
+    ((4, 5, 6), (2, 3, 3), (1, 1, 2), (1, 1, 1), False),
+    ((5, 4, 7), (3, 2, 2), (2, 1, 1), (1, 0, 1), False),
+    ((4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0), True),
+    ((3, 5, 5), (3, 3, 3), (1, 2, 2), (1, 1, 1), False),
+    ((6, 3, 4), (5, 1, 1), (1, 1, 1), (2, 0, 0), True),
+    ((2, 3, 24), (2, 2, 3), (1, 1, 1), (1, 1, 1), False),
+]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("size,kernel,stride,padding,count_include_pad", VOLUMES)
+def test_windows_of_volumes_round_once(
+    dtype, size, kernel, stride, padding, count_include_pad
+):
+    rng = np.random.default_rng(sum(size) + 5 * kernel[0] + stride[2])
+    x = _values(rng, (1, 2) + size, dtype)
+    depths, rows, cols = (
+        _fixed(size[axis], kernel[axis], stride[axis], padding[axis])
+        for axis in range(3)
+    )
+    g = _values(rng, (1, 2, len(depths), len(rows), len(cols)), dtype)
+    means, gradient = _pool_and_gradient(
+        lambda t: mt.nn.avg_pool3d(t, kernel, stride, padding, count_include_pad),
+        x,
+        g,
+    )
+    fixed_divisor = kernel[0] * kernel[1] * kernel[2] if count_include_pad else None
+    want_means, want_gradient = _exact_volume(
+        x, g, depths, rows, cols, fixed_divisor, dtype
+    )
+    _same(means, want_means, "means")
+    _same(gradient, want_gradient, "gradient")
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_a_mean_of_a_volume_halfway_between_two_floats_goes_to_the_even_one(dtype):
+    # Two slices a last place apart: each mean of the pair is a halfway point.
+    step = _last_place(dtype)
+    x = np.stack([np.ones((3, 4)), np.full((3, 4), 1 + step)]).astype(dtype)
+    pooled = mt.nn.avg_pool3d(mt.tensor(x.reshape(1, 1, 2, 3, 4)), (2, 1, 1))
+    assert (pooled.numpy() == np.array(1.0, dtype=dtype)).all()
+    x = np.stack([np.full((3, 4), 1 + step), np.full((3, 4), 1 + 2 * step)])
+    pooled = mt.nn.avg_pool3d(
+        mt.tensor(x.astype(dtype).reshape(1, 1, 2, 3, 4)), (2, 1, 1)
+    )
+    assert (pooled.numpy() == np.array(1 + 2 * step, dtype=dtype)).all()
 
 
 @pytest.mark.parametrize("dtype", DTYPES)

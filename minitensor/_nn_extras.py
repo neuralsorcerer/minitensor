@@ -49,6 +49,7 @@ Tensor = _C.Tensor
 _F = _C.functional
 # The engine's kernels, taken before the functions below replace them in `nn`.
 _cross_entropy_kernel = _C.nn.cross_entropy
+_avg_pool3d_kernel = _C.nn.avg_pool3d
 _bce_kernel = _C.nn.binary_cross_entropy
 _bce_logits_kernel = _C.nn.binary_cross_entropy_with_logits
 
@@ -1563,36 +1564,6 @@ def max_pool3d(
     return _as_volume(best, batch, out_depth)
 
 
-def _volume_window_sum(
-    tensor: Tensor,
-    kernel: tuple[int, ...],
-    step: tuple[int, ...],
-    margin: tuple[int, ...],
-) -> Tensor:
-    """The mean of each 3-D window counting the padding as zero.
-
-    `avg_pool2d` with `count_include_pad` divides each tap by the whole 2-D
-    window, so summing the taps and dividing by the depth gives a sum over the
-    3-D window divided by the whole of it -- which is the mean when the padding
-    counts.
-    """
-
-    planes, batch, out_depth = _depth_planes(
-        "avg_pool3d", tensor, kernel, step, margin, (1, 1, 1), 0.0
-    )
-    total = None
-    for plane in planes:
-        pooled = _F.avg_pool2d(
-            plane,
-            (kernel[1], kernel[2]),
-            (step[1], step[2]),
-            (margin[1], margin[2]),
-            True,
-        )
-        total = pooled if total is None else total + pooled
-    return _as_volume(total, batch, out_depth) * (1.0 / kernel[0])
-
-
 def avg_pool3d(
     input: object,
     kernel_size: object,
@@ -1603,21 +1574,14 @@ def avg_pool3d(
     """The mean of each 3-D window. Stride defaults to the window.
 
     With `count_include_pad` the divisor is the whole window; without it, only
-    the positions that are really there. The second is the first divided by the
-    same computation run over a volume of ones -- which gives the fraction of
-    each window that is real -- so the two cannot disagree about which
-    positions those are.
+    the positions that are really there. Each mean is the float nearest the
+    exact sum of its window over that divisor, rounded once, and so is each
+    entry of its gradient.
     """
 
     tensor = _volume_input("avg_pool3d", input)
     kernel, step, margin = _pooling_geometry("avg_pool3d", kernel_size, stride, padding)
-    summed = _volume_window_sum(tensor, kernel, step, margin)
-    if count_include_pad:
-        return summed
-    covered = _volume_window_sum(
-        Tensor.ones_like(tensor, requires_grad=False), kernel, step, margin
-    )
-    return summed / covered
+    return _avg_pool3d_kernel(tensor, kernel, step, margin, bool(count_include_pad))
 
 
 #: What `minitensor/__init__.py` attaches to the `nn` namespace. Listed here,

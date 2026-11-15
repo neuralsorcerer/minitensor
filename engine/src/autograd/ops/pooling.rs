@@ -35,6 +35,13 @@ pub struct MaxPool2dBackward {
     pub indices: Vec<i64>,
 }
 
+/// Spread each output gradient over the 3-D window it averaged.
+pub struct AvgPool3dBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub(crate) window: FixedWindow,
+}
+
 /// Spread each output gradient evenly over the window it averaged.
 pub struct AvgPool2dBackward {
     pub input_id: TensorId,
@@ -222,53 +229,70 @@ pub struct AdaptiveAvgPool2dBackward {
 
 impl GradientFunction for AdaptiveAvgPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let extents = Extents {
-            planes: self.input_shape[0] * self.input_shape[1],
-            in_h: self.input_shape[2],
-            in_w: self.input_shape[3],
-            out_h: self.output_size.0,
-            out_w: self.output_size.1,
-        };
-        let mismatched = || {
-            MinitensorError::internal_error(
-                "adaptive_avg_pool2d backward received a mismatched dtype",
-            )
-        };
-        let data = match grad_output.dtype() {
-            DataType::Float32 => {
-                let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
-                let cells = average::adaptive_gradient(flowing, extents);
-                TensorData::from_vec_f32(cells, grad_output.device())
-            }
-            DataType::Float64 => {
-                let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
-                let cells = average::adaptive_gradient(flowing, extents);
-                TensorData::from_vec_f64(cells, grad_output.device())
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "adaptive_avg_pool2d backward only supports floating point tensors",
-                ));
-            }
-        };
-        let mut gradients = FxHashMap::default();
-        accumulate_grad(
-            &mut gradients,
+        let shape = &self.input_shape;
+        let extents = Extents::planar(shape[0] * shape[1], (shape[2], shape[3]), self.output_size);
+        averaged_gradient(
+            grad_output,
             self.input_id,
-            Tensor::new(
-                Arc::new(data),
-                Shape::new(self.input_shape.clone()),
-                grad_output.dtype(),
-                grad_output.device(),
-                false,
-            ),
-        )?;
-        Ok(gradients)
+            shape,
+            extents,
+            None,
+            "adaptive_avg_pool2d",
+        )
     }
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
     }
+}
+
+/// The gradient an average pool's input of `input_shape` takes from
+/// `grad_output`: of `window`, or of adaptive windows without one.
+fn averaged_gradient(
+    grad_output: &Tensor,
+    input_id: TensorId,
+    input_shape: &[usize],
+    extents: Extents,
+    window: Option<&FixedWindow>,
+    name: &str,
+) -> Result<FxHashMap<TensorId, Tensor>> {
+    let mismatched =
+        || MinitensorError::internal_error(format!("{name} backward received a mismatched dtype"));
+    let data = match grad_output.dtype() {
+        DataType::Float32 => {
+            let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
+            let cells = match window {
+                Some(window) => average::gradient(flowing, extents, window),
+                None => average::adaptive_gradient(flowing, extents),
+            };
+            TensorData::from_vec_f32(cells, grad_output.device())
+        }
+        DataType::Float64 => {
+            let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
+            let cells = match window {
+                Some(window) => average::gradient(flowing, extents, window),
+                None => average::adaptive_gradient(flowing, extents),
+            };
+            TensorData::from_vec_f64(cells, grad_output.device())
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "{name} backward only supports floating point tensors"
+            )));
+        }
+    };
+    let mut gradients = FxHashMap::default();
+    gradients.insert(
+        input_id,
+        Tensor::new(
+            Arc::new(data),
+            Shape::new(input_shape.to_vec()),
+            grad_output.dtype(),
+            grad_output.device(),
+            false,
+        ),
+    );
+    Ok(gradients)
 }
 
 macro_rules! max_pool_backward {
@@ -341,58 +365,56 @@ impl GradientFunction for MaxPool2dBackward {
 
 impl GradientFunction for AvgPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let go_dims = grad_output.shape().dims();
-        let extents = Extents {
-            planes: self.input_shape[0] * self.input_shape[1],
-            in_h: self.input_shape[2],
-            in_w: self.input_shape[3],
-            out_h: go_dims[2],
-            out_w: go_dims[3],
-        };
-        let window = FixedWindow {
-            kernel: self.kernel,
-            stride: self.stride,
-            padding: self.padding,
-            count_include_pad: self.count_include_pad,
-        };
-        let mismatched =
-            || MinitensorError::internal_error("avg_pool2d backward received a mismatched dtype");
-        let data = match grad_output.dtype() {
-            DataType::Float32 => {
-                let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
-                let cells = average::gradient(flowing, extents, &window);
-                TensorData::from_vec_f32(cells, grad_output.device())
-            }
-            DataType::Float64 => {
-                let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
-                let cells = average::gradient(flowing, extents, &window);
-                TensorData::from_vec_f64(cells, grad_output.device())
-            }
-            _ => {
-                return Err(MinitensorError::internal_error(
-                    "avg_pool2d backward expects a floating point gradient",
-                ));
-            }
-        };
-
-        let mut gradients = FxHashMap::default();
-        gradients.insert(
-            self.input_id,
-            Tensor::new(
-                Arc::new(data),
-                Shape::new(self.input_shape.clone()),
-                grad_output.dtype(),
-                grad_output.device(),
-                false,
-            ),
+        let (shape, out) = (&self.input_shape, grad_output.shape().dims());
+        let extents = Extents::planar(shape[0] * shape[1], (shape[2], shape[3]), (out[2], out[3]));
+        let window = FixedWindow::planar(
+            self.kernel,
+            self.stride,
+            self.padding,
+            self.count_include_pad,
         );
-        Ok(gradients)
+        averaged_gradient(
+            grad_output,
+            self.input_id,
+            shape,
+            extents,
+            Some(&window),
+            "avg_pool2d",
+        )
     }
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
     }
 }
+
+impl GradientFunction for AvgPool3dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let (shape, out) = (&self.input_shape, grad_output.shape().dims());
+        let extents = Extents {
+            volumes: shape[0] * shape[1],
+            in_d: shape[2],
+            in_h: shape[3],
+            in_w: shape[4],
+            out_d: out[2],
+            out_h: out[3],
+            out_w: out[4],
+        };
+        averaged_gradient(
+            grad_output,
+            self.input_id,
+            shape,
+            extents,
+            Some(&self.window),
+            "avg_pool3d",
+        )
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient of [`crate::ops::conv::conv_transpose2d`].
 ///
 /// Every piece of this already existed, because a transposed convolution is a

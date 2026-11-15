@@ -12,7 +12,10 @@
 //! a plane are summed side by side, a tap of every window at a time, each
 //! in a two-sum that keeps what its additions round away, and each mean is
 //! divided from that pair where its bound places the quotient; a window it
-//! does not place is read whole and summed exactly.
+//! does not place is read whole and summed exactly. A volume is a stack of
+//! planes and a window of one a stack of a plane's windows, so a slice of
+//! windows takes the taps of each input slice they reach into the same
+//! two-sums.
 //!
 //! The gradient is the same sum turned round: a cell of the input takes,
 //! from each window that read it, that window's gradient over its divisor,
@@ -33,7 +36,7 @@ use crate::ops::conv::in_bounds_range;
 use crate::ops::map::par_out_chunks;
 use std::ops::Range;
 
-/// At least how many elements the planes of one task come to: enough to be
+/// At least how many elements the slices of one task come to: enough to be
 /// worth a task, which makes its scratch once for all of them.
 const BAND: usize = 4096;
 
@@ -43,51 +46,125 @@ const BAND: usize = 4096;
 /// unless it is exactly there.
 const DIRECT: usize = 1 << 24;
 
-/// The planes an average pool reads and the planes it writes.
+/// The volumes an average pool reads and the volumes it writes, each a
+/// stack of planes; a 2-D pool's are a plane deep.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Extents {
-    /// How many planes: the batch times the channels.
-    pub(crate) planes: usize,
+    /// How many volumes: the batch times the channels.
+    pub(crate) volumes: usize,
+    pub(crate) in_d: usize,
     pub(crate) in_h: usize,
     pub(crate) in_w: usize,
+    pub(crate) out_d: usize,
     pub(crate) out_h: usize,
     pub(crate) out_w: usize,
 }
 
 impl Extents {
+    /// `volumes` planes of `input`, pooled to planes of `output`.
+    pub(crate) fn planar(volumes: usize, input: (usize, usize), output: (usize, usize)) -> Self {
+        Self {
+            volumes,
+            in_d: 1,
+            in_h: input.0,
+            in_w: input.1,
+            out_d: 1,
+            out_h: output.0,
+            out_w: output.1,
+        }
+    }
+
+    fn plane_in(&self) -> usize {
+        self.in_h * self.in_w
+    }
+
+    fn plane_out(&self) -> usize {
+        self.out_h * self.out_w
+    }
+
+    fn volume_in(&self) -> usize {
+        self.in_d * self.plane_in()
+    }
+
+    fn volume_out(&self) -> usize {
+        self.out_d * self.plane_out()
+    }
+
+    /// Whether a volume has nothing to read or nothing to write.
+    fn empty(&self) -> bool {
+        self.volume_in() == 0 || self.volume_out() == 0
+    }
+
     /// The fixed window that pools these extents, where the output's divide
     /// the input's: the windows of an adaptive pool are then all of one
     /// size and none overlaps another.
     fn even_window(&self) -> Option<FixedWindow> {
-        let even = self.out_h > 0
-            && self.out_w > 0
-            && self.in_h.is_multiple_of(self.out_h)
-            && self.in_w.is_multiple_of(self.out_w);
-        let size = (self.in_h / self.out_h.max(1), self.in_w / self.out_w.max(1));
-        (even && size.0 > 0 && size.1 > 0).then_some(FixedWindow {
-            kernel: size,
-            stride: size,
-            padding: (0, 0),
-            count_include_pad: true,
-        })
+        let size = |input: usize, output: usize| {
+            (output > 0 && input >= output && input.is_multiple_of(output)).then(|| input / output)
+        };
+        Some(FixedWindow::tiling([
+            size(self.in_d, self.out_d)?,
+            size(self.in_h, self.out_h)?,
+            size(self.in_w, self.out_w)?,
+        ]))
     }
 }
 
-/// A window of one size, stepped across a padded plane.
+/// A window of one size, stepped across a padded volume: its extent, step
+/// and padding along the depth, the height and the width.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FixedWindow {
-    pub(crate) kernel: (usize, usize),
-    pub(crate) stride: (usize, usize),
-    pub(crate) padding: (usize, usize),
+    pub(crate) kernel: [usize; 3],
+    pub(crate) stride: [usize; 3],
+    pub(crate) padding: [usize; 3],
     /// Whether the padding a window lies over counts towards its divisor.
     pub(crate) count_include_pad: bool,
 }
 
-/// Where the windows of a plane lie, and what each divides by.
+impl FixedWindow {
+    /// A window of a plane, a slice deep.
+    pub(crate) fn planar(
+        kernel: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+        count_include_pad: bool,
+    ) -> Self {
+        Self {
+            kernel: [1, kernel.0, kernel.1],
+            stride: [1, stride.0, stride.1],
+            padding: [0, padding.0, padding.1],
+            count_include_pad,
+        }
+    }
+
+    /// Windows as large as their steps and over no padding, which tile the
+    /// volume.
+    fn tiling(size: [usize; 3]) -> Self {
+        Self {
+            kernel: size,
+            stride: size,
+            padding: [0; 3],
+            count_include_pad: true,
+        }
+    }
+
+    /// How many cells the window covers, padding included.
+    fn taps(&self) -> usize {
+        self.kernel.iter().product()
+    }
+
+    /// Whether no two windows read one cell.
+    fn apart(&self) -> bool {
+        (0..3).all(|axis| self.stride[axis] >= self.kernel[axis])
+    }
+}
+
+/// Where the windows of a volume lie, and what each divides by.
 struct Layout {
     extents: Extents,
-    /// The input rows that each row of windows reads, and the input columns
-    /// that each column of them does.
+    /// The input slices that each slice of windows reads, the input rows
+    /// that each row of them does, and the input columns each column does.
+    depths: Vec<Range<usize>>,
     rows: Vec<Range<usize>>,
     cols: Vec<Range<usize>>,
     /// What every window divides by, where that is not the cells it reads.
@@ -98,7 +175,12 @@ impl Layout {
     fn fixed(extents: Extents, window: &FixedWindow) -> Self {
         // A window's taps from `index * stride - padding`, kept to the
         // cells there are.
-        let reach = |out: usize, dim: usize, kernel: usize, stride: usize, padding: usize| {
+        let reach = |axis: usize, out: usize, dim: usize| {
+            let (kernel, stride, padding) = (
+                window.kernel[axis],
+                window.stride[axis],
+                window.padding[axis],
+            );
             (0..out)
                 .map(|index| {
                     let first = index * stride;
@@ -107,17 +189,12 @@ impl Layout {
                 })
                 .collect()
         };
-        let FixedWindow {
-            kernel,
-            stride,
-            padding,
-            count_include_pad,
-        } = *window;
         Self {
             extents,
-            rows: reach(extents.out_h, extents.in_h, kernel.0, stride.0, padding.0),
-            cols: reach(extents.out_w, extents.in_w, kernel.1, stride.1, padding.1),
-            fixed: count_include_pad.then_some(kernel.0 * kernel.1),
+            depths: reach(0, extents.out_d, extents.in_d),
+            rows: reach(1, extents.out_h, extents.in_h),
+            cols: reach(2, extents.out_w, extents.in_w),
+            fixed: window.count_include_pad.then_some(window.taps()),
         }
     }
 
@@ -129,16 +206,25 @@ impl Layout {
         };
         Self {
             extents,
+            depths: reach(extents.out_d, extents.in_d),
             rows: reach(extents.out_h, extents.in_h),
             cols: reach(extents.out_w, extents.in_w),
             fixed: None,
         }
     }
 
-    /// What the window at `(oh, ow)` divides its sum by.
-    fn divisor(&self, oh: usize, ow: usize) -> usize {
+    /// The slice, row and column of the window at `slot` of an output
+    /// volume.
+    fn place(&self, slot: usize) -> (usize, usize, usize) {
+        let (plane, out_w) = (self.extents.plane_out(), self.extents.out_w);
+        (slot / plane, slot % plane / out_w, slot % out_w)
+    }
+
+    /// What the window at `slot` of an output volume divides its sum by.
+    fn divisor(&self, slot: usize) -> usize {
+        let (od, oh, ow) = self.place(slot);
         self.fixed
-            .unwrap_or(self.rows[oh].len() * self.cols[ow].len())
+            .unwrap_or(self.depths[od].len() * self.rows[oh].len() * self.cols[ow].len())
     }
 
     /// The one count every window divides by, where there is one.
@@ -147,50 +233,69 @@ impl Layout {
             return self.fixed;
         }
         let even =
-            |ranges: &[Range<usize>]| ranges.iter().all(|range| range.len() == ranges[0].len());
-        (even(&self.rows) && even(&self.cols)).then(|| self.divisor(0, 0))
+            |ranges: &[Range<usize>]| ranges.windows(2).all(|pair| pair[0].len() == pair[1].len());
+        let even = even(&self.depths) && even(&self.rows) && even(&self.cols);
+        (even && !self.extents.empty()).then(|| self.divisor(0))
     }
 
-    /// Each window that reads cell `slot` of an input plane: its place in
-    /// the output plane, and what it divides by.
-    fn readers(&self, slot: usize, mut each: impl FnMut(usize, usize)) {
-        let (ih, iw) = (slot / self.extents.in_w, slot % self.extents.in_w);
-        for (oh, rows) in self.rows.iter().enumerate() {
-            if !rows.contains(&ih) {
-                continue;
-            }
-            for (ow, cols) in self.cols.iter().enumerate() {
-                if cols.contains(&iw) {
-                    each(oh * self.extents.out_w + ow, self.divisor(oh, ow));
+    /// The slices of an output volume whose windows read slice `id` of the
+    /// input.
+    fn reading(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.depths.len()).filter(move |&od| self.depths[od].contains(&id))
+    }
+
+    /// Each window that reads cell `slot` of slice `id` of an input volume:
+    /// its place in the output volume, and what it divides by.
+    fn readers(&self, id: usize, slot: usize, mut each: impl FnMut(usize, usize)) {
+        let Extents { in_w, out_w, .. } = self.extents;
+        let plane_out = self.extents.plane_out();
+        let (ih, iw) = (slot / in_w, slot % in_w);
+        for od in self.reading(id) {
+            for (oh, rows) in self.rows.iter().enumerate() {
+                if !rows.contains(&ih) {
+                    continue;
+                }
+                for (ow, cols) in self.cols.iter().enumerate() {
+                    if cols.contains(&iw) {
+                        let window = od * plane_out + oh * out_w + ow;
+                        each(window, self.divisor(window));
+                    }
                 }
             }
         }
     }
 
-    /// The mean of the window at `slot` of an output plane, read whole from
-    /// `plane`: where it lies in one piece and divides by its own size it
+    /// The mean of the window at `slot` of an output volume, read whole from
+    /// `volume`: where it lies in one piece and divides by its own size it
     /// is the mean of that piece, and otherwise its values are brought
     /// together, with a zero for each cell of padding its divisor counts.
     fn mean_of<T: Element + Output + Default>(
         &self,
-        plane: &[T],
+        volume: &[T],
         slot: usize,
         window: &mut Vec<T>,
     ) -> T {
-        let Extents { in_w, out_w, .. } = self.extents;
-        let (oh, ow) = (slot / out_w, slot % out_w);
-        let (rows, cols) = (&self.rows[oh], &self.cols[ow]);
-        let inside = rows.len() * cols.len();
+        let (in_w, plane_in) = (self.extents.in_w, self.extents.plane_in());
+        let (od, oh, ow) = self.place(slot);
+        let (depths, rows, cols) = (&self.depths[od], &self.rows[oh], &self.cols[ow]);
+        let inside = depths.len() * rows.len() * cols.len();
         if inside == 0 {
             return T::default();
         }
-        let divisor = self.divisor(oh, ow);
-        if divisor == inside && (cols.len() == in_w || rows.len() == 1) {
-            return mean_to(&plane[rows.start * in_w + cols.start..][..inside]);
+        let divisor = self.divisor(slot);
+        // A run of one row, whole rows of one slice, or whole slices.
+        let flat = (rows.len() == 1 || cols.len() == in_w)
+            && (depths.len() == 1 || rows.len() * cols.len() == plane_in);
+        if divisor == inside && flat {
+            let start = depths.start * plane_in + rows.start * in_w + cols.start;
+            return mean_to(&volume[start..][..inside]);
         }
         window.clear();
-        for ih in rows.clone() {
-            window.extend_from_slice(&plane[ih * in_w..][cols.clone()]);
+        for id in depths.clone() {
+            let slice = &volume[id * plane_in..][..plane_in];
+            for ih in rows.clone() {
+                window.extend_from_slice(&slice[ih * in_w..][cols.clone()]);
+            }
         }
         window.resize(divisor, T::default());
         mean_to(window)
@@ -198,97 +303,66 @@ impl Layout {
 
     /// The mean of every window, each read whole.
     fn means<T: Element + Output + Default>(&self, data: &[T]) -> Vec<T> {
-        let Extents {
-            planes,
-            in_h,
-            in_w,
-            out_h,
-            out_w,
-        } = self.extents;
-        let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-        let mut means = vec![T::default(); planes * plane_out];
-        if plane_in == 0 || plane_out == 0 {
+        let e = self.extents;
+        let mut means = vec![T::default(); e.volumes * e.volume_out()];
+        if e.empty() {
             return means;
         }
-        let pooled = |plane: &[T], means: &mut [T], window: &mut Vec<T>| {
-            for (slot, mean) in means.iter_mut().enumerate() {
-                *mean = self.mean_of(plane, slot, window);
+        let (volume_in, plane_out) = (e.volume_in(), e.plane_out());
+        let pool = |at: usize, means: &mut [T], window: &mut Vec<T>| {
+            let volume = &data[at / e.out_d * volume_in..][..volume_in];
+            let first = at % e.out_d * plane_out;
+            for (k, mean) in means.iter_mut().enumerate() {
+                *mean = self.mean_of(volume, first + k, window);
             }
         };
-        for_each_plane(&mut means, plane_out, data, plane_in, &Vec::new, &pooled);
+        for_each_slice(&mut means, plane_out, &Vec::new, &pool);
         means
     }
 
-    /// The gradient where the windows may divide by counts of their own.
-    ///
-    /// A share `g / d` is taken as `q + r`: `q` the quotient rounded, and
-    /// `r` the quotient of what `q` leaves of `g`, which a fused multiply
-    /// finds exactly. The pair misses the share by the rounding of `r`
-    /// alone, far below the last place of `q`, and that is counted with
-    /// what the two-sum the pairs are added into has dropped.
-    fn shares_of_quotients<T: Element + Output + Default>(&self, flowing: &[T]) -> Vec<T> {
-        let Extents {
-            planes,
-            in_h,
-            in_w,
-            out_h,
-            out_w,
-        } = self.extents;
-        let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-        let mut gradient = vec![T::default(); planes * plane_in];
-        if plane_in == 0 || plane_out == 0 {
-            return gradient;
+    /// The mean of every window of `window`, the windows of a slice summed
+    /// side by side, a tap of every window at a time; a window whose mean
+    /// the bound leaves open is read whole.
+    fn summed_side_by_side<T: Element + Output + Default>(
+        &self,
+        data: &[T],
+        window: &FixedWindow,
+    ) -> Vec<T> {
+        let e = self.extents;
+        let mut means = vec![T::default(); e.volumes * e.volume_out()];
+        if e.empty() {
+            return means;
         }
-        type Scratch = (Tallies, Vec<usize>, Vec<(f64, u64)>);
-        let scratch = || (Tallies::new(plane_in), Vec::new(), Vec::new());
-        let spread = |flowing: &[T], cells: &mut [T], (tallies, open, terms): &mut Scratch| {
+        let (plane_in, volume_in, plane_out) = (e.plane_in(), e.volume_in(), e.plane_out());
+        let step = window.stride[2];
+        let counts: Vec<f64> = (0..e.volume_out())
+            .map(|slot| self.divisor(slot) as f64)
+            .collect();
+        type Scratch<T> = (Tallies, Vec<usize>, Vec<T>);
+        let scratch = || (Tallies::new(plane_out), Vec::new(), Vec::new());
+        let pool = |at: usize, means: &mut [T], (tallies, open, kept): &mut Scratch<T>| {
+            let volume = &data[at / e.out_d * volume_in..][..volume_in];
+            let od = at % e.out_d;
             tallies.clear(0.0);
-            for (window, &share) in flowing.iter().enumerate() {
-                let (rows, cols) = (&self.rows[window / out_w], &self.cols[window % out_w]);
-                let share = share.wide();
-                if share == 0.0 || rows.is_empty() || cols.is_empty() {
-                    continue;
-                }
-                let divisor = self.divisor(window / out_w, window % out_w) as f64;
-                let quotient = share / divisor;
-                let remainder = (-quotient).mul_add(divisor, share);
-                let rest = remainder / divisor;
-                // The rounding of `rest`: half its last place, or half the
-                // least float64 where it is that small; none where the
-                // quotient is the share.
-                let rounding = if remainder == 0.0 {
-                    0.0
-                } else {
-                    rest.abs() * 2f64.powi(-52) + f64::from_bits(1)
-                };
-                for ih in rows.clone() {
-                    tallies.add_pair(
-                        ih * in_w + cols.start,
-                        cols.len(),
-                        (quotient, rest),
-                        rounding,
-                    );
-                }
-            }
-            open.clear();
-            tallies.totals_into(0, cells, open);
-            for &slot in open.iter() {
-                terms.clear();
-                self.readers(slot, |window, divisor| {
-                    terms.push((flowing[window].wide(), divisor as u64));
+            for id in self.depths[od].clone() {
+                let plane = &volume[id * plane_in..][..plane_in];
+                for_each_tap_row(e, window, |place, windows| {
+                    if step == 1 {
+                        tallies.add(windows.start, &plane[place..place + windows.len()]);
+                    } else {
+                        tallies.add_spaced(windows.start, &plane[place..], step, windows.len());
+                    }
                 });
-                cells[slot] = sum_of_quotients(terms);
+            }
+            let first = od * plane_out;
+            open.clear();
+            tallies.means_into(0, &counts[first..first + plane_out], means, open);
+            for &k in open.iter() {
+                means[k] = self.mean_of(volume, first + k, kept);
             }
         };
-        for_each_plane(
-            &mut gradient,
-            plane_in,
-            flowing,
-            plane_out,
-            &scratch,
-            &spread,
-        );
-        gradient
+        for_each_slice(&mut means, plane_out, &scratch, &pool);
+        means
     }
 
     /// The gradient where no cell is read twice: each takes the one share
@@ -299,39 +373,30 @@ impl Layout {
     /// [`DIRECT`] is either a halfway point between two float32s, which
     /// float64 holds, or further from one than float64 rounds.
     fn shares_apart<T: Element + Output + Default>(&self, flowing: &[T]) -> Vec<T> {
-        let Extents {
-            planes,
-            in_h,
-            in_w,
-            out_h,
-            out_w,
-        } = self.extents;
-        let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-        let mut gradient = vec![T::default(); planes * plane_in];
-        if plane_in == 0 || plane_out == 0 {
+        let e = self.extents;
+        let mut gradient = vec![T::default(); e.volumes * e.volume_in()];
+        if e.empty() {
             return gradient;
         }
-        let share_out = |flowing: &[T], cells: &mut [T], _: &mut ()| {
-            for (slot, &share) in flowing.iter().enumerate() {
-                let (oh, ow) = (slot / out_w, slot % out_w);
-                let divisor = self.divisor(oh, ow);
-                if share.wide() == 0.0 || divisor == 0 {
-                    continue;
-                }
-                let share = T::narrow(share.wide() / divisor as f64);
-                for ih in self.rows[oh].clone() {
-                    cells[ih * in_w..][self.cols[ow].clone()].fill(share);
+        let (plane_in, plane_out, volume_out) = (e.plane_in(), e.plane_out(), e.volume_out());
+        let share_out = |at: usize, cells: &mut [T], _: &mut ()| {
+            let flowing = &flowing[at / e.in_d * volume_out..][..volume_out];
+            for od in self.reading(at % e.in_d) {
+                for k in 0..plane_out {
+                    let slot = od * plane_out + k;
+                    let (share, divisor) = (flowing[slot].wide(), self.divisor(slot));
+                    if share == 0.0 || divisor == 0 {
+                        continue;
+                    }
+                    let share = T::narrow(share / divisor as f64);
+                    let (rows, cols) = (&self.rows[k / e.out_w], &self.cols[k % e.out_w]);
+                    for ih in rows.clone() {
+                        cells[ih * e.in_w..][cols.clone()].fill(share);
+                    }
                 }
             }
         };
-        for_each_plane(
-            &mut gradient,
-            plane_in,
-            flowing,
-            plane_out,
-            &|| (),
-            &share_out,
-        );
+        for_each_slice(&mut gradient, plane_in, &|| (), &share_out);
         gradient
     }
 
@@ -344,116 +409,117 @@ impl Layout {
         window: &FixedWindow,
         divisor: usize,
     ) -> Vec<T> {
-        let Extents {
-            planes,
-            in_h,
-            in_w,
-            out_h,
-            out_w,
-        } = self.extents;
-        let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-        let mut gradient = vec![T::default(); planes * plane_in];
-        if plane_in == 0 || plane_out == 0 || divisor == 0 {
+        let e = self.extents;
+        let mut gradient = vec![T::default(); e.volumes * e.volume_in()];
+        if e.empty() || divisor == 0 {
             return gradient;
         }
-        let step = window.stride.1;
+        let (plane_in, plane_out, volume_out) = (e.plane_in(), e.plane_out(), e.volume_out());
+        let step = window.stride[2];
         let counts = vec![divisor as f64; plane_in];
         type Scratch<T> = (Tallies, Vec<usize>, Vec<T>);
         let scratch = || (Tallies::new(plane_in), Vec::new(), Vec::new());
-        let spread = |flowing: &[T], cells: &mut [T], (tallies, open, kept): &mut Scratch<T>| {
+        let spread = |at: usize, cells: &mut [T], (tallies, open, kept): &mut Scratch<T>| {
+            let flowing = &flowing[at / e.in_d * volume_out..][..volume_out];
+            let id = at % e.in_d;
             tallies.clear(0.0);
-            for_each_tap_row(self.extents, window, |place, windows| {
-                if step == 1 {
-                    tallies.add(place, &flowing[windows]);
-                } else {
-                    tallies.add_spread(place, step, &flowing[windows]);
-                }
-            });
+            for od in self.reading(id) {
+                let slice = &flowing[od * plane_out..][..plane_out];
+                for_each_tap_row(e, window, |place, windows| {
+                    if step == 1 {
+                        tallies.add(place, &slice[windows]);
+                    } else {
+                        tallies.add_spread(place, step, &slice[windows]);
+                    }
+                });
+            }
             open.clear();
             tallies.means_into(0, &counts, cells, open);
             for &slot in open.iter() {
                 kept.clear();
-                self.readers(slot, |window, _| kept.push(flowing[window]));
+                self.readers(id, slot, |window, _| kept.push(flowing[window]));
                 cells[slot] = sum_over(kept, divisor as u64);
             }
         };
-        for_each_plane(
-            &mut gradient,
-            plane_in,
-            flowing,
-            plane_out,
-            &scratch,
-            &spread,
-        );
+        for_each_slice(&mut gradient, plane_in, &scratch, &spread);
         gradient
     }
 
-    /// The mean of every window of `window`, the windows summed side by
-    /// side, a tap of every window at a time; a window whose mean the bound
-    /// leaves open is read whole.
-    fn summed_side_by_side<T: Element + Output + Default>(
-        &self,
-        data: &[T],
-        window: &FixedWindow,
-    ) -> Vec<T> {
-        let Extents {
-            planes,
-            in_h,
-            in_w,
-            out_h,
-            out_w,
-        } = self.extents;
-        let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
-        let mut means = vec![T::default(); planes * plane_out];
-        if plane_in == 0 || plane_out == 0 {
-            return means;
+    /// The gradient where the windows may divide by counts of their own.
+    ///
+    /// A share `g / d` is taken as `q + r`: `q` the quotient rounded, and
+    /// `r` the quotient of what `q` leaves of `g`, which a fused multiply
+    /// finds exactly. The pair misses the share by the rounding of `r`
+    /// alone, far below the last place of `q`, and that is counted with
+    /// what the two-sum the pairs are added into has dropped.
+    fn shares_of_quotients<T: Element + Output + Default>(&self, flowing: &[T]) -> Vec<T> {
+        let e = self.extents;
+        let mut gradient = vec![T::default(); e.volumes * e.volume_in()];
+        if e.empty() {
+            return gradient;
         }
-        let step = window.stride.1;
-        let counts: Vec<f64> = (0..plane_out)
-            .map(|slot| self.divisor(slot / out_w, slot % out_w) as f64)
-            .collect();
-        type Scratch<T> = (Tallies, Vec<usize>, Vec<T>);
-        let scratch = || (Tallies::new(plane_out), Vec::new(), Vec::new());
-        let pool = |plane: &[T], means: &mut [T], (tallies, open, kept): &mut Scratch<T>| {
+        let (plane_in, plane_out, volume_out) = (e.plane_in(), e.plane_out(), e.volume_out());
+        type Scratch = (Tallies, Vec<usize>, Vec<(f64, u64)>);
+        let scratch = || (Tallies::new(plane_in), Vec::new(), Vec::new());
+        let spread = |at: usize, cells: &mut [T], (tallies, open, terms): &mut Scratch| {
+            let flowing = &flowing[at / e.in_d * volume_out..][..volume_out];
+            let id = at % e.in_d;
             tallies.clear(0.0);
-            for_each_tap_row(self.extents, window, |place, windows| {
-                if step == 1 {
-                    tallies.add(windows.start, &plane[place..place + windows.len()]);
-                } else {
-                    tallies.add_spaced(windows.start, &plane[place..], step, windows.len());
+            for od in self.reading(id) {
+                for k in 0..plane_out {
+                    let slot = od * plane_out + k;
+                    let share = flowing[slot].wide();
+                    let (rows, cols) = (&self.rows[k / e.out_w], &self.cols[k % e.out_w]);
+                    if share == 0.0 || rows.is_empty() || cols.is_empty() {
+                        continue;
+                    }
+                    let divisor = self.divisor(slot) as f64;
+                    let quotient = share / divisor;
+                    let remainder = (-quotient).mul_add(divisor, share);
+                    let rest = remainder / divisor;
+                    // The rounding of `rest`: half its last place, or half
+                    // the least float64 where it is that small; none where
+                    // the quotient is the share.
+                    let rounding = if remainder == 0.0 {
+                        0.0
+                    } else {
+                        rest.abs() * 2f64.powi(-52) + f64::from_bits(1)
+                    };
+                    for ih in rows.clone() {
+                        let at = ih * e.in_w + cols.start;
+                        tallies.add_pair(at, cols.len(), (quotient, rest), rounding);
+                    }
                 }
-            });
+            }
             open.clear();
-            tallies.means_into(0, &counts, means, open);
+            tallies.totals_into(0, cells, open);
             for &slot in open.iter() {
-                means[slot] = self.mean_of(plane, slot, kept);
+                terms.clear();
+                self.readers(id, slot, |window, divisor| {
+                    terms.push((flowing[window].wide(), divisor as u64));
+                });
+                cells[slot] = sum_of_quotients(terms);
             }
         };
-        for_each_plane(&mut means, plane_out, data, plane_in, &scratch, &pool);
-        means
+        for_each_slice(&mut gradient, plane_in, &scratch, &spread);
+        gradient
     }
 }
 
-/// `work` for each plane of `out` beside its plane of `data`, with scratch
-/// that a task makes once for the planes it takes.
-fn for_each_plane<T, S, Make, Work>(
-    out: &mut [T],
-    out_plane: usize,
-    data: &[T],
-    data_plane: usize,
-    scratch: &Make,
-    work: &Work,
-) where
-    T: Send + Sync,
+/// `work(index, slice, scratch)` for each slice of `out`, `len` long and
+/// numbered from the first, with scratch that a task makes once for the
+/// slices it takes.
+fn for_each_slice<T, S, Make, Work>(out: &mut [T], len: usize, scratch: &Make, work: &Work)
+where
+    T: Send,
     Make: Fn() -> S + Sync,
-    Work: Fn(&[T], &mut [T], &mut S) + Sync,
+    Work: Fn(usize, &mut [T], &mut S) + Sync,
 {
-    let band = (BAND / out_plane).max(1) * out_plane;
-    par_out_chunks(out, band, &|first, planes| {
+    let band = (BAND / len).max(1) * len;
+    par_out_chunks(out, band, &|first, slices| {
         let mut kept = scratch();
-        for (index, plane) in planes.chunks_mut(out_plane).enumerate() {
-            let at = first / out_plane + index;
-            work(&data[at * data_plane..][..data_plane], plane, &mut kept);
+        for (index, slice) in slices.chunks_mut(len).enumerate() {
+            work(first / len + index, slice, &mut kept);
         }
     });
 }
@@ -463,29 +529,30 @@ fn for_each_plane<T, S, Make, Work>(
 ///
 /// Side by side, each tap of each window is an addition into a two-sum kept
 /// in memory, and each run of windows a tap reads costs a little more; read
-/// whole, each window is gathered a row at a time and summed in registers,
-/// at a cost for the window and less for each value. The weights are what
-/// each of these was measured to take, in tenths of a nanosecond.
+/// whole, each window is gathered a run of a row at a time and summed in
+/// registers, at a cost for the window and less for each value. The weights
+/// are what each of these was measured to take, in tenths of a nanosecond.
 fn side_by_side(extents: &Extents, window: &FixedWindow) -> bool {
-    let (rows, cols) = window.kernel;
-    let taps = rows * cols;
+    let [depth, rows, cols] = window.kernel;
+    let taps = window.taps();
     let per_run = 80 / extents.out_w.max(1);
-    let per_tap = if window.stride.1 == 1 { 20 } else { 25 };
+    let per_tap = if window.stride[2] == 1 { 20 } else { 25 };
     let apart = taps * (per_run + per_tap) + 35;
-    // A window in one piece of the plane is read where it lies.
-    let gathered = if rows == 1 || cols >= extents.in_w {
-        0
+    // A window in one piece of the volume is read where it lies.
+    let runs = if rows == 1 || cols >= extents.in_w {
+        depth
     } else {
-        50 * rows
+        depth * rows
     };
+    let gathered = if runs == 1 { 0 } else { 50 * runs };
     let whole = 250 + gathered + 6 * taps;
     apart < whole
 }
 
-/// `row(place, values)` for each run of windows that one tap of the kernel
-/// reads from one row of the input: `place` is where in the input plane the
-/// run's first window reads, and `values` where in the output plane the
-/// run's windows lie.
+/// `row(place, windows)` for each run of windows of a slice that one tap of
+/// the kernel within a plane reads from one row of an input plane: `place`
+/// is where in the input plane the run's first window reads, and `windows`
+/// where in the slice of the output the run's windows lie.
 fn for_each_tap_row(
     extents: Extents,
     window: &FixedWindow,
@@ -504,23 +571,23 @@ fn for_each_tap_row(
         padding,
         ..
     } = *window;
-    for ky in 0..kernel.0 {
-        let (oh_lo, oh_hi) = in_bounds_range(ky, padding.0, in_h, stride.0, out_h);
-        for kx in 0..kernel.1 {
-            let (ow_lo, ow_hi) = in_bounds_range(kx, padding.1, in_w, stride.1, out_w);
+    for ky in 0..kernel[1] {
+        let (oh_lo, oh_hi) = in_bounds_range(ky, padding[1], in_h, stride[1], out_h);
+        for kx in 0..kernel[2] {
+            let (ow_lo, ow_hi) = in_bounds_range(kx, padding[2], in_w, stride[2], out_w);
             if oh_lo >= oh_hi || ow_lo >= ow_hi {
                 continue;
             }
-            let from = ow_lo * stride.1 + kx - padding.1;
+            let from = ow_lo * stride[2] + kx - padding[2];
             for oh in oh_lo..oh_hi {
-                let place = (oh * stride.0 + ky - padding.0) * in_w + from;
+                let place = (oh * stride[1] + ky - padding[1]) * in_w + from;
                 row(place, oh * out_w + ow_lo..oh * out_w + ow_hi);
             }
         }
     }
 }
 
-/// The mean of each window of each plane of `data`: the value nearest the
+/// The mean of each window of each volume of `data`: the value nearest the
 /// exact sum of what the window reads over what it divides by.
 pub(crate) fn pooled<T: Element + Output + Default>(
     data: &[T],
@@ -535,7 +602,7 @@ pub(crate) fn pooled<T: Element + Output + Default>(
     }
 }
 
-/// The mean of each adaptive window of each plane of `data`, as [`pooled`]
+/// The mean of each adaptive window of each volume of `data`, as [`pooled`]
 /// rounds a fixed window's.
 pub(crate) fn pooled_adaptively<T: Element + Output + Default>(
     data: &[T],
@@ -556,8 +623,7 @@ pub(crate) fn gradient<T: Element + Output + Default>(
     window: &FixedWindow,
 ) -> Vec<T> {
     let layout = Layout::fixed(extents, window);
-    let FixedWindow { kernel, stride, .. } = *window;
-    if stride.0 >= kernel.0 && stride.1 >= kernel.1 && kernel.0 * kernel.1 < DIRECT {
+    if window.apart() && window.taps() < DIRECT {
         return layout.shares_apart(flowing);
     }
     match layout.shared_divisor() {
@@ -646,68 +712,88 @@ mod tests {
         a / x * b
     }
 
-    /// The cells of the input that the window at `(oh, ow)` reads, taken tap
-    /// by tap, and what it divides by.
-    fn fixed_reads(
-        extents: Extents,
-        window: &FixedWindow,
-        oh: usize,
-        ow: usize,
-    ) -> (Vec<usize>, i128) {
+    /// The cells of an input volume that the window at `slot` of the output
+    /// reads, taken tap by tap, and what it divides by.
+    fn fixed_reads(extents: Extents, window: &FixedWindow, slot: usize) -> (Vec<usize>, i128) {
+        let plane = extents.out_h * extents.out_w;
+        let at = [
+            slot / plane,
+            slot % plane / extents.out_w,
+            slot % extents.out_w,
+        ];
+        let input = [extents.in_d, extents.in_h, extents.in_w];
         let mut cells = Vec::new();
-        for ky in 0..window.kernel.0 {
-            for kx in 0..window.kernel.1 {
-                let (ih, iw) = (oh * window.stride.0 + ky, ow * window.stride.1 + kx);
-                let inside = (window.padding.0..extents.in_h + window.padding.0).contains(&ih)
-                    && (window.padding.1..extents.in_w + window.padding.1).contains(&iw);
-                if inside {
-                    cells.push((ih - window.padding.0) * extents.in_w + iw - window.padding.1);
+        for kd in 0..window.kernel[0] {
+            for ky in 0..window.kernel[1] {
+                for kx in 0..window.kernel[2] {
+                    let place = [kd, ky, kx];
+                    let read: Option<Vec<usize>> = (0..3)
+                        .map(|axis| {
+                            let padded = at[axis] * window.stride[axis] + place[axis];
+                            let padding = window.padding[axis];
+                            (padding..input[axis] + padding)
+                                .contains(&padded)
+                                .then(|| padded - padding)
+                        })
+                        .collect();
+                    if let Some(read) = read {
+                        cells.push((read[0] * input[1] + read[1]) * input[2] + read[2]);
+                    }
                 }
             }
         }
         let divisor = if window.count_include_pad {
-            window.kernel.0 * window.kernel.1
+            window.taps()
         } else {
             cells.len()
         };
         (cells, divisor as i128)
     }
 
-    fn adaptive_reads(extents: Extents, oh: usize, ow: usize) -> (Vec<usize>, i128) {
+    fn adaptive_reads(extents: Extents, slot: usize) -> (Vec<usize>, i128) {
+        let plane = extents.out_h * extents.out_w;
+        let (od, oh, ow) = (
+            slot / plane,
+            slot % plane / extents.out_w,
+            slot % extents.out_w,
+        );
         let mut cells = Vec::new();
-        for ih in adaptive_window(oh, extents.in_h, extents.out_h) {
-            for iw in adaptive_window(ow, extents.in_w, extents.out_w) {
-                cells.push(ih * extents.in_w + iw);
+        for id in adaptive_window(od, extents.in_d, extents.out_d) {
+            for ih in adaptive_window(oh, extents.in_h, extents.out_h) {
+                for iw in adaptive_window(ow, extents.in_w, extents.out_w) {
+                    cells.push((id * extents.in_h + ih) * extents.in_w + iw);
+                }
             }
         }
         let divisor = cells.len() as i128;
         (cells, divisor)
     }
 
-    /// Checks the means and the gradients of one pool against the exact
-    /// quotients, for an element type of `bits` significant bits.
+    /// Checks the means and the gradients of one pool, the way it chooses
+    /// and every way it can take, against the exact quotients, for an
+    /// element type of `bits` significant bits.
     fn check<T: Element + Output + Default + std::fmt::Debug>(
         extents: Extents,
         window: Option<&FixedWindow>,
         bits: u32,
         seed: u64,
     ) {
-        let (plane_in, plane_out) = (extents.in_h * extents.in_w, extents.out_h * extents.out_w);
-        let reads = |oh: usize, ow: usize| match window {
-            Some(window) => fixed_reads(extents, window, oh, ow),
-            None => adaptive_reads(extents, oh, ow),
+        let (volume_in, volume_out) = (extents.volume_in(), extents.volume_out());
+        let reads = |slot: usize| match window {
+            Some(window) => fixed_reads(extents, window, slot),
+            None => adaptive_reads(extents, slot),
         };
         let label = format!("{extents:?} {window:?} at {bits} bits");
 
-        let input = wholes(seed, extents.planes * plane_in, bits);
+        let input = wholes(seed, extents.volumes * volume_in, bits);
         let data: Vec<T> = floats(&input);
-        let mut exact_means = Vec::with_capacity(extents.planes * plane_out);
-        for plane in 0..extents.planes {
-            for slot in 0..plane_out {
-                let (cells, divisor) = reads(slot / extents.out_w, slot % extents.out_w);
+        let mut exact_means = Vec::with_capacity(extents.volumes * volume_out);
+        for volume in 0..extents.volumes {
+            for slot in 0..volume_out {
+                let (cells, divisor) = reads(slot);
                 let sum: i128 = cells
                     .iter()
-                    .map(|&cell| input[plane * plane_in + cell])
+                    .map(|&cell| input[volume * volume_in + cell])
                     .sum();
                 exact_means.push(if divisor == 0 {
                     0.0
@@ -716,7 +802,6 @@ mod tests {
                 });
             }
         }
-        // The pool as it chooses, and each way it can take.
         let layout = match window {
             Some(window) => Layout::fixed(extents, window),
             None => Layout::adaptive(extents),
@@ -740,16 +825,16 @@ mod tests {
             }
         }
 
-        let flowed = wholes(seed + 1, extents.planes * plane_out, bits);
+        let flowed = wholes(seed + 1, extents.volumes * volume_out, bits);
         let flowing: Vec<T> = floats(&flowed);
-        let mut exact_cells = Vec::with_capacity(extents.planes * plane_in);
-        for plane in 0..extents.planes {
+        let mut exact_cells = Vec::with_capacity(extents.volumes * volume_in);
+        for volume in 0..extents.volumes {
             // Each cell's shares, as numerators over their divisors.
-            let mut shares: Vec<Vec<(i128, i128)>> = vec![Vec::new(); plane_in];
-            for slot in 0..plane_out {
-                let (cells, divisor) = reads(slot / extents.out_w, slot % extents.out_w);
+            let mut shares: Vec<Vec<(i128, i128)>> = vec![Vec::new(); volume_in];
+            for slot in 0..volume_out {
+                let (cells, divisor) = reads(slot);
                 for cell in cells {
-                    shares[cell].push((flowed[plane * plane_out + slot], divisor));
+                    shares[cell].push((flowed[volume * volume_out + slot], divisor));
                 }
             }
             for shares in &shares {
@@ -771,7 +856,7 @@ mod tests {
                 if let Some(divisor) = layout.shared_divisor() {
                     ways.push(("one divisor", layout.shares_over(&flowing, window, divisor)));
                 }
-                if window.stride.0 >= window.kernel.0 && window.stride.1 >= window.kernel.1 {
+                if window.apart() {
                     ways.push(("apart", layout.shares_apart(&flowing)));
                 }
             }
@@ -789,17 +874,33 @@ mod tests {
         }
     }
 
-    fn extents_of(planes: usize, input: (usize, usize), window: &FixedWindow) -> Extents {
-        let out = |dim: usize, kernel: usize, stride: usize, padding: usize| {
-            (dim + 2 * padding - kernel) / stride + 1
+    /// The extents `window` pools `volumes` volumes of `input` to.
+    fn extents_of(volumes: usize, input: [usize; 3], window: &FixedWindow) -> Extents {
+        let out = |axis: usize| {
+            (input[axis] + 2 * window.padding[axis] - window.kernel[axis]) / window.stride[axis] + 1
         };
         Extents {
-            planes,
-            in_h: input.0,
-            in_w: input.1,
-            out_h: out(input.0, window.kernel.0, window.stride.0, window.padding.0),
-            out_w: out(input.1, window.kernel.1, window.stride.1, window.padding.1),
+            volumes,
+            in_d: input[0],
+            in_h: input[1],
+            in_w: input[2],
+            out_d: out(0),
+            out_h: out(1),
+            out_w: out(2),
         }
+    }
+
+    /// A window of a plane, and the extents it pools `volumes` planes of
+    /// `input` to.
+    fn planar(
+        volumes: usize,
+        input: (usize, usize),
+        geometry: ((usize, usize), (usize, usize), (usize, usize)),
+        count_include_pad: bool,
+    ) -> (Extents, FixedWindow) {
+        let (kernel, stride, padding) = geometry;
+        let window = FixedWindow::planar(kernel, stride, padding, count_include_pad);
+        (extents_of(volumes, [1, input.0, input.1], &window), window)
     }
 
     #[test]
@@ -807,21 +908,46 @@ mod tests {
         // Windows side by side and read whole, strided and not, with the
         // padding counted and left out, apart, overlapping and with gaps.
         let cases = [
-            ((9, 20), (3, 3), (1, 1), (1, 1), true),
-            ((9, 20), (3, 3), (1, 1), (1, 1), false),
-            ((8, 21), (2, 3), (2, 2), (1, 1), false),
-            ((8, 21), (2, 3), (2, 2), (1, 1), true),
-            ((7, 7), (3, 3), (2, 2), (1, 1), true),
-            ((7, 7), (3, 3), (2, 2), (1, 1), false),
-            ((6, 6), (2, 2), (2, 2), (0, 0), true),
-            ((12, 32), (2, 2), (2, 2), (0, 0), true),
-            ((5, 16), (5, 4), (1, 1), (2, 2), false),
-            ((4, 12), (2, 2), (3, 1), (0, 1), true),
-            ((2, 2), (4, 4), (1, 1), (2, 2), false),
-            ((2, 9), (4, 4), (1, 1), (2, 2), false),
-            ((3, 40), (3, 1), (1, 1), (0, 0), true),
-            ((6, 9), (6, 9), (1, 1), (0, 0), true),
-            ((1, 30), (1, 7), (1, 3), (0, 3), false),
+            ((9, 20), ((3, 3), (1, 1), (1, 1)), true),
+            ((9, 20), ((3, 3), (1, 1), (1, 1)), false),
+            ((8, 21), ((2, 3), (2, 2), (1, 1)), false),
+            ((8, 21), ((2, 3), (2, 2), (1, 1)), true),
+            ((7, 7), ((3, 3), (2, 2), (1, 1)), true),
+            ((7, 7), ((3, 3), (2, 2), (1, 1)), false),
+            ((6, 6), ((2, 2), (2, 2), (0, 0)), true),
+            ((12, 32), ((2, 2), (2, 2), (0, 0)), true),
+            ((5, 16), ((5, 4), (1, 1), (2, 2)), false),
+            ((4, 12), ((2, 2), (3, 1), (0, 1)), true),
+            ((2, 2), ((4, 4), (1, 1), (2, 2)), false),
+            ((2, 9), ((4, 4), (1, 1), (2, 2)), false),
+            ((3, 40), ((3, 1), (1, 1), (0, 0)), true),
+            ((6, 9), ((6, 9), (1, 1), (0, 0)), true),
+            ((1, 30), ((1, 7), (1, 3), (0, 3)), false),
+        ];
+        for (index, &(input, geometry, count_include_pad)) in cases.iter().enumerate() {
+            let (extents, window) = planar(3, input, geometry, count_include_pad);
+            check::<f32>(extents, Some(&window), 24, 100 + index as u64);
+            check::<f64>(extents, Some(&window), 53, 200 + index as u64);
+        }
+    }
+
+    #[test]
+    fn windows_of_volumes_round_once() {
+        // Overlapping along the depth and apart along the width, apart
+        // everywhere, overlapping everywhere with padding counted and not,
+        // windows only along the depth, and a wide volume summed side by
+        // side.
+        let cases = [
+            ([4, 5, 6], [2, 3, 3], [1, 1, 2], [1, 1, 1], true),
+            ([4, 5, 6], [2, 3, 3], [1, 1, 2], [1, 1, 1], false),
+            ([5, 4, 7], [3, 2, 2], [2, 1, 1], [1, 0, 1], false),
+            ([4, 4, 4], [2, 2, 2], [2, 2, 2], [0, 0, 0], true),
+            ([2, 3, 12], [2, 1, 3], [1, 1, 3], [0, 0, 0], true),
+            ([3, 5, 5], [3, 3, 3], [1, 2, 2], [1, 1, 1], false),
+            ([3, 5, 5], [3, 3, 3], [1, 2, 2], [1, 1, 1], true),
+            ([7, 3, 3], [5, 1, 1], [1, 1, 1], [0, 0, 0], true),
+            ([7, 3, 3], [5, 1, 1], [1, 1, 1], [2, 0, 0], false),
+            ([3, 4, 40], [2, 2, 2], [1, 1, 1], [1, 1, 1], false),
         ];
         for (index, &(input, kernel, stride, padding, count_include_pad)) in
             cases.iter().enumerate()
@@ -832,9 +958,9 @@ mod tests {
                 padding,
                 count_include_pad,
             };
-            let extents = extents_of(3, input, &window);
-            check::<f32>(extents, Some(&window), 24, 100 + index as u64);
-            check::<f64>(extents, Some(&window), 53, 200 + index as u64);
+            let extents = extents_of(2, input, &window);
+            check::<f32>(extents, Some(&window), 24, 600 + index as u64);
+            check::<f64>(extents, Some(&window), 53, 700 + index as u64);
         }
     }
 
@@ -853,13 +979,7 @@ mod tests {
             ((16, 16), (8, 8)),
         ];
         for (index, &(input, output)) in cases.iter().enumerate() {
-            let extents = Extents {
-                planes: 3,
-                in_h: input.0,
-                in_w: input.1,
-                out_h: output.0,
-                out_w: output.1,
-            };
+            let extents = Extents::planar(3, input, output);
             check::<f32>(extents, None, 24, 300 + index as u64);
             check::<f64>(extents, None, 53, 400 + index as u64);
         }
@@ -868,36 +988,24 @@ mod tests {
     #[test]
     fn many_small_planes_are_each_their_own() {
         // More planes than one task takes.
+        let (extents, window) = planar(700, (3, 9), ((3, 3), (1, 1), (1, 1)), false);
+        check::<f32>(extents, Some(&window), 24, 500);
+        check::<f64>(Extents::planar(900, (3, 5), (2, 2)), None, 53, 501);
         let window = FixedWindow {
-            kernel: (3, 3),
-            stride: (1, 1),
-            padding: (1, 1),
+            kernel: [2, 2, 2],
+            stride: [1, 1, 1],
+            padding: [1, 0, 1],
             count_include_pad: false,
         };
-        let extents = extents_of(700, (3, 9), &window);
-        check::<f32>(extents, Some(&window), 24, 500);
-        let adaptive = Extents {
-            planes: 900,
-            in_h: 3,
-            in_w: 5,
-            out_h: 2,
-            out_w: 2,
-        };
-        check::<f64>(adaptive, None, 53, 501);
+        check::<f32>(extents_of(300, [3, 2, 3], &window), Some(&window), 24, 502);
     }
 
     #[test]
     fn halfway_means_and_shares_go_to_the_even_value() {
         let step = f32::EPSILON;
         // Two values a last place apart: their mean is halfway between them.
-        let window = FixedWindow {
-            kernel: (1, 2),
-            stride: (1, 1),
-            padding: (0, 0),
-            count_include_pad: true,
-        };
+        let (extents, window) = planar(1, (1, 10), ((1, 2), (1, 1), (0, 0)), true);
         let data: Vec<f32> = (0..10).map(|i| 1.0 + step * i as f32).collect();
-        let extents = extents_of(1, (1, 10), &window);
         let means = pooled(&data, extents, &window);
         for (i, mean) in means.iter().enumerate() {
             // Between `1 + i` and `1 + (i + 1)` last places: the even one.
@@ -914,13 +1022,7 @@ mod tests {
 
     #[test]
     fn zeros_are_positive_and_special_values_stay_where_they_are_read() {
-        let window = FixedWindow {
-            kernel: (2, 2),
-            stride: (1, 1),
-            padding: (1, 1),
-            count_include_pad: false,
-        };
-        let extents = extents_of(1, (3, 9), &window);
+        let (extents, window) = planar(1, (3, 9), ((2, 2), (1, 1), (1, 1)), false);
         let positive = 0.0f64.to_bits();
 
         // Negative zeros, and values that cancel, make positive zeros.
@@ -953,13 +1055,7 @@ mod tests {
             assert_eq!(cells[4].to_bits(), positive);
             assert_eq!(cells[3], 0.75);
         }
-        let adaptive = Extents {
-            planes: 1,
-            in_h: 3,
-            in_w: 9,
-            out_h: 2,
-            out_w: 4,
-        };
+        let adaptive = Extents::planar(1, (3, 9), (2, 4));
         let means = pooled_adaptively(&data, adaptive);
         assert!(
             means
@@ -977,8 +1073,7 @@ mod tests {
         data[9 + 8] = f32::INFINITY;
         let means = pooled(&data, extents, &window);
         for (slot, mean) in means.iter().enumerate() {
-            let (oh, ow) = (slot / extents.out_w, slot % extents.out_w);
-            let (cells, _) = fixed_reads(extents, &window, oh, ow);
+            let (cells, _) = fixed_reads(extents, &window, slot);
             let reads = |cell: usize| cells.contains(&cell);
             if reads(16) && reads(17) {
                 assert!(mean.is_nan(), "mean {slot}");
@@ -1011,13 +1106,7 @@ mod tests {
     fn shares_past_the_float_range_still_round_once() {
         // Gradients whose sum overflows before it is divided, and ones so
         // small that their quotients fall below the least float64.
-        let window = FixedWindow {
-            kernel: (1, 3),
-            stride: (1, 1),
-            padding: (0, 1),
-            count_include_pad: true,
-        };
-        let extents = extents_of(1, (1, 12), &window);
+        let (extents, window) = planar(1, (1, 12), ((1, 3), (1, 1), (0, 1)), true);
         let cells = gradient(&[f64::MAX; 12], extents, &window);
         assert_eq!(cells[5], f64::MAX);
         assert_eq!(cells[0], f64::MAX / 3.0 * 2.0);
@@ -1044,13 +1133,7 @@ mod tests {
         // negative zero, which is the nearest float of its sign, whichever
         // way it is taken.
         let negative_zero = (-0.0f64).to_bits();
-        let apart = FixedWindow {
-            kernel: (1, 3),
-            stride: (1, 3),
-            padding: (0, 0),
-            count_include_pad: true,
-        };
-        let extents = extents_of(1, (1, 12), &apart);
+        let (extents, apart) = planar(1, (1, 12), ((1, 3), (1, 3), (0, 0)), true);
         let layout = Layout::fixed(extents, &apart);
         let flowing = [-least; 4];
         for cells in [
