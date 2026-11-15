@@ -408,3 +408,12 @@ def test_the_two_by_two_window_matches_a_reference(dtype, shape):
     scattered = np.zeros(flat.shape, dtype=dtype)
     np.put_along_axis(scattered, expected.reshape(shape[0], shape[1], -1), 1.0, axis=2)
     np.testing.assert_array_equal(tracked.grad.numpy(), scattered.reshape(shape))
+
+
+@pytest.mark.parametrize("shape", [(0, 1, 4, 4), (2, 0, 4, 4)])
+def test_unpooling_nothing_gives_nothing(shape):
+    # No positions to check the range of, where taking their minimum raised.
+    pooled, indices = F.max_pool2d(_t(np.zeros(shape)), 2, return_indices=True)
+    assert tuple(F.max_unpool2d(pooled, indices, 2).shape) == shape
+    pooled, indices = F.max_pool1d(_t(np.zeros(shape[:3])), 2, return_indices=True)
+    assert tuple(F.max_unpool1d(pooled, indices, 2).shape) == shape[:3]

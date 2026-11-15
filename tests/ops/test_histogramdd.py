@@ -215,3 +215,13 @@ def test_an_integer_sample_is_widened():
 def test_a_boolean_sample_is_refused():
     with pytest.raises(ValueError, match="floating point"):
         mt.histogramdd(mt.Tensor(np.zeros((4, 2), dtype=bool), dtype="bool"), 3)
+
+
+def test_an_empty_sample_counts_nothing_over_the_unit_interval():
+    # It has no extent to take a range from; its edges cover the unit
+    # interval, as `histogram`'s do, where taking its minimum raised.
+    counts, edges = mt.histogramdd(_t(np.zeros((0, 2))), 4)
+    assert counts.numpy().shape == (4, 4) and not counts.numpy().any()
+    flat_counts, flat_edges = mt.histogram(_t(np.zeros(0)), 4)
+    for boundary in edges:
+        np.testing.assert_array_equal(boundary.numpy(), flat_edges.numpy())

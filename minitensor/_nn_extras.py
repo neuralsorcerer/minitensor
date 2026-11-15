@@ -500,12 +500,14 @@ def _unpool(
     plane = _element_count(spatial)
     pooled = _element_count(sizes[2:])
 
-    low, high = int(positions.min().item()), int(positions.max().item())
-    if planes and pooled and (low < 0 or high >= plane):
-        raise IndexError(
-            f"{op} was given positions in [{low}, {high}] for a plane of "
-            f"{spatial}, which holds {plane}"
-        )
+    # An empty input has no positions to check, nor a smallest or largest.
+    if planes and pooled:
+        low, high = int(positions.min().item()), int(positions.max().item())
+        if low < 0 or high >= plane:
+            raise IndexError(
+                f"{op} was given positions in [{low}, {high}] for a plane of "
+                f"{spatial}, which holds {plane}"
+            )
 
     shifts = _index_tensor((_np.arange(planes) * plane).reshape(planes, 1), positions)
     flat = (positions.reshape(planes, pooled).astype("int64") + shifts).reshape(

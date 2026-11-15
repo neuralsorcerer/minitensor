@@ -375,7 +375,11 @@ def _histogram_edges(column: Tensor, specification: object, bounds: object) -> T
     count = _operator.index(specification)
     if count < 1:
         raise ValueError(f"histogramdd requires at least one bin, got {count}")
-    if bounds is None:
+    if bounds is None and int(column.shape[0]) == 0:
+        # An empty sample spans nothing; its edges cover the unit interval,
+        # as `histogram`'s do.
+        low, high = 0.0, 1.0
+    elif bounds is None:
         low, high = float(column.min().item()), float(column.max().item())
     else:
         low, high = bounds
