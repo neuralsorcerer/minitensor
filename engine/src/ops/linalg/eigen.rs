@@ -347,7 +347,6 @@ macro_rules! eigh_kernel {
     };
 }
 
-eigh_kernel!(eigh_f32, f32, as_f32_slice);
 eigh_kernel!(eigh_f64, f64, as_f64_slice);
 
 /// Shared body for the two public entry points.
@@ -376,13 +375,7 @@ fn decompose(tensor: &Tensor, want_vectors: bool, op: &str) -> Result<(Tensor, T
         )
     } else {
         match tensor.dtype() {
-            DataType::Float32 => {
-                let (values, vectors) = eigh_f32(&contiguous, batch, n, want_vectors)?;
-                (
-                    TensorData::from_vec_f32(values, tensor.device()),
-                    TensorData::from_vec_f32(vectors, tensor.device()),
-                )
-            }
+            DataType::Float32 => return Err(crate::ops::linalg::carried_wide(op)),
             _ => {
                 let (values, vectors) = eigh_f64(&contiguous, batch, n, want_vectors)?;
                 (

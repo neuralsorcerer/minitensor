@@ -930,7 +930,7 @@ impl GradientFunction for CholeskyBackward {
         }
 
         match grad.dtype() {
-            DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut),
+            DataType::Float32 => return Err(crate::ops::linalg::carried_wide("cholesky backward")),
             DataType::Float64 => run!(as_f64_slice, as_f64_slice_mut),
             _ => {
                 return Err(MinitensorError::invalid_operation(

@@ -459,7 +459,7 @@ pub(crate) fn packed_lu(tensor: &Tensor, op: &str) -> Result<Packed> {
     }
 
     match tensor.dtype() {
-        DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide(op)),
         _ => run!(as_f64_slice, as_f64_slice_mut),
     }
 
@@ -598,7 +598,7 @@ pub fn lu(tensor: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
     }
 
     match dtype {
-        DataType::Float32 => split!(as_f32_slice, as_f32_slice_mut, 1.0f32),
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide("lu")),
         _ => split!(as_f64_slice, as_f64_slice_mut, 1.0f64),
     }
 
@@ -810,7 +810,7 @@ pub fn solve_triangular(
         }};
     }
     match a.dtype() {
-        DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide("solve_triangular")),
         _ => run!(as_f64_slice, as_f64_slice_mut),
     }
 
@@ -985,7 +985,7 @@ pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor>
         }};
     }
     match factors.dtype() {
-        DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide("lu_solve")),
         _ => run!(as_f64_slice, as_f64_slice_mut),
     }
 

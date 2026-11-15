@@ -439,7 +439,7 @@ pub fn cholesky(tensor: &Tensor, upper: bool) -> Result<Tensor> {
     }
 
     match tensor.dtype() {
-        DataType::Float32 => factor!(as_f32_slice, as_f32_slice_mut),
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide("cholesky")),
         _ => factor!(as_f64_slice, as_f64_slice_mut),
     }
 

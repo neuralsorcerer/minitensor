@@ -1732,7 +1732,7 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     match lhs.dtype() {
         _ if small => crate::ops::linalg::small_solutions(lhs, rhs, &mut output_data, n, rhs_cols)?,
-        DataType::Float32 => solve_f32(lhs, rhs, &mut output_data, rhs_cols)?,
+        DataType::Float32 => return Err(crate::ops::linalg::carried_wide("solve")),
         DataType::Float64 => solve_f64(lhs, rhs, &mut output_data, rhs_cols)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
@@ -1761,41 +1761,6 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     Ok(output)
-}
-
-fn solve_f32(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usize) -> Result<()> {
-    use std::borrow::Cow;
-
-    let lhs_view = if lhs.is_contiguous() && lhs.data().is_contiguous() {
-        Cow::Borrowed(lhs)
-    } else {
-        Cow::Owned(lhs.contiguous()?)
-    };
-    let rhs_view = if rhs.is_contiguous() && rhs.data().is_contiguous() {
-        Cow::Borrowed(rhs)
-    } else {
-        Cow::Owned(rhs.contiguous()?)
-    };
-
-    let lhs_slice = lhs_view
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 data for lhs"))?;
-    let rhs_slice = rhs_view
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 data for rhs"))?;
-    let out_slice = output
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 output slice"))?;
-
-    solve_batched(
-        lhs.shape().dims(),
-        rhs_cols,
-        lhs_slice,
-        rhs_slice,
-        out_slice,
-    )
 }
 
 fn solve_f64(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usize) -> Result<()> {

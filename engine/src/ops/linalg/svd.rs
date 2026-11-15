@@ -675,7 +675,6 @@ macro_rules! svd_kernel {
     };
 }
 
-svd_kernel!(svd_f32, f32, as_f32_slice, as_f32_slice_mut);
 svd_kernel!(svd_f64, f64, as_f64_slice, as_f64_slice_mut);
 
 /// Write a stack of identity matrices into `data`.
@@ -754,17 +753,7 @@ fn decompose(
         fill_identity(&mut vt_data, tensor.dtype(), batch, vt_rows, n)?;
     } else if batch > 0 {
         match tensor.dtype() {
-            DataType::Float32 => svd_f32(
-                &contiguous,
-                &mut u_data,
-                &mut s_data,
-                &mut vt_data,
-                batch,
-                m,
-                n,
-                full,
-                want_vectors,
-            )?,
+            DataType::Float32 => return Err(crate::ops::linalg::carried_wide(op)),
             _ => svd_f64(
                 &contiguous,
                 &mut u_data,

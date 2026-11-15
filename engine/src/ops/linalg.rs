@@ -91,6 +91,15 @@ impl<A: Narrow, B: Narrow, C: Narrow> Narrow for (A, B, C) {
     }
 }
 
+/// The error for a float32 matrix reaching a kernel past which every
+/// float32 factorisation is carried in float64; see [`Narrow`]. Only float64
+/// kernels are built, so one arriving here is a caller's slip, not an input.
+pub(crate) fn carried_wide(op: &str) -> crate::error::MinitensorError {
+    crate::error::MinitensorError::internal_error(format!(
+        "{op}: a float32 matrix reached a kernel float32 is carried past in float64"
+    ))
+}
+
 /// `tensor` in float64, for a float32 factorisation to be carried there; see
 /// [`Narrow`].
 pub(crate) fn widened(tensor: &Tensor) -> Result<Tensor> {

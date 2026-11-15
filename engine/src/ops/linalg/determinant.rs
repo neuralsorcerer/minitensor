@@ -121,39 +121,27 @@ macro_rules! determinant_kernel {
     };
 }
 
-determinant_kernel!(determinants_f32, f32, as_f32_slice);
 determinant_kernel!(determinants_f64, f64, as_f64_slice);
 
-/// The three answers one factorisation produces, kept together in the dtype
-/// they were computed in.
+/// The three answers one factorisation produces, kept together.
 ///
 /// `det` and `slogdet` are the same walk over the same pivots; splitting them
 /// into separate passes would factorise each matrix twice and, worse, leave
 /// room for the two to disagree about whether a matrix is singular.
-enum Determinants {
-    F32 {
-        det: Vec<f32>,
-        sign: Vec<f32>,
-        log_abs: Vec<f32>,
-    },
-    F64 {
-        det: Vec<f64>,
-        sign: Vec<f64>,
-        log_abs: Vec<f64>,
-    },
+struct Determinants {
+    det: Vec<f64>,
+    sign: Vec<f64>,
+    log_abs: Vec<f64>,
 }
 
+/// A float64 stack's determinants; a float32 one is carried in float64 before
+/// it reaches here.
 fn factorise(tensor: &Tensor, batch: usize, n: usize) -> Result<Determinants> {
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let (det, sign, log_abs) = determinants_f32(tensor, batch, n)?;
-            Ok(Determinants::F32 { det, sign, log_abs })
-        }
-        _ => {
-            let (det, sign, log_abs) = determinants_f64(tensor, batch, n)?;
-            Ok(Determinants::F64 { det, sign, log_abs })
-        }
+    if tensor.dtype() == DataType::Float32 {
+        return Err(crate::ops::linalg::carried_wide("det"));
     }
+    let (det, sign, log_abs) = determinants_f64(tensor, batch, n)?;
+    Ok(Determinants { det, sign, log_abs })
 }
 
 /// Wrap one batch-shaped result vector as a tensor.
@@ -199,16 +187,13 @@ pub fn det(tensor: &Tensor) -> Result<Tensor> {
     }
     let batch = batch_dims.iter().product::<usize>();
 
-    let (f32_out, f64_out) = match factorise(tensor, batch, n)? {
-        Determinants::F32 { det, .. } => (det, Vec::new()),
-        Determinants::F64 { det, .. } => (Vec::new(), det),
-    };
+    let Determinants { det, .. } = factorise(tensor, batch, n)?;
     let output = batch_tensor(
         &batch_dims,
         tensor.dtype(),
         tensor.device(),
-        f32_out,
-        f64_out,
+        Vec::new(),
+        det,
         tensor.requires_grad(),
     );
     with_det_gradient(tensor, output)
@@ -442,10 +427,8 @@ pub fn slogdet(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
             let (sign, log) = exact.iter().flatten().copied().unzip();
             (Vec::new(), sign, Vec::new(), log)
         } else {
-            match factorise(tensor, batch, n)? {
-                Determinants::F32 { sign, log_abs, .. } => (sign, Vec::new(), log_abs, Vec::new()),
-                Determinants::F64 { sign, log_abs, .. } => (Vec::new(), sign, Vec::new(), log_abs),
-            }
+            let Determinants { sign, log_abs, .. } = factorise(tensor, batch, n)?;
+            (Vec::new(), sign, Vec::new(), log_abs)
         };
     if sign64.len() == exact.len() {
         for ((sign, log), exact) in sign64.iter_mut().zip(log64.iter_mut()).zip(&exact) {
