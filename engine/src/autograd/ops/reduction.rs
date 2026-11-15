@@ -914,40 +914,33 @@ fn norm_grad_kernel(
             })?;
             let p_ty = p as $ty;
 
+            // Each element on its own, in parallel above the map threshold.
             let values: Vec<$ty> = match mask {
                 Some(mask) => {
                     let m = mask.data().$slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get slice from norm mask")
                     })?;
                     // d is the tie count here, never zero where m is 1.
-                    (0..x.len())
-                        .map(|i| {
-                            if m[i] == 0.0 {
-                                0.0
-                            } else {
-                                g[i] * sign_of(x[i]) / d[i]
-                            }
-                        })
-                        .collect()
-                }
-                None => (0..x.len())
-                    .map(|i| {
-                        let n = d[i];
-                        if n == 0.0 {
-                            // Every entry of this slice is zero: the norm has a
-                            // corner here, so take the zero subgradient rather
-                            // than dividing 0 by 0.
-                            0.0
-                        } else if p == 1.0 {
-                            g[i] * sign_of(x[i])
-                        } else if p == 2.0 {
-                            g[i] * x[i] / n
-                        } else {
-                            let ratio = x[i].abs() / n;
-                            g[i] * sign_of(x[i]) * ratio.powf(p_ty - 1.0)
-                        }
+                    let shares = crate::ops::map::binary_map(g, d, |g: $ty, d: $ty| g / d);
+                    crate::ops::map::ternary_map(&shares, x, m, |share: $ty, x: $ty, m: $ty| {
+                        if m == 0.0 { 0.0 } else { share * sign_of(x) }
                     })
-                    .collect(),
+                }
+                None => crate::ops::map::ternary_map(x, d, g, move |x: $ty, n: $ty, g: $ty| {
+                    if n == 0.0 {
+                        // Every entry of this slice is zero: the norm has a
+                        // corner here, so take the zero subgradient rather
+                        // than dividing 0 by 0.
+                        0.0
+                    } else if p == 1.0 {
+                        g * sign_of(x)
+                    } else if p == 2.0 {
+                        g * x / n
+                    } else {
+                        let ratio = x.abs() / n;
+                        g * sign_of(x) * ratio.powf(p_ty - 1.0)
+                    }
+                }),
             };
             TensorData::from_vec::<$ty>(values, $dtype, input.device())
         }};

@@ -992,6 +992,54 @@ def _lp_pool(
         window if stride is None else _sliding_argument(stride, "stride", rank, 1, op)
     )
 
+    # Each output is the `p`-norm of its window, taken by `norm` over the
+    # window's values set side by side: for `p` of 1 and 2 the float nearest
+    # the exact norm, rounded once. It was `|x| ** p` pooled to a mean, the
+    # mean times the window's size and its `p`-th root, a rounding at each;
+    # at a window of zeros the root's infinite slope times the zero power's
+    # gave a NaN gradient, where the norm's is zero; and `p = inf` read the
+    # zeroth root of a sum of infinities, where the norm is the largest value.
+    # An integer tensor is read in the float its width gives, as it was; a
+    # shape the pooling refuses goes to it, which says why.
+    dims = tensor.ndim()
+    spatial = [int(size) for size in tensor.shape][2:] if dims == rank + 2 else []
+    if (
+        dims == rank + 2
+        and tensor.dtype != "bool"
+        and all(size >= reach for size, reach in zip(spatial, window))
+    ):
+        if tensor.dtype in ("int32", "int64"):
+            tensor = tensor.astype("float32" if tensor.dtype == "int32" else "float64")
+        batch, channels = [int(size) for size in tensor.shape][:2]
+        out = [
+            (size - reach) // move + 1
+            for size, reach, move in zip(spatial, window, step)
+        ]
+        if list(step) == list(window):
+            # Windows that tile the input, the default, are its blocks: what
+            # the last window leaves over is cut away, each axis is split into
+            # windows and the place in one, and the places are moved ahead of
+            # the windows, so that each window's values lie down one column.
+            # Nothing is gathered, and the gradient comes back through the
+            # same moves rather than a scatter.
+            tiled = tensor
+            for axis, (count, reach) in enumerate(zip(out, window)):
+                if count * reach != spatial[axis]:
+                    tiled = _F.narrow(tiled, 2 + axis, 0, count * reach)
+            split = [size for pair in zip(out, window) for size in pair]
+            order = [0, 1] + [3 + 2 * axis for axis in range(rank)]
+            order += [2 + 2 * axis for axis in range(rank)]
+            blocks = (
+                tiled.reshape(batch, channels, *split)
+                .permute(*order)
+                .reshape(batch, channels, _math.prod(window), _math.prod(out))
+            )
+            return blocks.norm(p=power, dim=2).reshape(batch, channels, *out)
+        blocks = unfold(tensor, window, stride=step).reshape(
+            batch, channels, _math.prod(window), _math.prod(out)
+        )
+        return blocks.norm(p=power, dim=2).reshape(batch, channels, *out)
+
     # `abs` before the power, which is what makes this the L_p norm of the
     # window at every `norm_type` rather than only at even ones. Raising `x`
     # itself to the power would give an odd norm over negative values the root
