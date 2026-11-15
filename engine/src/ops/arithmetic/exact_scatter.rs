@@ -19,7 +19,7 @@
 //! A zero keeps the sign additions give it: negative only when every value
 //! added, the destination's own among them, is a negative zero.
 
-use super::{BinTotal, Carried, Element, LANES, Output, mean_to, sum_to, two_sum};
+use super::{BinTotal, Carried, Element, LANES, Output, Tallies, mean_to, sum_to};
 use crate::ops::map::par_out_chunks;
 
 /// Destinations a block keeps totals for at once, 32 bytes each: a block's
@@ -296,61 +296,6 @@ fn settle_block<T: Element + Output>(
 /// this, a row is too short for adding it a column beside a column to pay.
 const NARROW: usize = 16;
 
-/// The columns of a destination row several rows reach: each one's sum so
-/// far, a two-sum's, with the errors of its additions and their magnitudes.
-struct Columns {
-    sums: Vec<f64>,
-    errors: Vec<f64>,
-    magnitudes: Vec<f64>,
-}
-
-impl Columns {
-    fn new(inner: usize) -> Self {
-        Self {
-            sums: vec![0.0; inner],
-            errors: vec![0.0; inner],
-            magnitudes: vec![0.0; inner],
-        }
-    }
-
-    /// No rows yet: sums of negative zero, as [`BinTotal::EMPTY`] is.
-    fn clear(&mut self) {
-        self.sums.fill(-0.0);
-        self.errors.fill(0.0);
-        self.magnitudes.fill(0.0);
-    }
-
-    /// `row` added into the columns.
-    fn add<T: Element>(&mut self, row: &[T]) {
-        #[cfg(target_arch = "x86_64")]
-        if crate::ops::simd::simd_capabilities().avx2_fma {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { self.add_avx2(row) };
-        }
-        self.add_body(row)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    fn add_avx2<T: Element>(&mut self, row: &[T]) {
-        self.add_body(row)
-    }
-
-    #[inline(always)]
-    fn add_body<T: Element>(&mut self, row: &[T]) {
-        let len = row.len();
-        let sums = &mut self.sums[..len];
-        let errors = &mut self.errors[..len];
-        let magnitudes = &mut self.magnitudes[..len];
-        for j in 0..len {
-            let (total, rounding) = two_sum(sums[j], row[j].wide());
-            sums[j] = total;
-            errors[j] += rounding;
-            magnitudes[j] += rounding.abs();
-        }
-    }
-}
-
 /// Add whole rows into rows: `out` is runs of `rows` rows of `inner` values,
 /// and source row `i` of a run -- every run has `row_of.len()` of them, laid
 /// out after one another in `sources` -- adds to the run's row `row_of[i]`.
@@ -358,9 +303,9 @@ impl Columns {
 /// and what arrives.
 ///
 /// A row one source reaches takes one addition a value. A row several reach
-/// has them added a row at a time into a two-sum for each column, the
-/// columns side by side, and each column settled as a destination of
-/// [`add_scattered`] is.
+/// has them added a row at a time into [`Tallies`], a two-sum for each
+/// column, and each column settled as a destination of [`add_scattered`]
+/// is.
 pub(crate) fn add_scattered_rows<T>(
     out: &mut [T],
     sources: &[T],
@@ -406,7 +351,7 @@ pub(crate) fn add_scattered_rows<T>(
     let (starts, order) = (&starts, &order);
     let rows_per_task = (TASK / inner).max(1);
     par_out_chunks(out, inner * rows_per_task, &|start, part| {
-        let mut columns = Columns::new(inner);
+        let mut columns = Tallies::new(inner);
         for (offset, place) in part.chunks_mut(inner).enumerate() {
             let index = start / inner + offset;
             let (o, row) = (index / rows, index % rows);
@@ -419,20 +364,13 @@ pub(crate) fn add_scattered_rows<T>(
                     }
                 }
                 several => {
-                    columns.clear();
-                    columns.add(place);
+                    columns.clear(-0.0);
+                    columns.add(0, place);
                     for &i in several {
-                        columns.add(source(i));
+                        columns.add(0, source(i));
                     }
-                    let additions = several.len() as u64 + 1;
                     for (j, slot) in place.iter_mut().enumerate() {
-                        let total = BinTotal {
-                            sum: columns.sums[j],
-                            error: columns.errors[j],
-                            magnitude: columns.magnitudes[j],
-                            additions,
-                        };
-                        *slot = total.settled::<T>(None).unwrap_or_else(|| {
+                        *slot = columns.settled::<T>(j, None).unwrap_or_else(|| {
                             let mut kept: Vec<T> = several.iter().map(|&i| source(i)[j]).collect();
                             kept.push(*slot);
                             sum_to(&kept)

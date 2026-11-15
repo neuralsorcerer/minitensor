@@ -21,6 +21,9 @@ use crate::{
 };
 use std::sync::Arc;
 
+pub(crate) mod average;
+pub(crate) use self::average::{Extents, FixedWindow};
+
 /// Output extent of a pooling axis, matching the convolution's formula.
 fn pooled_extent(input: usize, kernel: usize, stride: usize, padding: usize) -> Result<usize> {
     let padded = input + 2 * padding;
@@ -50,6 +53,19 @@ struct PoolGeometry {
     in_w: usize,
     out_h: usize,
     out_w: usize,
+}
+
+impl PoolGeometry {
+    /// The planes an average pool reads and writes.
+    fn extents(&self) -> Extents {
+        Extents {
+            planes: self.batch * self.channels,
+            in_h: self.in_h,
+            in_w: self.in_w,
+            out_h: self.out_h,
+            out_w: self.out_w,
+        }
+    }
 }
 
 fn pool_geometry(
@@ -324,76 +340,6 @@ macro_rules! max_pool2d_kernel {
 max_pool2d_kernel!(max_pool2d_f32, f32, as_f32_slice);
 max_pool2d_kernel!(max_pool2d_f64, f64, as_f64_slice);
 
-macro_rules! avg_pool2d_kernel {
-    ($name:ident, $ty:ty, $accessor:ident) => {
-        fn $name(
-            input: &Tensor,
-            geometry: &PoolGeometry,
-            kernel: (usize, usize),
-            stride: (usize, usize),
-            padding: (usize, usize),
-            count_include_pad: bool,
-        ) -> Result<Vec<$ty>> {
-            let data = input.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error("avg_pool2d received a mismatched dtype")
-            })?;
-            let PoolGeometry {
-                batch,
-                channels,
-                in_h,
-                in_w,
-                out_h,
-                out_w,
-            } = *geometry;
-
-            let plane_out = out_h * out_w;
-            let plane_in = in_h * in_w;
-            let mut values = vec![0 as $ty; batch * channels * plane_out];
-
-            par_out_chunks(&mut values, plane_out, &|first, out_values| {
-                let base = (first / plane_out) * plane_in;
-                for oh in 0..out_h {
-                    for ow in 0..out_w {
-                        let mut total = 0 as $ty;
-                        let mut counted = 0usize;
-                        for ky in 0..kernel.0 {
-                            let ih = oh * stride.0 + ky;
-                            let inside_h = ih >= padding.0 && ih < in_h + padding.0;
-                            for kx in 0..kernel.1 {
-                                let iw = ow * stride.1 + kx;
-                                let inside_w = iw >= padding.1 && iw < in_w + padding.1;
-                                if inside_h && inside_w {
-                                    let offset = (ih - padding.0) * in_w + (iw - padding.1);
-                                    total += data[base + offset];
-                                    counted += 1;
-                                }
-                            }
-                        }
-                        // `count_include_pad` decides whether the padded
-                        // cells count towards the divisor.
-                        let divisor = if count_include_pad {
-                            kernel.0 * kernel.1
-                        } else {
-                            counted
-                        };
-                        let slot = oh * out_w + ow;
-                        out_values[slot] = if divisor == 0 {
-                            0 as $ty
-                        } else {
-                            total / divisor as $ty
-                        };
-                    }
-                }
-            });
-
-            Ok(values)
-        }
-    };
-}
-
-avg_pool2d_kernel!(avg_pool2d_f32, f32, as_f32_slice);
-avg_pool2d_kernel!(avg_pool2d_f64, f64, as_f64_slice);
-
 /// The half-open input range that output position `index` pools over.
 ///
 /// This is the whole of what makes a pooling "adaptive": the window comes from
@@ -453,54 +399,6 @@ fn adaptive_geometry(
         out_w: output_size.1,
     })
 }
-
-macro_rules! adaptive_avg_pool2d_kernel {
-    ($name:ident, $ty:ty, $accessor:ident) => {
-        fn $name(input: &Tensor, geometry: &PoolGeometry) -> Result<Vec<$ty>> {
-            let data = input.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error("adaptive_avg_pool2d received a mismatched dtype")
-            })?;
-            let PoolGeometry {
-                batch,
-                channels,
-                in_h,
-                in_w,
-                out_h,
-                out_w,
-            } = *geometry;
-
-            let plane_out = out_h * out_w;
-            let plane_in = in_h * in_w;
-            let mut values = vec![0 as $ty; batch * channels * plane_out];
-            if plane_out == 0 {
-                return Ok(values);
-            }
-
-            par_out_chunks(&mut values, plane_out, &|first, out_values| {
-                let base = (first / plane_out) * plane_in;
-                for oh in 0..out_h {
-                    let rows = adaptive_window(oh, in_h, out_h);
-                    for ow in 0..out_w {
-                        let cols = adaptive_window(ow, in_w, out_w);
-                        let count = rows.len() * cols.len();
-                        let mut total = 0 as $ty;
-                        for ih in rows.clone() {
-                            let row = base + ih * in_w;
-                            for value in &data[row + cols.start..row + cols.end] {
-                                total += *value;
-                            }
-                        }
-                        out_values[oh * out_w + ow] = total / count as $ty;
-                    }
-                }
-            });
-            Ok(values)
-        }
-    };
-}
-
-adaptive_avg_pool2d_kernel!(adaptive_avg_pool2d_f32, f32, as_f32_slice);
-adaptive_avg_pool2d_kernel!(adaptive_avg_pool2d_f64, f64, as_f64_slice);
 
 macro_rules! adaptive_max_pool2d_kernel {
     ($name:ident, $ty:ty, $accessor:ident) => {
@@ -627,12 +525,19 @@ pub fn adaptive_avg_pool2d(input: &Tensor, output_size: (usize, usize)) -> Resul
         geometry.out_w,
     ]);
 
+    let mismatched =
+        || MinitensorError::internal_error("adaptive_avg_pool2d received a mismatched dtype");
+    let extents = geometry.extents();
     let data = match input.dtype() {
         DataType::Float32 => {
-            TensorData::from_vec_f32(adaptive_avg_pool2d_f32(input, &geometry)?, input.device())
+            let values = input.data().as_f32_slice().ok_or_else(mismatched)?;
+            let pooled = average::pooled_adaptively(values, extents);
+            TensorData::from_vec_f32(pooled, input.device())
         }
         DataType::Float64 => {
-            TensorData::from_vec_f64(adaptive_avg_pool2d_f64(input, &geometry)?, input.device())
+            let values = input.data().as_f64_slice().ok_or_else(mismatched)?;
+            let pooled = average::pooled_adaptively(values, extents);
+            TensorData::from_vec_f64(pooled, input.device())
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
@@ -866,15 +771,25 @@ pub fn avg_pool2d(
         geometry.out_w,
     ]);
 
+    let mismatched = || MinitensorError::internal_error("avg_pool2d received a mismatched dtype");
+    let extents = geometry.extents();
+    let window = FixedWindow {
+        kernel,
+        stride,
+        padding,
+        count_include_pad,
+    };
     let data = match input.dtype() {
-        DataType::Float32 => TensorData::from_vec_f32(
-            avg_pool2d_f32(input, &geometry, kernel, stride, padding, count_include_pad)?,
-            input.device(),
-        ),
-        DataType::Float64 => TensorData::from_vec_f64(
-            avg_pool2d_f64(input, &geometry, kernel, stride, padding, count_include_pad)?,
-            input.device(),
-        ),
+        DataType::Float32 => {
+            let values = input.data().as_f32_slice().ok_or_else(mismatched)?;
+            let pooled = average::pooled(values, extents, &window);
+            TensorData::from_vec_f32(pooled, input.device())
+        }
+        DataType::Float64 => {
+            let values = input.data().as_f64_slice().ok_or_else(mismatched)?;
+            let pooled = average::pooled(values, extents, &window);
+            TensorData::from_vec_f64(pooled, input.device())
+        }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "avg_pool2d only supports float32 and float64 tensors",

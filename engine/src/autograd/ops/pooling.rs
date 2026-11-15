@@ -14,6 +14,7 @@
 use super::*;
 use crate::ops::conv::ConvScalar;
 use crate::ops::map::par_out_chunks;
+use crate::ops::pooling::{Extents, FixedWindow, average};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -219,73 +220,30 @@ pub struct AdaptiveAvgPool2dBackward {
     pub output_size: (usize, usize),
 }
 
-macro_rules! adaptive_avg_pool_backward {
-    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
-        fn $name(
-            grad_output: &Tensor,
-            input_shape: &[usize],
-            output_size: (usize, usize),
-        ) -> Result<TensorData> {
-            let grad = grad_output.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "adaptive_avg_pool2d backward received a mismatched dtype",
-                )
-            })?;
-            let (batch, channels) = (input_shape[0], input_shape[1]);
-            let (in_h, in_w) = (input_shape[2], input_shape[3]);
-            let (out_h, out_w) = output_size;
-            let plane_in = in_h * in_w;
-            let plane_out = out_h * out_w;
-
-            let mut values = vec![0 as $ty; batch * channels * plane_in];
-            if plane_out == 0 || plane_in == 0 {
-                return Ok(TensorData::$from_vec(values, grad_output.device()));
-            }
-
-            // One task per `[H, W]` plane: the windows within a plane overlap,
-            // so the scatter-add inside is serial, but planes never touch.
-            par_out_chunks(&mut values, plane_in, &|first, image| {
-                let base = (first / plane_in) * plane_out;
-                for oh in 0..out_h {
-                    let rows = crate::ops::pooling::adaptive_window(oh, in_h, out_h);
-                    for ow in 0..out_w {
-                        let cols = crate::ops::pooling::adaptive_window(ow, in_w, out_w);
-                        let share = grad[base + oh * out_w + ow] / (rows.len() * cols.len()) as $ty;
-                        for ih in rows.clone() {
-                            let row = ih * in_w;
-                            for slot in &mut image[row + cols.start..row + cols.end] {
-                                *slot += share;
-                            }
-                        }
-                    }
-                }
-            });
-            Ok(TensorData::$from_vec(values, grad_output.device()))
-        }
-    };
-}
-
-adaptive_avg_pool_backward!(
-    adaptive_avg_pool_backward_f32,
-    f32,
-    as_f32_slice,
-    from_vec_f32
-);
-adaptive_avg_pool_backward!(
-    adaptive_avg_pool_backward_f64,
-    f64,
-    as_f64_slice,
-    from_vec_f64
-);
-
 impl GradientFunction for AdaptiveAvgPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let extents = Extents {
+            planes: self.input_shape[0] * self.input_shape[1],
+            in_h: self.input_shape[2],
+            in_w: self.input_shape[3],
+            out_h: self.output_size.0,
+            out_w: self.output_size.1,
+        };
+        let mismatched = || {
+            MinitensorError::internal_error(
+                "adaptive_avg_pool2d backward received a mismatched dtype",
+            )
+        };
         let data = match grad_output.dtype() {
             DataType::Float32 => {
-                adaptive_avg_pool_backward_f32(grad_output, &self.input_shape, self.output_size)?
+                let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
+                let cells = average::adaptive_gradient(flowing, extents);
+                TensorData::from_vec_f32(cells, grad_output.device())
             }
             DataType::Float64 => {
-                adaptive_avg_pool_backward_f64(grad_output, &self.input_shape, self.output_size)?
+                let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
+                let cells = average::adaptive_gradient(flowing, extents);
+                TensorData::from_vec_f64(cells, grad_output.device())
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -381,113 +339,35 @@ impl GradientFunction for MaxPool2dBackward {
     }
 }
 
-macro_rules! avg_pool_backward {
-    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
-        #[allow(clippy::too_many_arguments)]
-        fn $name(
-            grad_output: &Tensor,
-            input_shape: &[usize],
-            out_h: usize,
-            out_w: usize,
-            kernel: (usize, usize),
-            stride: (usize, usize),
-            padding: (usize, usize),
-            count_include_pad: bool,
-        ) -> Result<TensorData> {
-            let go = grad_output.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error("avg_pool2d backward received a mismatched dtype")
-            })?;
-            let (in_h, in_w) = (input_shape[2], input_shape[3]);
-            let plane_in = in_h * in_w;
-            let plane_out = out_h * out_w;
-            let planes = input_shape[0] * input_shape[1];
-
-            let mut grad = vec![0 as $ty; planes * plane_in];
-            par_out_chunks(&mut grad, plane_in, &|first, grad_plane| {
-                let start = (first / plane_in) * plane_out;
-                {
-                    for oh in 0..out_h {
-                        for ow in 0..out_w {
-                            // Recompute the divisor the forward pass used, so an
-                            // edge window that excluded padding spreads its
-                            // gradient over the same cells it averaged.
-                            let mut counted = 0usize;
-                            for ky in 0..kernel.0 {
-                                let ih = oh * stride.0 + ky;
-                                if ih < padding.0 || ih >= in_h + padding.0 {
-                                    continue;
-                                }
-                                for kx in 0..kernel.1 {
-                                    let iw = ow * stride.1 + kx;
-                                    if iw >= padding.1 && iw < in_w + padding.1 {
-                                        counted += 1;
-                                    }
-                                }
-                            }
-                            let divisor = if count_include_pad {
-                                kernel.0 * kernel.1
-                            } else {
-                                counted
-                            };
-                            if divisor == 0 {
-                                continue;
-                            }
-                            let share = go[start + oh * out_w + ow] / divisor as $ty;
-
-                            for ky in 0..kernel.0 {
-                                let ih = oh * stride.0 + ky;
-                                if ih < padding.0 || ih >= in_h + padding.0 {
-                                    continue;
-                                }
-                                let ih = ih - padding.0;
-                                for kx in 0..kernel.1 {
-                                    let iw = ow * stride.1 + kx;
-                                    if iw < padding.1 || iw >= in_w + padding.1 {
-                                        continue;
-                                    }
-                                    let iw = iw - padding.1;
-                                    grad_plane[ih * in_w + iw] += share;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-
-            Ok(TensorData::$from_vec(grad, grad_output.device()))
-        }
-    };
-}
-
-avg_pool_backward!(avg_pool_backward_f32, f32, as_f32_slice, from_vec_f32);
-avg_pool_backward!(avg_pool_backward_f64, f64, as_f64_slice, from_vec_f64);
-
 impl GradientFunction for AvgPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let go_dims = grad_output.shape().dims();
-        let (out_h, out_w) = (go_dims[2], go_dims[3]);
-
+        let extents = Extents {
+            planes: self.input_shape[0] * self.input_shape[1],
+            in_h: self.input_shape[2],
+            in_w: self.input_shape[3],
+            out_h: go_dims[2],
+            out_w: go_dims[3],
+        };
+        let window = FixedWindow {
+            kernel: self.kernel,
+            stride: self.stride,
+            padding: self.padding,
+            count_include_pad: self.count_include_pad,
+        };
+        let mismatched =
+            || MinitensorError::internal_error("avg_pool2d backward received a mismatched dtype");
         let data = match grad_output.dtype() {
-            DataType::Float32 => avg_pool_backward_f32(
-                grad_output,
-                &self.input_shape,
-                out_h,
-                out_w,
-                self.kernel,
-                self.stride,
-                self.padding,
-                self.count_include_pad,
-            )?,
-            DataType::Float64 => avg_pool_backward_f64(
-                grad_output,
-                &self.input_shape,
-                out_h,
-                out_w,
-                self.kernel,
-                self.stride,
-                self.padding,
-                self.count_include_pad,
-            )?,
+            DataType::Float32 => {
+                let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
+                let cells = average::gradient(flowing, extents, &window);
+                TensorData::from_vec_f32(cells, grad_output.device())
+            }
+            DataType::Float64 => {
+                let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
+                let cells = average::gradient(flowing, extents, &window);
+                TensorData::from_vec_f64(cells, grad_output.device())
+            }
             _ => {
                 return Err(MinitensorError::internal_error(
                     "avg_pool2d backward expects a floating point gradient",

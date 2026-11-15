@@ -3219,11 +3219,11 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0, dilation=1, groups=1)` | 1-D transposed convolution over `[N, C_in, L]` with a `[C_in, C_out / groups, K]` kernel, built on `conv_transpose2d`. |
 | `max_pool1d(input, kernel_size, stride=None, padding=0, return_indices=False)` | 1-D max pooling; `stride` defaults to `kernel_size`. With `return_indices` the result is `(values, indices)`, each index the position along the axis its maximum came from. |
 | `max_unpool1d(input, indices, kernel_size, stride=None, padding=0, output_size=None)` | Scatter a pooled signal back to the positions `max_pool1d(..., return_indices=True)` reported, zero elsewhere. |
-| `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling. |
+| `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling, built on `avg_pool2d` and rounded as it is: each mean, and each entry of its gradient, the float nearest its exact value. |
 | `conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 3-D cross-correlation with a `(out, in / groups, kD, kH, kW)` kernel, taking the named paddings `conv2d` does. Written as `kD` two-dimensional convolutions -- each depth tap of the kernel applied to the depth slices it reads, summed -- so the arithmetic stays with the `conv2d` kernel and the memory stays at its cost. Laying the volume out as columns instead would take twenty-seven times the volume for a 3x3x3 kernel over eight channels. |
 | `max_unpool2d(input, indices, kernel_size, stride=None, padding=0, output_size=None)` | Scatter a pooled image back to where `max_pool2d` found each maximum, zero elsewhere. A partial inverse in two ways, both deliberate: it cannot restore what pooling discarded -- an unpooling decoder wants the shape and the locations back, not the values -- and it cannot know the input's size, because a seven-wide input and a six-wide one pool to the same three columns. `output_size` is how the caller says which, read the way `kernel_size` and `stride` are: one integer means that size on every spatial axis. |
 | `max_pool3d(input, kernel_size, stride=None, padding=0)` | The largest value in each 3-D window; stride defaults to the window. The maximum over a stack is the maximum of the maxima, so this is `max_pool2d` per depth tap and an elementwise maximum across them. Depth padding is negative infinity, so a padded position never wins. |
-| `avg_pool3d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | The mean of each 3-D window; stride defaults to the window. Without `count_include_pad` the divisor is only the positions really there, computed by running the same pipeline over a volume of ones -- so the numerator and the divisor cannot disagree about which positions those are. |
+| `avg_pool3d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | The mean of each 3-D window; stride defaults to the window. Without `count_include_pad` the divisor is only the positions really there, computed by running the same pipeline over a volume of ones -- so the numerator and the divisor cannot disagree about which positions those are. Each depth tap is pooled by `avg_pool2d` and rounded there, and the taps are then added and scaled, so unlike a 2-D mean a 3-D one is not rounded once. |
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. `eps` must be finite and non-negative and `momentum` in `[0, 1]`, here and in every normalization layer and function. Batch statistics need more than one value per channel, so a single sample with nothing else per channel raises where it would have normalized to all zeros; evaluation mode with running buffers takes it. |
 | `group_norm(input, num_groups, weight=None, bias=None, eps=1e-5)` | Normalize over each group of channels and all of their positions. Between `layer_norm`, which takes every channel together, and `instance_norm`, which takes each alone -- `num_groups` says how finely to divide them and those two are the ends of the range. The statistics never cross the batch, so a sample's result does not depend on which others it was computed with, which is what makes it work at a batch size of one. `weight` and `bias` are per channel, not per group. |
 | `instance_norm(input, running_mean=None, running_var=None, weight=None, bias=None, use_input_stats=True, momentum=0.1, eps=1e-5)` | Normalize each channel of each sample over its own positions -- `group_norm` with one group per channel, and written as that rather than twice. What it adds is the running buffers: updated from the batch when `use_input_stats`, used instead of it when not. The buffers take the *unbiased* variance while the normalization takes the biased one, as `batch_norm` does. |
@@ -3531,6 +3531,11 @@ True
 - `AvgPool2d(kernel_size, stride=None, padding=None, count_include_pad=True)`
 - `MaxPool1d(kernel_size, stride=None, padding=0)`
 - `AvgPool1d(kernel_size, stride=None, padding=0, count_include_pad=True)`
+- `AdaptiveAvgPool2d(output_size=None)`, `AdaptiveMaxPool2d(output_size=None)`
+  -- pool `[N, C, H, W]` to `output_size`, one integer for both axes or a
+  pair; without one, to a single cell, the global pool
+- `AdaptiveAvgPool1d(output_size=None)`, `AdaptiveMaxPool1d(output_size=None)`
+  -- the same over `[N, C, L]`, to one integer length
 - `BatchNorm1d(num_features, eps=1e-5, momentum=0.1, affine=True, device=None, dtype=None)`
 - `BatchNorm2d(num_features, eps=1e-5, momentum=0.1, affine=True, device=None, dtype=None)` -- with `affine=False` the layer only normalizes: it has no `weight` or `bias`, and nothing for an optimizer to train
 - `LayerNorm(normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None)`
@@ -3573,6 +3578,19 @@ the divisor. The functional forms are `functional.max_pool2d(input,
 kernel_size, stride=None, padding=None, return_indices=False)` and
 `functional.avg_pool2d(input, kernel_size, stride=None, padding=None,
 count_include_pad=True)`.
+
+Each mean an average pool gives is the float nearest the exact sum of its
+window over the divisor, rounded once, for float32 and float64 alike; and each
+entry of its gradient is the float nearest the exact sum, over the windows that
+read that cell, of each window's gradient over its own divisor. That holds with
+a stride, with padding counted or not, for the 1-D forms, and for the adaptive
+pools -- `AdaptiveAvgPool2d`, `AdaptiveAvgPool1d` and their functional forms
+`adaptive_avg_pool2d(input, output_size)` and `adaptive_avg_pool1d(input,
+output_size)` -- whose windows are sized by the ratio of the two extents and so
+need not share a divisor. A mean or a gradient whose exact value is zero is a
+positive zero. Accumulated in the element type and divided, as they were, a
+window's mean took a rounding for each value past the first and one more, and
+a cell read by several windows took one for each of their shares.
 
 With `return_indices` the max pooling returns `(values, indices)` rather than
 one tensor, each index a flat offset into the unpadded input plane. The kernel
