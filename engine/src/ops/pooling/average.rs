@@ -36,9 +36,13 @@ use crate::ops::conv::in_bounds_range;
 use crate::ops::map::par_out_chunks;
 use std::ops::Range;
 
-/// At least how many elements the slices of one task come to: enough to be
-/// worth a task, which makes its scratch once for all of them.
-const BAND: usize = 4096;
+/// About how many tasks a pool's slices are shared among: enough to spread
+/// across the pool, and few enough that the scratch each task makes once
+/// serves many slices.
+const TASKS: usize = 64;
+
+/// The least a task is worth starting for, in elements.
+const LEAST_TASK: usize = 4096;
 
 /// The divisors a share can be divided by in float64 and narrowed without a
 /// second rounding showing: under `2^24`, a float32's quotient by one is
@@ -515,13 +519,21 @@ where
     Make: Fn() -> S + Sync,
     Work: Fn(usize, &mut [T], &mut S) + Sync,
 {
-    let band = (BAND / len).max(1) * len;
+    let band = slices_per_task(out.len() / len, len) * len;
     par_out_chunks(out, band, &|first, slices| {
         let mut kept = scratch();
         for (index, slice) in slices.chunks_mut(len).enumerate() {
             work(first / len + index, slice, &mut kept);
         }
     });
+}
+
+/// How many slices of `len` elements, of `count` in all, one task takes.
+pub(crate) fn slices_per_task(count: usize, len: usize) -> usize {
+    count
+        .div_ceil(TASKS)
+        .max(LEAST_TASK.div_ceil(len.max(1)))
+        .max(1)
 }
 
 /// Whether the windows are better summed side by side, a tap of every

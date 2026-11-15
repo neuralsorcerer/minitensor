@@ -12,6 +12,7 @@
 //! plane of the gradient and no two tasks touch the same element.
 
 use super::*;
+use crate::ops::arithmetic::exact_sum::{Element, Output, Tallies, sum_to};
 use crate::ops::conv::ConvScalar;
 use crate::ops::map::par_out_chunks;
 use crate::ops::pooling::{Extents, FixedWindow, average};
@@ -295,47 +296,100 @@ fn averaged_gradient(
     Ok(gradients)
 }
 
-macro_rules! max_pool_backward {
-    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
-        fn $name(
-            grad_output: &Tensor,
-            indices: &[i64],
-            input_shape: &[usize],
-        ) -> Result<TensorData> {
-            let go = grad_output.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error("max_pool2d backward received a mismatched dtype")
-            })?;
-            let plane_in = input_shape[2] * input_shape[3];
-            let planes = input_shape[0] * input_shape[1];
-            let plane_out = if planes == 0 { 0 } else { go.len() / planes };
-
-            let mut grad = vec![0 as $ty; planes * plane_in];
-            par_out_chunks(&mut grad, plane_in, &|first, grad_plane| {
-                let start = (first / plane_in) * plane_out;
-                for slot in 0..plane_out {
-                    let offset = indices[start + slot];
-                    if offset >= 0 {
-                        grad_plane[offset as usize] += go[start + slot];
+/// The gradient a max pool's input takes from `flowing`: each window's
+/// gradient sent to the cell that won it, `indices` naming that cell within
+/// its plane, or `-1` where a window chose none.
+///
+/// A plane in which no cell won twice takes one addition a cell. In one
+/// where windows overlap and a cell won several, each cell takes the value
+/// nearest the exact sum of the gradients of the windows it won, rounded
+/// once: they are added into a two-sum for each cell, and a cell its bound
+/// leaves open has its gradients gathered and summed exactly. Added one at
+/// a time in the element type, they took a rounding for each past the
+/// first.
+fn routed_to_winners<T>(flowing: &[T], indices: &[i64], planes: usize, plane_in: usize) -> Vec<T>
+where
+    T: Element + Output + Default + std::ops::Add<Output = T>,
+{
+    let mut grad = vec![T::default(); planes * plane_in];
+    if plane_in == 0 || planes == 0 {
+        return grad;
+    }
+    let plane_out = flowing.len() / planes;
+    let band = average::slices_per_task(planes, plane_in) * plane_in;
+    par_out_chunks(&mut grad, band, &|first, part| {
+        let (mut seen, mut tallies) = (vec![false; plane_in], None);
+        for (index, cells) in part.chunks_mut(plane_in).enumerate() {
+            let start = (first / plane_in + index) * plane_out;
+            let (flowing, won) = (
+                &flowing[start..start + plane_out],
+                &indices[start..start + plane_out],
+            );
+            seen.fill(false);
+            let mut twice = false;
+            for &cell in won.iter().filter(|&&cell| cell >= 0) {
+                twice |= std::mem::replace(&mut seen[cell as usize], true);
+            }
+            if !twice {
+                for (&cell, &share) in won.iter().zip(flowing) {
+                    if cell >= 0 {
+                        cells[cell as usize] = cells[cell as usize] + share;
                     }
                 }
-            });
-
-            Ok(TensorData::$from_vec(grad, grad_output.device()))
+                continue;
+            }
+            // Only the cells some window chose are emptied, added into and
+            // rounded; the rest stay zero.
+            let tallies = tallies.get_or_insert_with(|| Tallies::new(plane_in));
+            let chosen = || {
+                won.iter()
+                    .filter(|&&cell| cell >= 0)
+                    .map(|&cell| cell as usize)
+            };
+            for cell in chosen() {
+                tallies.clear_at(cell, 0.0);
+            }
+            for (&cell, &share) in won.iter().zip(flowing) {
+                if cell >= 0 {
+                    tallies.add_at(cell as usize, share.wide());
+                }
+            }
+            for cell in chosen() {
+                // Each chosen cell once: its mark is taken as it is rounded.
+                if std::mem::take(&mut seen[cell]) {
+                    cells[cell] = tallies.settled::<T>(cell, None).unwrap_or_else(|| {
+                        let kept: Vec<T> = won
+                            .iter()
+                            .zip(flowing)
+                            .filter(|&(&winner, _)| winner == cell as i64)
+                            .map(|(_, &share)| share)
+                            .collect();
+                        sum_to(&kept)
+                    });
+                }
+            }
         }
-    };
+    });
+    grad
 }
-
-max_pool_backward!(max_pool_backward_f32, f32, as_f32_slice, from_vec_f32);
-max_pool_backward!(max_pool_backward_f64, f64, as_f64_slice, from_vec_f64);
 
 impl GradientFunction for MaxPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mismatched =
+            || MinitensorError::internal_error("max_pool2d backward received a mismatched dtype");
+        let planes = self.input_shape[0] * self.input_shape[1];
+        let plane_in = self.input_shape[2] * self.input_shape[3];
+        let device = grad_output.device();
         let data = match grad_output.dtype() {
             DataType::Float32 => {
-                max_pool_backward_f32(grad_output, &self.indices, &self.input_shape)?
+                let flowing = grad_output.data().as_f32_slice().ok_or_else(mismatched)?;
+                let cells = routed_to_winners(flowing, &self.indices, planes, plane_in);
+                TensorData::from_vec_f32(cells, device)
             }
             DataType::Float64 => {
-                max_pool_backward_f64(grad_output, &self.indices, &self.input_shape)?
+                let flowing = grad_output.data().as_f64_slice().ok_or_else(mismatched)?;
+                let cells = routed_to_winners(flowing, &self.indices, planes, plane_in);
+                TensorData::from_vec_f64(cells, device)
             }
             _ => {
                 return Err(MinitensorError::internal_error(
@@ -769,5 +823,57 @@ impl GradientFunction for Conv2dBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         &self.deps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_that_wins_several_windows_takes_their_sum_rounded_once() {
+        let tiny = 2f32.powi(-24);
+        // Two planes of four cells and six windows each. In the first, cell
+        // 0 wins three windows, whose gradients come to one and a float32's
+        // last place exactly, where adding them one at a time stays at one;
+        // cell 1 wins two that cancel, and a window chose nothing.
+        let flowing = [
+            1.0, tiny, tiny, 3.0, -3.0, 7.0, //
+            0.5, 0.25, -0.0, 2.0, tiny, 9.0,
+        ];
+        let indices = [0, 0, 0, 1, 1, -1, 3, 2, 1, 0, 0, 3];
+        let cells = routed_to_winners(&flowing, &indices, 2, 4);
+        assert_eq!(cells[0], 1.0 + 2.0 * tiny);
+        assert_eq!(cells[1].to_bits(), 0.0f32.to_bits());
+        assert_eq!(cells[2..4], [0.0, 0.0]);
+        assert_eq!(cells[4], 2.0 + tiny);
+        assert_eq!(cells[5].to_bits(), 0.0f32.to_bits());
+        assert_eq!(cells[6], 0.25);
+        assert_eq!(cells[7], 9.5);
+
+        // A plane in which no cell won twice takes each gradient as it is,
+        // a negative zero as a positive one.
+        let cells = routed_to_winners(&[1.5f64, -0.0, 2.5], &[2, 0, -1], 1, 3);
+        assert_eq!(cells, vec![0.0, 0.0, 1.5]);
+        assert_eq!(cells[0].to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn infinities_and_halfway_sums_are_rounded_as_their_exact_sums_are() {
+        let step = f32::EPSILON;
+        // One and a half last places past one: halfway, so the even one.
+        let cells = routed_to_winners(&[1.0f32, step, step / 2.0], &[0, 0, 0], 1, 1);
+        assert_eq!(cells, vec![1.0 + 2.0 * step]);
+        let cells = routed_to_winners(&[1.0f32, step / 2.0], &[0, 0], 1, 1);
+        assert_eq!(cells, vec![1.0]);
+        let cells = routed_to_winners(
+            &[f32::INFINITY, 1.0, f32::MAX, f32::MAX],
+            &[0, 0, 1, 1],
+            1,
+            2,
+        );
+        assert_eq!(cells, vec![f32::INFINITY, f32::INFINITY]);
+        let cells = routed_to_winners(&[f64::INFINITY, f64::NEG_INFINITY], &[0, 0], 1, 1);
+        assert!(cells[0].is_nan());
     }
 }

@@ -105,15 +105,29 @@ impl Tallies {
         }
     }
 
+    /// Place `at` emptied, its sum the zero `from`, as [`Tallies::clear`]
+    /// empties them all.
+    #[inline]
+    pub(crate) fn clear_at(&mut self, at: usize, from: f64) {
+        self.sums[at] = from;
+        self.errors[at] = 0.0;
+        self.dropped[at] = 0.0;
+    }
+
+    /// `value` added into place `at`.
+    #[inline]
+    pub(crate) fn add_at(&mut self, at: usize, value: f64) {
+        let (total, rounding) = two_sum(self.sums[at], value);
+        self.sums[at] = total;
+        let (error, lost) = two_sum(self.errors[at], rounding);
+        self.errors[at] = error;
+        self.dropped[at] += lost.abs();
+    }
+
     /// `values` added into every `step`-th place from `start`.
     pub(crate) fn add_spread<T: Element>(&mut self, start: usize, step: usize, values: &[T]) {
         for (i, &value) in values.iter().enumerate() {
-            let at = start + i * step;
-            let (total, rounding) = two_sum(self.sums[at], value.wide());
-            self.sums[at] = total;
-            let (error, lost) = two_sum(self.errors[at], rounding);
-            self.errors[at] = error;
-            self.dropped[at] += lost.abs();
+            self.add_at(start + i * step, value.wide());
         }
     }
 

@@ -3598,7 +3598,9 @@ finds that position anyway -- the backward pass has to send the gradient to the
 element that won -- so asking for it costs one copy of a vector that already
 exists, and only when asked. It is what `max_unpool2d` scatters back into, and
 because the padding may not exceed half the window, every index names a real
-element.
+element. Where windows overlap, one element can win several of them; its
+gradient is then the float nearest the exact sum of theirs, rounded once,
+where it was added one window at a time in the element type.
 
 ```python
 import minitensor as mt
