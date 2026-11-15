@@ -2558,11 +2558,14 @@ assert row_std.shape == (2, 3)
   negative integers both functions cross zero, and there the terms cancel: in
   float64 `lgamma` was 16% low at the float nearest its zero at `-2.457` and
   `digamma` `1.8e15` ulps out next to its zero at `-1.573`, and away from the
-  zeros both missed by up to thousands of ulps. Away from the zeros the pair
-  holds each to about `2^-100` before it is rounded, and every answer
-  measured there is the float nearest the exact value; at the floats either
-  side of a zero, where the answer can be `1e-16` against terms of size one,
-  it is within `2e-14` of it.
+  zeros both missed by up to thousands of ulps. The pair carries a bound on
+  what it rounds, `2^-96` of its terms' magnitude, and where that bound
+  places the float nearest the answer, that is the answer; next to a zero,
+  where the answer can be `1e-16` against terms of size one, it does not,
+  and the terms are taken again in triples, about 159 bits. Every answer
+  measured left of zero, at the floats either side of each zero too, is the
+  float nearest the exact value. A negative argument costs about a
+  microsecond.
 - `polygamma(order, input)` — the `order`-th derivative of `digamma`, so order
   0 is `digamma` and order 1 is `trigamma`; both are computed by their own
   routes and the general one agrees with them. Its own derivative is the next

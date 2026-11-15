@@ -12,7 +12,7 @@ cancel. Taken in float64 the answer next to a zero was what the terms
 rounded: `lgamma` 16% low at the float nearest its zero at -2.457, `digamma`
 1.8e15 ulps out next to its zero at -1.573, and away from the zeros both missed
 by hundreds to thousands of ulps. The terms are now carried in pairs of
-float64s.
+float64s, and in triples where the pair's bound does not settle the answer.
 
 The references are the float64s nearest the exact values, worked out to 200
 bits.
@@ -185,13 +185,13 @@ def test_the_float_nearest_the_exact_value(function, points):
     "function,points",
     [("lgamma", LGAMMA_NEAR_ZEROS), ("digamma", DIGAMMA_NEAR_ZEROS)],
 )
-def test_the_floats_either_side_of_each_zero_keep_their_digits(function, points):
+def test_the_floats_either_side_of_each_zero_keep_every_digit(function, points):
     # The float nearest each zero and its neighbours, where the answer is as
     # small as 5.6e-17 against terms of size one: what float64 left of it
     # was its first digit, or not even that.
     got = _values(function, points)
     want = np.array([w for _, w in points])
-    np.testing.assert_allclose(got, want, rtol=2e-14, atol=0)
+    np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.parametrize(
