@@ -42,6 +42,7 @@ use engine::ops::conv_transpose1d as conv_transpose1d_op;
 use engine::ops::conv_transpose2d as conv_transpose2d_op;
 use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
+use engine::ops::conv3d as conv3d_op;
 use engine::ops::grid_sample::{Padding as GridPadding, SampleMode, grid_sample as grid_sample_op};
 use engine::ops::interpolate::{InterpolateMode, interpolate as interpolate_op};
 use engine::ops::loss::cross_entropy as cross_entropy_op;
@@ -658,6 +659,34 @@ fn avg_pool2d(
         stride,
         padding,
         count_include_pad,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// 3-D cross-correlation with a `[C_out, C_in / groups, kD, kH, kW]` kernel: `stride`, `padding` and `dilation` each a value for the depth, the height and the width.
+#[pyfunction]
+#[pyo3(signature = (input, weight, bias, stride, padding, dilation, groups))]
+fn conv3d(
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+    stride: [usize; 3],
+    padding: [usize; 3],
+    dilation: [usize; 3],
+    groups: usize,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    let result = conv3d_op(
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
+        stride,
+        padding,
+        dilation,
+        groups,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

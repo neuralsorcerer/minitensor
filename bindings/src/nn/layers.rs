@@ -2218,6 +2218,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(conv3d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(interpolate, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(adaptive_avg_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(adaptive_max_pool2d, &nn_module)?)?;

@@ -38,6 +38,7 @@ from ._derived import _require_float
 from ._sampling import bernoulli as _bernoulli
 from ._shape import (
     _atleast_tensor,
+    _beside,
     _constant_like,
     _element_count,
     _index_tensor,
@@ -50,6 +51,7 @@ _F = _C.functional
 # The engine's kernels, taken before the functions below replace them in `nn`.
 _cross_entropy_kernel = _C.nn.cross_entropy
 _avg_pool3d_kernel = _C.nn.avg_pool3d
+_conv3d_kernel = _C.nn.conv3d
 _bce_kernel = _C.nn.binary_cross_entropy
 _bce_logits_kernel = _C.nn.binary_cross_entropy_with_logits
 
@@ -1354,6 +1356,26 @@ def _volume_input(op: str, input: object) -> Tensor:
     return tensor
 
 
+def _fits_the_depth(
+    op: str,
+    depth: int,
+    kernel: tuple[int, ...],
+    margin: tuple[int, ...],
+    spaced: tuple[int, ...],
+) -> tuple[int, int]:
+    """The depth a dilated kernel spans and the padded depth it slides over,
+    refused where the first is the larger."""
+
+    reach = spaced[0] * (kernel[0] - 1) + 1
+    padded = depth + 2 * margin[0]
+    if reach > padded:
+        raise ValueError(
+            f"{op} has a kernel that does not fit along the depth: a dilated "
+            f"extent of {reach} over a padded depth of {padded}"
+        )
+    return reach, padded
+
+
 def _depth_planes(
     op: str,
     tensor: Tensor,
@@ -1377,13 +1399,7 @@ def _depth_planes(
     """
 
     batch, channels, depth = (int(size) for size in list(tensor.shape)[:3])
-    reach = spaced[0] * (kernel[0] - 1) + 1
-    padded = depth + 2 * margin[0]
-    if reach > padded:
-        raise ValueError(
-            f"{op} has a kernel that does not fit along the depth: a dilated "
-            f"extent of {reach} over a padded depth of {padded}"
-        )
+    reach, padded = _fits_the_depth(op, depth, kernel, margin, spaced)
     out_depth = (padded - reach) // step[0] + 1
     if margin[0]:
         # `pad` takes its axes innermost-first, so the depth is the third pair.
@@ -1481,15 +1497,17 @@ def conv3d(
     """3-D cross-correlation of a volume with a `(out, in / groups, kD, kH, kW)`
     kernel.
 
-    Written as `kD` two-dimensional convolutions rather than as one big matrix
-    product: each depth tap of the kernel is a 2-D kernel, applied to the depth
-    slices that tap reads, and the results are summed. So the arithmetic is
-    done by the `conv2d` kernel that already exists, at its memory cost rather
-    than at im2col's, and `dilation` and `groups` mean what they mean there
-    because they are passed straight to it.
+    A 3-D window is a stack of 2-D ones, one per depth tap of the kernel, so
+    this is one 2-D convolution of a signal whose channels are the input's at
+    each depth tap -- for each output slice, the slices its windows read --
+    by the kernel, which is already laid out that way. That keeps the work
+    with the `conv2d` kernels at a copy of the input per depth tap rather
+    than im2col's one per tap of the whole window, and `dilation` and
+    `groups` mean what they mean there.
 
-    The bias is added once at the end, not once per tap, which is both right
-    and cheaper.
+    For float32 each entry, the bias added, is the float nearest its exact
+    value, rounded once, and so is each entry of each gradient. A bias of
+    another dtype than the input's is added after, in the wider of the two.
     """
 
     tensor = _volume_input("conv3d", input)
@@ -1501,7 +1519,6 @@ def conv3d(
         )
     kernel = tuple(int(size) for size in list(taps.shape)[2:])
     if 0 in kernel:
-        # With no depth taps the sum below has no terms at all.
         raise ValueError(f"conv3d kernel size must be greater than zero, got {kernel}")
     step = _sliding_argument(stride, "stride", 3, 1, "conv3d")
     spaced = _sliding_argument(dilation, "dilation", 3, 1, "conv3d")
@@ -1510,29 +1527,14 @@ def conv3d(
             "conv3d", tensor, padding, kernel, step, spaced
         )
     margin = _sliding_argument(padding, "padding", 3, 0, "conv3d")
+    _fits_the_depth("conv3d", int(tensor.shape[2]), kernel, margin, spaced)
 
-    planes, batch, out_depth = _depth_planes(
-        "conv3d", tensor, kernel, step, margin, spaced, 0.0
-    )
-    total = None
-    for tap, plane in enumerate(planes):
-        flat = _F.squeeze(_F.narrow(taps, 2, tap, 1), 2)
-        partial = _F.conv2d(
-            plane,
-            flat,
-            None,
-            (step[1], step[2]),
-            (margin[1], margin[2]),
-            (spaced[1], spaced[2]),
-            groups,
-        )
-        total = partial if total is None else total + partial
-
-    volume = _as_volume(total, batch, out_depth)
-    if bias is None:
-        return volume
-    channels = int(volume.shape[1])
-    return volume + _atleast_tensor(bias).reshape(1, channels, 1, 1, 1)
+    count = int(taps.shape[0])
+    added = None if bias is None else _beside(bias, tensor).reshape(count)
+    if added is not None and str(added.dtype) != str(tensor.dtype):
+        volume = _conv3d_kernel(tensor, taps, None, step, margin, spaced, groups)
+        return volume + added.reshape(1, count, 1, 1, 1)
+    return _conv3d_kernel(tensor, taps, added, step, margin, spaced, groups)
 
 
 def max_pool3d(

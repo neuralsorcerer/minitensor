@@ -656,6 +656,102 @@ impl Conv2dBackward {
     }
 }
 
+/// Gradient function for 3-D convolution (`ops::conv3d`), the gradients of
+/// the convolution of planes it is.
+///
+/// The kernel's gradient is that plane's, over the input set side by side
+/// as the forward pass read it, and the bias's each channel of the incoming
+/// gradient summed. The input's scatters the incoming gradient, set side by
+/// side by input slice, a channel for each output channel at each depth
+/// tap, back through the kernel a depth tap at a time.
+pub struct Conv3dBackward {
+    pub input: Tensor,
+    pub weight: Tensor,
+    pub input_id: TensorId,
+    pub weight_id: TensorId,
+    pub bias_id: Option<TensorId>,
+    pub input_requires_grad: bool,
+    pub weight_requires_grad: bool,
+    pub bias_requires_grad: bool,
+    pub(crate) shape: crate::ops::conv::Volumes,
+    pub deps: SmallVec<[TensorId; 3]>,
+}
+
+impl Conv3dBackward {
+    fn backward_typed<T: ConvScalar>(
+        &self,
+        grad_output: &Tensor,
+        gradients: &mut FxHashMap<TensorId, Tensor>,
+    ) -> Result<()> {
+        let mismatched =
+            || MinitensorError::internal_error("conv3d backward received a mismatched dtype");
+        let flowing = T::slice(grad_output.data()).ok_or_else(mismatched)?;
+        let shape = &self.shape;
+        let (device, dtype) = (self.input.device(), T::DTYPE);
+        let gradient = |values: Vec<T>, like: &Tensor| {
+            Tensor::new(
+                Arc::new(T::into_tensor_data(values, device)),
+                like.shape().clone(),
+                dtype,
+                device,
+                false,
+            )
+        };
+
+        if self.input_requires_grad {
+            let weight = T::slice(self.weight.data()).ok_or_else(mismatched)?;
+            let spread = shape.stack_gradient(flowing);
+            let planes = T::scatter(&spread, &shape.kernel_by_tap(weight), None, &shape.spread());
+            let plane = shape.input[1] * shape.input[2];
+            let cells =
+                crate::ops::conv::slices_inside(&planes, shape.input[0], shape.in_channels, plane);
+            accumulate_grad(gradients, self.input_id, gradient(cells, &self.input))?;
+        }
+
+        if self.weight_requires_grad {
+            let input = T::slice(self.input.data()).ok_or_else(mismatched)?;
+            let plane = shape.output[1] * shape.output[2];
+            let planes = crate::ops::conv::slices_outside(
+                flowing,
+                shape.output[0],
+                shape.out_channels,
+                plane,
+            );
+            let taps = T::weight_gradient(&shape.stack_input(input), &planes, &shape.stacked());
+            accumulate_grad(gradients, self.weight_id, gradient(taps, &self.weight))?;
+        }
+
+        if self.bias_requires_grad
+            && let Some(bias_id) = self.bias_id
+        {
+            let sums =
+                crate::ops::reduction::sum(&grad_output.detach(), Some(vec![0, 2, 3, 4]), false)?;
+            accumulate_grad(gradients, bias_id, sums.detach())?;
+        }
+        Ok(())
+    }
+}
+
+impl GradientFunction for Conv3dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        match grad_output.dtype() {
+            DataType::Float32 => self.backward_typed::<f32>(grad_output, &mut gradients)?,
+            DataType::Float64 => self.backward_typed::<f64>(grad_output, &mut gradients)?,
+            _ => {
+                return Err(MinitensorError::internal_error(
+                    "conv3d backward expects a floating point gradient",
+                ));
+            }
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.deps
+    }
+}
+
 impl GradientFunction for Conv2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();

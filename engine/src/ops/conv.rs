@@ -16,6 +16,9 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 
 mod rounded;
+mod volume;
+pub use self::volume::conv3d;
+pub(crate) use self::volume::{Volumes, slices_inside, slices_outside};
 
 /// The floating-point types convolution is implemented for.
 ///
