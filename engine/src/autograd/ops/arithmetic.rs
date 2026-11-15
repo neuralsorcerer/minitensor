@@ -1382,6 +1382,19 @@ fn pow_exponent_slope<T: num_traits::Float>(o: T, log_base: T) -> T {
     }
 }
 
+/// The gradient of a one-element operand of `pow`: its terms, one for each
+/// output, summed exactly and rounded once, which is the sum a broadcast
+/// operand's gradient is everywhere else -- the operand expanded to the
+/// output's shape, each element taking its own term, and those reduced by
+/// `sum`. Added one at a time in the element type, each addition rounded,
+/// and over many outputs the roundings mounted.
+fn summed_terms<T>(terms: &[T]) -> T
+where
+    T: crate::ops::arithmetic::exact_sum::Element + crate::ops::arithmetic::exact_sum::Output,
+{
+    crate::ops::arithmetic::exact_sum::sum_to::<T, T>(terms)
+}
+
 /// Gradient function for power operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowBroadcast {
@@ -1428,13 +1441,13 @@ impl GradientFunction for PowBackward {
                             |e: f32, b: f32, g: f32| pow_base_slope(b, e) * g,
                         ),
                         PowBroadcast::BaseScalar => {
-                            // The scalar base receives the sum over every output.
+                            // The scalar base receives the sum over every
+                            // output, rounded once; see `summed_terms`.
                             let base_val = base_slice[0];
-                            let mut accum = 0.0_f32;
-                            for i in 0..grad_out.len() {
-                                accum += pow_base_slope(base_val, exp_slice[i]) * grad_out[i];
-                            }
-                            vec![accum]
+                            let terms = binary_map(exp_slice, grad_out, |e: f32, g: f32| {
+                                pow_base_slope(base_val, e) * g
+                            });
+                            vec![summed_terms(&terms)]
                         }
                         PowBroadcast::ExponentScalar => {
                             scalar_exponent_base_grad(base_slice, grad_out, exp_slice[0])
@@ -1469,13 +1482,15 @@ impl GradientFunction for PowBackward {
                             })
                         }
                         PowBroadcast::ExponentScalar => {
-                            // The scalar exponent receives the sum over every output.
-                            let mut accum = 0.0_f32;
-                            for i in 0..grad_out.len() {
-                                accum += pow_exponent_slope(out_slice[i], base_slice[i].ln())
-                                    * grad_out[i];
-                            }
-                            vec![accum]
+                            // The scalar exponent receives the sum over every
+                            // output, rounded once; see `summed_terms`.
+                            let terms = ternary_map(
+                                out_slice,
+                                base_slice,
+                                grad_out,
+                                |o: f32, b: f32, g: f32| pow_exponent_slope(o, b.ln()) * g,
+                            );
+                            vec![summed_terms(&terms)]
                         }
                     };
                     let grad_data = TensorData::from_vec::<f32>(
@@ -1518,13 +1533,13 @@ impl GradientFunction for PowBackward {
                             |e: f64, b: f64, g: f64| pow_base_slope(b, e) * g,
                         ),
                         PowBroadcast::BaseScalar => {
-                            // The scalar base receives the sum over every output.
+                            // The scalar base receives the sum over every
+                            // output, rounded once; see `summed_terms`.
                             let base_val = base_slice[0];
-                            let mut accum = 0.0_f64;
-                            for i in 0..grad_out.len() {
-                                accum += pow_base_slope(base_val, exp_slice[i]) * grad_out[i];
-                            }
-                            vec![accum]
+                            let terms = binary_map(exp_slice, grad_out, |e: f64, g: f64| {
+                                pow_base_slope(base_val, e) * g
+                            });
+                            vec![summed_terms(&terms)]
                         }
                         PowBroadcast::ExponentScalar => {
                             scalar_exponent_base_grad(base_slice, grad_out, exp_slice[0])
@@ -1559,13 +1574,15 @@ impl GradientFunction for PowBackward {
                             })
                         }
                         PowBroadcast::ExponentScalar => {
-                            // The scalar exponent receives the sum over every output.
-                            let mut accum = 0.0_f64;
-                            for i in 0..grad_out.len() {
-                                accum += pow_exponent_slope(out_slice[i], base_slice[i].ln())
-                                    * grad_out[i];
-                            }
-                            vec![accum]
+                            // The scalar exponent receives the sum over every
+                            // output, rounded once; see `summed_terms`.
+                            let terms = ternary_map(
+                                out_slice,
+                                base_slice,
+                                grad_out,
+                                |o: f64, b: f64, g: f64| pow_exponent_slope(o, b.ln()) * g,
+                            );
+                            vec![summed_terms(&terms)]
                         }
                     };
                     let grad_data = TensorData::from_vec::<f64>(

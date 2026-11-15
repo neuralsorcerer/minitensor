@@ -125,3 +125,41 @@ def test_a_single_element_takes_the_same_form(dtype, exponent):
         alone = (mt.Tensor([value], dtype=dtype) ** exponent).item()
         assert alone == want, value
         assert (mt.Tensor(value, dtype=dtype) ** exponent).item() == want, value
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_one_element_base_takes_its_terms_summed_once(dtype):
+    # Its gradient is the sum of one term for each output, which is what the
+    # base expanded to the outputs' shape takes element by element and `sum`
+    # adds. The terms were added one at a time in the element type.
+    rng = np.random.default_rng(31)
+    exponents = (rng.standard_normal(4000) * 3).astype(dtype)
+    g = (rng.standard_normal(4000) * 2.0 ** rng.integers(-20, 20, 4000)).astype(dtype)
+    base = mt.tensor(np.array(1.3, dtype=dtype), requires_grad=True)
+    (base ** mt.tensor(exponents) * mt.tensor(g)).sum().backward()
+    spread = mt.tensor(np.full(4000, 1.3, dtype=dtype), requires_grad=True)
+    (spread ** mt.tensor(exponents) * mt.tensor(g)).sum().backward()
+    assert base.grad.item() == mt.sum(spread.grad).item()
+
+    # One and a little more, three times: one at a time the little pieces
+    # each rounded up to a last place, three of them, where together they
+    # make less than two.
+    step = float(np.finfo(dtype).eps)
+    exponents = np.array([1.0] + [0.625 * step] * 3, dtype=dtype)
+    one = mt.tensor(np.array(1.0, dtype=dtype), requires_grad=True)
+    (one ** mt.tensor(exponents)).sum().backward()
+    assert one.grad.item() == np.array(1 + 2 * step, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_one_element_exponent_takes_its_terms_summed_once(dtype):
+    rng = np.random.default_rng(37)
+    bases = rng.uniform(0.1, 4.0, 4000).astype(dtype)
+    g = (rng.standard_normal(4000) * 2.0 ** rng.integers(-20, 20, 4000)).astype(dtype)
+    # An exponent of one makes every output its base whichever way the power
+    # is taken, so the terms below are the same terms.
+    exponent = mt.tensor(np.array(1.0, dtype=dtype), requires_grad=True)
+    (mt.tensor(bases) ** exponent * mt.tensor(g)).sum().backward()
+    spread = mt.tensor(np.ones(4000, dtype=dtype), requires_grad=True)
+    (mt.tensor(bases) ** spread * mt.tensor(g)).sum().backward()
+    assert exponent.grad.item() == mt.sum(spread.grad).item()
