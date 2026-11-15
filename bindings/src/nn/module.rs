@@ -60,6 +60,7 @@ use engine::ops::pooling::{
     avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, avg_pool3d as avg_pool3d_op,
     max_pool1d as max_pool1d_op, max_pool1d_with_indices as max_pool1d_with_indices_op,
     max_pool2d as max_pool2d_op, max_pool2d_with_indices as max_pool2d_with_indices_op,
+    max_pool3d as max_pool3d_op,
 };
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializedModel};
 use pyo3::PyClassInitializer;
@@ -689,6 +690,21 @@ fn conv3d(
         groups,
     )
     .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Largest value of each 3-D window: `kernel_size`, `stride` and `padding` each a value for the depth, the height and the width.
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride, padding))]
+fn max_pool3d(
+    input: &Bound<PyAny>,
+    kernel_size: [usize; 3],
+    stride: [usize; 3],
+    padding: [usize; 3],
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let result = max_pool3d_op(input_tensor.tensor(), kernel_size, stride, padding)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 

@@ -751,6 +751,173 @@ fn max_pool2d_parts(
     Ok((output, exposed))
 }
 
+/// Max pooling over a 5-D `[N, C, D, H, W]` input: each window's largest
+/// value, the first in reading order -- by depth, then height, then width --
+/// where several are equal, and the first NaN where the window holds one.
+///
+/// `kernel`, `stride` and `padding` are along the depth, the height and the
+/// width, the padding at most half the window along each. The padding is
+/// never a window's winner, and the gradient goes to the cell that won,
+/// each cell's the value nearest the exact sum of the gradients of the
+/// windows it won.
+pub fn max_pool3d(
+    input: &Tensor,
+    kernel: [usize; 3],
+    stride: [usize; 3],
+    padding: [usize; 3],
+) -> Result<Tensor> {
+    if input.ndim() != 5 {
+        return Err(MinitensorError::invalid_operation(
+            "max_pool3d expects a 5D input tensor [N, C, D, H, W]",
+        ));
+    }
+    if (0..3).any(|axis| padding[axis] * 2 > kernel[axis]) {
+        return Err(MinitensorError::invalid_argument(
+            "max_pool3d padding must not exceed half the window size",
+        ));
+    }
+    let dims = input.shape().dims();
+    let mut out = [0; 3];
+    for axis in 0..3 {
+        out[axis] = pooled_extent(dims[2 + axis], kernel[axis], stride[axis], padding[axis])?;
+    }
+    let window = FixedWindow {
+        kernel,
+        stride,
+        padding,
+        count_include_pad: true,
+    };
+    let extents = Extents {
+        volumes: dims[0] * dims[1],
+        in_d: dims[2],
+        in_h: dims[3],
+        in_w: dims[4],
+        out_d: out[0],
+        out_h: out[1],
+        out_w: out[2],
+    };
+    let mismatched = || MinitensorError::internal_error("max_pool3d received a mismatched dtype");
+    let (data, indices) = match input.dtype() {
+        DataType::Float32 => {
+            let values = input.data().as_f32_slice().ok_or_else(mismatched)?;
+            let (largest, winners) = largest_of_volumes(values, extents, &window);
+            (TensorData::from_vec_f32(largest, input.device()), winners)
+        }
+        DataType::Float64 => {
+            let values = input.data().as_f64_slice().ok_or_else(mismatched)?;
+            let (largest, winners) = largest_of_volumes(values, extents, &window);
+            (TensorData::from_vec_f64(largest, input.device()), winners)
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "max_pool3d only supports float32 and float64 tensors",
+            ));
+        }
+    };
+    let out_shape = Shape::new(vec![dims[0], dims[1], out[0], out[1], out[2]]);
+    let mut output = Tensor::new(
+        Arc::new(data),
+        out_shape,
+        input.dtype(),
+        input.device(),
+        input.requires_grad(),
+    );
+    if input.requires_grad() {
+        let grad_fn = Arc::new(MaxPool2dBackward {
+            input_id: input.id(),
+            input_shape: dims.to_vec(),
+            indices,
+        });
+        output = with_grad_fn(output, grad_fn)?;
+    }
+    Ok(output)
+}
+
+/// The largest value of each window of each volume of `data`, and where in
+/// its volume that value is, as [`max_pool3d`] takes them.
+fn largest_of_volumes<T: Copy + Default + PartialOrd + Send + Sync>(
+    data: &[T],
+    extents: Extents,
+    window: &FixedWindow,
+) -> (Vec<T>, Vec<i64>) {
+    let Extents {
+        volumes,
+        in_d,
+        in_h,
+        in_w,
+        out_d,
+        out_h,
+        out_w,
+    } = extents;
+    let (volume_in, volume_out) = (in_d * in_h * in_w, out_d * out_h * out_w);
+    let mut values = vec![T::default(); volumes * volume_out];
+    let mut indices = vec![-1i64; volumes * volume_out];
+    if volume_in == 0 || volume_out == 0 {
+        return (values, indices);
+    }
+    // The cells along one axis that window `index` reads, padding left out.
+    let reach = |axis: usize, index: usize, dim: usize| {
+        let first = index * window.stride[axis];
+        let end = (first + window.kernel[axis])
+            .saturating_sub(window.padding[axis])
+            .min(dim);
+        first.saturating_sub(window.padding[axis]).min(end)..end
+    };
+    par_out_chunks2(
+        &mut values,
+        &mut indices,
+        volume_out,
+        &|first, largest, winners| {
+            let volume = &data[(first / volume_out) * volume_in..][..volume_in];
+            for (slot, (value, winner)) in largest.iter_mut().zip(winners.iter_mut()).enumerate() {
+                let (od, oh, ow) = (slot / (out_h * out_w), slot / out_w % out_h, slot % out_w);
+                let (best, at) = largest_in(
+                    volume,
+                    [reach(0, od, in_d), reach(1, oh, in_h), reach(2, ow, in_w)],
+                    (in_h, in_w),
+                );
+                *value = best;
+                *winner = at as i64;
+            }
+        },
+    );
+    (values, indices)
+}
+
+/// The largest value of `volume` over the cells `ranges` names along the
+/// depth, the height and the width, and its offset in the volume: the first
+/// of equal ones in reading order, and the first NaN where there is one.
+/// The ranges are not empty.
+// `x != x` holds only for NaN, and never for an integer, where it folds away.
+#[allow(clippy::eq_op)]
+fn largest_in<T: Copy + PartialOrd>(
+    volume: &[T],
+    ranges: [std::ops::Range<usize>; 3],
+    (in_h, in_w): (usize, usize),
+) -> (T, usize) {
+    let [depths, rows, cols] = ranges;
+    let first = (depths.start * in_h + rows.start) * in_w + cols.start;
+    let (mut best, mut at) = (volume[first], first);
+    // A NaN is unequal to itself, and the first one found is the answer.
+    if best != best {
+        return (best, at);
+    }
+    for id in depths {
+        for ih in rows.clone() {
+            let row = (id * in_h + ih) * in_w;
+            for (iw, &value) in volume[row..][cols.clone()].iter().enumerate() {
+                if value != value {
+                    return (value, row + cols.start + iw);
+                }
+                if value > best {
+                    (best, at) = (value, row + cols.start + iw);
+                }
+            }
+        }
+    }
+    (best, at)
+}
+
 /// Average pooling over a 4-D `[N, C, H, W]` input.
 ///
 /// `count_include_pad` selects whether padded cells contribute to the divisor.

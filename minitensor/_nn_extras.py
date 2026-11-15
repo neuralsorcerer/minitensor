@@ -51,6 +51,7 @@ _F = _C.functional
 # The engine's kernels, taken before the functions below replace them in `nn`.
 _cross_entropy_kernel = _C.nn.cross_entropy
 _avg_pool3d_kernel = _C.nn.avg_pool3d
+_max_pool3d_kernel = _C.nn.max_pool3d
 _conv3d_kernel = _C.nn.conv3d
 _bce_kernel = _C.nn.binary_cross_entropy
 _bce_logits_kernel = _C.nn.binary_cross_entropy_with_logits
@@ -1376,59 +1377,6 @@ def _fits_the_depth(
     return reach, padded
 
 
-def _depth_planes(
-    op: str,
-    tensor: Tensor,
-    kernel: tuple[int, ...],
-    step: tuple[int, ...],
-    margin: tuple[int, ...],
-    spaced: tuple[int, ...],
-    fill: float,
-) -> tuple[list[Tensor], int, int]:
-    """The 2-D problem each depth tap of a 3-D window reduces to.
-
-    A 3-D window is a stack of 2-D windows, one per depth tap, so a 3-D
-    operation is the 2-D one run over each of those and then combined along the
-    depth. That leaves the work with the `conv2d` and `max_pool2d` kernels,
-    where laying the volume out as columns would take it away from them and
-    cost a copy of every window besides.
-
-    Each plane comes back as `(batch * out_depth, channels, height, width)`,
-    which is the shape the 2-D kernels take, and `fill` is what the depth
-    padding holds -- zero for a sum, negative infinity for a maximum.
-    """
-
-    batch, channels, depth = (int(size) for size in list(tensor.shape)[:3])
-    reach, padded = _fits_the_depth(op, depth, kernel, margin, spaced)
-    out_depth = (padded - reach) // step[0] + 1
-    if margin[0]:
-        # `pad` takes its axes innermost-first, so the depth is the third pair.
-        tensor = _F.pad(tensor, [0, 0, 0, 0, margin[0], margin[0]], value=fill)
-
-    # Depth in front of the channels once, rather than once per tap: the 2-D
-    # kernels want the channel axis second, and the batch is what absorbs the
-    # depth.
-    moved = _F.permute(tensor, [0, 2, 1, 3, 4])
-    height, width = (int(size) for size in list(moved.shape)[3:])
-    starts = _np.arange(out_depth) * step[0]
-
-    planes = []
-    for tap in range(kernel[0]):
-        positions = _index_tensor(starts + tap * spaced[0], moved)
-        taken = _F.index_select(moved, 1, positions)
-        planes.append(taken.reshape(batch * out_depth, channels, height, width))
-    return planes, batch, out_depth
-
-
-def _as_volume(planes: Tensor, batch: int, out_depth: int) -> Tensor:
-    """A stack of 2-D results back into `(batch, channels, depth, h, w)`."""
-
-    channels, height, width = (int(size) for size in list(planes.shape)[1:])
-    return _F.permute(
-        planes.reshape(batch, out_depth, channels, height, width), [0, 2, 1, 3, 4]
-    )
-
-
 def _pooling_geometry(
     op: str, kernel_size: object, stride: object, padding: object
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -1545,25 +1493,16 @@ def max_pool3d(
 ) -> Tensor:
     """The largest value in each 3-D window. Stride defaults to the window.
 
-    The maximum over a stack is the maximum of the maxima, so this is
-    `max_pool2d` on each depth tap and then an elementwise maximum across them.
-    The depth padding is negative infinity for the same reason `max_pool2d`
-    pads with it: a padded position must never be the one that wins.
+    The first of equal largest values in reading order -- by depth, then
+    height, then width -- and a NaN where the window holds one; the padding
+    never wins. The gradient goes to the cell that won, and a cell that won
+    several overlapping windows takes the float nearest the exact sum of
+    their gradients, rounded once.
     """
 
     tensor = _volume_input("max_pool3d", input)
     kernel, step, margin = _pooling_geometry("max_pool3d", kernel_size, stride, padding)
-    planes, batch, out_depth = _depth_planes(
-        "max_pool3d", tensor, kernel, step, margin, (1, 1, 1), float("-inf")
-    )
-
-    best = None
-    for plane in planes:
-        pooled = _F.max_pool2d(
-            plane, (kernel[1], kernel[2]), (step[1], step[2]), (margin[1], margin[2])
-        )
-        best = pooled if best is None else _F.maximum(best, pooled)
-    return _as_volume(best, batch, out_depth)
+    return _max_pool3d_kernel(tensor, kernel, step, margin)
 
 
 def avg_pool3d(

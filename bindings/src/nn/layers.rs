@@ -2231,6 +2231,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(max_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(avg_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(avg_pool3d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(max_pool3d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(batch_norm, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(cross_entropy, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(dropout_functional, &nn_module)?)?;

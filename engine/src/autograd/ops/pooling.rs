@@ -436,8 +436,10 @@ impl GradientFunction for MaxPool2dBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mismatched =
             || MinitensorError::internal_error("max_pool2d backward received a mismatched dtype");
+        // A plane of a 2-D pool, or the volume of a 3-D one: what the winning
+        // offsets are within.
         let planes = self.input_shape[0] * self.input_shape[1];
-        let plane_in = self.input_shape[2] * self.input_shape[3];
+        let plane_in = self.input_shape[2..].iter().product();
         let device = grad_output.device();
         let data = match grad_output.dtype() {
             DataType::Float32 => {

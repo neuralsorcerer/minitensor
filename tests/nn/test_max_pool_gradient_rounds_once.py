@@ -156,3 +156,68 @@ def test_a_cell_winning_four_windows_takes_their_sum_rounded_once(dtype):
     assert grad[0, 0, 1, 1] == np.array(1 + 2 * step, dtype=dtype)
     assert (np.delete(grad.reshape(-1), 4) == 0).all()
     assert not np.signbit(grad).any()
+
+
+def _winners3d(x, kernel, stride, padding):
+    """Each 3-D window's largest value and the offset of the cell it came
+    from, from the definition: the first in reading order of equal ones,
+    the padding never winning."""
+
+    n, c, *size = x.shape
+    out = [
+        (s + 2 * p - k) // st + 1 for s, p, k, st in zip(size, padding, kernel, stride)
+    ]
+    values = np.zeros((n, c, *out), dtype=x.dtype)
+    winners = np.zeros((n, c, *out), dtype=np.int64)
+    for a in range(n):
+        for b in range(c):
+            for window in np.ndindex(*out):
+                best, at = None, None
+                for taps in np.ndindex(*kernel):
+                    cell = [
+                        o * st + t - p
+                        for o, st, t, p in zip(window, stride, taps, padding)
+                    ]
+                    if any(i < 0 or i >= s for i, s in zip(cell, size)):
+                        continue
+                    value = x[(a, b) + tuple(cell)]
+                    if best is None or value > best:
+                        best, at = value, int(np.ravel_multi_index(cell, size))
+                values[(a, b) + window] = best
+                winners[(a, b) + window] = at
+    return values, winners
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "size,kernel,stride,padding",
+    [
+        ((5, 6, 7), (3, 3, 3), (1, 1, 1), (1, 1, 1)),
+        ((6, 6, 6), (3, 3, 3), (2, 2, 2), (1, 1, 1)),
+        ((4, 5, 6), (2, 2, 2), (2, 2, 2), (0, 0, 0)),
+        ((7, 4, 5), (3, 2, 2), (1, 2, 1), (1, 1, 0)),
+    ],
+)
+def test_max_pool3d_and_its_gradient_round_once(dtype, size, kernel, stride, padding):
+    rng = np.random.default_rng(sum(size) + sum(kernel))
+    x = _peaks(rng, (1, 2) + size, dtype)
+    # Ties, which the first in reading order wins.
+    x[0, 0, 1:3, 1:3, 1:3] = 99.0
+    tensor = mt.tensor(x, requires_grad=True)
+    pooled = mt.nn.max_pool3d(tensor, kernel, stride, padding)
+    want, winners = _winners3d(x, kernel, stride, padding)
+    np.testing.assert_array_equal(pooled.numpy(), want)
+    g = _flowing(rng, tuple(pooled.shape), dtype)
+    (pooled * mt.tensor(g)).sum().backward()
+    cells = int(np.prod(size))
+    _same(tensor.grad.numpy(), _routed(winners, g, cells, dtype), "3-D gradient")
+
+
+def test_max_pool3d_takes_a_nan_where_a_window_holds_one():
+    x = np.zeros((1, 1, 4, 4, 4), dtype=np.float32)
+    x[0, 0, 1, 1, 1] = np.nan
+    x[0, 0, 3, 3, 3] = 7.0
+    pooled = mt.nn.max_pool3d(mt.tensor(x), 2).numpy()
+    assert np.isnan(pooled[0, 0, 0, 0, 0])
+    assert pooled[0, 0, 1, 1, 1] == 7.0
+    assert (pooled[0, 0][~np.isnan(pooled[0, 0])] >= 0).all()
