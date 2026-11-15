@@ -172,3 +172,82 @@ def test_gradients(dtype):
     x = mt.tensor([5.0, 1.0, 4.0, 2.0, 3.0], dtype=dtype, requires_grad=True)
     mt.quantile(x, 0.5, interpolation="nearest").backward()
     assert x.grad.tolist() == [0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+def _shares(values, q: float, mode: str, g: Fraction):
+    """The exact share of the gradient `g` each of the distinct `values`
+    takes, by its position in `values`: the definition's weights."""
+
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    position = Fraction(min(max(float(q) * (len(values) - 1), 0.0), len(values) - 1))
+    lower = math.floor(position)
+    fraction = position - lower
+    shares = {}
+    if fraction == 0:
+        shares[order[lower]] = g
+    elif mode == "linear":
+        shares[order[lower]] = g * (1 - fraction)
+        shares[order[lower + 1]] = g * fraction
+    elif mode == "midpoint":
+        shares[order[lower]] = g / 2
+        shares[order[lower + 1]] = g / 2
+    elif mode == "lower":
+        shares[order[lower]] = g
+    elif mode == "higher":
+        shares[order[lower + 1]] = g
+    elif fraction == Fraction(1, 2):
+        shares[order[lower + (lower & 1)]] = g
+    else:
+        shares[order[lower] if fraction < Fraction(1, 2) else order[lower + 1]] = g
+    return shares
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("mode", MODES)
+def test_gradient_shares_are_rounded_once(dtype, mode):
+    # Each share is the gradient times its weight, rounded once. Narrowing
+    # the weight to the element type and multiplying rounded twice, and in
+    # float64 `1 - weight` was rounded where the position is under one.
+    rng = np.random.default_rng(743)
+    for trial in range(150):
+        n = int(rng.integers(2, 30))
+        values = rng.permutation(n).astype(dtype) + rng.uniform(0, 0.5, n).astype(dtype)
+        q = float(rng.uniform()) * (0.05 if trial % 3 == 0 else 1.0)
+        g = np.array(rng.normal() * 2.0 ** rng.integers(-30, 30), dtype=dtype)
+        x = mt.tensor(values, dtype=dtype, requires_grad=True)
+        (mt.quantile(x, q, interpolation=mode) * mt.tensor(g)).sum().backward()
+        want = [0.0] * n
+        for index, share in _shares(values, q, mode, Fraction(float(g))).items():
+            want[index] = _rounded(share, dtype)
+        assert x.grad.tolist() == want, (trial, n, q, float(g))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("mode", MODES)
+def test_an_element_not_read_takes_no_gradient(dtype, mode):
+    # The gradient times a weight of zero was NaN for an infinite gradient,
+    # sent to the element beside the one read -- or, at a whole position,
+    # added to the one read, which made its gradient NaN.
+    x = mt.tensor([5.0, 1.0, 4.0, 2.0, 3.0], dtype=dtype, requires_grad=True)
+    (
+        mt.quantile(x, 0.5, interpolation=mode) * mt.tensor(math.inf, dtype=dtype)
+    ).backward()
+    assert x.grad.tolist() == [0.0, 0.0, 0.0, 0.0, math.inf]
+    x = mt.tensor([5.0, 1.0, 4.0, 2.0, 3.0], dtype=dtype, requires_grad=True)
+    pooled = mt.quantile(x, 0.4, interpolation=mode)
+    (pooled * mt.tensor(-math.inf, dtype=dtype)).backward()
+    read = {"lower": [3], "higher": [4], "nearest": [4]}.get(mode, [3, 4])
+    want = [-math.inf if index in read else 0.0 for index in range(5)]
+    assert x.grad.tolist() == want
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_rank_read_alone_takes_the_whole_gradient(dtype):
+    # At a whole position the midpoint reads one rank. Its two halves of the
+    # smallest subnormal each rounded to zero, and so did their sum.
+    tiny = float(np.finfo(dtype).smallest_subnormal)
+    for g in (tiny, 3 * tiny):
+        x = mt.tensor([5.0, 1.0, 4.0, 2.0, 3.0], dtype=dtype, requires_grad=True)
+        pooled = mt.quantile(x, 0.5, interpolation="midpoint")
+        (pooled * mt.tensor(g, dtype=dtype)).backward()
+        assert x.grad.tolist() == [0.0, 0.0, 0.0, 0.0, g]

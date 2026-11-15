@@ -5,7 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_map_indexed, par_out_chunks_gated};
+use crate::ops::map::{
+    PAR_THRESHOLD, outputs_per_task, par_map_indexed, par_out_chunks, par_out_chunks_gated,
+};
 use crate::ops::normalization::lane_sum_zip;
 use crate::ops::shape_ops;
 use crate::{
@@ -272,24 +274,205 @@ fn route_grad_to_selected(
 /// Route `grad_output` to every input element equal to the selected reduction
 /// value (`reduced`, recomputed with keepdim so it broadcasts), splitting equally
 /// among ties. Shared by min/max and median value reductions.
+///
+/// Each element a slice's value was read from takes the float nearest its
+/// share, the gradient over the number of them, and the others take
+/// nothing, an infinite or NaN gradient included: multiplying a mask of the
+/// ties by the share made every other element `0 · inf`, NaN. A slice whose
+/// value is NaN was read from its NaNs, which share its gradient -- equal to
+/// nothing, it gave every element of the slice NaN -- unless the reduction
+/// leaves NaNs out (`nan_aware`), when a NaN says there was nothing to read
+/// and no element takes anything.
 fn distribute_selection_grad(
     input: &Tensor,
     reduced: &Tensor,
     grad_output: &Tensor,
     dim: Option<usize>,
-    keepdim: bool,
+    nan_aware: bool,
 ) -> Result<Tensor> {
-    let input_shape = input.shape().dims().to_vec();
-    let mask = crate::ops::comparison::eq(input, reduced)?;
-    let mask_f = mask.astype(input.dtype())?;
+    let dims = input.shape().dims();
+    let (len, inner) = match dim {
+        None => (input.numel(), 1),
+        Some(d) => (dims[d], dims[d + 1..].iter().product()),
+    };
+    let x = input.contiguous()?;
+    let value = reduced.contiguous()?;
+    let grad = grad_output.contiguous()?;
+    let missing = || MinitensorError::internal_error("selection backward: mismatched dtype");
+    let data = match input.dtype() {
+        DataType::Float32 => {
+            let (x, value, grad) = (
+                x.data().as_f32_slice().ok_or_else(missing)?,
+                value.data().as_f32_slice().ok_or_else(missing)?,
+                grad.data().as_f32_slice().ok_or_else(missing)?,
+            );
+            TensorData::from_vec(
+                spread_over_ties(x, value, grad, (len, inner), !nan_aware),
+                DataType::Float32,
+                input.device(),
+            )
+        }
+        DataType::Float64 => {
+            let (x, value, grad) = (
+                x.data().as_f64_slice().ok_or_else(missing)?,
+                value.data().as_f64_slice().ok_or_else(missing)?,
+                grad.data().as_f64_slice().ok_or_else(missing)?,
+            );
+            TensorData::from_vec(
+                spread_over_ties(x, value, grad, (len, inner), !nan_aware),
+                DataType::Float64,
+                input.device(),
+            )
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "selection backward only supported for floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    ))
+}
 
-    let sum_dims = dim.map(|d| vec![d as isize]);
-    let count = reduction::sum(&mask_f, sum_dims, true)?;
+/// Whether `element` is one a slice whose value is `value` was read from:
+/// equal to it, or a NaN where it is NaN and `nans_read`. `x != x` holds
+/// only for NaN.
+///
+/// The tests are combined without branching, so that a row of them runs in
+/// vector lanes.
+#[allow(clippy::eq_op)]
+#[inline(always)]
+fn read_from<T: Copy + PartialOrd>(element: T, value: T, nans_read: bool) -> bool {
+    (element == value) | (nans_read & (value != value) & (element != element))
+}
 
-    let dims_vec = dim.map(|d| vec![d]);
-    let grad_kd = expand_reduction_grad(grad_output, &input_shape, &dims_vec, keepdim)?;
-    let scaled = arithmetic::div(&grad_kd, &count)?;
-    arithmetic::mul(&mask_f, &scaled)
+/// [`distribute_selection_grad`] over slices of `len` elements `inner`
+/// apart, `value` and `grad` holding one entry for each.
+///
+/// The input is taken a band of whole rows at a time, the elements of a row
+/// side by side: once to count each slice's elements read, and once more
+/// to give them their shares.
+fn spread_over_ties<T>(
+    x: &[T],
+    value: &[T],
+    grad: &[T],
+    (len, inner): (usize, usize),
+    nans_read: bool,
+) -> Vec<T>
+where
+    T: crate::ops::arithmetic::exact_sum::Element
+        + crate::ops::arithmetic::exact_sum::Output
+        + Copy
+        + Default
+        + PartialOrd
+        + Send
+        + Sync,
+{
+    let mut out = vec![T::default(); x.len()];
+    if len == 0 || inner == 0 {
+        return out;
+    }
+    let rows = x.len() / inner;
+    let band = ((1usize << 16) / inner).max(1);
+    // Each run of a band's rows that lies in one slice, as the slice, its
+    // first row and the row past its last.
+    let runs = |first: usize, last: usize| {
+        let (mut row, mut slice) = (first, first / len);
+        std::iter::from_fn(move || {
+            (row < last).then(|| {
+                let end = ((slice + 1) * len).min(last);
+                let run = (slice, row, end);
+                (row, slice) = (end, slice + 1);
+                run
+            })
+        })
+    };
+    let counted = par_map_indexed(rows.div_ceil(band), &|task| {
+        let (first, last) = (task * band, ((task + 1) * band).min(rows));
+        // A band holds at most 2^16 rows, so its counts fit in 32 bits,
+        // which take twice the lanes 64 would.
+        let start = first / len;
+        let mut counts = vec![0u32; ((last - 1) / len + 1 - start) * inner];
+        for (slice, row, end) in runs(first, last) {
+            let elements = &x[row * inner..end * inner];
+            let tally = &mut counts[(slice - start) * inner..][..inner];
+            if inner == 1 {
+                let value = value[slice];
+                tally[0] += elements
+                    .iter()
+                    .map(|&element| u32::from(read_from(element, value, nans_read)))
+                    .sum::<u32>();
+                continue;
+            }
+            let values = &value[slice * inner..][..inner];
+            for row in elements.chunks_exact(inner) {
+                for ((count, &element), &value) in tally.iter_mut().zip(row).zip(values) {
+                    *count += u32::from(read_from(element, value, nans_read));
+                }
+            }
+        }
+        (start, counts)
+    });
+    let mut counts = vec![0u64; value.len()];
+    for (start, part) in counted {
+        for (total, count) in counts[start * inner..].iter_mut().zip(part) {
+            *total += u64::from(count);
+        }
+    }
+    let shares: Vec<T> = counts
+        .iter()
+        .zip(grad)
+        .map(|(&count, &g)| match count {
+            0 | 1 => g,
+            _ => crate::ops::arithmetic::exact_sum::weighted_quotient(
+                std::iter::once((1u64, g)),
+                count,
+            ),
+        })
+        .collect();
+    par_out_chunks(&mut out, band * inner, &|offset, chunk| {
+        let first = offset / inner;
+        for (slice, row, end) in runs(first, first + chunk.len() / inner) {
+            let cells = &mut chunk[(row - first) * inner..(end - first) * inner];
+            let elements = &x[row * inner..end * inner];
+            // Every cell is written, the share or zero, so that the row is a
+            // select in vector lanes rather than a branch at each cell.
+            let zero = T::default();
+            if inner == 1 {
+                let (value, share) = (value[slice], shares[slice]);
+                for (cell, &element) in cells.iter_mut().zip(elements) {
+                    *cell = if read_from(element, value, nans_read) {
+                        share
+                    } else {
+                        zero
+                    };
+                }
+                continue;
+            }
+            let values = &value[slice * inner..][..inner];
+            let given = &shares[slice * inner..][..inner];
+            for (cells, row) in cells
+                .chunks_exact_mut(inner)
+                .zip(elements.chunks_exact(inner))
+            {
+                for (((cell, &element), &value), &share) in
+                    cells.iter_mut().zip(row).zip(values).zip(given)
+                {
+                    *cell = if read_from(element, value, nans_read) {
+                        share
+                    } else {
+                        zero
+                    };
+                }
+            }
+        }
+    });
+    out
 }
 
 impl GradientFunction for MinMaxBackward {
@@ -322,7 +505,7 @@ impl GradientFunction for MinMaxBackward {
             (false, true) => reduction::nanmin(input, dim_isize, true)?,
         };
         let grad_input =
-            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.keepdim)?;
+            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.nan_aware)?;
         accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         Ok(gradients)
     }
@@ -370,7 +553,7 @@ impl GradientFunction for MedianBackward {
             reduction::median(input, dim_isize, true)?.0
         };
         let grad_input =
-            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.keepdim)?;
+            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.nan_aware)?;
         accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         Ok(gradients)
     }
@@ -387,7 +570,10 @@ impl GradientFunction for MedianBackward {
 /// bracket the requested position, so the gradient routes back to the two
 /// original elements occupying those sorted ranks with the interpolation weights
 /// (`Lower`/`Higher`/`Nearest` collapse to a single element; `Midpoint` splits
-/// evenly). Groups containing NaN produced NaN and receive no gradient.
+/// evenly). Each element's share is the float nearest its exact value, and an
+/// element the quantile does not read gets nothing, an infinite or NaN
+/// gradient included. Groups containing NaN produced NaN and receive no
+/// gradient.
 pub struct QuantileBackward {
     pub input_id: TensorId,
     pub input: Tensor,
@@ -397,34 +583,57 @@ pub struct QuantileBackward {
     pub nan_aware: bool,
 }
 
-/// Sorted-rank indices and their gradient weights for a group of length `len`.
-fn quantile_grad_coeffs(
+/// The sorted ranks a quantile of `len` values reads, and how its gradient
+/// divides between them: the forward's own position, so that the gradient
+/// reaches the ranks the value was read from, ties at a half included.
+fn quantile_reading(
     len: usize,
     q: f64,
     interp: crate::ops::reduction::QuantileInterpolation,
-) -> (usize, usize, f64, f64) {
+) -> Reading {
     use crate::ops::reduction::QuantileInterpolation as Qi;
-    if len <= 1 {
-        return (0, 0, 1.0, 0.0);
-    }
-    // The forward's own position, so that the gradient reaches the ranks
-    // the value was read from, ties at a half included.
     let position = crate::ops::reduction::quantile_position_for_len_q(len, q);
     let (lower, upper) = (position.lower_idx, position.upper_idx);
-    let weight = position.weight;
-    match interp {
-        Qi::Linear => (lower, upper, 1.0 - weight, weight),
-        Qi::Lower => (lower, upper, 1.0, 0.0),
-        Qi::Higher => (lower, upper, 0.0, 1.0),
-        Qi::Midpoint => (lower, upper, 0.5, 0.5),
-        Qi::Nearest => {
-            if position.nearest_idx == lower {
-                (lower, upper, 1.0, 0.0)
-            } else {
-                (lower, upper, 0.0, 1.0)
-            }
-        }
+    if lower == upper {
+        // A whole position reads its rank alone, whatever the mode.
+        return Reading::One(lower);
     }
+    match interp {
+        Qi::Linear => Reading::Linear(lower, position.weight),
+        Qi::Midpoint => Reading::Midpoint(lower),
+        Qi::Lower => Reading::One(lower),
+        Qi::Higher => Reading::One(upper),
+        Qi::Nearest => Reading::One(position.nearest_idx),
+    }
+}
+
+/// The ranks a quantile reads, from [`quantile_reading`].
+#[derive(Clone, Copy)]
+enum Reading {
+    /// One rank, whose element the quantile is: it takes the whole gradient.
+    One(usize),
+    /// A rank and the next, the next taking `weight` of the gradient and the
+    /// first the rest. The weight lies strictly between 0 and 1.
+    Linear(usize, f64),
+    /// A rank and the next, half of the gradient each.
+    Midpoint(usize),
+}
+
+/// A gradient `g` divided between the lower and the upper of two ranks the
+/// upper of which takes `weight` of it: `g - g · weight` and `g · weight`,
+/// each the float nearest its exact value. Narrowing `1 - weight` and
+/// `weight` to the element type and multiplying rounded each share twice.
+/// An infinite or NaN `g` is itself in both, as is a zero, the weight lying
+/// strictly between 0 and 1.
+fn linear_shares<T: crate::ops::arithmetic::exact_sum::Output>(g: f64, weight: f64) -> (T, T) {
+    use crate::ops::arithmetic::exact_sum::lerp_of;
+    if !g.is_finite() || g == 0.0 {
+        return (T::narrow(g), T::narrow(g));
+    }
+    (
+        lerp_of::<T, false>(g, 0.0, weight),
+        lerp_of::<T, false>(0.0, g, weight),
+    )
 }
 
 impl GradientFunction for QuantileBackward {
@@ -486,27 +695,41 @@ impl GradientFunction for QuantileBackward {
                             if skip_group || buffer.is_empty() {
                                 continue;
                             }
-                            let (lo, up, c_lo, c_up) =
-                                quantile_grad_coeffs(buffer.len(), self.q, self.interpolation);
-                            // Only the elements at sorted ranks `lo` and `up`
-                            // (adjacent) are needed, so select them in O(n) rather
-                            // than fully sorting. NaN is already filtered, so the
-                            // comparator never sees an incomparable value.
+                            // Only the elements at the ranks read are needed,
+                            // so they are selected in O(n) rather than sorted
+                            // for. NaN is already filtered, so the comparator
+                            // never sees an incomparable value.
                             let cmp =
                                 |a: &(usize, $ty), b: &(usize, $ty)| a.1.partial_cmp(&b.1).unwrap();
-                            buffer.select_nth_unstable_by(up, cmp);
-                            let d_up = buffer[up].0;
-                            let d_lo = if lo == up {
-                                d_up
-                            } else {
-                                // `lo == up - 1`: the lo-th order statistic is the
-                                // largest of the elements left of `up`.
-                                buffer[..up].select_nth_unstable_by(lo, cmp);
-                                buffer[lo].0
-                            };
                             let g = go[o * inner + r];
-                            gi[o * outer_stride + d_lo * inner + r] += g * c_lo as $ty;
-                            gi[o * outer_stride + d_up * inner + r] += g * c_up as $ty;
+                            let cell = |d: usize| o * outer_stride + d * inner + r;
+                            let reading =
+                                quantile_reading(buffer.len(), self.q, self.interpolation);
+                            let lower = match reading {
+                                Reading::One(rank) => {
+                                    buffer.select_nth_unstable_by(rank, cmp);
+                                    gi[cell(buffer[rank].0)] = g;
+                                    continue;
+                                }
+                                Reading::Linear(lower, _) | Reading::Midpoint(lower) => lower,
+                            };
+                            // The upper of the two is selected first, and the
+                            // lower is then the largest of the elements left
+                            // of it.
+                            buffer.select_nth_unstable_by(lower + 1, cmp);
+                            let d_up = buffer[lower + 1].0;
+                            buffer[..lower + 1].select_nth_unstable_by(lower, cmp);
+                            let d_lo = buffer[lower].0;
+                            let (low, high) = match reading {
+                                Reading::Linear(_, weight) => {
+                                    linear_shares::<$ty>(g as f64, weight)
+                                }
+                                // Halving is exact but where it underflows,
+                                // and rounds once there.
+                                _ => (g * 0.5, g * 0.5),
+                            };
+                            gi[cell(d_lo)] = low;
+                            gi[cell(d_up)] = high;
                         }
                     }
                 }};

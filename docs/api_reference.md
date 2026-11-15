@@ -1315,7 +1315,11 @@ The reductions split on whether they report an index. `max(dim)`, `min(dim)`,
 their NaN-aware forms and `median(dim)` send the whole gradient to the element
 their index names, so the value, the index and the gradient all identify the
 same element. `amax`, `amin` and `nanmedian` report no index and divide a tie's
-gradient evenly among the elements that tied — the mean subgradient. `mode` is not differentiable at all.
+gradient evenly among the elements that tied — the mean subgradient, each share
+the float nearest the gradient over their number. The elements a reduction did
+not read take nothing, an infinite gradient included; a `NaN` value was read
+from the slice's `NaN`s, which share its gradient, unless the reduction leaves
+`NaN` out, when it read nothing and nothing takes a gradient. `mode` is not differentiable at all.
 `"mean"` divides by the same count the forward divided by. `"prod"` needs the
 product of every contribution *except* each one, and computes it by counting
 zeros rather than dividing the total: `total / factor` is the obvious form and
@@ -2342,7 +2346,9 @@ A `quantile` reads its ranks off the float64 nearest `q * (n - 1)`, so that
 the `0.1` quantile of eleven values sits on the second of them as the decimal
 does, and its `"linear"` value between the two ranks is the float nearest the
 exact interpolation at that position, where `lower + (upper - lower) * weight`
-rounded the gap, the product and the sum.
+rounded the gap, the product and the sum. Its gradient gives the upper rank the
+float nearest `g * weight` and the lower the float nearest `g - g * weight`, a
+whole position's one rank the whole of `g`, and no other element anything.
 
 `nanmedian(dim=None, keepdim=False)` is available as a tensor method,
 functional helper, and top-level helper. It ignores `NaN` values in floating
