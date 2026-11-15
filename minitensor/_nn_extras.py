@@ -1158,6 +1158,7 @@ def _affine(
         return normalized
     channels = int(normalized.shape[1])
     shape = _feature_shape(channels, normalized.ndim())
+    parameters = {}
     for name, value in (("weight", weight), ("bias", bias)):
         if value is None:
             continue
@@ -1167,12 +1168,16 @@ def _affine(
                 f"{op} expects one {name} per channel ({channels}), got "
                 f"{int(parameter.reshape(-1).shape[0])}"
             )
-        normalized = (
-            normalized * parameter.reshape(shape)
-            if name == "weight"
-            else normalized + parameter.reshape(shape)
+        parameters[name] = parameter.reshape(shape)
+    if len(parameters) == 2:
+        # Scaled and shifted with one rounding, where a product and then a
+        # sum took two.
+        return _C.functional._addcmul(
+            parameters["bias"], normalized, parameters["weight"], 1.0
         )
-    return normalized
+    if "weight" in parameters:
+        return normalized * parameters["weight"]
+    return normalized + parameters["bias"]
 
 
 def _check_norm_args(op: str, eps: float, momentum: float | None = None) -> None:

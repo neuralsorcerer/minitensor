@@ -49,6 +49,10 @@ pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotie
 mod scatter;
 pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows};
 
+#[path = "exact_standard.rs"]
+mod standard;
+pub(crate) use self::standard::{standardized_rows, standardized_slice};
+
 /// Lanes a run is added in, and values per block a task takes.
 const LANES: usize = 8;
 const BLOCK: usize = 8192;

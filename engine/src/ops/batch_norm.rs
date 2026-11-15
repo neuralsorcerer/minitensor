@@ -413,10 +413,12 @@ fn typed<T: NormFloat>(
 
     let w = weight.map(|w| values::<T>(w, "weight")).transpose()?;
     let b = bias.map(|b| values::<T>(b, "bias")).transpose()?;
-    // A missing weight is a gain of one and a missing bias a shift of zero,
-    // both exact, so one formula serves every combination.
+    // A missing weight is a gain of one and a missing bias a shift of
+    // negative zero, the two values that change nothing -- a shift of
+    // positive zero would turn a negative zero positive -- so one formula
+    // serves every combination.
     let gain = w.clone().unwrap_or_else(|| vec![1.0; layout.channels]);
-    let shift = b.unwrap_or_else(|| vec![0.0; layout.channels]);
+    let shift = b.unwrap_or_else(|| vec![-0.0; layout.channels]);
     let mut out = vec![T::from_f64(0.0); x.len()];
     if layout.spatial == 1 {
         per_row(layout, &mut out, &|out_row, at| {
@@ -435,6 +437,41 @@ fn typed<T: NormFloat>(
                 *o = T::from_f64((v.to_f64() - mean) * scale * g + sh);
             }
         });
+    }
+
+    if T::DTYPE == DataType::Float64 && stats.from_batch {
+        // Each output again as the float64 nearest its exact value, where
+        // each step above rounded in float64 and most came out an ulp or
+        // more off: each channel's values gathered, standardized over
+        // themselves with its weight and bias, and set back.
+        let channel = |c: usize| -> Vec<f64> {
+            let mut values = Vec::with_capacity(count);
+            for image in 0..layout.images {
+                let at = (image * layout.channels + c) * layout.spatial;
+                values.extend(x[at..at + layout.spatial].iter().map(|&v| v.to_f64()));
+            }
+            // What the formula gave, which a channel holding a value that is
+            // not finite keeps.
+            let mut exact = Vec::with_capacity(count);
+            for image in 0..layout.images {
+                let at = (image * layout.channels + c) * layout.spatial;
+                exact.extend(out[at..at + layout.spatial].iter().map(|&v| v.to_f64()));
+            }
+            crate::ops::arithmetic::exact_sum::standardized_slice(
+                &values, eps, gain[c], shift[c], &mut exact,
+            );
+            exact
+        };
+        let exact = crate::ops::map::par_map_indexed(layout.channels, &channel);
+        for (c, values) in exact.iter().enumerate() {
+            let mut values = values.iter();
+            for image in 0..layout.images {
+                let at = (image * layout.channels + c) * layout.spatial;
+                for (o, &v) in out[at..at + layout.spatial].iter_mut().zip(&mut values) {
+                    *o = T::from_f64(v);
+                }
+            }
+        }
     }
 
     let requires_grad = crate::autograd::is_grad_enabled()

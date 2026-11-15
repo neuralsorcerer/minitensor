@@ -706,6 +706,20 @@ pub fn layer_norm(
                 requires_grad.then_some(n.as_mut_slice()),
                 &mut s,
             );
+            // Each output again, and each normalized value saved, as the
+            // float64 nearest its exact value, where each step above rounded
+            // in float64 and most came out an ulp or more off; the
+            // statistics stay as they are for the backward.
+            crate::ops::arithmetic::exact_sum::standardized_rows(
+                src,
+                norm,
+                w,
+                b,
+                eps,
+                true,
+                &mut o,
+                requires_grad.then_some(n.as_mut_slice()),
+            );
             (
                 TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
                 TensorData::from_vec::<f64>(n, DataType::Float64, input.device()),
@@ -945,6 +959,11 @@ pub fn rms_norm(
             let mut o = vec![0f64; total];
             let mut r = vec![0f64; rows];
             rms_norm_rows_f64(src, norm, w, eps, &mut o, &mut r);
+            // Each output again as the float64 nearest its exact value; see
+            // `layer_norm`.
+            crate::ops::arithmetic::exact_sum::standardized_rows(
+                src, norm, w, None, eps, false, &mut o, None,
+            );
             (
                 TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
                 TensorData::from_vec::<f64>(r, DataType::Float64, input.device()),
