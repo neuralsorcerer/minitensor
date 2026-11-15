@@ -1032,7 +1032,7 @@ pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
         dims,
         keepdim,
         mask: non_nan_mask(tensor)?,
-        count: super::nan_stats_impl::non_nan_count(tensor, dim, keepdim)?,
+        count: super::nan_stats_impl::non_nan_counts(tensor, dim, keepdim)?,
     });
     with_grad_fn(result.requires_grad_(true), grad_fn)
 }

@@ -125,3 +125,45 @@ def test_gradients(dtype):
     x.nanmean(dim=1).sum().backward()
     assert x.grad.tolist() == [[0.5, 0.0, 0.5], [0.0, 0.0, 0.0]]
     assert str(x.grad.dtype) == dtype
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("name", ["nansum", "nanmean"])
+def test_a_skipped_nan_takes_no_gradient_whatever_it_is_sent(dtype, name):
+    # The gradient was the mask of kept values times the incoming gradient,
+    # and a NaN skipped took `0 * inf`, NaN, from an infinite one.
+    x = mt.tensor(
+        [[1.0, math.nan, 3.0], [math.nan, 2.0, math.nan]],
+        dtype=dtype,
+        requires_grad=True,
+    )
+    reduced = getattr(x, name)(dim=1)
+    (reduced * mt.tensor([math.inf, -math.inf], dtype=dtype)).sum().backward()
+    assert x.grad.tolist() == [
+        [math.inf, 0.0, math.inf],
+        [0.0, -math.inf, 0.0],
+    ]
+    x = mt.tensor([2.0, math.nan], dtype=dtype, requires_grad=True)
+    (getattr(x, name)() * mt.tensor(math.nan, dtype=dtype)).backward()
+    got = x.grad.tolist()
+    assert math.isnan(got[0]) and got[1] == 0.0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_a_mean_shares_its_gradient_over_the_exact_count(dtype):
+    # Each kept value takes the float nearest the gradient over the count of
+    # its slice, over several axes as over one.
+    rng = np.random.default_rng(29)
+    values = rng.standard_normal((3, 5, 4))
+    values[rng.random(values.shape) < 0.4] = np.nan
+    g = rng.standard_normal((5,)) * 2.0 ** rng.integers(-20, 20, 5)
+    x = mt.tensor(values.astype(dtype), requires_grad=True)
+    (x.nanmean(dim=[0, 2]) * mt.tensor(g.astype(dtype))).sum().backward()
+    kept = ~np.isnan(values)
+    counts = kept.sum(axis=(0, 2))
+    for j in range(5):
+        share = Fraction(float(np.array(g[j], dtype=dtype))) / max(int(counts[j]), 1)
+        want = _float32(share) if dtype == "float32" else float(share)
+        column = x.grad.numpy()[:, j, :]
+        assert (column[kept[:, j, :]] == want).all(), j
+        assert (column[~kept[:, j, :]] == 0).all(), j

@@ -8,9 +8,7 @@ use super::*;
 use crate::{
     error::{MinitensorError, Result},
     ops::binary_math::{FloatBinaryKernel, float_binary_tensor},
-    ops::map::{
-        binary_map, outputs_per_task, par_out_chunks, par_out_chunks2, ternary_map, unary_map,
-    },
+    ops::map::{binary_map, outputs_per_task, par_out_chunks, par_out_chunks2, ternary_map},
     ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -93,8 +91,7 @@ impl GradientFunction for NanSumBackward {
         gradients.reserve(1);
 
         let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
-        let mask = self.mask.astype(grad_output.dtype())?;
-        let grad_input = arithmetic::mul(&mask, &grad)?;
+        let grad_input = kept_only(&self.mask, &grad)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
@@ -112,6 +109,8 @@ pub struct NanMeanBackward {
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
     pub mask: Tensor,
+    /// How many values of each slice are not NaN, as int64, in the shape of
+    /// the mean.
     pub count: Tensor,
 }
 
@@ -120,15 +119,9 @@ impl GradientFunction for NanMeanBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
-        let count =
-            expand_reduction_grad(&self.count, &self.input_shape, &self.dims, self.keepdim)?;
-        let grad = sanitize_grad_for_nanmean(&grad, &count)?;
-        let count = safe_count_for_nanmean(&count)?;
-
-        let scaled = arithmetic::div(&grad, &count)?;
-        let mask = self.mask.astype(grad_output.dtype())?;
-        let grad_input = arithmetic::mul(&mask, &scaled)?;
+        let shares = shares_over_counts(grad_output, &self.count)?;
+        let grad = expand_reduction_grad(&shares, &self.input_shape, &self.dims, self.keepdim)?;
+        let grad_input = kept_only(&self.mask, &grad)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
@@ -139,83 +132,50 @@ impl GradientFunction for NanMeanBackward {
     }
 }
 
-fn sanitize_grad_for_nanmean(grad: &Tensor, count: &Tensor) -> Result<Tensor> {
-    if grad.dtype() != count.dtype() {
-        return Err(MinitensorError::invalid_operation(
-            "nanmean backward expected matching gradient and count dtypes",
-        ));
-    }
+/// `grad`, broadcast to the shape of `kept`, where `kept` holds, and zero
+/// where it does not: a NaN a reduction skipped takes nothing, an infinite
+/// or NaN gradient included. Multiplying by the mask made it `0 · inf`, NaN.
+fn kept_only(kept: &Tensor, grad: &Tensor) -> Result<Tensor> {
+    let zero = create_scalar_tensor(0.0, grad.dtype(), grad.device())?;
+    crate::ops::selection::where_op(kept, grad, &zero)
+}
 
-    // A count of zero means the whole reduced axis was NaN, so nothing flows
-    // back through that position.
-    macro_rules! sanitize {
-        ($accessor:ident, $ty:ty, $tyname:literal, $from_vec:ident) => {{
-            let missing =
-                || MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"));
-            let grad_src = grad.data().$accessor().ok_or_else(missing)?;
-            let count_src = count.data().$accessor().ok_or_else(missing)?;
-            TensorData::$from_vec(
-                binary_map(
-                    grad_src,
-                    count_src,
-                    |g: $ty, c: $ty| {
-                        if c == 0.0 { 0.0 } else { g }
-                    },
-                ),
-                grad.device(),
-            )
-        }};
+/// Each entry of `grad` over the int64 count beside it, the float nearest
+/// the exact quotient. A count past 2^24 is not a float32, and dividing by
+/// its rounding rounded twice. A count of zero, a slice of nothing but NaN,
+/// takes zero: none of its values is kept to receive it.
+fn shares_over_counts(grad: &Tensor, counts: &Tensor) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::{Element, Output, weighted_quotient};
+    fn share<T: Element + Output + Default>(g: T, count: i64) -> T {
+        match count {
+            ..=0 => T::default(),
+            1 => g,
+            _ => weighted_quotient(std::iter::once((1u64, g)), count as u64),
+        }
     }
-
-    let new_data = match grad.dtype() {
-        DataType::Float32 => sanitize!(as_f32_slice, f32, "f32", from_vec_f32),
-        DataType::Float64 => sanitize!(as_f64_slice, f64, "f64", from_vec_f64),
+    let (grad, counts) = (grad.contiguous()?, counts.contiguous()?);
+    let missing = || MinitensorError::internal_error("nanmean backward: mismatched operands");
+    let tally = counts.data().as_i64_slice().ok_or_else(missing)?;
+    let data = match grad.dtype() {
+        DataType::Float32 => {
+            let g = grad.data().as_f32_slice().ok_or_else(missing)?;
+            TensorData::from_vec_f32(binary_map(g, tally, share::<f32>), grad.device())
+        }
+        DataType::Float64 => {
+            let g = grad.data().as_f64_slice().ok_or_else(missing)?;
+            TensorData::from_vec_f64(binary_map(g, tally, share::<f64>), grad.device())
+        }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "nanmean backward only supports floating point tensors",
             ));
         }
     };
-
     Ok(Tensor::new(
-        Arc::new(new_data),
+        Arc::new(data),
         grad.shape().clone(),
         grad.dtype(),
         grad.device(),
-        false,
-    ))
-}
-
-fn safe_count_for_nanmean(count: &Tensor) -> Result<Tensor> {
-    // Divide-by-zero guard: a zero count pairs with a zero gradient (see
-    // `sanitize_grad_for_nanmean`), so the substituted 1 never reaches a result.
-    macro_rules! safe_count {
-        ($accessor:ident, $ty:ty, $tyname:literal, $from_vec:ident) => {{
-            let src = count.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
-            })?;
-            TensorData::$from_vec(
-                unary_map(src, |c: $ty| if c == 0.0 { 1.0 } else { c }),
-                count.device(),
-            )
-        }};
-    }
-
-    let new_data = match count.dtype() {
-        DataType::Float32 => safe_count!(as_f32_slice, f32, "f32", from_vec_f32),
-        DataType::Float64 => safe_count!(as_f64_slice, f64, "f64", from_vec_f64),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "nanmean backward only supports floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(new_data),
-        count.shape().clone(),
-        count.dtype(),
-        count.device(),
         false,
     ))
 }

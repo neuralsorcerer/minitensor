@@ -44,8 +44,18 @@ pub(crate) fn non_nan_count(
     dim: Option<Vec<isize>>,
     keepdim: bool,
 ) -> Result<Tensor> {
+    non_nan_counts(tensor, dim, keepdim)?.astype(tensor.dtype())
+}
+
+/// [`non_nan_count`] as the int64 `count_nonzero` gives it, every count
+/// exact.
+pub(crate) fn non_nan_counts(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+) -> Result<Tensor> {
     let finite = eq(&tensor.isnan()?, &boolean_false(tensor)?)?;
-    count_nonzero(&finite, dim, keepdim)?.astype(tensor.dtype())
+    count_nonzero(&finite, dim, keepdim)
 }
 
 /// A `false` to compare a NaN mask against, so "is not NaN" needs no operator
