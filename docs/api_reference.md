@@ -2551,6 +2551,18 @@ assert row_std.shape == (2, 3)
   for `0.0` and `-0.0`, the side the signed zero was reached from; at a
   negative integer its two sides go to opposite infinities and nothing names
   one, so the answer is NaN.
+
+  Left of zero both are reflected -- `digamma(x) = digamma(-x) - 1/x -
+  pi cot(pi x)`, `lgamma(x) = ln pi - ln |x sin(pi x)| - lgamma(-x)` -- with
+  the terms carried in pairs of float64s, about 106 bits. Between each pair of
+  negative integers both functions cross zero, and there the terms cancel: in
+  float64 `lgamma` was 16% low at the float nearest its zero at `-2.457` and
+  `digamma` `1.8e15` ulps out next to its zero at `-1.573`, and away from the
+  zeros both missed by up to thousands of ulps. Away from the zeros the pair
+  holds each to about `2^-100` before it is rounded, and every answer
+  measured there is the float nearest the exact value; at the floats either
+  side of a zero, where the answer can be `1e-16` against terms of size one,
+  it is within `2e-14` of it.
 - `polygamma(order, input)` — the `order`-th derivative of `digamma`, so order
   0 is `digamma` and order 1 is `trigamma`; both are computed by their own
   routes and the general one agrees with them. Its own derivative is the next

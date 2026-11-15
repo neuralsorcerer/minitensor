@@ -37,6 +37,8 @@ use libm::erfc;
 use crate::ops::gaussian::{erf_inverse as erf_inv, erf_inverse_estimate};
 use std::f64::consts::{FRAC_2_SQRT_PI, LN_2, PI};
 
+mod reflection;
+
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
 /// widening, evaluating there, and rounding once at the end.
 ///
@@ -461,8 +463,23 @@ wide_kernel!(
     /// `log |gamma(x)|`, which stays finite where `gamma` itself overflows:
     /// `gamma(200)` is past the top of float64 and its logarithm is 857.
     LGAMMA,
-    |x, _p| libm::lgamma(x)
+    |x, _p| lgamma_scalar(x)
 );
+
+/// `log |gamma(x)|`.
+///
+/// Below minus one, away from the poles, by the reflection formula carried
+/// past float64's precision: in float64 its terms cancel next to each zero
+/// `lgamma` has there -- two between each pair of integers, out to where
+/// they come closer to the integers than a float64 can -- and the answer was
+/// what they rounded, 16% low at the float nearest the zero at -2.457 and up
+/// to 17000 ulps out across (-3, -2). Elsewhere `libm`'s, within a few ulps.
+fn lgamma_scalar(x: f64) -> f64 {
+    if x < -1.0 && x.floor() != x {
+        return reflection::lgamma_reflected(x);
+    }
+    libm::lgamma(x)
+}
 wide_grad_kernel!(
     /// `d/dx log gamma(x) = digamma(x)`, which is the definition of digamma.
     LGAMMA_D,
@@ -707,29 +724,19 @@ fn digamma_asymptotic(x: f64) -> f64 {
     x.ln() - 0.5 / x + s * inverse_square
 }
 
-/// `pi * cot(pi * x)`, with its argument reduced exactly.
-///
-/// The cotangent has period one, so it is taken at the distance `r` to the
-/// nearest integer, which is exact and at most a half; `pi * x` itself is
-/// rounded before the tangent sees it, and next to a pole that rounding is the
-/// whole answer -- within 7e-5 of `-20` it left `digamma` 2e-11 relative out.
-/// Past a quarter, `cot(pi r) = tan(pi (1/2 - r))` instead, whose argument is
-/// exact too and small where the cotangent is: dividing by the tangent of a
-/// rounded near-`pi/2` left 1e-14 relative on `digamma(-0.4999999999)`.
-fn pi_cot_pi(x: f64) -> f64 {
-    let r = x - x.round();
-    if r.abs() <= 0.25 {
-        PI / (PI * r).tan()
-    } else {
-        PI * (PI * (0.5f64.copysign(r) - r)).tan()
-    }
-}
+/// Below this magnitude `digamma(x)` of a negative `x` is `-1/x` rounded:
+/// `2^-500`.
+const TINY_DIGAMMA: f64 = 3.054_936_363_499_605e-151;
 
 /// `digamma(x)`, the logarithmic derivative of the gamma function.
 ///
 /// Three routes, because no one of them holds everywhere. The negative half
 /// reflects, so a large negative argument is one step rather than a million
-/// of them, the same way [`trigamma`] handles it. The neighbourhood of the
+/// of them, the same way [`trigamma`] handles it -- its terms carried in pairs
+/// of float64s, because between each pair of negative integers `digamma`
+/// crosses zero and there they cancel: in float64 the answer next to the zero
+/// at -1.573 was 1.8e15 ulps out, and anywhere left of zero up to 1900. The
+/// neighbourhood of the
 /// positive root gets its own series, because that is where any other route
 /// has nothing left to be accurate about, and the series is made wide enough
 /// that every positive argument below the asymptotic expansion reaches it by
@@ -768,9 +775,15 @@ fn digamma_scalar(x: f64) -> f64 {
         return f64::NAN;
     }
     if x < 0.0 {
-        // `digamma(1 - x) - digamma(x) = pi * cot(pi * x)`, and `1 - x` is
-        // above one for every negative `x`, so this recurses exactly once.
-        return digamma_scalar(1.0 - x) - pi_cot_pi(x);
+        if x > -TINY_DIGAMMA {
+            // `-1/x - gamma + O(x)`, where `gamma` is far below half an ulp of
+            // `1/x`, and the reflection's reciprocals would overflow.
+            return -1.0 / x;
+        }
+        // Reflected, its terms carried past float64's precision: they cancel
+        // next to the zero `digamma` has between each pair of negative
+        // integers, and in float64 the answer there was what they rounded.
+        return reflection::digamma_reflected(x);
     }
 
     if x >= DIGAMMA_ASYMPTOTIC_MIN {
