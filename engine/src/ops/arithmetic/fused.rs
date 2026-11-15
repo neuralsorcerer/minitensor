@@ -20,7 +20,8 @@ use rustc_hash::FxHashMap;
 
 use super::exact_sum::{
     Element, Output, addcdiv_lane, addcdiv_lane_narrow, addcdiv_of, addcmul_lane,
-    addcmul_lane_narrow, addcmul_of, lerp_lane, lerp_lane_narrow, lerp_of,
+    addcmul_lane_narrow, addcmul_of, exact_terms, exact_terms_over, lerp_lane, lerp_lane_narrow,
+    lerp_of,
 };
 use crate::{
     autograd::{GradientFunction, TensorId, accumulate_grad, with_grad_fn},
@@ -428,7 +429,7 @@ fn fused(kind: Fused, operands: [&Tensor; 3], value: f64) -> Result<Tensor> {
         value
     };
     let (narrow_slices, wide_slices) = (TensorData::as_f32_slice, TensorData::as_f64_slice);
-    let data = match (read_as, dtype) {
+    let mut data = match (read_as, dtype) {
         (DataType::Float32, _) => {
             evaluate::<f32, f32>(kind, &cast, narrow_slices, &shape, value, true)?
         }
@@ -437,6 +438,13 @@ fn fused(kind: Fused, operands: [&Tensor; 3], value: f64) -> Result<Tensor> {
         }
         _ => evaluate::<f64, f64>(kind, &cast, wide_slices, &shape, value, false)?,
     };
+    if operands.iter().any(|operand| past_float64(operand)) {
+        if let Some(out) = data.as_f32_slice_mut() {
+            reread_exactly(kind, operands, &shape, value, out)?;
+        } else if let Some(out) = data.as_f64_slice_mut() {
+            reread_exactly(kind, operands, &shape, value, out)?;
+        }
+    }
     let requires_grad =
         cast.iter().any(|operand| operand.requires_grad()) && crate::autograd::is_grad_enabled();
     let output = Tensor::new(Arc::new(data), shape, dtype, a.device(), requires_grad);
@@ -452,6 +460,116 @@ fn fused(kind: Fused, operands: [&Tensor; 3], value: f64) -> Result<Tensor> {
         operands: [a.detach(), b.detach(), c.detach()],
     });
     with_grad_fn(output, grad_fn)
+}
+
+/// Whether `tensor` holds an int64 that float64 does not, one past 2^53 in
+/// magnitude: read in float64 with the other operands, it was rounded
+/// before the formula saw it.
+fn past_float64(tensor: &Tensor) -> bool {
+    tensor.dtype() == DataType::Int64
+        && tensor
+            .data()
+            .as_i64_slice()
+            .is_some_and(|values| values.iter().any(|&v| v.unsigned_abs() > 1 << 53))
+}
+
+/// An int64 as the float64 nearest it and what that leaves over, which is
+/// a float64 too: the two add up to it exactly.
+fn split_int64(value: i64) -> (f64, f64) {
+    let head = value as f64;
+    // In 128 bits, where the head of a value near the top, 2^63, fits.
+    (head, (i128::from(value) - head as i128) as f64)
+}
+
+/// [`fused`]'s outputs again where an int64 operand holds a value float64
+/// does not. Each operand is read at the output's shape as pairs that add
+/// up to it -- an int64 as [`split_int64`] splits it, a float as itself and
+/// zero -- and an output an int64 past float64 reaches is the float nearest
+/// the exact formula, rounded once. The others, and one with an operand
+/// that is not finite, whose answer the formula gives, keep what `out` has.
+fn reread_exactly<T: Output + Copy + Send + Sync>(
+    kind: Fused,
+    operands: [&Tensor; 3],
+    shape: &Shape,
+    value: f64,
+    out: &mut [T],
+) -> Result<()> {
+    let dims: Vec<isize> = shape.dims().iter().map(|&size| size as isize).collect();
+    let missing = || MinitensorError::internal_error("fused: an operand without its storage");
+    let mut parts: Vec<Vec<(f64, f64)>> = Vec::with_capacity(3);
+    for operand in operands {
+        let full = operand.detach().expand(dims.clone())?.contiguous()?;
+        parts.push(match full.dtype() {
+            DataType::Int64 => {
+                let values = full.data().as_i64_slice().ok_or_else(missing)?;
+                values.iter().map(|&v| split_int64(v)).collect()
+            }
+            _ => {
+                let wide = full.astype(DataType::Float64)?;
+                let values = wide.data().as_f64_slice().ok_or_else(missing)?;
+                values.iter().map(|&v| (v, 0.0)).collect()
+            }
+        });
+    }
+    crate::ops::map::par_out_chunks(out, 1 << 12, &|start, block| {
+        for (offset, cell) in block.iter_mut().enumerate() {
+            let index = start + offset;
+            let [x, y, z] = [parts[0][index], parts[1][index], parts[2][index]];
+            let whole = x.1 == 0.0 && y.1 == 0.0 && z.1 == 0.0;
+            if !whole && [x.0, y.0, z.0].iter().all(|part| part.is_finite()) {
+                *cell = exact_formula(kind, [x, y, z], value);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// The float nearest `kind`'s formula over operands given as pairs that add
+/// up to each, all finite, summed exactly.
+fn exact_formula<T: Output>(kind: Fused, [x, y, z]: [(f64, f64); 3], value: f64) -> T {
+    match kind {
+        // start + weight · end - weight · start
+        Fused::Lerp => {
+            let (start, end, weight) = (x, y, z);
+            let mut terms = vec![(start.0, 1.0, 1.0), (start.1, 1.0, 1.0)];
+            for w in [weight.0, weight.1] {
+                for e in [end.0, end.1] {
+                    terms.push((w, e, 1.0));
+                }
+                for s in [start.0, start.1] {
+                    terms.push((-w, s, 1.0));
+                }
+            }
+            exact_terms(&terms, start.0 + weight.0 * (end.0 - start.0))
+        }
+        // input + value · first · second
+        Fused::Addcmul => {
+            let (input, first, second) = (x, y, z);
+            let mut terms = vec![(input.0, 1.0, 1.0), (input.1, 1.0, 1.0)];
+            for f in [first.0, first.1] {
+                for g in [second.0, second.1] {
+                    terms.push((value, f, g));
+                }
+            }
+            exact_terms(&terms, input.0 + first.0 * second.0 * value)
+        }
+        // (input · second + value · first) / second
+        Fused::Addcdiv => {
+            let (input, first, second) = (x, y, z);
+            let formula = input.0 + first.0 / second.0 * value;
+            if second.0 == 0.0 && second.1 == 0.0 {
+                return T::narrow(formula);
+            }
+            let mut numerator = vec![(value, first.0, 1.0), (value, first.1, 1.0)];
+            for i in [input.0, input.1] {
+                for g in [second.0, second.1] {
+                    numerator.push((i, g, 1.0));
+                }
+            }
+            let divisor = [(second.0, 1.0, 1.0), (second.1, 1.0, 1.0)];
+            exact_terms_over(&numerator, &divisor, formula)
+        }
+    }
 }
 
 /// Whether a fused multiply-add is an instruction on every CPU of the

@@ -2423,7 +2423,9 @@ assert row_std.shape == (2, 3)
   sum. `value` is read at the result's width, as a literal beside it is. The
   quotient is a float even for integer operands, so `addcdiv` is always
   rounded once. An integer beside a float32 is read exactly in float64 and
-  rounded once to float32. A tensor `value` takes the formula.
+  rounded once to float32, and an int64 past 2^53, which float64 does not
+  hold, as two float64s that add up to it -- in `lerp` too. A tensor `value`
+  takes the formula.
 - `deg2rad`, `rad2deg` — `input * pi / 180` and `input * 180 / pi`, each
   element the float nearest the exact angle, where a product with the
   rounded constant -- rounded to float32 for a float32 tensor -- rounded

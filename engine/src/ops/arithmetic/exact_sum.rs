@@ -5790,12 +5790,29 @@ fn settled_terms<T: Output>(
 /// exact zero is `formula` where that is a zero, and `+0` otherwise.
 #[cold]
 #[inline(never)]
-fn exact_terms<T: Output>(terms: &[(f64, f64, f64)], formula: f64) -> T {
+pub(crate) fn exact_terms<T: Output>(terms: &[(f64, f64, f64)], formula: f64) -> T {
     let total = Total::of_terms(terms);
     if total.positive == total.negative {
         return T::narrow(if formula == 0.0 { formula } else { 0.0 });
     }
     total.rounded()
+}
+
+/// The value nearest the exact quotient of `Σ x · y · z` over `numerator`
+/// by the same over `divisor`, all finite and the divisor not zero; an
+/// exact zero is `formula` where that is a zero, and `+0` otherwise.
+#[cold]
+#[inline(never)]
+pub(crate) fn exact_terms_over<T: Output>(
+    numerator: &[(f64, f64, f64)],
+    divisor: &[(f64, f64, f64)],
+    formula: f64,
+) -> T {
+    let total = Total::of_terms(numerator);
+    if total.positive == total.negative {
+        return T::narrow(if formula == 0.0 { formula } else { 0.0 });
+    }
+    total.quotient(Total::of_terms(divisor))
 }
 
 /// A quick path's value and whether its bound settles it, without a

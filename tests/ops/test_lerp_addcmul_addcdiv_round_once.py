@@ -227,3 +227,53 @@ def test_gradients(dtype):
     shared = mt.tensor(0.5, dtype=dtype, requires_grad=True)
     mt.lerp(start.detach(), end.detach(), shared).sum().backward()
     assert shared.grad.item() == 5.0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_an_int64_past_two_to_the_53_is_read_exactly(dtype):
+    # Past 2^53 an int64 is not a float64, and the operands were read in
+    # float64, so it lost its last bits before the formula saw them:
+    # `addcmul(2^53 + 1, 0.5, 1)` came out 2^53 where the float nearest
+    # 2^53 + 1.5 is 2^53 + 2.
+    # The last lies just past the float32 halfway point between 2^54 and the
+    # next float32; read in float64 it was the halfway point, and went down.
+    big = [2**53 + 1, -(2**53 + 3), 2**62 + 3, 2**63 - 1, -(2**63), 2**54 + 2**30 + 1]
+    ints = mt.tensor(big, dtype="int64")
+    floats = np.array([0.5, 0.25, -0.75, 1.5, 0.5, 0.0], dtype=dtype)
+    other = mt.tensor(floats)
+    exact = [Fraction(float(v)) for v in floats]
+    v = [Fraction(n) for n in big]
+
+    def check(got, want, kind=dtype):
+        assert str(got.dtype) == kind
+        assert got.tolist() == [_rounded(w, kind) for w in want]
+
+    check(
+        mt.addcmul(ints, other, other, value=3.0),
+        [a + 3 * b * b for a, b in zip(v, exact)],
+    )
+    check(
+        mt.addcmul(other, ints, other, value=0.5),
+        [b + Fraction(1, 2) * a * b for a, b in zip(v, exact)],
+    )
+    check(
+        mt.lerp(ints, other, mt.tensor(np.full(6, 0.25, dtype=dtype))),
+        [a + Fraction(1, 4) * (b - a) for a, b in zip(v, exact)],
+    )
+    check(
+        mt.lerp(other, ints, mt.tensor(np.full(6, 0.75, dtype=dtype))),
+        [b + Fraction(3, 4) * (a - b) for a, b in zip(v, exact)],
+    )
+    check(
+        mt.addcdiv(ints, other, mt.tensor(np.full(6, 3.0, dtype=dtype)), value=2.0),
+        [a + 2 * b / 3 for a, b in zip(v, exact)],
+    )
+    # An int64 divisor past 2^53 too, beside a numerator of its own: two
+    # int64s divide into a float64, which the float32 beside them joins.
+    divisors = mt.tensor([2**53 + 1, 2**60 + 1, -(2**55 + 7), 3, 2**63 - 1, 5])
+    d = [Fraction(n) for n in [2**53 + 1, 2**60 + 1, -(2**55 + 7), 3, 2**63 - 1, 5]]
+    check(
+        mt.addcdiv(other, ints, divisors, value=1.0),
+        [b + a / q for a, b, q in zip(v, exact, d)],
+        "float64",
+    )
