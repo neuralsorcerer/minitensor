@@ -676,7 +676,9 @@ def matrix_exp(input: object) -> Tensor:
 
     # The 1-norm is the largest absolute column sum, and the largest over a
     # batch decides for all of it.
-    norm = float(_F.abs(matrix).sum(-2).max().item())
+    # An empty stack, or a stack of empty matrices, has no norm to take and
+    # nothing to scale.
+    norm = float(_F.abs(matrix).sum(-2).max().item()) if matrix.numel() else 0.0
     thresholds = _PADE_THRESHOLDS[precision]
     squarings = 0
     for degree, threshold in thresholds:

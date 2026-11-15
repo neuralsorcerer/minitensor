@@ -416,7 +416,7 @@ impl Packed {
 /// Factor a stack of square matrices, whatever their dtype.
 pub(crate) fn packed_lu(tensor: &Tensor, op: &str) -> Result<Packed> {
     let (batch_dims, n) = square_layout(tensor, op)?;
-    let batch = batch_dims.iter().product::<usize>().max(1);
+    let batch = batch_dims.iter().product::<usize>();
     let contiguous = tensor.contiguous()?;
     let shape = tensor.shape().clone();
     let mut data = TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
@@ -440,7 +440,7 @@ pub(crate) fn packed_lu(tensor: &Tensor, op: &str) -> Result<Packed> {
                     &mut records,
                     width,
                     batch,
-                    (PAR_THRESHOLD / (n * n * n / 3).max(1)).clamp(1, batch),
+                    (PAR_THRESHOLD / (n * n * n / 3).max(1)).clamp(1, batch.max(1)),
                     &|_first, block_group, record_group| {
                         let mut scratch = Scratch::new();
                         for local in 0..block_group.len() / stride {
@@ -720,7 +720,7 @@ fn systems(rhs: &Tensor, n: usize, batch_dims: &[usize], op: &str) -> Result<Sys
     }
     Ok(Systems {
         cols,
-        batch: batch_dims.iter().product::<usize>().max(1),
+        batch: batch_dims.iter().product::<usize>(),
         shape: rhs.shape().clone(),
     })
 }
@@ -851,7 +851,8 @@ fn substitute_batched<T: Factorable>(
     if span == 0 || stride == 0 {
         return Ok(());
     }
-    let per_task = (PAR_THRESHOLD / (n * n * found.cols.max(1)).max(1)).clamp(1, found.batch);
+    let per_task =
+        (PAR_THRESHOLD / (n * n * found.cols.max(1)).max(1)).clamp(1, found.batch.max(1));
     let group_span = per_task * span;
     try_par_out_chunks(rhs, group_span, &|start, group| {
         let base = (start / group_span) * per_task;

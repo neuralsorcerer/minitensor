@@ -188,7 +188,7 @@ pub fn det(tensor: &Tensor) -> Result<Tensor> {
         return crate::ops::linalg::Narrow::narrowed(det(&crate::ops::linalg::widened(tensor)?)?);
     }
     let (batch_dims, n) = square_layout(tensor, "det")?;
-    let batch = batch_dims.iter().product::<usize>().max(1);
+    let batch = batch_dims.iter().product::<usize>();
 
     let (f32_out, f64_out) = match factorise(tensor, batch, n)? {
         Determinants::F32 { det, .. } => (det, Vec::new()),
@@ -229,7 +229,7 @@ pub fn slogdet(tensor: &Tensor) -> Result<(Tensor, Tensor)> {
         )?)?);
     }
     let (batch_dims, n) = square_layout(tensor, "slogdet")?;
-    let batch = batch_dims.iter().product::<usize>().max(1);
+    let batch = batch_dims.iter().product::<usize>();
     let dtype = tensor.dtype();
     let device = tensor.device();
 
@@ -280,7 +280,7 @@ pub fn inv(tensor: &Tensor) -> Result<Tensor> {
 
 /// A stack of identity matrices shaped like `tensor`'s batch.
 fn eye_like(tensor: &Tensor, batch_dims: &[usize], n: usize) -> Result<Tensor> {
-    let batch = batch_dims.iter().product::<usize>().max(1);
+    let batch = batch_dims.iter().product::<usize>();
     let mut dims = batch_dims.to_vec();
     dims.push(n);
     dims.push(n);

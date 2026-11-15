@@ -1845,8 +1845,7 @@ fn solve_batched<T: crate::ops::linalg::Factorable>(
     let batch = lhs_shape[..lhs_shape.len() - 2]
         .iter()
         .copied()
-        .product::<usize>()
-        .max(1);
+        .product::<usize>();
     let rhs_stride = n * rhs_cols;
     let matrix_stride = n * n;
 
@@ -1875,7 +1874,7 @@ fn solve_batched<T: crate::ops::linalg::Factorable>(
 
     // With no right-hand-side columns there is no output to split over, so the
     // parallel path has nothing to chunk; a single batch is not worth a task.
-    if batch == 1 || rhs_stride == 0 {
+    if batch <= 1 || rhs_stride == 0 {
         return solve_group(0, batch, out_slice);
     }
 
