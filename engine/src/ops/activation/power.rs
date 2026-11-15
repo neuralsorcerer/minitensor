@@ -757,15 +757,15 @@ fn sign_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
+    // A NaN is itself, and so is a zero: `sign` is odd, and `-0.0` keeps its
+    // bit as `copysign` and `signbit` read it.
     let out = unary_map(input_data, |v: f32| {
-        if v.is_nan() {
-            v
-        } else if v > 0.0 {
+        if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0
         } else {
-            0.0
+            v
         }
     });
     Ok(TensorData::from_vec::<f32>(
@@ -780,15 +780,15 @@ fn sign_f64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
+    // A NaN is itself, and so is a zero: `sign` is odd, and `-0.0` keeps its
+    // bit as `copysign` and `signbit` read it.
     let out = unary_map(input_data, |v: f64| {
-        if v.is_nan() {
-            v
-        } else if v > 0.0 {
+        if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0
         } else {
-            0.0
+            v
         }
     });
     Ok(TensorData::from_vec::<f64>(

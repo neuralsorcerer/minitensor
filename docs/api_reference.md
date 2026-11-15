@@ -2505,7 +2505,9 @@ assert row_std.shape == (2, 3)
   a width is counted correctly too, where an implementation built on `abs`
   would overflow -- its magnitude is one past what the signed type holds.
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
-- `softsign`, `rsqrt`, `reciprocal`, `sign`
+- `softsign`, `rsqrt`, `reciprocal`, `sign` — `sign` of a zero is that zero:
+  `sign` is odd, so `sign(-0.0)` is `-0.0`, its bit kept as `copysign` and
+  `signbit` read it; of a NaN it is the NaN.
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
   `negative_slope`, the same side `relu` takes
 - `isnan`, `isinf`, `isfinite`

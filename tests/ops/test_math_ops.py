@@ -773,6 +773,14 @@ def test_tensor_sign_propagates_nan():
         assert np.isnan(result.numpy()[0])
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_tensor_sign_of_a_zero_is_that_zero(dtype):
+    # `sign` is odd, so `sign(-0.0)` is `-sign(0.0)`: the bit stays.
+    got = mt.Tensor([-0.0, 0.0], dtype=dtype).sign().numpy()
+    assert (got == 0.0).all()
+    assert np.signbit(got[0]) and not np.signbit(got[1])
+
+
 def test_tensor_sign_integer_dtype():
     tensor = mt.Tensor([-3, 0, 4, -7], dtype="int32")
 

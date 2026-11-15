@@ -91,7 +91,8 @@ def test_copysign_carries_the_sign_bit_of_a_zero():
     got = mt.copysign(mt.from_numpy(x.copy()), mt.from_numpy(y.copy())).numpy()
 
     np.testing.assert_array_equal(got, np.copysign(x, y))
-    # `sign(y) * abs(x)` would give +3 here, because `sign(-0.0)` is 0.
+    # `sign(y) * abs(x)` would give a zero here: the sign of a zero is that
+    # zero.
     assert got[1] == -3.0
     assert np.signbit(got[4]) and got[4] == 0.0
 
