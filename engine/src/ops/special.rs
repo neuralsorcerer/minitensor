@@ -358,12 +358,16 @@ fn sinc_values(tensor: &Tensor) -> Result<TensorData> {
             let mut out = vec![<$ty>::default(); xs.len()];
             par_out_chunks(&mut out, outputs_per_task(1), &|offset, block| {
                 let x = &xs[offset..offset + block.len()];
+                // sinc is even, and each value is taken at its magnitude, so
+                // that `sinc(-x)` is `sinc(x)` to the bit: the zeros at the
+                // whole numbers had the sign of their argument.
                 let arguments: Vec<$ty> = x
                     .iter()
-                    .map(|&v| $pi * folded_for_sin(reduced_mod_two(v)))
+                    .map(|&v| $pi * folded_for_sin(reduced_mod_two(v.abs())))
                     .collect();
                 $sin_block(&arguments, &mut *block);
                 for (o, &v) in block.iter_mut().zip(x) {
+                    let v = v.abs();
                     let quotient = *o / ($pi * v);
                     *o = if v == 0.0 {
                         1.0

@@ -98,6 +98,24 @@ def test_sinc_is_one_at_zero_and_exactly_zero_at_the_other_integers(dtype):
     got = mt.sinc(mt.tensor(values, dtype=dtype)).tolist()
     assert got[0] == 1.0
     assert got[1:] == [0.0] * (len(values) - 1)
+    # And positive at every one of them, as the function is even: those at
+    # the negative integers were negative zeros.
+    assert not any(math.copysign(1.0, value) < 0 for value in got)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sinc_is_even_to_the_bit(dtype):
+    rng = np.random.default_rng(13)
+    values = np.concatenate(
+        [
+            rng.standard_normal(500) * 10.0 ** rng.uniform(-6, 6, 500),
+            np.arange(-20, 21) * 0.5,
+        ]
+    ).astype(dtype)
+    plus = mt.sinc(mt.tensor(values)).numpy()
+    minus = mt.sinc(mt.tensor(-values)).numpy()
+    bits = np.uint32 if dtype == "float32" else np.uint64
+    np.testing.assert_array_equal(plus.view(bits), minus.view(bits))
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
