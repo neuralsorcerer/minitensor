@@ -53,6 +53,12 @@ pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows};
 mod standard;
 pub(crate) use self::standard::{standardized_rows, standardized_slice};
 
+#[path = "exact_small.rs"]
+mod small;
+pub(crate) use self::small::{
+    small_cofactors, small_determinant, small_log_determinant, small_solve,
+};
+
 /// Lanes a run is added in, and values per block a task takes.
 const LANES: usize = 8;
 const BLOCK: usize = 8192;

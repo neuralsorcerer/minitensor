@@ -1680,8 +1680,12 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let (lhs, rhs) = product_operands(lhs, rhs)?;
     let (lhs, rhs) = (lhs.as_ref(), rhs.as_ref());
 
+    // Systems of order two and three by Cramer's rule, each entry rounded
+    // once in the operands' own dtype.
+    let small = crate::ops::linalg::small_order(lhs, rhs)?;
+
     // Carried in float64; see `Narrow`.
-    if lhs.dtype() == DataType::Float32 {
+    if lhs.dtype() == DataType::Float32 && !small {
         use crate::ops::linalg::widened;
         return crate::ops::linalg::Narrow::narrowed(solve(&widened(lhs)?, &widened(rhs)?)?);
     }
@@ -1727,6 +1731,7 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         TensorData::try_zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device())?;
 
     match lhs.dtype() {
+        _ if small => crate::ops::linalg::small_solutions(lhs, rhs, &mut output_data, n, rhs_cols)?,
         DataType::Float32 => solve_f32(lhs, rhs, &mut output_data, rhs_cols)?,
         DataType::Float64 => solve_f64(lhs, rhs, &mut output_data, rhs_cols)?,
         _ => {

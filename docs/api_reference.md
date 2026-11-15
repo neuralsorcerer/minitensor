@@ -1655,6 +1655,18 @@ times float32's own and an SVD's small singular values three orders less
 accurate; now each factor is as near the exact one as float32 holds. The
 gradient comes back float32.
 
+Of order two or three, `det` is the float nearest the exact determinant, and
+each entry of `solve`'s solution and of `inv` is the float nearest its exact
+value -- by Cramer's rule a quotient of two determinants -- in float32 as in
+float64: a matrix of whole numbers has a whole-number determinant and its
+inverse the nearest floats to the exact fractions, where elimination left
+`-0.9999999999999998`. A matrix whose exact determinant is zero is singular,
+however elimination would have rounded its last pivot: `det` gives zero,
+`slogdet` gives sign zero and `-inf`, and `solve` and `inv` refuse it.
+`slogdet` takes its sign from that determinant and its logarithm of it, and
+`det`'s gradient is the incoming gradient times each cofactor, rounded once. A
+matrix holding a value that is not finite is taken by elimination.
+
 A `dot` and `vecdot`, float32 or float64, are the float nearest the exact sum
 of the products, and so is each entry of a product with a single row or a
 single column: a matrix times a vector, a vector times a matrix, and `a @ b` of

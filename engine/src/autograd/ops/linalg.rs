@@ -817,12 +817,13 @@ impl GradientFunction for DetBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
+        // Of order two or three, each cofactor is a difference of products,
+        // and its product with the incoming gradient is rounded once.
+        if let Some(grad) = crate::ops::linalg::small_det_gradient(&self.input, grad_output)? {
+            accumulate_grad(&mut gradients, self.input_id, grad)?;
+            return Ok(gradients);
+        }
         let scale = as_matrix_scalar(grad_output)?;
-        // `det(A) A^-T` is the cofactor matrix, and it is the cheap way to get
-        // one -- but only while `A` has an inverse. A singular `A` has a
-        // determinant of zero and a perfectly good derivative, the cofactor
-        // matrix still, and the forward had answered: the backward used to
-        // refuse it with "solve received a singular matrix".
         // `det(A) A^-T` is the cofactor matrix, and the cheap way to get one --
         // but only while `A` is comfortably invertible. A singular `A` has a
         // determinant of zero and a perfectly good derivative, the cofactor
