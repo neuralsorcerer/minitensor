@@ -167,6 +167,33 @@ def _slice_index(index: Tensor, dim: int, shape: list[int], name: str) -> Tensor
     return broadcast_to(index.reshape(spread), target)
 
 
+def _scaled_exactly(values: Tensor, scale: Tensor) -> list[Tensor]:
+    """`values * scale` as terms whose exact sum is the exact product.
+
+    A product of two floats rounds, and a sum of rounded products rounds
+    again. What the product's rounding left is itself a float -- the exact
+    product of two floats is the sum of two -- so adding it beside the
+    rounded product leaves a scattered sum, which rounds the exact total once,
+    the float nearest the exact sum of the exact products. It carries no
+    gradient: it is what the rounding left, which the rounded product's
+    gradient already accounts for. Where it is zero for every element -- a
+    power-of-two scale, whole numbers -- it is left out.
+    """
+
+    product = values * scale
+    if str(product.dtype) not in _FLOAT_DTYPES:
+        return [product]
+    rounded = product.detach()
+    # `-rounded + values * scale`, rounded once: exact, being a float.
+    error = _F._addcmul(-rounded, values.detach(), scale.detach(), 1.0)
+    # A zero product's error is that zero, so that a total of negative zeros
+    # stays one; an infinite or NaN product has none to carry.
+    error = _F.where(rounded == 0, rounded, _F.where(_F.isfinite(rounded), error, 0.0))
+    if not bool(_F.any(error != 0).item()):
+        return [product]
+    return [product, error]
+
+
 def index_add(
     input: object, dim: int, index: object, source: object, alpha: float = 1.0
 ) -> Tensor:
@@ -174,7 +201,9 @@ def index_add(
 
     Repeated indices accumulate, which is the difference between this and
     `index_copy` and the reason it is the one used to build histograms and
-    scatter gradients.
+    scatter gradients. A float destination is the float nearest the exact
+    sum of what it held and of `alpha` times each value that arrives, rounded
+    once: `alpha` read at the tensor's width, as a literal beside it is.
     """
 
     tensor = _atleast_tensor(input)
@@ -182,8 +211,19 @@ def index_add(
     axis = _normalize_axis(dim, tensor.ndim(), "index_add")
     positions = _wrap_negative(_as_index(index, "index_add"), tensor.shape[axis])
     spread = _slice_index(positions, axis, list(values.shape), "index_add")
-    scaled = values if alpha == 1.0 else values * alpha
-    return _F.scatter_add(tensor, axis, spread, scaled)
+    if alpha == 1.0:
+        return _F.scatter_add(tensor, axis, spread, values)
+    if str(values.dtype) not in _FLOAT_DTYPES:
+        return _F.scatter_add(tensor, axis, spread, values * alpha)
+    scale = Tensor.from_numpy(_np.array(alpha, dtype=_np.float64)).astype(
+        str(values.dtype)
+    )
+    terms = _scaled_exactly(values, scale.to(_C.Device(values.device)))
+    if len(terms) == 1:
+        return _F.scatter_add(tensor, axis, spread, terms[0])
+    return _F.scatter_add(
+        tensor, axis, _F.cat([spread, spread], axis), _F.cat(terms, axis)
+    )
 
 
 def index_copy(input: object, dim: int, index: object, source: object) -> Tensor:

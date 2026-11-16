@@ -154,7 +154,7 @@ of convenience aliases.
 | `take(input, index)` | The elements at flat positions `index`, shaped like `index`. Reads the tensor in row-major order whatever its shape; negative positions count from the end. |
 | `put(input, index, source, accumulate=False)` | The write direction of `take`: `input` with `source` written at the flat positions `index` names, read row-major over the whole tensor and counting negative positions from the end. `accumulate` adds into the target instead of overwriting, which is also what decides what a repeated position means. |
 | `take_along_dim(input, indices, dim=None)` | One element per position, its `dim` coordinate coming from `indices`. With `dim` omitted both are flattened first, which is what makes `take_along_dim(x, x.argsort())` reorder a whole tensor. |
-| `index_add(input, dim, index, source, alpha=1.0)` | Add `alpha * source` into the slices `index` names. Repeated indices accumulate, each float destination the value nearest the exact sum of what it held and what was added to it. |
+| `index_add(input, dim, index, source, alpha=1.0)` | Add `alpha * source` into the slices `index` names. Repeated indices accumulate, each float destination the value nearest the exact sum of what it held and of `alpha` times each value added to it. |
 | `index_copy(input, dim, index, source)` | Write `source` over the slices `index` names. A repeated index leaves whichever write landed last. |
 | `index_fill(input, dim, index, value)` | Set the slices `index` names to `value`. |
 | `masked_scatter(input, mask, source)` | Fill the positions `mask` selects with the leading elements of a flattened `source`, in order -- a positional write, where `masked_fill` writes one value everywhere. A source of another dtype is refused rather than promoted, so the write cannot change the dtype of the tensor it writes into. |
@@ -1293,11 +1293,15 @@ A float `"sum"` or `"mean"` is rounded once at each destination, as
 `scatter_add` is: the exact sum of what arrives, with the destination's own
 value when it takes part, and for a mean that sum over the count -- where the
 sum was rounded at each value and the mean divided it and rounded again. What
-is built on them follows: `index_add` with `alpha=1`, an accumulating `put`,
-`fold`, and `embedding_bag`'s `"sum"` and `"mean"`. A destination one value
-arrives at is one addition, as it always was, and a zero is negative only when
-every value added to it is a negative zero. With another `alpha`, `index_add`
-rounds each scaled value and then their sum.
+is built on them follows: `index_add`, an accumulating `put`, `fold`, and
+`embedding_bag`'s `"sum"` and `"mean"`. A destination one value arrives at is
+one addition, as it always was, and a zero is negative only when every value
+added to it is a negative zero. Where each value is scaled first --
+`index_add`'s `alpha`, read at the tensor's width as a literal beside it is,
+and `embedding_bag`'s `per_sample_weights` -- the sum is of the exact
+products: each product's rounding is itself a float, and is scattered beside
+the rounded product. Rounding each product and then their sum had put a
+third of the destinations an ulp or more out.
 
 The gradients that are sums of the entries reading one position are rounded
 once the same way: `gather`'s, `index_select`'s and so an embedding's where a
@@ -3308,7 +3312,7 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `pixel_shuffle(input, upscale_factor)` | Trade `r**2` channels for that much height and width: `(n, c * r * r, h, w)` becomes `(n, c, h * r, w * r)`. The last layer of a super-resolution network -- upsampling by rearrangement costs nothing and invents nothing, where a transposed convolution does both. |
 | `pixel_unshuffle(input, downscale_factor)` | The inverse: `(n, c, h * r, w * r)` back to `(n, c * r * r, h, w)`. |
 | `embedding(input, weight, padding_idx=None)` | The rows of `weight` that `input` names, one per index, keeping the index's shape and adding the feature axis. `nn.Embedding` with the table owned by the caller -- a frozen one, or one shared between models. `padding_idx` names a row that takes no gradient; the value it holds is returned unchanged. |
-| `embedding_bag(input, weight, offsets=None, mode="mean", per_sample_weights=None, include_last_offset=False, padding_idx=None)` | One vector per bag of indices: `embedding` followed by a reduction, with the `(total, dim)` intermediate never named -- which is the whole reason the fused operation exists elsewhere. A two-dimensional `input` is one bag per row; a one-dimensional one needs `offsets` saying where each bag starts, which is what allows the bags to differ, and with `include_last_offset` the final entry is the end rather than a start. `mode` is `"sum"`, `"mean"` or `"max"`, and an empty bag reduces to zero in all three. `per_sample_weights` scales each row before it is summed and is meaningful only for `"sum"`. |
+| `embedding_bag(input, weight, offsets=None, mode="mean", per_sample_weights=None, include_last_offset=False, padding_idx=None)` | One vector per bag of indices: `embedding` followed by a reduction, with the `(total, dim)` intermediate never named -- which is the whole reason the fused operation exists elsewhere. A two-dimensional `input` is one bag per row; a one-dimensional one needs `offsets` saying where each bag starts, which is what allows the bags to differ, and with `include_last_offset` the final entry is the end rather than a start. `mode` is `"sum"`, `"mean"` or `"max"`, and an empty bag reduces to zero in all three. `per_sample_weights` scales each row before it is summed and is meaningful only for `"sum"`; each bag is then the float nearest the exact sum of the exact products. |
 | `channel_shuffle(input, groups)` | Read `(n, g * c, ...)` as `(n, g, c, ...)`, swap the two, flatten back. A grouped convolution never mixes its groups, so stacking two leaves two networks side by side; one shuffle between them makes it one, at the cost of a permutation and no parameters. |
 | `lp_pool1d(input, norm_type, kernel_size, stride=None)` | The `p`-norm of each window rather than its mean or its largest -- a norm type of 1 is the sum of magnitudes and a large one approaches the maximum, so this is the family `avg_pool` and `max_pool` are the ends of, with a gradient reaching every element. Each output is `norm` of its window's values: for a norm type of 1 or 2 the float nearest the exact norm, rounded once; `inf` is the largest magnitude; a window of zeros has a gradient of zero, the norm's at its corner. An integer input is read in the float of its width. |
 | `lp_pool2d(input, norm_type, kernel_size, stride=None)` | The same over 2-D windows. |

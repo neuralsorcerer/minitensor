@@ -13,7 +13,10 @@ accumulating `put`, `fold` and `embedding_bag` is now the float nearest the
 exact sum of everything addressed to it -- its own value among them where it
 counts -- and so is each gradient that is a sum of the entries that read one
 position: `gather`'s, `index_select`'s and an embedding's, a repeated
-element's, and a value broadcast into an assignment.
+element's, and a value broadcast into an assignment. Where each value is scaled
+first -- `index_add`'s `alpha`, `embedding_bag`'s `per_sample_weights` -- the
+sum is of the exact products, where rounding each product before the sum
+rounded again had put a third of the destinations an ulp or more out.
 """
 
 from __future__ import annotations
@@ -161,6 +164,123 @@ def test_index_add_and_an_accumulating_put(dtype, width):
     )
     want = _scattered(base.ravel(), flat, values, 0, dtype)
     assert got.reshape(-1).tolist() == want
+
+
+def _exact(value: Fraction, dtype: str) -> float:
+    return (
+        _float32(value) if dtype == "float32" else value.numerator / value.denominator
+    )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("alpha", [0.1, 1.0 / 3.0, -2.5e-3, 7.0])
+def test_index_add_sums_the_exact_scaled_values(dtype, alpha):
+    # `alpha` at the tensor's width, as a literal beside it is; each
+    # destination the float nearest what it held plus `alpha` times each value
+    # that arrives, exactly.
+    rng = np.random.default_rng(1061)
+    base, source = _draw(rng, (5, 4), dtype), _draw(rng, (30, 4), dtype)
+    rows = rng.integers(0, 5, 30)
+    got = mt.index_add(
+        mt.Tensor(base, dtype=dtype),
+        0,
+        mt.Tensor(rows, dtype="int64"),
+        mt.Tensor(source, dtype=dtype),
+        alpha=alpha,
+    ).tolist()
+    scale = Fraction(float(np.array(alpha, dtype=dtype)))
+    want = [
+        [
+            _exact(
+                Fraction(float(base[r, c]))
+                + sum(
+                    scale * Fraction(float(source[i, c]))
+                    for i in np.flatnonzero(rows == r)
+                ),
+                dtype,
+            )
+            for c in range(4)
+        ]
+        for r in range(5)
+    ]
+    assert got == want
+
+
+def test_a_scaled_scatter_keeps_its_zeros_and_infinities():
+    def index_add(base, rows, source):
+        return mt.index_add(
+            mt.Tensor(np.array(base)),
+            0,
+            mt.Tensor(np.array(rows), dtype="int64"),
+            mt.Tensor(np.array(source)),
+            alpha=0.1,
+        ).tolist()
+
+    got = index_add([-0.0, 0.0], [0, 0, 1], [-0.0, -0.0, -0.0])
+    assert [math.copysign(1.0, v) for v in got] == [-1.0, 1.0] and got == [0.0, 0.0]
+    got = index_add([0.0, 1.0, 2.0], [0, 1, 1, 2], [math.inf, 3.0, -math.inf, math.nan])
+    assert got[0] == math.inf and got[1] == -math.inf and math.isnan(got[2])
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_a_weighted_embedding_bag_sums_the_exact_products(dtype):
+    rng = np.random.default_rng(1063)
+    table, weights = _draw(rng, (6, 3), dtype), _draw(rng, 40, dtype)
+    tokens = rng.integers(0, 6, 40)
+    offsets = np.array([0, 9, 9, 25])
+    got = mt.nn.embedding_bag(
+        mt.Tensor(tokens, dtype="int64"),
+        mt.Tensor(table, dtype=dtype),
+        mt.Tensor(offsets, dtype="int64"),
+        mode="sum",
+        per_sample_weights=mt.Tensor(weights, dtype=dtype),
+    ).tolist()
+    ends = list(offsets[1:]) + [40]
+    want = [
+        [
+            _exact(
+                sum(
+                    (
+                        Fraction(float(weights[i]))
+                        * Fraction(float(table[tokens[i], j]))
+                        for i in range(start, end)
+                    ),
+                    Fraction(0),
+                ),
+                dtype,
+            )
+            for j in range(3)
+        ]
+        for start, end in zip(offsets, ends)
+    ]
+    assert got == want
+
+
+def test_the_gradients_of_a_scaled_scatter():
+    base = mt.Tensor(np.zeros((3, 2)), requires_grad=True)
+    source = mt.Tensor(np.arange(8.0).reshape(4, 2) + 0.5, requires_grad=True)
+    out = mt.index_add(
+        base, 0, mt.Tensor(np.array([0, 2, 0, 1]), dtype="int64"), source, alpha=0.1
+    )
+    seed = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    (out * mt.Tensor(seed)).sum().backward()
+    assert base.grad.tolist() == seed.tolist()
+    assert source.grad.tolist() == (np.float64(0.1) * seed[[0, 2, 0, 1]]).tolist()
+
+    table = mt.Tensor(
+        np.array([[1.0, 2.0], [3.0, -1.0], [0.5, 4.0]]), requires_grad=True
+    )
+    weights = mt.Tensor(np.array([0.5, -1.25, 3.0]), requires_grad=True)
+    bag = mt.nn.embedding_bag(
+        mt.Tensor(np.array([1, 2, 1]), dtype="int64"),
+        table,
+        mt.Tensor(np.array([0]), dtype="int64"),
+        mode="sum",
+        per_sample_weights=weights,
+    )
+    (bag * mt.Tensor(np.array([[2.0, -1.0]]))).sum().backward()
+    assert weights.grad.tolist() == [7.0, -3.0, 7.0]
+    assert table.grad.tolist() == [[0.0, 0.0], [7.0, -3.5], [-2.5, 1.25]]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)

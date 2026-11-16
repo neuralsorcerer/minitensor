@@ -35,6 +35,7 @@ import numpy as _np
 
 from . import _core as _C
 from ._derived import _require_float
+from ._indexing import _scaled_exactly
 from ._sampling import bernoulli as _bernoulli
 from ._shape import (
     _atleast_tensor,
@@ -911,7 +912,13 @@ def embedding_bag(
                 f"not {mode!r}"
             )
         scaling = _atleast_tensor(per_sample_weights).reshape(total, 1)
-        rows = rows * scaling
+        # Each row times its weight as the rounded product and what that
+        # rounding left, so that each bag is the float nearest the exact
+        # weighted sum, rounded once.
+        weighted = _scaled_exactly(rows, scaling)
+        rows = weighted[0]
+    else:
+        weighted = [rows]
 
     # Which bag each row belongs to: the number of starts at or below its
     # position, less one. Repeated starts mean an empty bag, and this steps
@@ -937,7 +944,11 @@ def embedding_bag(
         return _F.scatter_reduce(target, 0, scattered, rows, "amax", False)
 
     if mode == "sum":
-        return _F.scatter_add(target, 0, scattered, rows)
+        if len(weighted) == 1:
+            return _F.scatter_add(target, 0, scattered, rows)
+        return _F.scatter_add(
+            target, 0, _F.cat([scattered, scattered], 0), _F.cat(weighted, 0)
+        )
     # Each bag's exact sum over its count, rounded once, where dividing the
     # rounded sum rounded again. An empty bag has nothing to average, is never
     # written to, and keeps the zero.
