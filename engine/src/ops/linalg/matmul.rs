@@ -416,6 +416,79 @@ macro_rules! blas_transposed_gemm {
     };
 }
 
+/// `c = a * b` with explicit operand strides, one of each operand's two a
+/// unit, through BLAS: a unit column stride read as it lies, a unit row
+/// stride as the transpose of what lies.
+///
+/// # Safety
+///
+/// The strides must address only readable elements of `a` and `b`, and `c`
+/// must be writable at `rsc` per row with unit column stride.
+#[cfg(feature = "blas")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn gemm_strided_serial_f64(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f64,
+    rsa: usize,
+    csa: usize,
+    b: *const f64,
+    rsb: usize,
+    csb: usize,
+    c: *mut f64,
+    rsc: usize,
+) {
+    // SAFETY: forwarded; `gemv` addresses exactly what the kernel would.
+    if m == 0
+        || k == 0
+        || n == 0
+        || unsafe { gemv::<f64>(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc) }
+    {
+        return;
+    }
+    let reach = |rows: usize, cols: usize, row_step: usize, col_step: usize| {
+        (rows - 1) * row_step + (cols - 1) * col_step + 1
+    };
+    let (a_order, lda) = if csa == 1 {
+        (Transpose::None, rsa)
+    } else {
+        (Transpose::Ordinary, csa)
+    };
+    let (b_order, ldb) = if csb == 1 {
+        (Transpose::None, rsb)
+    } else {
+        (Transpose::Ordinary, csb)
+    };
+    // SAFETY: each slice is the extent the strides address, which the
+    // contract above makes readable, or writable for `c`.
+    let (a, b, c) = unsafe {
+        (
+            std::slice::from_raw_parts(a, reach(m, k, rsa, csa)),
+            std::slice::from_raw_parts(b, reach(k, n, rsb, csb)),
+            std::slice::from_raw_parts_mut(c, reach(m, n, rsc, 1)),
+        )
+    };
+    unsafe {
+        cblas::dgemm(
+            Layout::RowMajor,
+            a_order,
+            b_order,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a,
+            lda as i32,
+            b,
+            ldb as i32,
+            0.0,
+            c,
+            rsc as i32,
+        );
+    }
+}
+
 #[cfg(feature = "blas")]
 blas_transposed_gemm!(gemm_nt_f32, gemm_tn_f32, f32, cblas::sgemm);
 #[cfg(feature = "blas")]
@@ -948,7 +1021,7 @@ macro_rules! split_gemm {
         /// is why it is passed rather than derived from `n`.
         #[inline]
         #[allow(clippy::too_many_arguments)]
-        unsafe fn $serial(
+        pub(crate) unsafe fn $serial(
             m: usize,
             k: usize,
             n: usize,
@@ -1203,33 +1276,6 @@ macro_rules! stored_gemm {
     };
 }
 
-/// `out[b] = lhs[b] @ rhs[b]` for float32, as [`stored_gemm_f64`] takes them,
-/// every entry the float32 nearest its exact dot; see
-/// [`crate::ops::linalg::rounded_products_f32`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn stored_gemm_f32(
-    batch: usize,
-    m: usize,
-    k: usize,
-    n: usize,
-    lhs: &[f32],
-    lhs_storage: crate::ops::provider::Storage,
-    rhs: &[f32],
-    rhs_storage: crate::ops::provider::Storage,
-    out: &mut [f32],
-) -> Result<()> {
-    crate::ops::linalg::rounded_products_f32(
-        batch,
-        m,
-        k,
-        n,
-        lhs,
-        lhs_storage,
-        rhs,
-        rhs_storage,
-        out,
-    )
-}
 stored_gemm!(
     stored_gemm_f64,
     f64,
@@ -1296,8 +1342,8 @@ pub(crate) unsafe fn gemm_f64(
 }
 
 /// The whole product on the calling thread, which the split one is checked
-/// against: a float32 product whose entries are rounded once is
-/// [`crate::ops::linalg::rounded_products_f32`].
+/// against: a float product whose entries are rounded once is
+/// [`crate::ops::linalg::rounded_products`].
 ///
 /// # Safety
 ///
@@ -1315,13 +1361,13 @@ pub(crate) unsafe fn gemm_serial_f32(
     unsafe { gemm_strided_serial_f32(m, k, n, a, k, 1, b, n, 1, c, n) }
 }
 
-/// The whole product on the calling thread; see the module note on why a
-/// batched matmul that already fills the pool uses this.
+/// The whole product on the calling thread, which the split one is checked
+/// against.
 ///
 /// # Safety
 ///
 /// As [`gemm_f64`].
-#[cfg(not(feature = "blas"))]
+#[cfg(all(test, not(feature = "blas")))]
 #[inline]
 pub(crate) unsafe fn gemm_serial_f64(
     m: usize,
@@ -1332,26 +1378,6 @@ pub(crate) unsafe fn gemm_serial_f64(
     c: *mut f64,
 ) {
     unsafe { gemm_strided_serial_f64(m, k, n, a, k, 1, b, n, 1, c, n) }
-}
-
-/// With a BLAS underneath there is no splitting to opt out of: a BLAS threads
-/// its own GEMM, and dividing the call first would only fight it. So the
-/// "serial" entry point is the same call.
-///
-/// # Safety
-///
-/// As [`gemm_f64`].
-#[cfg(feature = "blas")]
-#[inline]
-pub(crate) unsafe fn gemm_serial_f64(
-    m: usize,
-    k: usize,
-    n: usize,
-    a: *const f64,
-    b: *const f64,
-    c: *mut f64,
-) {
-    unsafe { gemm_f64(m, k, n, a, b, c) }
 }
 
 /// Reject a product whose operands cannot be multiplied, describing both of
@@ -1624,8 +1650,7 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if output_shape_obj.numel() != 0 && lhs_cols != 0 {
         // Perform matrix multiplication based on data type
         match lhs.dtype() {
-            DataType::Float32 => matmul_f32(lhs, rhs, &mut output_data)?,
-            DataType::Float64 => matmul_f64(lhs, rhs, &mut output_data)?,
+            DataType::Float32 | DataType::Float64 => matmul_float(lhs, rhs, &mut output_data)?,
             DataType::Int32 => matmul_i32(lhs, rhs, &mut output_data)?,
             DataType::Int64 => matmul_i64(lhs, rhs, &mut output_data)?,
             DataType::Bool => unreachable!("bool dtype checked above"),

@@ -6,7 +6,6 @@
 
 //! `input @ weight^T + bias`, the affine map behind every dense layer.
 
-use super::matmul_impl::gemm_nt_f64;
 use crate::autograd::with_grad_fn;
 use crate::{
     autograd::LinearBackward,
@@ -101,106 +100,24 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
     let fused_values = fused_bias.map(Tensor::contiguous).transpose()?;
 
     if rows != 0 && out_features != 0 && (in_features != 0 || fused_bias.is_some()) {
-        macro_rules! forward {
-            ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:ident) => {{
-                let a = input.data().$accessor().ok_or_else(|| {
-                    MinitensorError::internal_error("linear: unexpected input dtype")
-                })?;
-                let b = weight.data().$accessor().ok_or_else(|| {
-                    MinitensorError::internal_error("linear: unexpected weight dtype")
-                })?;
-                // The GEMM reads both through raw pointers sized by the shapes,
-                // so the storage is checked against them rather than trusted.
-                assert!(
-                    a.len() == rows * in_features && b.len() == out_features * in_features,
-                    "linear operands do not match their shapes"
-                );
-                let c = output_data.$mut_accessor().unwrap();
-                // `weight` holds the logical `(in, out)` operand as `(out, in)`.
-                // The provider is offered it that way round rather than being
-                // handed a transposed copy: the copy is the cost this function
-                // exists to avoid, and a GEMM reads either layout.
-                let delegated = crate::ops::provider::$offer(crate::ops::provider::Gemm {
-                    batch: 1,
-                    m: rows,
-                    k: in_features,
-                    n: out_features,
-                    lhs: a,
-                    lhs_storage: crate::ops::provider::Storage::RowMajor,
-                    rhs: b,
-                    rhs_storage: crate::ops::provider::Storage::Transposed,
-                    out: c,
-                });
-                if !delegated {
-                    unsafe {
-                        $gemm(
-                            rows,
-                            in_features,
-                            out_features,
-                            a.as_ptr(),
-                            b.as_ptr(),
-                            c.as_mut_ptr(),
-                        )
-                    };
-                }
-            }};
-        }
-        match input.dtype() {
-            DataType::Float32 => {
-                // Each entry the float32 nearest its exact dot, the bias
-                // added to it exactly; see `rounded_affine_products_f32`.
-                let a = input.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("linear: unexpected input dtype")
-                })?;
-                let b = weight.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("linear: unexpected weight dtype")
-                })?;
-                let affine = match &fused_values {
-                    Some(values) => Some(crate::ops::linalg::Affine {
-                        alpha: 1.0,
-                        beta: 1.0,
-                        values: values.data().as_f32_slice().ok_or_else(|| {
-                            MinitensorError::internal_error("linear: unexpected bias dtype")
-                        })?,
-                        strides: [0, 0, 1],
-                    }),
-                    None => None,
-                };
-                let c = output_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error("linear: unexpected output dtype")
-                })?;
-                crate::ops::linalg::rounded_affine_products_f32(
-                    1,
-                    rows,
-                    in_features,
-                    out_features,
-                    (a, crate::ops::provider::Storage::RowMajor),
-                    (b, crate::ops::provider::Storage::Transposed),
-                    affine,
-                    c,
-                )?;
-            }
-            DataType::Float64 => {
-                if in_features != 0 {
-                    forward!(as_f64_slice, as_f64_slice_mut, gemm_nt_f64, offer_gemm_f64)
-                }
-                // Added as `+` adds it, once to each rounded entry.
-                if let Some(values) = &fused_values {
-                    let values = values.data().as_f64_slice().ok_or_else(|| {
-                        MinitensorError::internal_error("linear: unexpected bias dtype")
-                    })?;
-                    let c = output_data.as_f64_slice_mut().ok_or_else(|| {
-                        MinitensorError::internal_error("linear: unexpected output dtype")
-                    })?;
-                    for row in c.chunks_mut(out_features) {
-                        for (slot, &value) in row.iter_mut().zip(values) {
-                            *slot += value;
-                        }
-                    }
-                }
-            }
-            _ => unreachable!("dtype checked above"),
-        }
+        // Each entry the float nearest its exact dot, the bias added to it
+        // exactly; `weight` holds the logical `(in, out)` operand as `(out,
+        // in)` and is read that way round.
+        use crate::ops::provider::Storage;
+        let taken = fused_values
+            .as_ref()
+            .map(|values| crate::ops::linalg::Taken {
+                alpha: 1.0,
+                beta: 1.0,
+                addend: Some((&**values.data(), [0, 0, 1])),
+            });
+        crate::ops::linalg::rounded_products(
+            (1, rows, in_features, out_features),
+            (&**input.data(), Storage::RowMajor),
+            (&**weight.data(), Storage::Transposed),
+            taken,
+            &mut output_data,
+        )?;
     }
 
     let requires_grad = crate::autograd::is_grad_enabled()
@@ -257,10 +174,11 @@ fn attach_grad(
     with_grad_fn(output, grad_fn)
 }
 
-/// `beta · input + alpha · (mat1 @ mat2)` for float32 operands, each entry the
-/// float32 nearest its exact value, with its gradient: `addmm` for two
-/// matrices and `baddbmm` for two stacks of them of one depth, `input`
-/// broadcasting to the product's shape.
+/// `beta · input + alpha · (mat1 @ mat2)` for float operands of one width,
+/// each entry the float nearest its exact value, with its gradient: `addmm`
+/// for two matrices and `baddbmm` for two stacks of them of one depth,
+/// `input` broadcasting to the product's shape. The scales are floats of
+/// the operands' width.
 ///
 /// Composed of a product, two scalings and a sum, an entry was rounded at
 /// each; here the product's exact dot is scaled and the addend added to it
@@ -269,16 +187,18 @@ pub fn affine_product(
     input: &Tensor,
     mat1: &Tensor,
     mat2: &Tensor,
-    beta: f32,
-    alpha: f32,
+    beta: f64,
+    alpha: f64,
 ) -> Result<Tensor> {
     use crate::ops::provider::Storage;
-    if [input, mat1, mat2]
-        .iter()
-        .any(|t| t.dtype() != DataType::Float32 || t.device() != input.device())
+    let dtype = input.dtype();
+    if !matches!(dtype, DataType::Float32 | DataType::Float64)
+        || [mat1, mat2]
+            .iter()
+            .any(|t| t.dtype() != dtype || t.device() != input.device())
     {
         return Err(MinitensorError::invalid_operation(
-            "an affine product takes float32 operands on one device",
+            "an affine product takes float operands of one width on one device",
         ));
     }
     let (left, right) = (mat1.shape().dims(), mat2.shape().dims());
@@ -331,36 +251,24 @@ pub fn affine_product(
         step *= full[axis];
     }
     let (lhs, rhs) = (mat1.contiguous()?, mat2.contiguous()?);
-    let missing = || MinitensorError::internal_error("affine product: a float32 slice");
-    let mut data =
-        TensorData::try_zeros_on_device(batch * m * n, DataType::Float32, input.device())?;
-    crate::ops::linalg::rounded_affine_products_f32(
-        batch,
-        m,
-        k,
-        n,
-        (
-            lhs.data().as_f32_slice().ok_or_else(missing)?,
-            Storage::RowMajor,
-        ),
-        (
-            rhs.data().as_f32_slice().ok_or_else(missing)?,
-            Storage::RowMajor,
-        ),
-        Some(crate::ops::linalg::Affine {
+    let mut data = TensorData::try_zeros_on_device(batch * m * n, dtype, input.device())?;
+    crate::ops::linalg::rounded_products(
+        (batch, m, k, n),
+        (&**lhs.data(), Storage::RowMajor),
+        (&**rhs.data(), Storage::RowMajor),
+        Some(crate::ops::linalg::Taken {
             alpha,
             beta,
-            values: base.data().as_f32_slice().ok_or_else(missing)?,
-            strides,
+            addend: Some((&**base.data(), strides)),
         }),
-        data.as_f32_slice_mut().ok_or_else(missing)?,
+        &mut data,
     )?;
     let requires_grad = crate::autograd::is_grad_enabled()
         && (input.requires_grad() || mat1.requires_grad() || mat2.requires_grad());
     let output = Tensor::new(
         Arc::new(data),
         Shape::new(out_dims),
-        DataType::Float32,
+        dtype,
         input.device(),
         requires_grad,
     );

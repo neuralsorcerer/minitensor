@@ -6,11 +6,13 @@
 
 """A dense product may be computed by NumPy's BLAS; it must not matter that it was.
 
-The engine hands a single large `float32` or `float64` product to the BLAS that
-`numpy` already brought, on the engine's own buffers, and runs its own kernel
-for everything else. Which side of that line a product lands on is a
-performance decision that depends on its shape and dtype, and it is allowed to
-change. What is not allowed to change is the answer.
+The engine hands a single large `float32` product to the BLAS that `numpy`
+already brought, as the float64 product of its operands widened, and runs its
+own kernel for everything else -- a `float64` product among it, whose entries
+are rounded once from pieces of its operands. Which side of that line a
+product lands on is a performance decision that depends on its shape and
+dtype, and it is allowed to change. What is not allowed to change is the
+answer.
 
 So these tests do not check where a product was computed. They check the
 things a reader would otherwise have to take on trust: that both sides agree

@@ -26,6 +26,8 @@ mod qr_impl;
 pub(crate) mod reflector;
 #[path = "linalg/rotation.rs"]
 pub(crate) mod rotation;
+#[path = "linalg/rounded_product_f64.rs"]
+mod rounded_product_f64_impl;
 #[path = "linalg/rounded_product.rs"]
 mod rounded_product_impl;
 #[path = "linalg/sliding.rs"]
@@ -44,9 +46,9 @@ pub use self::linear_impl::*;
 pub use self::lu_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;
+pub(crate) use self::rounded_product_f64_impl::{Taken, rounded_products};
 pub(crate) use self::rounded_product_impl::{
-    Affine, grain_of, rounded_affine_products_f32, rounded_affine_products_in_engine_f32,
-    rounded_products_f32, settles,
+    Affine, grain_of, rounded_affine_products_f32, rounded_affine_products_in_engine_f32, settles,
 };
 pub use self::sliding_impl::sliding_products;
 pub use self::svd_impl::*;

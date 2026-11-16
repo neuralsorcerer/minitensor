@@ -51,8 +51,9 @@ const BAND: usize = 256;
 /// `out[b] = lhs[b] @ rhs[b]` for each of `batch` products of `(m, k)` by
 /// `(k, n)`, either operand read in the layout it is stored in, every entry
 /// the float32 nearest its exact dot. `out` need not arrive zeroed.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rounded_products_f32(
+fn rounded_products_f32(
     batch: usize,
     m: usize,
     k: usize,
@@ -80,16 +81,19 @@ pub(crate) fn rounded_products_f32(
 /// `strides[0] · b + strides[1] · i + strides[2] · j` in `values` -- a stride
 /// of zero broadcasting it along that axis.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Affine<'a> {
-    pub(crate) alpha: f32,
-    pub(crate) beta: f32,
-    pub(crate) values: &'a [f32],
+pub(crate) struct Affine<'a, T = f32> {
+    pub(crate) alpha: T,
+    pub(crate) beta: T,
+    pub(crate) values: &'a [T],
     pub(crate) strides: [usize; 3],
 }
 
-/// [`rounded_products_f32`] with each entry taken to `alpha · dot + beta ·
+/// `out[b] = lhs[b] @ rhs[b]` for each of `batch` products of `(m, k)` by
+/// `(k, n)`, either operand read in the layout it is stored in, every entry
+/// the float32 nearest its exact dot -- or, taken to `alpha · dot + beta ·
 /// c` by `affine`, where there is one, the float32 nearest that exactly: a
 /// bias added and a product scaled, rounded once rather than at each step.
+/// `out` need not arrive zeroed.
 ///
 /// The float64 value is `alpha · dot` rounded, plus `beta · c`, exact for
 /// two float32s, rounded: off the exact one by `|alpha|` times the dot's

@@ -177,12 +177,12 @@ installed NumPy ships rather than with anything in this library.
 
 ## Where a dense product is computed
 
-A single large `float64` product does not run on this library's own kernel,
-and neither does a `float32` one, which is carried as the float64 product of
-its operands widened and each entry rounded from it to the float32 nearest
-its exact dot. It runs on the BLAS that `numpy` already brought -- OpenBLAS on
-the wheels -- on the buffers the engine allocated, with nothing copied on the
-way in or out but the widened operands of a float32 product. Every install has `numpy` in it, every install of `numpy` has a
+A single large `float32` product does not run on this library's own kernel.
+It is carried as the float64 product of its operands widened, each entry
+rounded from that to the float32 nearest its exact dot, and that float64
+product runs on the BLAS that `numpy` already brought -- OpenBLAS on the
+wheels -- on the buffers the engine allocated, with nothing copied on the
+way in or out but the widened operands. Every install has `numpy` in it, every install of `numpy` has a
 tuned BLAS in it, and that BLAS is per-architecture assembly selected at load
 time from a table of implementations. A portable Rust kernel does not close
 that gap.
@@ -206,6 +206,44 @@ the operands and taking their rows' and columns' norms, and narrowing each
 entry against its bound -- three and a half times the float32 product on a
 large matrix, and four to five times on a small one or a stack of them; the
 float32 figures for `nn.Linear` below are from before as well.
+
+The float64 rows are of a plain float64 product, which is what a `float32`
+product is still carried in. A `float64` product of the library's own is no
+longer one: each of its entries is the float64 nearest its exact dot, which
+no single product in float64 gives. Its operands are cut in two, so that the
+product of their first pieces is exact and the two products that remain are
+small enough to bound; the three are taken on the engine's kernel a
+cache-sized band of the output at a time, in runs of 64 terms added into a
+pair of float64s without error, and the entries the bound leaves open are
+taken as their exact dots. It stays on the engine's kernel because the bands
+already fill the pool. Against the plain product it replaced -- NumPy's BLAS
+above the delegation threshold, the engine's kernel below it -- on the same
+4-core container:
+
+| product | plain | rounded once | ratio |
+| --- | --- | --- | --- |
+| 16x16 @ 16x16 | 0.8us | 4.8us | 6.0x |
+| 64x64 @ 64x64 | 10.8us | 72.8us | 6.7x |
+| 256x256 @ 256x256 | 0.24ms | 1.49ms | 6.3x |
+| 512x512 @ 512x512 | 1.51ms | 9.17ms | 6.1x |
+| 1024x1024 @ 1024x1024 | 10.1ms | 55.2ms | 5.5x |
+| 512x2048 @ 2048x512 | 5.67ms | 31.4ms | 5.5x |
+| 2048x64 @ 64x2048 | 4.27ms | 16.4ms | 3.8x |
+| 64x4096 @ 4096x64 | 0.33ms | 3.04ms | 9.3x |
+| 64 x (16x16 @ 16x16) | 23us | 102us | 4.4x |
+| 8 x (128x128 @ 128x128) | 0.63ms | 1.49ms | 2.4x |
+| `dense_layer`, 256 x 768 x 768 with a bias | 3.21ms | 10.6ms | 3.3x |
+| a 256x256 matrix by its inverse | 0.42ms | 15.8ms | 38x |
+| a 512x512 matrix by its inverse | 2.79ms | 69.9ms | 25x |
+
+Three kernel products make the floor three; the cutting, the pair and the
+bound take it to five or six, and a short output over a long dot, whose
+operands are large beside it, to nine. The last two rows are the far end: a
+product that cancels throughout leaves every entry open, and each is then
+its exact dot -- carried in two float64s, in three where two do not settle
+it, and summed exactly where three do not. The plain product's answers
+there were not near: the entries that should be nothing came out a fifth of
+themselves off at the median.
 
 A product with a single row or column -- a matrix times a vector, or a vector
 times a matrix -- is not handed over. Each of its entries is a dot product,
@@ -285,11 +323,14 @@ how the same benchmark measures the engine's own kernels on one build --
 `benchmarks/README.md` carries the tables it produced.
 
 Where a product is computed is a performance decision that depends on its shape
-and dtype, and it may change. The answer does not: both paths agree with a
-float64 reference to the precision of the dtype asked for. They do not agree
-bit for bit, and neither does a BLAS with itself across shapes -- it dispatches
-on all three extents and on how each operand is stored, so reordering the
-accumulation of `k` is normal.
+and dtype, and it may change. The answer does not: a float32 product's entries
+are rounded once from whichever float64 product carried them, and a float64
+product's from its own pieces, so each is the float nearest its exact dot on
+either path, to the bit. The float64 product underneath a float32 one is not
+the same bit for bit on the two paths, and neither is a BLAS's with itself
+across shapes -- it dispatches on all three extents and on how each operand is
+stored, so reordering the accumulation of `k` is normal -- which is why the
+entries are rounded from it rather than read off it.
 
 ## Choosing a GEMM backend
 

@@ -794,16 +794,17 @@ pub fn addcdiv_rounded(
         .map_err(_convert_error)
 }
 
-/// `beta · input + alpha · (mat1 @ mat2)` for float32 operands, each entry
-/// the float32 nearest its exact value. Behind `addmm` and `baddbmm`.
+/// `beta · input + alpha · (mat1 @ mat2)` for float operands of one width,
+/// each entry the float nearest its exact value, the scales floats of that
+/// width. Behind `addmm` and `baddbmm`.
 #[pyfunction]
 #[pyo3(name = "_affine_product", signature = (input, mat1, mat2, beta, alpha))]
 pub fn affine_product_rounded(
     input: &Bound<PyAny>,
     mat1: &Bound<PyAny>,
     mat2: &Bound<PyAny>,
-    beta: f32,
-    alpha: f32,
+    beta: f64,
+    alpha: f64,
 ) -> PyResult<PyTensor> {
     let (input, mat1, mat2) = (
         borrow_tensor(input)?,

@@ -11,7 +11,10 @@ one, which reaches the provider by a different route and for a different
 reason: a single product is offered because a tuned BLAS beats the engine's
 kernel on it, and a *batch* is offered because handing matrices over one at a
 time would spend the crossing per matrix -- at a batch of 256 more than the
-whole product costs to compute.
+whole product costs to compute. It is a `float32` product that crosses, as
+the float64 product of its operands widened; a `float64` one is rounded once
+on the engine's own kernels whatever the thresholds, and is run here beside
+it for the same answers.
 
 What has to hold is that the route makes no difference to the answer. The
 provider is asked before the batch axis is split across the thread pool, so the
@@ -100,53 +103,57 @@ class TestTheTwoPathsAgree:
         np.testing.assert_allclose(delegated, native, rtol=tol, atol=tol)
         np.testing.assert_allclose(delegated, a @ b, rtol=tol, atol=tol)
 
-    def test_broadcast_batch_dimensions(self):
+    @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("float64", 1e-11)])
+    def test_broadcast_batch_dimensions(self, dtype, tol):
         rng = np.random.default_rng(1)
-        a = rng.standard_normal((6, 3, 5))
-        b = rng.standard_normal((5, 2))
+        a = rng.standard_normal((6, 3, 5)).astype(dtype)
+        b = rng.standard_normal((5, 2)).astype(dtype)
         native, delegated = _both_paths(lambda: mt.matmul(_t(a), _t(b)))
-        np.testing.assert_allclose(delegated, native, rtol=1e-11, atol=1e-11)
-        np.testing.assert_allclose(delegated, a @ b, rtol=1e-11, atol=1e-11)
+        np.testing.assert_allclose(delegated, native, rtol=tol, atol=tol)
+        np.testing.assert_allclose(delegated, a @ b, rtol=tol, atol=tol)
 
-    def test_a_batch_of_one_is_the_plain_product(self):
+    @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("float64", 1e-11)])
+    def test_a_batch_of_one_is_the_plain_product(self, dtype, tol):
         rng = np.random.default_rng(2)
-        a = rng.standard_normal((1, 12, 9))
-        b = rng.standard_normal((1, 9, 7))
+        a = rng.standard_normal((1, 12, 9)).astype(dtype)
+        b = rng.standard_normal((1, 9, 7)).astype(dtype)
         native, delegated = _both_paths(lambda: mt.bmm(_t(a), _t(b)))
-        np.testing.assert_allclose(delegated, native, rtol=1e-11, atol=1e-11)
+        np.testing.assert_allclose(delegated, native, rtol=tol, atol=tol)
 
-    def test_every_matrix_in_the_batch_is_its_own_product(self):
+    @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("float64", 1e-11)])
+    def test_every_matrix_in_the_batch_is_its_own_product(self, dtype, tol):
         # A batch where each element differs, so a kernel that broadcast one
         # matrix over the batch -- or offset into the wrong one -- is caught.
         rng = np.random.default_rng(3)
-        a = rng.standard_normal((7, 4, 4))
-        b = rng.standard_normal((7, 4, 4))
+        a = rng.standard_normal((7, 4, 4)).astype(dtype)
+        b = rng.standard_normal((7, 4, 4)).astype(dtype)
         _, delegated = _both_paths(lambda: mt.bmm(_t(a), _t(b)))
         for index in range(7):
             np.testing.assert_allclose(
-                delegated[index], a[index] @ b[index], rtol=1e-11, atol=1e-11
+                delegated[index], a[index] @ b[index], rtol=tol, atol=tol
             )
 
 
 @requires_delegation
 class TestGradientsAgree:
+    @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("float64", 1e-11)])
     @pytest.mark.parametrize("min_flops,min_k", [(0, 0), (_NEVER, _NEVER)])
-    def test_batched_backward(self, min_flops, min_k, restore_thresholds):
+    def test_batched_backward(self, min_flops, min_k, dtype, tol, restore_thresholds):
         dispatch.set_gemm_thresholds(min_flops, min_k)
         rng = np.random.default_rng(4)
-        a_host = rng.standard_normal((5, 3, 4))
-        b_host = rng.standard_normal((5, 4, 2))
-        a = mt.Tensor(np.ascontiguousarray(a_host), dtype="float64", requires_grad=True)
-        b = mt.Tensor(np.ascontiguousarray(b_host), dtype="float64", requires_grad=True)
+        a_host = rng.standard_normal((5, 3, 4)).astype(dtype)
+        b_host = rng.standard_normal((5, 4, 2)).astype(dtype)
+        a = mt.Tensor(np.ascontiguousarray(a_host), dtype=dtype, requires_grad=True)
+        b = mt.Tensor(np.ascontiguousarray(b_host), dtype=dtype, requires_grad=True)
 
         mt.bmm(a, b).sum().backward()
 
-        ones = np.ones((5, 3, 2))
+        ones = np.ones((5, 3, 2), dtype=dtype)
         np.testing.assert_allclose(
-            np.asarray(a.grad), ones @ b_host.transpose(0, 2, 1), rtol=1e-11
+            np.asarray(a.grad), ones @ b_host.transpose(0, 2, 1), rtol=tol, atol=tol
         )
         np.testing.assert_allclose(
-            np.asarray(b.grad), a_host.transpose(0, 2, 1) @ ones, rtol=1e-11
+            np.asarray(b.grad), a_host.transpose(0, 2, 1) @ ones, rtol=tol, atol=tol
         )
         mt.clear_autograd_graph()
 

@@ -387,21 +387,27 @@ fn handling_the_product_is_honoured() {
 }
 
 #[test]
-fn each_dtype_reaches_its_own_entry_point() {
+fn a_float64_product_is_never_offered() {
     let _serial = begin();
 
-    let before = f64_calls().load(Ordering::Relaxed);
-    let (m, k, n) = (4, DECLINED_K, 4);
-    let lhs = tensor_f64(ramp_f64(m * k), vec![m, k]);
-    let rhs = tensor_f64(ramp_f64(k * n), vec![k, n]);
-    let out = linalg::matmul(&lhs, &rhs).unwrap();
+    // A few entries, which are their dots, and enough of them to be cut
+    // into pieces: neither has a whole product to hand over. Each entry is
+    // rounded once from the products of its operands' pieces, which the
+    // engine's own kernel takes a band at a time inside its pool.
+    for (m, n) in [(4, 4), (24, 24)] {
+        let before = f64_calls().load(Ordering::Relaxed);
+        let k = DECLINED_K;
+        let lhs = tensor_f64(ramp_f64(m * k), vec![m, k]);
+        let rhs = tensor_f64(ramp_f64(k * n), vec![k, n]);
+        let out = linalg::matmul(&lhs, &rhs).unwrap();
 
-    assert_eq!(f64_calls().load(Ordering::Relaxed), before + 1);
-    assert_eq!(taken().len(), 1);
+        assert_eq!(f64_calls().load(Ordering::Relaxed), before);
+        assert!(taken().is_empty());
 
-    let expected = reference(&ramp_f64(m * k), &ramp_f64(k * n), m, k, n);
-    for (got, want) in out.data().as_f64_slice().unwrap().iter().zip(&expected) {
-        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        // Small whole numbers: the slow obvious sum is exact, and so is
+        // every entry.
+        let expected = reference(&ramp_f64(m * k), &ramp_f64(k * n), m, k, n);
+        assert_eq!(out.data().as_f64_slice().unwrap(), expected);
     }
 }
 

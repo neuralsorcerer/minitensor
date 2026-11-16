@@ -188,7 +188,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `vecmat(input, other)` | `(..., m)` times `(..., m, n)`, giving `(..., n)` -- `matvec` from the other side. |
 | `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
 | `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
-| `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. For float32 operands, and scales a float32 holds, each entry is the float32 nearest the exact value, `input` broadcasting to the product -- where composed, the product, each scaling and the sum rounded -- and so is each gradient: the matrices' scaled products, and the input's sum over the axes it was broadcast along, scaled. Other dtypes and scales take the composed form. |
+| `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. For float operands of one width, float32 or float64, and scales that width holds, each entry is the float nearest the exact value, `input` broadcasting to the product -- where composed, the product, each scaling and the sum rounded -- and so is each gradient: the matrices' scaled products, and the input's sum over the axes it was broadcast along, scaled. Other dtypes and scales take the composed form. |
 | `inverse(input)` | The inverse of each square matrix in the stack -- a second name for `inv`. For `inverse(A) @ b`, ask `solve(lhs, rhs)` instead -- same answer, without forming the inverse, faster and better conditioned. |
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- a second name for `pinv`, with a fixed threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
@@ -1709,11 +1709,40 @@ entry cancels far below its terms -- the entry is the exact dot of its row
 and column. Accumulated in float32, nine entries in ten of such a product
 were other than that float. It costs the float64 product and a pass either
 side of it: three and a half times the float32 product it replaces on a
-large matrix, and four to five times on a small one or a stack of them. A float64 product with more than one
-row and column still accumulates in float64, as a matrix product
-conventionally does, which leaves a few ulps of error in a typical entry
-and more where the sum cancels; where one of its entries has to be exact,
-it is the `dot` of its row and column.
+large matrix, and four to five times on a small one or a stack of them.
+
+A float64 `matmul`, `mm`, `bmm` or `@` gives each entry as the float64
+nearest its exact dot as well, and so do a float64 dense layer, `addmm`,
+`baddbmm` and the gradients these hand back. Float64 has no wider float to
+multiply in, so each operand is cut in two: a value's first piece is the
+whole multiple nearest it of a power of two between `2^-23` and `2^-22` of
+the largest magnitude in its row -- for the right operand, in its column --
+and its rest is what that leaves, half that power at most. A dot is taken in
+runs of at most 64 terms. Within a run the first pieces' products are whole
+multiples of one power of two whose sums stay within `2^53` of it, so the
+product of the first pieces is exact in whatever order the kernel adds it;
+the two that remain, of the rests by the first pieces and of the values by
+the rests, are `2^-23` of it in size at most and are each off by some
+`2^-47` of their terms' magnitudes. The runs are added into a pair of
+float64s without error, and the pair is narrowed against the bound on what
+was rounded, some `2^-69` of the product of the row's and the column's
+2-norms. Where that leaves one float64, it is
+the entry; where it does not -- one entry in a thousand of ordinary data
+sixty deep, one in two hundred a thousand deep, and every one that cancels
+far below its terms, as those of a matrix by its inverse do -- the entry is
+the exact dot of its row and column. Whole numbers, one-hot rows and zeros
+have no rests, so their entries are exact as they stand. Accumulated in
+float64, as a matrix product conventionally is, one entry in four of a
+product of ordinary random matrices thirty deep was the float64 nearest its
+exact dot and one in twelve of one a thousand deep, and the entries of a
+matrix by its inverse that should be nothing were a fifth of themselves off
+at the median. It costs three of the kernel's products and the passes
+between them: five and a half to six and a half times the plain float64
+product it replaces on square matrices from 16 to 1024 wide, two and a half
+to four and a half on a stack of small ones, a wide output over a short dot
+or a dense layer, nine on a short output over a long dot -- and twenty-five
+to forty where a product cancels throughout and every entry is its exact
+dot.
 
 `cross(other, dim=None)` of two float tensors takes each component,
 `x * y - z * w`, rounded once, in the wider of the two dtypes. Each product
@@ -3268,7 +3297,7 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 
 | Function | Purpose |
 | --- | --- |
-| `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. For float32, each entry is the float32 nearest its exact value, the bias added to the exact dot before the one rounding -- a bias of one value per output feature, `[out]` or with leading ones; any other broadcasts as `+` does -- and the bias's gradient is each column of the incoming one summed, rounded once. |
+| `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. Each entry is the float nearest its exact value, float32 or float64, the bias added to the exact dot before the one rounding -- a bias of one value per output feature, `[out]` or with leading ones; any other broadcasts as `+` does -- and the bias's gradient is each column of the incoming one summed, rounded once. |
 | `conv2d(input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. `padding` is zeros per side, or by name: `"valid"` for none, and `"same"` for enough that a stride-1 output keeps the input's height and width. `"same"` needs `dilation * (kernel - 1)` zeros per axis, and an odd total puts its extra zero after the axis; it is refused with any other stride, where no single size is kept. For float32, each entry of the output is the float32 nearest its exact value -- the sum of its taps' products with the bias added before the one rounding -- and so is each entry of the gradients of the input, the weight and the bias; see the note under this table. |
 | `conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on, the same named paddings, and the same rounding. |
 | `conv_transpose2d(input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=1)` | 2-D transposed convolution: each input position scattered across a neighbourhood of the output, which grows the grid where `conv2d` shrinks it -- the map a convolution's input gradient performs, run forwards. `weight` is `[C_in, C_out / groups, kH, kW]`, input channels first. The output is `(H - 1) * stride - 2 * padding + dilation * (kH - 1) + output_padding + 1` high, and as wide by the same rule; `output_padding` picks among the input sizes that convolve to one output size, and must be smaller than `stride`. Float32 or Float64 CPU tensors of one dtype; for float32 the output and each gradient are rounded once, as `conv2d`'s are. |
@@ -3339,8 +3368,8 @@ numbers or of a few short values, which lands on a halfway point often, and
 one that cancels to zero are exact as they stand; a zero is a positive one.
 The answer is the same on either path and for any number of threads. It costs
 two to four times the float32 arithmetic it replaces. A float64 convolution
-accumulates in float64, as a float64 matrix product does, though its bias's
-gradient, a plain sum, is rounded once. `conv3d` is one two-dimensional
+accumulates in float64, though its bias's gradient, a plain sum, is rounded
+once. `conv3d` is one two-dimensional
 convolution of its depth taps set side by side as channels, so its entries
 and those of its gradients are rounded once in the same way.
 
@@ -4957,7 +4986,8 @@ The same error follows a `backward()` whose graph was cleared by
 
 Every operation holds the GIL, so two Python threads never run tensor code at
 the same moment -- with two exceptions, both work handed to NumPy. A large
-`float32` or `float64` product goes to `numpy.matmul`, and the element-wise
+`float32` product goes to `numpy.matmul`, as the float64 product of its
+operands widened, and the element-wise
 functions listed by `minitensor._core.dispatch.delegated_ufuncs()` (the
 float64 transcendentals, `pow` and `atan2` among them; nothing in float32) go
 to NumPy's ufuncs above a few hundred elements; both release the GIL while their loops run.

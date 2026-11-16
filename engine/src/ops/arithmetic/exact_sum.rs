@@ -1720,6 +1720,14 @@ pub(crate) fn exact_dot_to<T: Output>(pairs: impl Iterator<Item = (f64, f64)> + 
     }
 }
 
+/// The float64 nearest the exact sum of the products of `terms`, four finite
+/// factors each.
+#[cold]
+#[inline(never)]
+pub(crate) fn exact_quads_f64(terms: &[[f64; 4]]) -> f64 {
+    Total::of_quads(terms).rounded()
+}
+
 /// The float32 nearest every number within `bound` of `value`, when that is
 /// one float32.
 pub(crate) fn settle_f32(value: f64, bound: f64) -> Option<f32> {

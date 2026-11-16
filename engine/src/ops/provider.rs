@@ -7,12 +7,14 @@
 //! A seam for handing work to a library that does it faster than the engine.
 //!
 //! The engine's kernels are the right thing to run almost everywhere, and the
-//! exceptions are specific and measured: a single large dense product in
-//! `float64`, where a tuned BLAS wins by 1.6-2.3x -- a `float32` product among
-//! them, carried as the float64 product of its operands widened, from which
-//! each entry is rounded once -- and the float64 transcendentals, where the
-//! engine calls scalar `libm` and NumPy runs vectorized loops that are both
-//! faster and at least as accurate.
+//! exceptions are specific and measured: the single large float64 product a
+//! `float32` product is carried in -- that of its operands widened, from
+//! which each entry is rounded once -- where a tuned BLAS wins by 1.6-2.3x,
+//! and the float64 transcendentals, where the engine calls scalar `libm` and
+//! NumPy runs vectorized loops that are both faster and at least as accurate.
+//! A `float64` product is not among them: each of its entries is rounded once
+//! from the products of its operands' pieces, which the engine's kernel takes
+//! a cache-sized band at a time inside its own pool.
 //!
 //! The library already ships next to both: `numpy`, which every install pulls
 //! in, carries a full OpenBLAS and those loops. Reaching them costs nothing but
@@ -167,9 +169,11 @@ impl Ufunc {
 /// that. An element-wise `out` arrives uninitialized, and is read only if the
 /// provider says it wrote every element of it.
 pub trait Provider: Send + Sync {
-    /// A float64 product. Float32 ones are not offered: each entry of one
-    /// is the float32 nearest its exact dot, which a float64 product of the
-    /// operands widened carries, and is offered as that.
+    /// A float64 product: the one a float32 product is carried in, that of
+    /// its operands widened, from which each entry is rounded to the float32
+    /// nearest its exact dot. The library's own float64 products are not
+    /// offered; their entries are rounded once from pieces of their
+    /// operands.
     fn gemm_f64(&self, request: Gemm<'_, f64>) -> bool;
 
     /// `out[i] = op(input[i])` for every `i`, or `false` having promised

@@ -7,12 +7,15 @@
 //! Sending work to the `numpy` every install already has, where it measured
 //! faster than the engine.
 //!
-//! Two kinds of work cross, both measured rather than assumed. A dense product
-//! goes to the BLAS `numpy` brought: on a single large `float64` product -- a
-//! `float32` one is offered as the float64 product of its operands widened,
-//! and each entry rounded once from it -- it beats the engine's own kernel by
+//! Two kinds of work cross, both measured rather than assumed. A dense
+//! `float32` product goes to the BLAS `numpy` brought, as the float64 product
+//! of its operands widened, from which each entry is rounded once: on a
+//! single large float64 product that BLAS beats the engine's own kernel by
 //! 1.6-2.3x, which is not a gap a portable Rust kernel closes -- it is
-//! per-architecture assembly, chosen at load time from a table of them. And the float64 transcendentals go to
+//! per-architecture assembly, chosen at load time from a table of them. A
+//! `float64` product does not cross: its entries are rounded once from pieces
+//! of its operands, whose products the engine takes a band at a time. And the
+//! float64 transcendentals go to
 //! `numpy`'s ufuncs, listed in [`UFUNC_ORDER`] with the measurements that put
 //! them there: in float64 the engine has nothing but scalar `libm` for them,
 //! where `numpy` runs vectorized loops that are faster and as accurate.

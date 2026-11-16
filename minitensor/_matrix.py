@@ -237,21 +237,38 @@ def _float32_holds(value: float) -> bool:
         return False
 
 
+def _float64_holds(value: float) -> bool:
+    """Whether a float64 is exactly `value`."""
+
+    try:
+        return float(value) == value
+    except OverflowError:
+        return False
+
+
 def _rounded_affine(
     base: Tensor, left: Tensor, right: Tensor, beta: object, alpha: object
 ) -> Tensor | None:
-    """`beta * base + alpha * (left @ right)` with each entry the float32
-    nearest its exact value, or None where the operands are not float32 or
-    a scale is not exactly a float32, which the composed form takes."""
+    """`beta * base + alpha * (left @ right)` with each entry the float
+    nearest its exact value, or None where the operands are not floats of
+    one width or a scale is not exactly a float of that width, which the
+    composed form takes."""
 
+    dtypes = {str(t.dtype) for t in (base, left, right)}
+    if dtypes == {"float32"}:
+        holds = _float32_holds
+    elif dtypes == {"float64"}:
+        holds = _float64_holds
+    else:
+        return None
     exact = all(
         isinstance(scale, (int, float))
         and not isinstance(scale, bool)
         and _math.isfinite(scale)
-        and _float32_holds(scale)
+        and holds(scale)
         for scale in (beta, alpha)
     )
-    if not exact or any(str(t.dtype) != "float32" for t in (base, left, right)):
+    if not exact:
         return None
     out = list(left.shape[:-1]) + [right.shape[-1]]
     shape = list(base.shape)
@@ -266,9 +283,9 @@ def addmm(
     input: object, mat1: object, mat2: object, beta: float = 1, alpha: float = 1
 ) -> Tensor:
     """`beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer
-    is written in. For float32 operands and scales each entry is the float32
-    nearest the exact value, where the composed form rounded at the product,
-    each scaling and the sum."""
+    is written in. For float operands of one width, and scales that width
+    holds, each entry is the float nearest the exact value, where the
+    composed form rounded at the product, each scaling and the sum."""
 
     base = _atleast_tensor(input)
     left, right = _operand_pair(mat1, mat2)
@@ -286,7 +303,8 @@ def baddbmm(
 ) -> Tensor:
     """`beta * input + alpha * (batch1 @ batch2)` over a batch of matrices.
 
-    Each entry of float32 operands is rounded once, as `addmm`'s is.
+    Each entry of float operands of one width is rounded once, as `addmm`'s
+    is.
     """
 
     left = _require_rank(_atleast_tensor(batch1), 3, "baddbmm", "first batch")

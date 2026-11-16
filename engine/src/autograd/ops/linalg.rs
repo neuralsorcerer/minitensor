@@ -131,8 +131,7 @@ fn check_extents(grad: usize, grad_needs: usize, other: usize, other_needs: usiz
 
 impl GradientFunction for LinearBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        use crate::ops::linalg::{gemm_f64, gemm_tn_f64};
-        use crate::ops::provider::{Gemm, Storage, offer_gemm_f64};
+        use crate::ops::provider::Storage;
         use crate::tensor::{DataType, Shape, TensorData};
         use std::sync::Arc;
 
@@ -144,6 +143,12 @@ impl GradientFunction for LinearBackward {
             .product();
         let empty = rows == 0 || in_features == 0 || out_features == 0;
 
+        if !matches!(grad_output.dtype(), DataType::Float32 | DataType::Float64) {
+            return Err(MinitensorError::invalid_operation(
+                "linear backward only supports floating point tensors",
+            ));
+        }
+        let grad_len = grad_output.data().len();
         if self.input_requires_grad {
             let mut data = TensorData::zeros_on_device(
                 rows * in_features,
@@ -152,82 +157,20 @@ impl GradientFunction for LinearBackward {
             );
             if !empty {
                 // `grad_input = grad_output @ weight`, both stored the way
-                // the product names them.
-                macro_rules! run {
-                    ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:path) => {{
-                        let g = grad_output.data().$accessor().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: grad dtype")
-                        })?;
-                        let w = self.weight.data().$accessor().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: weight dtype")
-                        })?;
-                        check_extents(
-                            g.len(),
-                            rows * out_features,
-                            w.len(),
-                            out_features * in_features,
-                        )?;
-                        let out = data.$mut_accessor().unwrap();
-                        let delegated = $offer(Gemm {
-                            batch: 1,
-                            m: rows,
-                            k: out_features,
-                            n: in_features,
-                            lhs: g,
-                            lhs_storage: Storage::RowMajor,
-                            rhs: w,
-                            rhs_storage: Storage::RowMajor,
-                            out,
-                        });
-                        if !delegated {
-                            unsafe {
-                                $gemm(
-                                    rows,
-                                    out_features,
-                                    in_features,
-                                    g.as_ptr(),
-                                    w.as_ptr(),
-                                    out.as_mut_ptr(),
-                                )
-                            };
-                        }
-                    }};
-                }
-                match grad_output.dtype() {
-                    DataType::Float32 => {
-                        let g = grad_output.data().as_f32_slice().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: grad dtype")
-                        })?;
-                        let w = self.weight.data().as_f32_slice().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: weight dtype")
-                        })?;
-                        check_extents(
-                            g.len(),
-                            rows * out_features,
-                            w.len(),
-                            out_features * in_features,
-                        )?;
-                        crate::ops::linalg::rounded_products_f32(
-                            1,
-                            rows,
-                            out_features,
-                            in_features,
-                            g,
-                            Storage::RowMajor,
-                            w,
-                            Storage::RowMajor,
-                            data.as_f32_slice_mut().unwrap(),
-                        )?;
-                    }
-                    DataType::Float64 => {
-                        run!(as_f64_slice, as_f64_slice_mut, gemm_f64, offer_gemm_f64)
-                    }
-                    _ => {
-                        return Err(MinitensorError::invalid_operation(
-                            "linear backward only supports floating point tensors",
-                        ));
-                    }
-                }
+                // the product names them, each entry rounded once.
+                check_extents(
+                    grad_len,
+                    rows * out_features,
+                    self.weight.data().len(),
+                    out_features * in_features,
+                )?;
+                crate::ops::linalg::rounded_products(
+                    (1, rows, out_features, in_features),
+                    (&**grad_output.data(), Storage::RowMajor),
+                    (&**self.weight.data(), Storage::RowMajor),
+                    None,
+                    &mut data,
+                )?;
             }
             let grad_input = Tensor::new(
                 Arc::new(data),
@@ -246,74 +189,22 @@ impl GradientFunction for LinearBackward {
                 grad_output.device(),
             );
             if !empty {
-                macro_rules! run {
-                    ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:path) => {{
-                        let g = grad_output.data().$accessor().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: grad dtype")
-                        })?;
-                        let x = self.input.data().$accessor().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: input dtype")
-                        })?;
-                        check_extents(g.len(), rows * out_features, x.len(), rows * in_features)?;
-                        let out = data.$mut_accessor().unwrap();
-                        // `grad` holds the logical `(out, rows)` operand as
-                        // `(rows, out)`, and goes over that way rather than
-                        // transposed into a copy the size of the activations.
-                        let delegated = $offer(Gemm {
-                            batch: 1,
-                            m: out_features,
-                            k: rows,
-                            n: in_features,
-                            lhs: g,
-                            lhs_storage: Storage::Transposed,
-                            rhs: x,
-                            rhs_storage: Storage::RowMajor,
-                            out,
-                        });
-                        if !delegated {
-                            unsafe {
-                                $gemm(
-                                    out_features,
-                                    rows,
-                                    in_features,
-                                    g.as_ptr(),
-                                    x.as_ptr(),
-                                    out.as_mut_ptr(),
-                                )
-                            };
-                        }
-                    }};
-                }
-                match grad_output.dtype() {
-                    DataType::Float32 => {
-                        let g = grad_output.data().as_f32_slice().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: grad dtype")
-                        })?;
-                        let x = self.input.data().as_f32_slice().ok_or_else(|| {
-                            MinitensorError::internal_error("linear backward: input dtype")
-                        })?;
-                        check_extents(g.len(), rows * out_features, x.len(), rows * in_features)?;
-                        crate::ops::linalg::rounded_products_f32(
-                            1,
-                            out_features,
-                            rows,
-                            in_features,
-                            g,
-                            Storage::Transposed,
-                            x,
-                            Storage::RowMajor,
-                            data.as_f32_slice_mut().unwrap(),
-                        )?;
-                    }
-                    DataType::Float64 => {
-                        run!(as_f64_slice, as_f64_slice_mut, gemm_tn_f64, offer_gemm_f64)
-                    }
-                    _ => {
-                        return Err(MinitensorError::invalid_operation(
-                            "linear backward only supports floating point tensors",
-                        ));
-                    }
-                }
+                // `grad` holds the logical `(out, rows)` operand as `(rows,
+                // out)`, and is read that way round rather than transposed
+                // into a copy the size of the activations.
+                check_extents(
+                    grad_len,
+                    rows * out_features,
+                    self.input.data().len(),
+                    rows * in_features,
+                )?;
+                crate::ops::linalg::rounded_products(
+                    (1, out_features, rows, in_features),
+                    (&**grad_output.data(), Storage::Transposed),
+                    (&**self.input.data(), Storage::RowMajor),
+                    None,
+                    &mut data,
+                )?;
             }
             let grad_weight = Tensor::new(
                 Arc::new(data),
@@ -344,17 +235,17 @@ impl GradientFunction for LinearBackward {
     }
 }
 
-/// The gradient of `beta · input + alpha · (mat1 @ mat2)` for float32
-/// operands; see [`crate::ops::linalg::affine_product`]. Each gradient is
-/// rounded once too: the products' scaled by `alpha` in their own kernel,
-/// and the input's -- the incoming gradient summed over the axes it was
-/// broadcast along -- scaled by `beta` the same way.
+/// The gradient of `beta · input + alpha · (mat1 @ mat2)` for float
+/// operands of one width; see [`crate::ops::linalg::affine_product`]. Each
+/// gradient is rounded once too: the products' scaled by `alpha` in their
+/// own kernel, and the input's -- the incoming gradient summed over the
+/// axes it was broadcast along -- scaled by `beta` the same way.
 pub struct AffineProductBackward {
     pub mat1: Tensor,
     pub mat2: Tensor,
     pub input_shape: crate::tensor::Shape,
-    pub alpha: f32,
-    pub beta: f32,
+    pub alpha: f64,
+    pub beta: f64,
     pub input_ids: [TensorId; 3],
     pub requires: [bool; 3],
 }
@@ -362,40 +253,27 @@ pub struct AffineProductBackward {
 impl AffineProductBackward {
     /// `scale · (lhs @ rhs)` rounded once, the operands read in the layouts
     /// given, `batch` products of `(m, k)` by `(k, n)`.
-    #[allow(clippy::too_many_arguments)]
     fn scaled_product(
-        &self,
-        (batch, m, k, n): (usize, usize, usize, usize),
-        lhs: (&[f32], crate::ops::provider::Storage),
-        rhs: (&[f32], crate::ops::provider::Storage),
-        scale: f32,
-        dims: Vec<usize>,
-        device: crate::device::Device,
+        dims: (usize, usize, usize, usize),
+        lhs: (&crate::tensor::TensorData, crate::ops::provider::Storage),
+        rhs: (&crate::tensor::TensorData, crate::ops::provider::Storage),
+        scale: f64,
+        shape: Vec<usize>,
     ) -> Result<Tensor> {
-        use crate::tensor::{DataType, Shape, TensorData};
-        let mut data = TensorData::try_zeros_on_device(batch * m * n, DataType::Float32, device)?;
-        let out = data
-            .as_f32_slice_mut()
-            .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))?;
-        crate::ops::linalg::rounded_affine_products_f32(
-            batch,
-            m,
-            k,
-            n,
-            lhs,
-            rhs,
-            Some(crate::ops::linalg::Affine {
-                alpha: scale,
-                beta: 0.0,
-                values: &[0.0],
-                strides: [0, 0, 0],
-            }),
-            out,
-        )?;
+        use crate::tensor::{Shape, TensorData};
+        let (batch, m, _, n) = dims;
+        let (dtype, device) = (rhs.0.dtype(), rhs.0.device());
+        let mut data = TensorData::try_zeros_on_device(batch * m * n, dtype, device)?;
+        let taken = crate::ops::linalg::Taken {
+            alpha: scale,
+            beta: 0.0,
+            addend: None,
+        };
+        crate::ops::linalg::rounded_products(dims, lhs, rhs, Some(taken), &mut data)?;
         Ok(Tensor::new(
             std::sync::Arc::new(data),
-            Shape::new(dims),
-            DataType::Float32,
+            Shape::new(shape),
+            dtype,
             device,
             false,
         ))
@@ -407,10 +285,6 @@ impl GradientFunction for AffineProductBackward {
         use crate::ops::provider::Storage::{RowMajor, Transposed};
         let mut gradients = FxHashMap::default();
         let grad = grad_output.contiguous()?;
-        let g = grad
-            .data()
-            .as_f32_slice()
-            .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))?;
         let (left, right) = (self.mat1.shape().dims(), self.mat2.shape().dims());
         let batched = left.len() == 3;
         let batch = if batched { left[0] } else { 1 };
@@ -419,12 +293,11 @@ impl GradientFunction for AffineProductBackward {
             left[left.len() - 1],
             right[right.len() - 1],
         );
-        let device = grad.device();
-        if g.len() != batch * m * n {
+        if grad.data().len() != batch * m * n {
             return Err(MinitensorError::internal_error(format!(
                 "affine product backward: a gradient of {} elements for {batch} products of \
                  ({m}, {n})",
-                g.len()
+                grad.data().len()
             )));
         }
         let lead = |rest: &[usize]| -> Vec<usize> {
@@ -434,35 +307,25 @@ impl GradientFunction for AffineProductBackward {
                 rest.to_vec()
             }
         };
-        let f32s = |t: &Tensor| {
-            t.data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("affine product backward: float32"))
-                .map(<[f32]>::to_vec)
-        };
         if self.requires[1] {
             // `alpha · grad @ mat2^T`, `mat2` read across its storage.
-            let rhs = f32s(&self.mat2)?;
-            let product = self.scaled_product(
+            let product = Self::scaled_product(
                 (batch, m, n, k),
-                (g, RowMajor),
-                (&rhs, Transposed),
+                (&**grad.data(), RowMajor),
+                (&**self.mat2.data(), Transposed),
                 self.alpha,
                 lead(&[m, k]),
-                device,
             )?;
             accumulate_grad(&mut gradients, self.input_ids[1], product)?;
         }
         if self.requires[2] {
             // `alpha · mat1^T @ grad`.
-            let lhs = f32s(&self.mat1)?;
-            let product = self.scaled_product(
+            let product = Self::scaled_product(
                 (batch, k, m, n),
-                (&lhs, Transposed),
-                (g, RowMajor),
+                (&**self.mat1.data(), Transposed),
+                (&**grad.data(), RowMajor),
                 self.alpha,
                 lead(&[k, n]),
-                device,
             )?;
             accumulate_grad(&mut gradients, self.input_ids[2], product)?;
         }
@@ -486,15 +349,18 @@ impl GradientFunction for AffineProductBackward {
             let laid = grad.permute(order)?.contiguous()?;
             let rows: usize = summed.iter().map(|&axis| out_dims[axis]).product();
             let columns: usize = kept.iter().map(|&axis| out_dims[axis]).product();
-            let ones = vec![1.0f32; rows];
-            let values = f32s(&laid)?;
-            let product = self.scaled_product(
+            let ones = Tensor::ones(
+                crate::tensor::Shape::new(vec![rows]),
+                grad.dtype(),
+                grad.device(),
+                false,
+            );
+            let product = Self::scaled_product(
                 (1, 1, rows, columns),
-                (&ones, RowMajor),
-                (&values, RowMajor),
+                (&**ones.data(), RowMajor),
+                (&**laid.data(), RowMajor),
                 self.beta,
                 target.to_vec(),
-                device,
             )?;
             accumulate_grad(&mut gradients, self.input_ids[0], product)?;
         }
@@ -524,7 +390,6 @@ impl MatMulBackward {
     /// that, so a backward through `x @ w` copied all of `w` and all of `x`
     /// on every pass: half again the products' own cost for a weight matrix.
     fn stored_backward(&self, grad_output: &Tensor) -> Result<Option<FxHashMap<TensorId, Tensor>>> {
-        use crate::ops::linalg::{stored_gemm_f32, stored_gemm_f64};
         use crate::ops::provider::Storage;
         use crate::tensor::{DataType, TensorData};
         use std::sync::Arc;
@@ -564,45 +429,24 @@ impl MatMulBackward {
             let (rows, inner, cols) = if lhs_side { (m, n, k) } else { (k, m, n) };
             let mut data =
                 TensorData::zeros_on_device(batch * rows * cols, dtype, grad_output.device());
-            macro_rules! run {
-                ($accessor:ident, $mut_accessor:ident, $gemm:path) => {{
-                    let missing =
-                        || MinitensorError::internal_error("matmul backward: operand dtype");
-                    let g = grad_output.data().$accessor().ok_or_else(missing)?;
-                    let out = data.$mut_accessor().ok_or_else(missing)?;
-                    if lhs_side {
-                        let r = self.rhs.data().$accessor().ok_or_else(missing)?;
-                        $gemm(
-                            batch,
-                            rows,
-                            inner,
-                            cols,
-                            g,
-                            Storage::RowMajor,
-                            r,
-                            Storage::Transposed,
-                            out,
-                        )?;
-                    } else {
-                        let l = self.lhs.data().$accessor().ok_or_else(missing)?;
-                        $gemm(
-                            batch,
-                            rows,
-                            inner,
-                            cols,
-                            l,
-                            Storage::Transposed,
-                            g,
-                            Storage::RowMajor,
-                            out,
-                        )?;
-                    }
-                }};
-            }
-            match dtype {
-                DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut, stored_gemm_f32),
-                _ => run!(as_f64_slice, as_f64_slice_mut, stored_gemm_f64),
-            }
+            let (lhs, rhs) = if lhs_side {
+                (
+                    (&**grad_output.data(), Storage::RowMajor),
+                    (&**self.rhs.data(), Storage::Transposed),
+                )
+            } else {
+                (
+                    (&**self.lhs.data(), Storage::Transposed),
+                    (&**grad_output.data(), Storage::RowMajor),
+                )
+            };
+            crate::ops::linalg::rounded_products(
+                (batch, rows, inner, cols),
+                lhs,
+                rhs,
+                None,
+                &mut data,
+            )?;
             let shape = if lhs_side {
                 self.lhs.shape()
             } else {
