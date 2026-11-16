@@ -1841,45 +1841,217 @@ pub(super) fn fused() -> bool {
 /// The float64 nearest `Σ a[i] · b[i]`.
 ///
 /// Each product is split into the float64 nearest it and the exact error of
-/// that, and the halves are carried as a sum's values are; the exact dot
-/// decides where the bound cannot. A NaN, a product of an infinity and a
-/// zero, or infinite products of both signs make NaN, and an infinite
-/// product of one sign that infinity, as they would added up one by one;
-/// finite operands give the value nearest their exact dot, an infinity past
-/// the largest, though a product on the way would overflow.
+/// that, and the halves are carried as a sum's values are; where the bound
+/// cannot say -- a dot that cancels to within some `2^-44` of its terms, or
+/// lands on a halfway point -- the errors are carried in turn, by
+/// [`thrice_dot`], and the exact dot decides what that cannot. A NaN, a
+/// product of an infinity and a zero, or infinite products of both signs
+/// make NaN, and an infinite product of one sign that infinity, as they
+/// would added up one by one; finite operands give the value nearest their
+/// exact dot, an infinity past the largest, though a product on the way
+/// would overflow.
 pub(crate) fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
     let carried = f64::carried_dot(a, b);
-    settled_dot(carried, a.len(), a.iter().copied().zip(b.iter().copied()))
+    let pairs = || a.iter().copied().zip(b.iter().copied());
+    carried
+        .allowing(a.len())
+        .rounded()
+        .or_else(|| {
+            // A total of nothing with nothing dropped is left to the last
+            // step, which settles it where no product is too small to tell.
+            let nothing = carried.sum == 0.0 && carried.error == 0.0 && carried.slack == 0.0;
+            if nothing { None } else { thrice_dot(a, b) }
+        })
+        .or_else(|| carried.unless_tiny(pairs()))
+        .unwrap_or_else(|| exact_dot_f64(pairs()))
+}
+
+impl Carried {
+    /// The total with room for the errors of `count` products rounded below
+    /// the normals: a product's error is exact unless the product lies
+    /// within `2^-968` of zero, where the error may have been rounded to a
+    /// subnormal -- by at most half the least subnormal a product, which is
+    /// allowed for as the whole of it.
+    fn allowing(self, count: usize) -> Self {
+        Carried {
+            slack: self.slack + count as f64 * f64::from_bits(1),
+            ..self
+        }
+    }
+
+    /// The float64 nearest the total without that room, where no product of
+    /// two nonzero operands among `pairs` is small enough to need it: the
+    /// room settles every total but one that is zero or nearly.
+    fn unless_tiny(self, mut pairs: impl Iterator<Item = (f64, f64)>) -> Option<f64> {
+        let tiny = pairs.any(|(x, y)| x != 0.0 && y != 0.0 && (x * y).abs() < 2f64.powi(-968));
+        if tiny { None } else { self.rounded() }
+    }
 }
 
 /// The float64 nearest the dot of the `count` `pairs` that `carried`
-/// carries, when the bound says which it is, and the exact one otherwise.
-///
-/// A product's error is exact unless the product lies within `2^-968` of
-/// zero, where the error may have been rounded to a subnormal -- by at most
-/// half the least subnormal a product, which is allowed for as the whole of
-/// it. That allowance settles every total but one that is zero or nearly;
-/// such a total is settled without it when no product of two nonzero
-/// operands is that small.
+/// carries, when the bound says which it is.
 fn settled_dot(
     carried: Carried,
     count: usize,
-    pairs: impl Iterator<Item = (f64, f64)> + Clone,
-) -> f64 {
-    let allowing = Carried {
-        slack: carried.slack + count as f64 * f64::from_bits(1),
-        ..carried
-    };
-    allowing
+    pairs: impl Iterator<Item = (f64, f64)>,
+) -> Option<f64> {
+    carried
+        .allowing(count)
         .rounded()
-        .or_else(|| {
-            let tiny = pairs
-                .clone()
-                .any(|(x, y)| x != 0.0 && y != 0.0 && (x * y).abs() < 2f64.powi(-968));
-            if tiny { None } else { carried.rounded() }
-        })
-        .unwrap_or_else(|| exact_dot_f64(pairs))
+        .or_else(|| carried.unless_tiny(pairs))
+}
+
+/// One product added to a sum carried in three: the product split into the
+/// float64 nearest it and that rounding's error, the product added to the
+/// sum and what that drops and the product's error to the sum's error, each
+/// by a two-sum, and what those two drop added beside them as one term.
+#[inline(always)]
+fn add_thrice(carried: &mut [f64; 4], x: f64, y: f64) {
+    let product = x * y;
+    let product_error = x.mul_add(y, -product);
+    let (sum, dropped) = two_sum(carried[0], product);
+    let (error, first) = two_sum(carried[1], dropped);
+    let (error, second) = two_sum(error, product_error);
+    *carried = [
+        sum,
+        error,
+        carried[2] + (first + second),
+        carried[3] + (first.abs() + second.abs()),
+    ];
+}
+
+/// `Σ a[i] · b[i]` carried in three float64s in each of [`LANES`] lanes --
+/// a sum, its error and that error's -- with the magnitudes of what the
+/// third adds up: [`add_thrice`] in 256-bit registers, the same lanes,
+/// operations and order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn thrice_fma(a: &[f64], b: &[f64]) -> [[f64; 4]; LANES] {
+    use std::arch::x86_64::{
+        __m256d, _mm256_add_pd, _mm256_andnot_pd, _mm256_fmsub_pd, _mm256_loadu_pd, _mm256_mul_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
+    };
+    // A sum and what the addition dropped.
+    macro_rules! two {
+        ($x:expr, $y:expr) => {{
+            let (x, y) = ($x, $y);
+            let sum = _mm256_add_pd(x, y);
+            let virtual_y = _mm256_sub_pd(sum, x);
+            let virtual_x = _mm256_sub_pd(sum, virtual_y);
+            (
+                sum,
+                _mm256_add_pd(_mm256_sub_pd(x, virtual_x), _mm256_sub_pd(y, virtual_y)),
+            )
+        }};
+    }
+    let sign = _mm256_set1_pd(-0.0);
+    let mut carried: [[__m256d; 4]; 2] = [[_mm256_setzero_pd(); 4]; 2];
+    let (left, left_rest) = a.as_chunks::<LANES>();
+    let (right, right_rest) = b.as_chunks::<LANES>();
+    for (x, y) in left.iter().zip(right) {
+        for (half, carried) in carried.iter_mut().enumerate() {
+            // SAFETY: four values from `4 * half` lie inside each chunk.
+            let (x, y) = unsafe {
+                (
+                    _mm256_loadu_pd(x.as_ptr().add(4 * half)),
+                    _mm256_loadu_pd(y.as_ptr().add(4 * half)),
+                )
+            };
+            let product = _mm256_mul_pd(x, y);
+            let product_error = _mm256_fmsub_pd(x, y, product);
+            let (sum, dropped) = two!(carried[0], product);
+            let (error, first) = two!(carried[1], dropped);
+            let (error, second) = two!(error, product_error);
+            let size = _mm256_add_pd(
+                _mm256_andnot_pd(sign, first),
+                _mm256_andnot_pd(sign, second),
+            );
+            *carried = [
+                sum,
+                error,
+                _mm256_add_pd(carried[2], _mm256_add_pd(first, second)),
+                _mm256_add_pd(carried[3], size),
+            ];
+        }
+    }
+    let mut lanes = [[0f64; 4]; LANES];
+    for (half, carried) in carried.iter().enumerate() {
+        for (part, vector) in carried.iter().enumerate() {
+            let mut values = [0f64; 4];
+            // SAFETY: the array holds four values.
+            unsafe { _mm256_storeu_pd(values.as_mut_ptr(), *vector) };
+            for (lane, value) in values.into_iter().enumerate() {
+                lanes[4 * half + lane][part] = value;
+            }
+        }
+    }
+    for (&x, &y) in left_rest.iter().zip(right_rest) {
+        add_thrice(&mut lanes[0], x, y);
+    }
+    lanes
+}
+
+/// The float64 nearest `Σ a[i] · b[i]`, where carrying the errors of
+/// [`dot_f64`]'s own errors settles it: a dot that cancels to within some
+/// `2^-97` of its terms, short of a halfway point. `None` where it does
+/// not, or where the CPU has no fused multiply-add to split a product with.
+///
+/// A lane's third parts, two to a product over `m` products, are added in
+/// float64 within `γ_2m` of the sum of their magnitudes, which the lane
+/// adds up as well; the lanes' sums and errors are added by two-sums, and
+/// what those drop with the third parts in float64, within `γ_24` of their
+/// magnitudes. Each is allowed for twice over. A product within `2^-968` of
+/// zero may have had its error rounded, by under the least subnormal, which
+/// is allowed for as [`settled_dot`] allows for it.
+#[inline(never)]
+fn thrice_dot(a: &[f64], b: &[f64]) -> Option<f64> {
+    let lanes: [[f64; 4]; LANES];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !fused() {
+            return None;
+        }
+        // SAFETY: avx2 and fma were detected on this CPU.
+        lanes = unsafe { thrice_fma(a, b) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut carried = [[0f64; 4]; LANES];
+        let (left, left_rest) = a.as_chunks::<LANES>();
+        let (right, right_rest) = b.as_chunks::<LANES>();
+        for (x, y) in left.iter().zip(right) {
+            for lane in 0..LANES {
+                add_thrice(&mut carried[lane], x[lane], y[lane]);
+            }
+        }
+        for (&x, &y) in left_rest.iter().zip(right_rest) {
+            add_thrice(&mut carried[0], x, y);
+        }
+        lanes = carried;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        return None;
+    }
+    let products = (a.len() / LANES + LANES) as f64;
+    let (mut sum, mut error, mut third) = (0.0, 0.0, 0.0);
+    let (mut slack, mut size) = (0.0, 0.0);
+    for [lane_sum, lane_error, lane_third, lane_size] in lanes {
+        let (total, dropped) = two_sum(sum, lane_sum);
+        let (errors, first) = two_sum(error, lane_error);
+        let (errors, second) = two_sum(errors, dropped);
+        (sum, error) = (total, errors);
+        third += lane_third + (first + second);
+        size += lane_third.abs() + first.abs() + second.abs();
+        slack += lane_size * (2.0 * products + 2.0) * 2f64.powi(-52);
+    }
+    let (value, rest) = two_sum(sum, error);
+    let (rest, last) = two_sum(rest, third);
+    let (value, rest) = two_sum(value, rest);
+    let bound = (slack + size * 2f64.powi(-47) + last.abs()) * (1.0 + 2f64.powi(-40))
+        + a.len() as f64 * f64::from_bits(1);
+    f64::settle(value, rest, bound)
 }
 
 /// The float64 nearest the exact dot of `pairs`; see [`dot_f64`].
@@ -6771,7 +6943,8 @@ pub(crate) fn dot_columns_f64<'a>(
                 Carried::merge,
             );
             let column = (0..k).map(|step| (scales[step], rows(step)[first + j]));
-            *slot = settled_dot(carried, k, column);
+            *slot =
+                settled_dot(carried, k, column.clone()).unwrap_or_else(|| exact_dot_f64(column));
         }
     }
 }
@@ -7520,6 +7693,51 @@ mod tests {
             dot_f64(&[1.0, half, 1e-300], &[1.0, 1.0, 1.0]),
             1.0 + f64::EPSILON
         );
+    }
+
+    #[test]
+    fn a_dot_that_cancels_is_settled_by_its_third_parts() {
+        // Dots whose last term cancels the rest to within a rounding or
+        // two, far below where the pair of sums can say which float64 is
+        // nearest: the third parts settle them as the exact dot would, but
+        // for those left on a halfway point, which is the exact dot's to
+        // break.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let (mut settled, mut all) = (0, 0);
+        for len in [2usize, 7, 8, 9, 64, 255, 1000] {
+            for _ in 0..40 {
+                let mut a: Vec<f64> = (0..len).map(|_| next()).collect();
+                let b: Vec<f64> = (0..len).map(|_| next() * 4.0).collect();
+                let partial = dot_f64(&a[..len - 1], &b[..len - 1]);
+                a[len - 1] = -partial / b[len - 1];
+                let want = exact_dot_f64(a.iter().copied().zip(b.iter().copied()));
+                let carried = f64::carried_dot(&a, &b);
+                let pairs = a.iter().copied().zip(b.iter().copied());
+                if settled_dot(carried, len, pairs).is_none() {
+                    all += 1;
+                    if let Some(value) = thrice_dot(&a, &b) {
+                        settled += 1;
+                        assert_eq!(value.to_bits(), want.to_bits(), "{len} terms");
+                    }
+                }
+                assert_eq!(dot_f64(&a, &b).to_bits(), want.to_bits(), "{len} terms");
+            }
+        }
+        assert!(all >= 100, "{all} dots were left to their third parts");
+        if cfg!(target_arch = "aarch64") || fused() {
+            assert!(4 * settled >= 3 * all, "{settled} of {all} settled");
+        }
+        // A total of nothing, an overflow and an infinity are left to the
+        // exact dot.
+        assert_eq!(thrice_dot(&[1.0, -1.0], &[3.0, 3.0]), None);
+        assert_eq!(thrice_dot(&[1e200, 1.0], &[1e200, 1.0]), None);
+        assert_eq!(thrice_dot(&[f64::INFINITY, 1.0], &[1.0, 1.0]), None);
     }
 
     #[test]

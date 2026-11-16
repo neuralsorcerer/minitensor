@@ -1681,8 +1681,10 @@ sum's rounding, which settles the float32 answer unless the bound reaches a
 halfway point between two float32s; then the sum is carried with its
 additions' exact errors. A float64 product is split by a fused multiply-add
 into the float64 nearest it and that rounding's exact error, and both halves
-are carried that way from the start. Where the carried bound cannot decide
-either, the products are summed exactly. Accumulated in float32, a float32
+are carried that way from the start; a float64 dot that cancels to within
+some `2^-44` of its terms, which that leaves open, carries the errors of
+those errors as well. Where the carried bound cannot decide either, the
+products are summed exactly. Accumulated in float32, a float32
 matrix times a vector was correctly rounded in one entry of twenty; added in
 float64 and narrowed, products that cancelled lost what lay below float64's
 last bit, and a float64 sum on a float32 halfway point was rounded twice --
