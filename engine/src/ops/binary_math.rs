@@ -164,12 +164,56 @@ float_pair!(
 /// infinities from differing by NaN. Anything else at an infinity falls out of
 /// the arithmetic: a `-inf` operand's power is zero, and a `+inf` one is the
 /// larger operand.
-fn logaddexp2_f64(a: f64, b: f64) -> f64 {
+///
+/// The difference is exact, a two-sum's pair whose tail moves the power by
+/// `2^d e log 2`; and where `2^a + 2^b` is near one, so that the sum cancels
+/// to a number many times smaller than its terms, it is formed again with the
+/// terms carried as pairs, as `util::log_add_exp` is.
+pub(crate) fn logaddexp2_f64(a: f64, b: f64) -> f64 {
+    use crate::ops::arithmetic::extended::LOG2_E;
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
     if a == b {
         return a + 1.0;
     }
     let (high, low) = if a > b { (a, b) } else { (b, a) };
-    high + (low - high).exp2().ln_1p() * std::f64::consts::LOG2_E
+    let (d, e) = two_sum(low, -high);
+    let power = d.exp2();
+    let power = if e.is_finite() && power.is_finite() {
+        power + power * (e * std::f64::consts::LN_2)
+    } else {
+        power
+    };
+    // `log2(1 + 2^d)` as the natural logarithm's product with `log2(e)`, the
+    // product's error and the constant's own carried into the sum.
+    let natural = power.ln_1p();
+    let rest = natural * LOG2_E.0;
+    let value = high + rest;
+    if value.abs() < rest && d >= -1000.0 {
+        return cancelled_logaddexp2(high, low);
+    }
+    if !rest.is_finite() || rest == 0.0 {
+        return value;
+    }
+    let (sum, error) = two_sum(high, rest);
+    let carried = product_error(natural, LOG2_E.0, rest) + natural * LOG2_E.1;
+    sum + (error + carried)
+}
+
+/// [`logaddexp2_f64`] where its sum cancelled: `log2(1 + 2^(d + e))` carried
+/// as a pair, and its sum with `high` rounded once.
+#[cold]
+fn cancelled_logaddexp2(high: f64, low: f64) -> f64 {
+    use crate::ops::arithmetic::extended::{self, LN_2, LOG2_E, Pair};
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    #[inline(always)]
+    fn body<const FMA: bool>(high: f64, low: f64) -> f64 {
+        let (d, e) = two_sum(low, -high);
+        let power = extended::exp::<FMA>(Pair(d, e).mul::<FMA>(LN_2));
+        let rest = extended::ln_1p::<FMA>(power).mul::<FMA>(LOG2_E);
+        let (sum, error) = two_sum(high, rest.0);
+        sum + (error + rest.1)
+    }
+    extended::fused!(body, high, low)
 }
 
 /// `d/da log2(2^a + 2^b) = 2^a / (2^a + 2^b)`, the logistic function of

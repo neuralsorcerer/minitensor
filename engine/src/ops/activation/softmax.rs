@@ -298,7 +298,7 @@ pub(crate) fn logaddexp_f64(
         lhs.shape(),
         rhs.shape(),
         output_shape,
-        crate::ops::util::log_add_exp::<f64>,
+        crate::ops::util::log_add_exp,
     )?;
     Ok(TensorData::from_vec::<f64>(
         out,

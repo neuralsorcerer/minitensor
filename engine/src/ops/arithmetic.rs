@@ -21,6 +21,8 @@ mod evenly_spaced;
 pub(crate) mod exact_product;
 #[path = "arithmetic/exact_sum.rs"]
 pub(crate) mod exact_sum;
+
+pub(crate) mod extended;
 #[path = "arithmetic/fused.rs"]
 mod fused;
 #[path = "arithmetic/rounded_once.rs"]

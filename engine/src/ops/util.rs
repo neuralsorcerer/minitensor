@@ -529,10 +529,18 @@ pub(crate) fn stable_sigmoid_f64(x: f64) -> f64 {
 /// The infinite guard is not decoration either. Without it `+inf` against
 /// `+inf` reaches `inf - inf`, which is NaN, and a sum of two certainties comes
 /// back as no answer at all.
+///
+/// The exponent is the exact difference, a two-sum's pair, where rounding it
+/// put its error into the power. And where `e^a + e^b` is near one the sum
+/// `high + log1p(...)` cancels to a number many times smaller than its terms,
+/// which a float64 `log1p` leaves with an ulp of the larger: `logaddexp` at
+/// `(-0.7, -0.69)` was some 270 ulps out, and of equal operands near `-log 2`
+/// thousands. Those few are formed again with the terms carried as pairs; see
+/// [`crate::ops::arithmetic::extended`].
 #[inline]
-pub(crate) fn log_add_exp<T: Float>(a: T, b: T) -> T {
+pub(crate) fn log_add_exp(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
-        return T::nan();
+        return f64::NAN;
     }
     let (high, low) = if a > b { (a, b) } else { (b, a) };
     if high.is_infinite() {
@@ -540,7 +548,35 @@ pub(crate) fn log_add_exp<T: Float>(a: T, b: T) -> T {
         // the log of nothing at all is still `-inf`.
         return high;
     }
-    high + (low - high).exp().ln_1p()
+    let rest = crate::ops::activation::exp_difference(low, high).ln_1p();
+    let value = high + rest;
+    if value.abs() < rest {
+        cancelled_log_add_exp(high, low).unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+/// [`log_add_exp`] where its sum cancelled: `high + log1p(exp(low - high))`
+/// with the difference, the power and the logarithm carried as pairs, and the
+/// sum rounded once. `None` past where the pairs reach, a difference below
+/// -700, whose power no float64 sum can hold beside a `high` it cancels.
+#[cold]
+fn cancelled_log_add_exp(high: f64, low: f64) -> Option<f64> {
+    use crate::ops::arithmetic::extended::{self, Pair};
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    #[inline(always)]
+    fn body<const FMA: bool>(high: f64, low: f64) -> f64 {
+        let (d, e) = two_sum(low, -high);
+        let rest = extended::ln_1p::<FMA>(extended::exp::<FMA>(Pair(d, e)));
+        let (sum, error) = two_sum(high, rest.0);
+        sum + (error + rest.1)
+    }
+    let d = low - high;
+    if d.is_nan() || d < -700.0 {
+        return None;
+    }
+    Some(extended::fused!(body, high, low))
 }
 
 /// Map a linear index into an output tensor onto the corresponding element of

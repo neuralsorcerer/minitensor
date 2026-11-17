@@ -2511,8 +2511,18 @@ assert row_std.shape == (2, 3)
   the dtype's range.
 - `logaddexp2(input, other)` — the base-2 `logaddexp`, on its own kernel
   rather than as a rescaled `logaddexp`: scaling by `ln 2` rounds an error
-  proportional to the operand into the exponent. A float32 pair is computed in
-  float64 and rounded once.
+  proportional to the operand into the exponent. Both are the larger operand
+  plus `log_b(1 + b^(low - high))`, the difference exact. Where `b^a + b^b`
+  is near one that sum cancels to a number many times smaller than its terms
+  and kept their error, an ulp of the larger: `logaddexp(-0.7, -0.69)` was
+  some 270 ulps out, and near the zero of the result millions. Those are
+  formed again with `exp` and `log1p` carried as pairs of floats, about 2^-100
+  of the operands, and the sum rounded once. A float32 result is the float32
+  nearest its value -- computed in float64, and where the float64 value
+  cannot settle the rounding, formed as the float64 one is -- and a float64
+  one is within an ulp or two; past a cancellation of 2^50, where `b^a + b^b`
+  is one to within the rounding of its operands, within 2^-100 of them.
+  `logcumsumexp` and `ctc_loss` add the same way.
 - `ldexp(input, other)` — `input * 2**other`. An integer `other`, a Python int
   included, is applied to the exponent: one rounding, and only where the answer
   is subnormal, so `ldexp(2**1000, -1100)` is `2**-100` and `ldexp(0, 5000)` is

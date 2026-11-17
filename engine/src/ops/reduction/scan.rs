@@ -228,7 +228,7 @@ pub(crate) fn logcumsumexp_raw(
         inner,
         reverse,
         |v: f64| v,
-        log_add_exp::<f64>,
+        log_add_exp,
     );
 }
 
@@ -265,15 +265,7 @@ pub fn logcumsumexp(tensor: &Tensor, dim: isize) -> Result<Tensor> {
             let out = data.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error("logcumsumexp: dtype does not match the output")
             })?;
-            scan_along_dim(
-                out,
-                source,
-                dim_size,
-                inner,
-                false,
-                |v: $ty| v,
-                log_add_exp::<$ty>,
-            );
+            scan_along_dim(out, source, dim_size, inner, false, |v: $ty| v, log_add_exp);
         }};
     }
 
@@ -287,7 +279,7 @@ pub fn logcumsumexp(tensor: &Tensor, dim: isize) -> Result<Tensor> {
             let out = data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("logcumsumexp: dtype does not match the output")
             })?;
-            scan_wide_f32(out, source, dim_size, inner, false, log_add_exp::<f64>);
+            scan_wide_f32(out, source, dim_size, inner, false, log_add_exp);
         }
         _ => run!(as_f64_slice, as_f64_slice_mut, f64),
     }

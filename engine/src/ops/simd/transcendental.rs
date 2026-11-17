@@ -1251,15 +1251,39 @@ pub(crate) const SOFTPLUS_THRESHOLD: f64 = 20.0;
 /// into the same relative error in the answer: `logaddexp2(1e-45, -103)` was
 /// 18 ulp off that way. Here the scaling rounds at `2^-53`, and the one
 /// rounding that reaches float32 is the last.
+///
+/// Returned with the rest, `log_b(1 + b^(low - high))`, beside it: the
+/// float64 value is within a few ulps of the rest of the exact one, which
+/// where the sum cancels can be more than the float32 rounding allows. See
+/// [`log_add_exp_kernel!`].
 #[inline(always)]
-fn log_add_exp_core<const FMA: bool>(a: f64, b: f64, ln_base: f64, log_base_e: f64) -> f64 {
+fn log_add_exp_parts<const FMA: bool>(a: f64, b: f64, ln_base: f64, log_base_e: f64) -> (f64, f64) {
     let (high, low) = if a > b { (a, b) } else { (b, a) };
     let d = if a == b { 0.0 } else { low - high };
     let w = exp_core::<FMA>(d * ln_base);
     let u = 1.0 + w;
     // Exact by Sterbenz, as in `log1p_one`: `w` is at most one.
     let c = w - (u - 1.0);
-    high + log_core::<FMA, true>(u, c) * log_base_e
+    let rest = log_core::<FMA, true>(u, c) * log_base_e;
+    (high + rest, rest)
+}
+
+/// Whether a float64 log-add-exp's float32 rounding is in doubt: whether the
+/// value, moved either way by a bound on its error, rounds to two different
+/// float32s.
+///
+/// `exp_core` and `log_core` are each within an ulp or two, so the rest is
+/// within 2^-50 of itself and the sum within half an ulp more; the bound is
+/// four times that. Where the sum is many times smaller than the rest -- it
+/// cancelled -- the bound is a larger share of it, but a value is in doubt
+/// only near a point where the rounding changes, so few are.
+#[inline(always)]
+fn log_add_exp_in_doubt(value: f64, rest: f64) -> bool {
+    const REST: f64 = 1.0 / 281_474_976_710_656.0; // 2^-48
+    const VALUE: f64 = 1.0 / 4_503_599_627_370_496.0; // 2^-52
+    let bound = rest * REST + value.abs() * VALUE;
+    let (below, above) = ((value - bound) as f32, (value + bound) as f32);
+    !value.is_nan() & (below != above)
 }
 
 /// Binary cross entropy of a logit `x` against a target `t`, in float64 and
@@ -1287,16 +1311,62 @@ fn bce_with_logits_one<const FMA: bool>(x: f32, t: f32) -> f32 {
     (linear + tail) as f32
 }
 
-/// `log(e^a + e^b)` for one float32 pair. See [`log_add_exp_core`].
-#[inline(always)]
-fn logaddexp_one<const FMA: bool>(a: f32, b: f32) -> f32 {
-    log_add_exp_core::<FMA>(a as f64, b as f64, 1.0, 1.0) as f32
-}
+/// `log(e^a + e^b)` and `log2(2^a + 2^b)` over float32 pairs, in float64 and
+/// rounded once; see [`log_add_exp_parts`].
+///
+/// A second pass takes the pairs whose float32 rounding the float64 value
+/// cannot settle -- see [`log_add_exp_in_doubt`] -- to the float64 function,
+/// which where the sum cancels carries its terms as pairs of floats. They are
+/// rare, and a scalar call inside the main loop would scalarize all of it, so
+/// the main loop only flags them, a byte each beside a piece of the output;
+/// the second pass reads the flags and leaves everything else alone.
+/// Recomputing the piece there instead, scalar for the call in it, made a
+/// million float32 pairs of standard normals take 11ms rather than 0.6.
+macro_rules! log_add_exp_kernel {
+    ($block:ident, $ln_base:expr, $log_base_e:expr, $exact:path, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            const PIECE: usize = 512;
+            debug_assert_eq!(lhs.len(), out.len());
+            debug_assert_eq!(rhs.len(), out.len());
+            let mut flags = [0u8; PIECE];
+            for ((out, lhs), rhs) in out
+                .chunks_mut(PIECE)
+                .zip(lhs.chunks(PIECE))
+                .zip(rhs.chunks(PIECE))
+            {
+                let mut rare = 0u8;
+                for (((o, &a), &b), flag) in out.iter_mut().zip(lhs).zip(rhs).zip(&mut flags) {
+                    let (value, rest) =
+                        log_add_exp_parts::<FMA>(a as f64, b as f64, $ln_base, $log_base_e);
+                    o.write(value as f32);
+                    *flag = log_add_exp_in_doubt(value, rest) as u8;
+                    rare |= *flag;
+                }
+                if rare != 0 {
+                    for (k, _) in flags[..out.len()]
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| **f != 0)
+                    {
+                        out[k].write($exact(lhs[k] as f64, rhs[k] as f64) as f32);
+                    }
+                }
+            }
+        }
 
-/// `log2(2^a + 2^b)` for one float32 pair. See [`log_add_exp_core`].
-#[inline(always)]
-fn logaddexp2_one<const FMA: bool>(a: f32, b: f32) -> f32 {
-    log_add_exp_core::<FMA>(a as f64, b as f64, std::f64::consts::LN_2, LOG2E) as f32
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,15 +2192,19 @@ block_kernel2!(
     bce_with_logits_block_avx512,
     bce_with_logits_block_avx2
 );
-block_kernel2!(
+log_add_exp_kernel!(
     logaddexp_block,
-    logaddexp_one,
+    1.0,
+    1.0,
+    crate::ops::util::log_add_exp,
     logaddexp_block_avx512,
     logaddexp_block_avx2
 );
-block_kernel2!(
+log_add_exp_kernel!(
     logaddexp2_block,
-    logaddexp2_one,
+    std::f64::consts::LN_2,
+    LOG2E,
+    crate::ops::binary_math::logaddexp2_f64,
     logaddexp2_block_avx512,
     logaddexp2_block_avx2
 );
