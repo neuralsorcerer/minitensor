@@ -46,10 +46,14 @@
 //! A product of at most [`ROWS_BY_COLUMNS`] rows whose right operand's rows
 //! lie along its storage is not cut either: each of its rows is taken
 //! against every column at once, each entry carried as `dot` carries one.
+//! And a product too long to hold at once is taken a stretch of its dots at
+//! a time, as [`Totals`]: each stretch's pairs -- or, for few rows, its
+//! dots -- are added to totals carried beside their bounds, which are
+//! narrowed once at the end.
 
 use crate::error::{MinitensorError, Result};
 use crate::ops::arithmetic::exact_sum::{
-    Output, dot_columns_f64, dot_f64, exact_dot_to, exact_quads_f64,
+    Carried, Output, dot_columns_f64, dot_f64, exact_dot_to, exact_quads_f64,
 };
 use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
 use crate::ops::map::{PAR_THRESHOLD, par_out_chunks, par_out_chunks_mapped, par_out_chunks_sized};
@@ -80,6 +84,16 @@ const SERIAL_BELOW: usize = 1 << 21;
 /// Rows or columns of an operand cut at a time where they lie across its
 /// storage.
 const TILE: usize = 256;
+
+/// Bytes of the left operand a task of a carried product of few rows keeps
+/// beside the column of the right it is taking: what stays in cache while
+/// every column passes.
+const CARRIED_BYTES: usize = 1 << 17;
+
+/// A product of two float64s at least this far from zero is split into the
+/// float64 nearest it and that rounding's error exactly, with room to
+/// spare.
+const SPLITS: f64 = f64::from_bits((1023 - 960) << 52);
 
 /// The most rows a product is taken a row at a time for, each against every
 /// column of a right operand whose rows lie along its storage: past these
@@ -289,7 +303,7 @@ fn rounded_products_f64(
 /// and the roundings of the errors' sum. An entry left open is the exact sum
 /// of `alpha · a_l · b_l` and `beta · c`.
 #[allow(clippy::too_many_arguments)]
-fn rounded_affine_products_f64(
+pub(crate) fn rounded_affine_products_f64(
     batch: usize,
     m: usize,
     k: usize,
@@ -899,6 +913,42 @@ wide! {
     fn settle_line(line: &mut [f64], pair: (&[f64], &[f64]), norms: (&[f64], &[f64], &[bool]), by: (f64, f64, bool)) -> usize = settle_line_with
 }
 
+/// A row of pairs added to the totals a longer product carries, each with
+/// its bound, which is [`settle_line_with`]'s: the sums by a two-sum, and
+/// what that drops with the two low parts in float64 -- twice, within
+/// `2.01u` of their magnitudes, of which the slack takes four times as
+/// much, beside the bound and its own roundings.
+#[inline(always)]
+fn carry_line_with(
+    (sums, errors, slacks): (&mut [f64], &mut [f64], &mut [f64]),
+    (highs, lows): (&[f64], &[f64]),
+    (rests, norms, wholes): (&[f64], &[f64], &[bool]),
+    by: (f64, f64, bool),
+) {
+    let count = sums.len();
+    let (errors, slacks) = (&mut errors[..count], &mut slacks[..count]);
+    let (highs, lows) = (&highs[..count], &lows[..count]);
+    let (rests, norms, wholes) = (&rests[..count], &norms[..count], &wholes[..count]);
+    for index in 0..count {
+        let bound = if by.2 & wholes[index] {
+            0.0
+        } else {
+            by.0 * rests[index] + by.1 * norms[index]
+        };
+        let (sum, dropped) = two_sum(sums[index], highs[index]);
+        let magnitude = errors[index].abs() + lows[index].abs() + dropped.abs();
+        sums[index] = sum;
+        errors[index] = (errors[index] + lows[index]) + dropped;
+        slacks[index] =
+            (slacks[index] + bound) * (1.0 + 2f64.powi(-50)) + magnitude * 2f64.powi(-51);
+    }
+}
+
+wide! {
+    /// [`carry_line_with`], in the widest lanes the CPU has.
+    fn carry_line(totals: (&mut [f64], &mut [f64], &mut [f64]), pair: (&[f64], &[f64]), norms: (&[f64], &[f64], &[bool]), by: (f64, f64, bool)) = carry_line_with
+}
+
 /// `alpha · (high + low ± bound) + beta · addend` as a pair and its bound:
 /// both products split into the float64 nearest them and its error, the
 /// errors and the low part's product added up, each rounding of that inside
@@ -1103,6 +1153,33 @@ fn split_product(
     scaling: Option<Scaling<'_>>,
     out: &mut [f64],
 ) {
+    let entries = Sink::Entries(Parts::of(out));
+    let open = split_pairs(m, k, n, left, right, scaling, &entries);
+    if open > 0 {
+        exact_entries(k, n, left, right, scaling, out, open);
+    }
+}
+
+/// Where a product's pairs go, row after row of `n`: narrowed into its
+/// entries, or added to the totals a longer product carries from one
+/// stretch of its dots to the next -- their sums, their errors and their
+/// slacks.
+enum Sink {
+    Entries(Parts<f64>),
+    Totals([Parts<f64>; 3]),
+}
+
+/// The pieces' products of `(m, k)` by `(k, n)`, each entry's pair handed
+/// to `sink` with its bound; how many entries it narrowed were left open.
+fn split_pairs(
+    m: usize,
+    k: usize,
+    n: usize,
+    left: Side<'_>,
+    right: Side<'_>,
+    scaling: Option<Scaling<'_>>,
+    sink: &Sink,
+) -> usize {
     // Runs of one length, but for the last, and the widest first pieces
     // whose products a run of them sums exactly: at most `2^(β-1)` of their
     // grain each, so `run · 2^(2β-2)` of the products' at most.
@@ -1159,7 +1236,6 @@ fn split_product(
     let rows = m.div_ceil(bands);
     let bands = m.div_ceil(rows);
     let rights = &rights[..];
-    let lines = Parts::of(out);
     let tile = |task: usize| -> usize {
         let first_row = task / sections * rows;
         let rows = rows.min(m - first_row);
@@ -1262,14 +1338,21 @@ fn split_product(
                     &right_wholes[first_column..][..width],
                 );
                 // SAFETY: the tasks' bands share no row and a band's
-                // sections no column, so these `width` entries of row
-                // `first_row + row` of the output, which holds `m` rows of
-                // `n`, are this task's alone.
-                let line = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        lines.start().add((first_row + row) * n + first_column),
-                        width,
-                    )
+                // sections no column, so these `width` places of row
+                // `first_row + row` of what the sink holds, `m` rows of `n`,
+                // are this task's alone.
+                let at = (first_row + row) * n + first_column;
+                let line = match sink {
+                    Sink::Entries(lines) => unsafe {
+                        std::slice::from_raw_parts_mut(lines.start().add(at), width)
+                    },
+                    Sink::Totals(totals) => {
+                        let [sums, errors, slacks] = totals.each_ref().map(|part| unsafe {
+                            std::slice::from_raw_parts_mut(part.start().add(at), width)
+                        });
+                        carry_line((sums, errors, slacks), (highs, lows), norms, by);
+                        continue;
+                    }
                 };
                 let Some((alpha, beta, addend)) = scaling else {
                     open += settle_line(line, (highs, lows), norms, by);
@@ -1296,15 +1379,127 @@ fn split_product(
         }
         open
     };
-    let open: usize = if spread {
+    if spread {
         crate::parallel::map_tasks(bands * sections, &tile)
             .into_iter()
             .sum()
     } else {
         (0..bands * sections).map(tile).sum()
-    };
-    if open > 0 {
-        exact_entries(k, n, left, right, scaling, out, open);
+    }
+}
+
+/// `batch` products of `(m, K)` by `(K, n)` too long to hold at once, taken
+/// a stretch of their dots at a time: each entry's total carried from one
+/// stretch to the next as `dot` carries one, and narrowed once at the end.
+///
+/// A product of few rows adds each entry's dot over the stretch to its
+/// total; one of more adds the pairs its cut operands' products make, with
+/// the bound those are within of the stretch's dots.
+pub(crate) struct Totals {
+    dims: (usize, usize, usize),
+    /// Each total's sum, its error, and what the two are within of it.
+    parts: [Vec<f64>; 3],
+    /// The terms of each dot so far.
+    terms: usize,
+}
+
+impl Totals {
+    /// Nothing yet, for `batch` products with `(m, n)` entries each.
+    pub(crate) fn new(batch: usize, m: usize, n: usize) -> Self {
+        Totals {
+            dims: (batch, m, n),
+            parts: std::array::from_fn(|_| vec![0.0; batch * m * n]),
+            terms: 0,
+        }
+    }
+
+    /// The next `k` terms of every dot: `lhs` holds each product's `m` rows
+    /// of them and `rhs` its `n` columns, each lying along its storage.
+    pub(crate) fn add(&mut self, k: usize, lhs: &[f64], rhs: &[f64]) {
+        let (batch, m, n) = self.dims;
+        if self.parts[0].is_empty() || k == 0 {
+            return;
+        }
+        self.terms += k;
+        let [sums, errors, slacks] = self.parts.each_mut().map(|part| Parts::of(part));
+        if m <= ROWS_BY_COLUMNS {
+            // A task takes a few rows, which stay in cache while each
+            // column passes them once.
+            let band = (CARRIED_BYTES / (8 * k)).clamp(1, (batch * m).div_ceil(threads()));
+            crate::parallel::for_each_task((batch * m).div_ceil(band), &|task| {
+                let rows = task * band..(task * band + band).min(batch * m);
+                for j in 0..n {
+                    for row in rows.clone() {
+                        let column = &rhs[(row / m * n + j) * k..][..k];
+                        let at = row * n + j;
+                        // SAFETY: the tasks share no row, and each of the
+                        // three holds `batch · m` rows of `n`.
+                        unsafe {
+                            let (sum, error, slack) = (
+                                sums.start().add(at),
+                                errors.start().add(at),
+                                slacks.start().add(at),
+                            );
+                            let total = Carried::of(*sum, *error, *slack)
+                                .with_dot(&lhs[row * k..][..k], column);
+                            (*sum, *error, *slack) = total.parts();
+                        }
+                    }
+                }
+            });
+            return;
+        }
+        let one = |product: usize| {
+            let left = Side::of(&lhs[product * m * k..][..m * k], true, m, k);
+            let right = Side::of(&rhs[product * n * k..][..n * k], true, n, k);
+            // SAFETY: each product's `m · n` totals are its own.
+            let totals = [&sums, &errors, &slacks].map(|part| unsafe {
+                Parts::of(std::slice::from_raw_parts_mut(
+                    part.start().add(product * m * n),
+                    m * n,
+                ))
+            });
+            split_pairs(m, k, n, left, right, None, &Sink::Totals(totals));
+        };
+        if batch > 1 && batch >= threads() {
+            crate::parallel::for_each_task(batch, &one);
+        } else {
+            (0..batch).for_each(one);
+        }
+    }
+
+    /// Every entry: the float64 nearest its total where the bound says
+    /// which that is, and `exactly` of its place among them all where it
+    /// does not -- the dot of every stretch's terms.
+    ///
+    /// `least` holds, for each row of the left operands and each column of
+    /// the right, a magnitude no value of it that is not a zero lay below:
+    /// a product within `2^-968` of zero that is not one may have had its
+    /// error rounded, by under the least subnormal, which is allowed for in
+    /// every term of an entry whose row and column leave room for such a
+    /// product.
+    pub(crate) fn settled(
+        self,
+        (left, right): (&[f64], &[f64]),
+        exactly: &(dyn Fn(usize) -> f64 + Sync),
+    ) -> Vec<f64> {
+        let (_, m, n) = self.dims;
+        let [mut entries, errors, slacks] = self.parts;
+        let room = self.terms as f64 * f64::from_bits(1);
+        par_out_chunks(&mut entries, n, &|start, line| {
+            let row = start / n;
+            let columns = &right[row / m * n..][..n];
+            for (j, slot) in line.iter_mut().enumerate() {
+                let tiny = left[row] * columns[j] < SPLITS;
+                let slack = slacks[start + j] + if tiny { room } else { 0.0 };
+                let (value, rest) = two_sum(*slot, errors[start + j]);
+                *slot = match f64::settle(value, rest, slack) {
+                    Some(value) => value + 0.0,
+                    None => exactly(start + j),
+                };
+            }
+        });
+        entries
     }
 }
 
@@ -1618,6 +1813,111 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// `Totals` over `stretches` of the dots of `batch` products of `(m,
+    /// K)` by `(K, n)`, against `dot` of each entry's whole row and column;
+    /// how many entries were left to that.
+    fn stretched(
+        (batch, m, n): (usize, usize, usize),
+        stretches: &[usize],
+        (lhs, rhs): (&[f64], &[f64]),
+        least: (&[f64], &[f64]),
+    ) -> usize {
+        let k: usize = stretches.iter().sum();
+        let mut totals = Totals::new(batch, m, n);
+        let mut start = 0;
+        for &len in stretches {
+            let part = |values: &[f64]| -> Vec<f64> {
+                values
+                    .chunks(k)
+                    .flat_map(|line| line[start..start + len].iter().copied())
+                    .collect()
+            };
+            totals.add(len, &part(lhs), &part(rhs));
+            start += len;
+        }
+        let dot = |index: usize| {
+            let (row, j) = (index / n, index % n);
+            let column = &rhs[(row / m * n + j) * k..][..k];
+            dot_f64(&lhs[row * k..][..k], column)
+        };
+        let left = std::sync::atomic::AtomicUsize::new(0);
+        let got = totals.settled(least, &|index| {
+            left.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dot(index)
+        });
+        for (index, value) in got.iter().enumerate() {
+            let want = dot(index);
+            assert!(
+                value.to_bits() == want.to_bits() || value.is_nan() && want.is_nan(),
+                "{batch} x ({m}, {k}, {n}) in {stretches:?}, entry {index}: {value} where \
+                 the dot is {want}"
+            );
+        }
+        left.into_inner()
+    }
+
+    #[test]
+    fn a_product_taken_a_stretch_at_a_time_rounds_once() {
+        // Few rows, whose dots are carried, and more, whose pairs are; one
+        // stretch and several, of one term and of some hundreds.
+        for (batch, m, n) in [(1, 3, 7), (5, 1, 4), (2, 12, 9), (2, 13, 9), (1, 40, 30)] {
+            for stretches in [&[70usize, 1, 200, 33][..], &[150][..], &[64, 64, 65][..]] {
+                let k: usize = stretches.iter().sum();
+                for spread in [false, true] {
+                    let lhs = values(61 + m as u64, batch * m * k, spread);
+                    let rhs = values(67 + n as u64, batch * n * k, spread);
+                    let entries = batch * m * n;
+                    // No value of these lies near enough to zero for a
+                    // product of two to be split inexactly; told so, or told
+                    // nothing, the entries are the same, and nearly all are
+                    // settled by what was carried.
+                    let none = (vec![1e-9; batch * m], vec![1e-9; batch * n]);
+                    let left =
+                        stretched((batch, m, n), stretches, (&lhs, &rhs), (&none.0, &none.1));
+                    assert!(left * 8 <= entries, "{left} of {entries} entries left open");
+                    let any = (vec![0.0; batch * m], vec![0.0; batch * n]);
+                    stretched((batch, m, n), stretches, (&lhs, &rhs), (&any.0, &any.1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stretches_of_zeros_whole_numbers_and_special_values() {
+        for m in [6, 20] {
+            let (n, stretches) = (6, [40usize, 90]);
+            let k: usize = stretches.iter().sum();
+            // Whole numbers throughout, and a row and a column of zeros:
+            // nothing is rounded on the way, so nothing is left open.
+            let mut lhs: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 7919) % 23) as f64 - 11.0)
+                .collect();
+            let mut rhs: Vec<f64> = (0..n * k)
+                .map(|i| ((i * 104729) % 19) as f64 - 9.0)
+                .collect();
+            lhs[..k].fill(0.0);
+            rhs[2 * k..3 * k].fill(-0.0);
+            let mut least = (vec![1.0; m], vec![1.0; n]);
+            (least.0[0], least.1[2]) = (f64::INFINITY, f64::INFINITY);
+            let left = stretched((1, m, n), &stretches, (&lhs, &rhs), (&least.0, &least.1));
+            assert_eq!(left, 0);
+
+            // A row past the range the cut takes, one below it, one with an
+            // infinity and one with a NaN, and a row whose dot with the
+            // first column cancels to within the roundings of the rest.
+            let mut lhs = values(71, m * k, false);
+            let rhs = values(73, n * k, true);
+            lhs[0] = 1e300;
+            lhs[k] = 1e-300;
+            lhs[2 * k + 5] = f64::INFINITY;
+            lhs[3 * k + 7] = f64::NAN;
+            let partial = dot_f64(&lhs[4 * k..5 * k - 1], &rhs[..k - 1]);
+            lhs[5 * k - 1] = -partial / rhs[k - 1];
+            let least = (vec![0.0; m], vec![0.0; n]);
+            stretched((1, m, n), &stretches, (&lhs, &rhs), (&least.0, &least.1));
         }
     }
 

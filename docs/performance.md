@@ -325,6 +325,36 @@ for them:
   value, which takes the sums in float64 and each entry against a bound: two
   to four times the float32 arithmetic on either path.
 
+  A float64 convolution is rounded once too, and has no wider float to take
+  its sums in: its output and its input's gradient are float64 matrix
+  products rounded once, of the kernel by the lowered columns, and its
+  weight's gradient is a product too long to hold at once, carried from one
+  block of positions to the next. All three go through the lowered columns,
+  whatever the group's size -- a group of at most twelve output channels a
+  row of the product at a time. Against the float64 convolution accumulated
+  in float64 that it replaced, forward and then forward and backward, on the
+  same container:
+
+  | convolution, float64 | forward | rounded once | | step | rounded once | |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 64 -> 64, 3x3, over `[16, 64, 32, 32]` | 12.0ms | 64.6ms | 5.4x | 37.8ms | 186ms | 4.9x |
+  | 128 -> 128, 3x3, over `[8, 128, 28, 28]` | 13.2ms | 66.8ms | 5.0x | 67.5ms | 192ms | 2.8x |
+  | 256 -> 256, 3x3, over `[8, 256, 16, 16]` | 15.3ms | 70.0ms | 4.6x | 54.5ms | 203ms | 3.7x |
+  | 512 -> 512, 3x3, over `[16, 512, 8, 8]` | 28.0ms | 123ms | 4.4x | 120ms | 399ms | 3.3x |
+  | 512 -> 512, 3x3, over `[4, 512, 4, 4]` | 2.3ms | 11.1ms | 4.9x | 14.6ms | 36.3ms | 2.5x |
+  | 64 -> 64, 3x3, stride 2, over `[16, 64, 32, 32]` | 3.5ms | 16.6ms | 4.7x | 12.5ms | 58.3ms | 4.7x |
+  | 256 -> 64, 1x1, over `[16, 256, 14, 14]` | 1.8ms | 5.9ms | 3.2x | 6.1ms | 17.9ms | 2.9x |
+  | 3 -> 32, 7x7, stride 2, over `[4, 3, 112, 112]` | 2.6ms | 11.5ms | 4.5x | 7.6ms | 49.0ms | 6.4x |
+  | 3 -> 8, 3x3, over `[16, 3, 32, 32]` | 0.27ms | 1.54ms | 5.7x | 0.98ms | 5.05ms | 5.2x |
+  | 64 -> 4, 3x3, over `[16, 64, 32, 32]` | 2.9ms | 15.4ms | 5.3x | 8.9ms | 39.3ms | 4.4x |
+  | 32 -> 32, 3x3, 8 groups, over `[16, 32, 32, 32]` | 1.3ms | 5.0ms | 3.8x | 4.5ms | 14.3ms | 3.2x |
+  | depthwise 3x3, 32 channels, over `[16, 32, 56, 56]` | 1.8ms | 8.1ms | 4.5x | 44.2ms | 41.9ms | 0.9x |
+
+  The plain input gradient added each tap's plane back onto the grid in
+  float64, which a depthwise layer spent most of its step on; taken as
+  products of the taps that reach each class of positions it has no such
+  pass, and that row comes out even.
+
 The boundary is reachable from Python, and is meant for measuring rather than
 tuning: `minitensor._core.dispatch.gemm_thresholds()` reports it and
 `set_gemm_thresholds(min_flops, min_k)` moves it. Setting both out of reach is

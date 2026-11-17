@@ -1519,9 +1519,9 @@ def conv3d(
     than im2col's one per tap of the whole window, and `dilation` and
     `groups` mean what they mean there.
 
-    For float32 each entry, the bias added, is the float nearest its exact
-    value, rounded once, and so is each entry of each gradient. A bias of
-    another dtype than the input's is added after, in the wider of the two.
+    Each entry, the bias added, is the float nearest its exact value,
+    rounded once, and so is each entry of each gradient. A bias of another
+    dtype than the input's is added after, in the wider of the two.
     """
 
     tensor = _volume_input("conv3d", input)

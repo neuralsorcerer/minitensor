@@ -16,22 +16,21 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 
 mod rounded;
+mod rounded_f64;
 mod volume;
 pub use self::volume::conv3d;
 pub(crate) use self::volume::{Volumes, slices_inside, slices_outside};
 
 /// The floating-point types convolution is implemented for.
 ///
-/// A float64 convolution lowers to im2col + GEMM in both directions, so what
-/// varies with the dtype there is the slice accessors and which BLAS entry
-/// point to call; capturing that in one trait lets the forward and both
-/// gradient kernels be written once. A float32 one rounds each entry once from
-/// its exact value instead, which [`rounded`] does with the same lowering and
-/// the same direct paths, and the three operations below are where the two
-/// part.
-pub(crate) trait ConvScalar:
-    Copy + Default + Send + Sync + std::ops::AddAssign + std::ops::Mul<Output = Self>
-{
+/// Every entry of a convolution, and of each of its gradients, is the float
+/// nearest its exact value. A float32 one is rounded from float64 sums of its
+/// exact products, which [`rounded`] takes; a float64 one has no wider float
+/// to add in, and [`rounded_f64`] puts each of the three as matrix products
+/// and dots that are rounded once. What the two share -- the lowering of an
+/// input into columns, a block of positions at a time -- is written once
+/// over this trait.
+pub(crate) trait ConvScalar: Copy + Default + Send + Sync {
     const DTYPE: DataType;
     fn slice(data: &TensorData) -> Option<&[Self]>;
     fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData;
@@ -43,38 +42,39 @@ pub(crate) trait ConvScalar:
         bias: Option<&[Self]>,
         geometry: &ConvGeometry,
     ) -> Result<Vec<Self>>;
-    /// [`scatter_columns`], `bias` added to each channel of the grid it
-    /// writes.
+    /// `col2im(weight^T @ source)`, `bias` added to each channel of the grid
+    /// it writes -- a signal scattered back through a kernel onto the larger
+    /// grid it was gathered from.
+    ///
+    /// This is one operation with two names. Read backwards it is a
+    /// convolution's gradient with respect to its input; read forwards it is
+    /// a transposed convolution, which is why `conv_transpose2d` is not a
+    /// separate algorithm. The two differ only in which side the caller
+    /// calls the input.
+    ///
+    /// In `geometry`, the `input_*` fields describe the grid being written
+    /// and the `output_*` fields the signal being read -- the convolution's
+    /// own naming, kept so that a caller coming from either direction reads
+    /// the same struct. `weight` is `[out_channels, in_channels / groups, kH,
+    /// kW]`.
     fn scatter(
         source: &[Self],
         weight: &[Self],
         bias: Option<&[Self]>,
         geometry: &ConvGeometry,
-    ) -> Vec<Self>;
-    /// [`column_weight_gradient`].
-    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self>;
-    /// Row-major `C[m, n] = A[m, k] @ B[k, n]`.
+    ) -> Result<Vec<Self>>;
+    /// `source @ im2col(image)^T` -- the gradient a kernel accumulates from a
+    /// signal and the grid it was gathered from.
     ///
-    /// # Safety
-    /// `a`, `b` and `c` must point to contiguous row-major buffers of at least
-    /// `m * k`, `k * n` and `m * n` elements; see [`crate::ops::linalg::gemm_f32`].
-    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
-    /// Row-major `C[m, n] = A[m, k]^T @ B[k, n]`, with `a` holding the logical
-    /// `(m, k)` operand as `(k, m)`.
-    ///
-    /// The weight gradient path needs the weight as `[K, C_out]` while it is
-    /// stored `[C_out, K]`. Reading it transposed by stride costs nothing;
-    /// materialising it was a serial strided-write copy of the whole weight.
-    ///
-    /// # Safety
-    /// As [`Self::gemm`], with `a` read as `k * m` elements.
-    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
-    /// Row-major `C[m, n] = A[m, k] @ B[n, k]^T`, with `b` holding the logical
-    /// `(k, n)` operand as `(n, k)`.
-    ///
-    /// # Safety
-    /// As [`Self::gemm`], with `b` read as `n * k` elements.
-    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
+    /// The other half of the pair: a convolution's weight gradient, and a
+    /// transposed convolution's, which is the same sum with the two operands
+    /// swapping which one is the image. Shapes follow
+    /// [`ConvScalar::scatter`].
+    fn weight_gradient(
+        image: &[Self],
+        source: &[Self],
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>>;
 }
 
 impl ConvScalar for f32 {
@@ -86,18 +86,6 @@ impl ConvScalar for f32 {
     #[inline]
     fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData {
         TensorData::from_vec_f32(values, device)
-    }
-    #[inline]
-    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_f32(m, k, n, a, b, c) }
-    }
-    #[inline]
-    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_tn_f32(m, k, n, a, b, c) }
-    }
-    #[inline]
-    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_nt_f32(m, k, n, a, b, c) }
     }
     fn convolve(
         input: &[Self],
@@ -112,11 +100,15 @@ impl ConvScalar for f32 {
         weight: &[Self],
         bias: Option<&[Self]>,
         geometry: &ConvGeometry,
-    ) -> Vec<Self> {
-        rounded::scatter(source, weight, bias, geometry)
+    ) -> Result<Vec<Self>> {
+        Ok(rounded::scatter(source, weight, bias, geometry))
     }
-    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self> {
-        rounded::weight_gradient(image, source, geometry)
+    fn weight_gradient(
+        image: &[Self],
+        source: &[Self],
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>> {
+        Ok(rounded::weight_gradient(image, source, geometry))
     }
 }
 
@@ -130,46 +122,28 @@ impl ConvScalar for f64 {
     fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData {
         TensorData::from_vec_f64(values, device)
     }
-    #[inline]
-    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_f64(m, k, n, a, b, c) }
-    }
-    #[inline]
-    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_tn_f64(m, k, n, a, b, c) }
-    }
-    #[inline]
-    unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
-        unsafe { crate::ops::linalg::gemm_nt_f64(m, k, n, a, b, c) }
-    }
     fn convolve(
         input: &[Self],
         weight: &[Self],
         bias: Option<&[Self]>,
         geometry: &ConvGeometry,
     ) -> Result<Vec<Self>> {
-        Ok(convolve_plain(input, weight, bias, geometry))
+        rounded_f64::convolve(input, weight, bias, geometry)
     }
     fn scatter(
         source: &[Self],
         weight: &[Self],
         bias: Option<&[Self]>,
         geometry: &ConvGeometry,
-    ) -> Vec<Self> {
-        let mut values = scatter_columns(source, weight, geometry);
-        if let Some(added) = bias {
-            let plane = (geometry.input_height * geometry.input_width).max(1);
-            par_out_chunks(&mut values, plane, &|start, row| {
-                let shift = added[(start / plane) % geometry.in_channels];
-                for slot in row.iter_mut() {
-                    *slot += shift;
-                }
-            });
-        }
-        values
+    ) -> Result<Vec<Self>> {
+        rounded_f64::scatter(source, weight, bias, geometry)
     }
-    fn weight_gradient(image: &[Self], source: &[Self], geometry: &ConvGeometry) -> Vec<Self> {
-        column_weight_gradient(image, source, geometry)
+    fn weight_gradient(
+        image: &[Self],
+        source: &[Self],
+        geometry: &ConvGeometry,
+    ) -> Result<Vec<Self>> {
+        rounded_f64::weight_gradient(image, source, geometry)
     }
 }
 
@@ -666,7 +640,7 @@ pub fn conv_transpose2d(
                 })?),
                 None => None,
             };
-            let values = <$ty as ConvScalar>::scatter(signal, kernel, added, &geometry);
+            let values = <$ty as ConvScalar>::scatter(signal, kernel, added, &geometry)?;
             <$ty as ConvScalar>::into_tensor_data(values, input.device())
         }};
     }
@@ -877,239 +851,6 @@ fn images_per_block<T>(batch: usize, lowered: usize, signal: usize) -> usize {
     (COL_BLOCK_BYTES / widest).clamp(1, batch.max(1))
 }
 
-/// `col2im(weight^T @ source)` -- scatter a signal back through a kernel onto
-/// the larger grid it was gathered from.
-///
-/// This is one operation with two names. Read backwards it is a convolution's
-/// gradient with respect to its input; read forwards it is a transposed
-/// convolution, which is why `conv_transpose2d` is not a separate algorithm and
-/// does not get a second copy of this. The two differ only in which side the
-/// caller calls the input.
-///
-/// In `geometry`, the `input_*` fields describe the grid being written and the
-/// `output_*` fields the signal being read -- the convolution's own naming,
-/// kept so that a caller coming from either direction reads the same struct.
-/// `weight` is `[out_channels, in_channels / groups, kH, kW]`.
-///
-/// The signal arrives in its natural `[N, C, H, W]` layout and is taken one
-/// image at a time; within an image the scatter-add runs one channel plane per
-/// task, whose destinations are disjoint, so nothing races.
-pub(crate) fn scatter_columns<T: ConvScalar>(
-    source: &[T],
-    weight: &[T],
-    geometry: &ConvGeometry,
-) -> Vec<T> {
-    let ConvGeometry {
-        batch_size: batch,
-        in_channels,
-        input_height: in_h,
-        input_width: in_w,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height: out_h,
-        output_width: out_w,
-        stride,
-        padding,
-        dilation,
-        groups,
-    } = *geometry;
-
-    let in_stride = in_channels * in_h * in_w;
-    let mut destination = vec![T::default(); batch * in_stride];
-
-    let ohw = out_h * out_w;
-    let kh_kw = kernel_h * kernel_w;
-    let k_dim = in_channels * kh_kw;
-    if ohw == 0 || in_stride == 0 {
-        return destination;
-    }
-    if direct_pays(geometry) {
-        scatter_direct(&mut destination, source, weight, geometry);
-        return destination;
-    }
-
-    // `k` runs channel-major, so a group owns a contiguous row-block of every
-    // `[k_dim, ...]` buffer here and the weight owns one of `[C_out, group_k]`.
-    let group_out = out_channels / groups;
-    let group_k = (in_channels / groups) * kh_kw;
-    let plane = in_h * in_w;
-    // The GEMM reads `weight` through a raw pointer, one group's row-block at a
-    // time, so its extent is checked rather than trusted.
-    assert!(
-        weight.len() >= groups * group_out * group_k,
-        "convolution weight is smaller than its geometry says"
-    );
-
-    // A block of images at a time. Taking the whole batch at once meant a
-    // `[k_dim, N*OH*OW]` intermediate -- 944MB for a 32x3x224x224 stem -- and
-    // taking one image at a time makes the multiply `N` small ones, which for a
-    // first layer's shapes runs at a fraction of the rate one large one does.
-    // The block is bounded by what the lowering and the copied signal cost, so
-    // small images travel in company and large ones alone.
-    let span_image = out_channels * ohw;
-    let images = images_per_block::<T>(batch, k_dim * ohw, span_image);
-    let mut columns = vec![T::default(); images * k_dim * ohw];
-    let mut signal = vec![T::default(); images * span_image];
-
-    let mut first = 0;
-    while first < batch {
-        let last = (first + images).min(batch);
-        let span = (last - first) * ohw;
-        let block = &mut signal[..out_channels * span];
-        block_channel_major::<T>(source, block, first, last, out_channels, ohw);
-
-        for g in 0..groups {
-            // SAFETY: group `g` reads `weight` rows `[g*group_out,
-            // (g+1)*group_out)` -- stored `[group_out, group_k]` and read
-            // transposed by stride, which is why this never materialises the
-            // transpose -- against `block` rows `[g*group_out, ..)`, writing
-            // `columns` rows `[g*group_k, ..)`. Each is a row-block of a
-            // contiguous buffer exactly `groups` times its size.
-            unsafe {
-                T::gemm_tn(
-                    group_k,
-                    group_out,
-                    span,
-                    weight.as_ptr().add(g * group_out * group_k),
-                    block.as_ptr().add(g * group_out * span),
-                    columns.as_mut_ptr().add(g * group_k * span),
-                );
-            }
-        }
-
-        // Scatter the block's columns back onto its grids, one channel plane
-        // per task: a channel's taps write only its own plane of its own image,
-        // so the adds never race. Parallelising over the batch alone left a
-        // single-image backward pass -- and every batch smaller than the pool
-        // -- on one core.
-        //
-        // Output positions are walked as nested loops with their in-bounds
-        // range hoisted, for the reason the forward's im2col does the same:
-        // recovering `(oh, ow)` from a flat `p` cost two runtime-divisor
-        // divisions per element, over 4.7M elements for a 16x32x32x32
-        // convolution.
-        let grids = &mut destination[first * in_stride..][..(last - first) * in_stride];
-        par_out_chunks(grids, plane, &|start, target| {
-            let index = start / plane;
-            let image = index / in_channels;
-            let channel = index % in_channels;
-            for tap in 0..kh_kw {
-                let ky_off = (tap / kernel_w) * dilation.0;
-                let kx_off = (tap % kernel_w) * dilation.1;
-                let (oh_lo, oh_hi) = in_bounds_range(ky_off, padding.0, in_h, stride.0, out_h);
-                let (ow_lo, ow_hi) = in_bounds_range(kx_off, padding.1, in_w, stride.1, out_w);
-                let row = (channel * kh_kw + tap) * span + image * ohw;
-                for oh in oh_lo..oh_hi {
-                    let ih = oh * stride.0 + ky_off - padding.0;
-                    let dst = ih * in_w;
-                    let src = row + oh * out_w;
-                    for ow in ow_lo..ow_hi {
-                        let iw = ow * stride.1 + kx_off - padding.1;
-                        target[dst + iw] += columns[src + ow];
-                    }
-                }
-            }
-        });
-
-        first = last;
-    }
-    destination
-}
-
-/// `source @ im2col(image)^T` -- the gradient a kernel accumulates from a
-/// signal and the grid it was gathered from.
-///
-/// The other half of the pair: a convolution's weight gradient, and a
-/// transposed convolution's, which is the same sum with the two operands
-/// swapping which one is the image. Shapes follow [`scatter_columns`].
-pub(crate) fn column_weight_gradient<T: ConvScalar>(
-    image: &[T],
-    source: &[T],
-    geometry: &ConvGeometry,
-) -> Vec<T> {
-    let ConvGeometry {
-        batch_size: batch,
-        in_channels,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height: out_h,
-        output_width: out_w,
-        groups,
-        ..
-    } = *geometry;
-
-    let ohw = out_h * out_w;
-    let kh_kw = kernel_h * kernel_w;
-    let k_dim = in_channels * kh_kw;
-    let group_out = out_channels / groups;
-    let group_k = (in_channels / groups) * kh_kw;
-
-    let mut gradient = vec![T::default(); out_channels * group_k];
-    if ohw == 0 || batch == 0 {
-        return gradient;
-    }
-    if direct_pays(geometry) {
-        weight_gradient_direct(&mut gradient, image, source, geometry);
-        return gradient;
-    }
-
-    // The image is lowered exactly as the forward lowers it, `[K, positions]`,
-    // and the multiply reads that transposed. This used to build the
-    // transpose itself, one row per output position with a bounds test on
-    // every tap -- a scattered gather that cost more than the multiply, and
-    // was repeated for every group. Here a group's `k` values are a row-block,
-    // so one lowering serves all of them by pointer offset.
-    //
-    // A block of images at a time, so the scratch stays bounded, and a block
-    // rather than one image because the multiply is what this costs: a first
-    // layer's weight gradient is `[32, OH*OW] @ [OH*OW, 27]`, and 64 of those
-    // run at a fraction of the rate one `[32, 64*OH*OW] @ [.., 27]` does.
-    //
-    // The sum over blocks runs in image order, so the answer does not move with
-    // the thread count.
-    let span_image = out_channels * ohw;
-    let images = images_per_block::<T>(batch, k_dim * ohw, span_image);
-    let mut columns = vec![T::default(); images * ohw * k_dim];
-    let mut signal = vec![T::default(); images * span_image];
-    let mut partial = vec![T::default(); group_out * group_k];
-
-    let mut first = 0;
-    while first < batch {
-        let last = (first + images).min(batch);
-        let span = (last - first) * ohw;
-        let block = &mut signal[..out_channels * span];
-        block_channel_major::<T>(source, block, first, last, out_channels, ohw);
-        lower_positions::<T>(image, &mut columns, first * ohw, last * ohw, geometry);
-
-        for g in 0..groups {
-            // SAFETY: `block` rows `[g*group_out, ..)` form a
-            // `[group_out, span]` block and `columns` rows `[g*group_k, ..)` a
-            // `[group_k, span]` one, read transposed; `partial` is
-            // `[group_out, group_k]`. Each is a row-block of a contiguous
-            // row-major buffer at least `groups` times its size.
-            unsafe {
-                T::gemm_nt(
-                    group_out,
-                    span,
-                    group_k,
-                    block.as_ptr().add(g * group_out * span),
-                    columns.as_ptr().add(g * group_k * span),
-                    partial.as_mut_ptr(),
-                );
-            }
-            let target = &mut gradient[g * group_out * group_k..][..group_out * group_k];
-            for (slot, &value) in target.iter_mut().zip(partial.iter()) {
-                *slot += value;
-            }
-        }
-
-        first = last;
-    }
-    gradient
-}
-
 /// Lower output positions `[first, last)` into `cols`, one row per
 /// kernel-input index `k` -- the `[K, last - first]` matrix a convolution's
 /// GEMM contracts, `K = C_in * kH * kW` running channel-major.
@@ -1254,9 +995,9 @@ fn lower_positions<T: ConvScalar>(
 /// 7`: a stem over an image's three channels.
 const DIRECT_MAX_TAPS: usize = 147;
 
-/// Whether a convolution goes straight from the input -- [`conv2d_direct`], and
-/// [`scatter_direct`] and [`weight_gradient_direct`] for its gradients --
-/// rather than through the lowered columns and a GEMM.
+/// Whether a float32 convolution goes straight from the input -- its output
+/// and both of its gradients, as [`rounded`] takes them -- rather than through
+/// the lowered columns and a GEMM.
 ///
 /// The lowering writes every tap of every position once, and pays that back
 /// only when the multiply reuses it across many output channels. A group with
@@ -1300,332 +1041,6 @@ fn direct_pays(geometry: &ConvGeometry) -> bool {
         || (contiguous && group_out * group_k <= 144)
 }
 
-/// [`scatter_columns`] without the columns: each tap of each output channel is
-/// added straight into the input planes it was read from.
-fn scatter_direct<T: ConvScalar>(
-    destination: &mut [T],
-    source: &[T],
-    weight: &[T],
-    geometry: &ConvGeometry,
-) {
-    let plane_in = geometry.input_height * geometry.input_width;
-    par_out_chunks(destination, plane_in, &|first, plane| {
-        let index = first / plane_in;
-        let (n, ic) = (index / geometry.in_channels, index % geometry.in_channels);
-        #[cfg(target_arch = "x86_64")]
-        if crate::ops::simd::simd_capabilities().avx2_fma {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { scatter_plane_avx2(plane, n, ic, source, weight, geometry) };
-        }
-        scatter_plane(plane, n, ic, source, weight, geometry)
-    });
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn scatter_plane_avx2<T: ConvScalar>(
-    plane: &mut [T],
-    n: usize,
-    ic: usize,
-    source: &[T],
-    weight: &[T],
-    geometry: &ConvGeometry,
-) {
-    scatter_plane(plane, n, ic, source, weight, geometry)
-}
-
-/// Input plane `(n, ic)` of [`scatter_direct`].
-#[inline(always)]
-fn scatter_plane<T: ConvScalar>(
-    plane: &mut [T],
-    n: usize,
-    ic: usize,
-    source: &[T],
-    weight: &[T],
-    geometry: &ConvGeometry,
-) {
-    let ConvGeometry {
-        in_channels,
-        input_height,
-        input_width,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height,
-        output_width,
-        stride,
-        padding,
-        dilation,
-        groups,
-        ..
-    } = *geometry;
-    let group_in = in_channels / groups;
-    let group_out = out_channels / groups;
-    let (group, local) = (ic / group_in, ic % group_in);
-    let plane_out = output_height * output_width;
-    for oc in group * group_out..(group + 1) * group_out {
-        let signal = &source[(n * out_channels + oc) * plane_out..][..plane_out];
-        for ky in 0..kernel_h {
-            let ky_off = ky * dilation.0;
-            let (oh_lo, oh_hi) =
-                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-            for kx in 0..kernel_w {
-                let kx_off = kx * dilation.1;
-                let (ow_lo, ow_hi) =
-                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-                if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                    continue;
-                }
-                let tap = weight[((oc * group_in + local) * kernel_h + ky) * kernel_w + kx];
-                for oh in oh_lo..oh_hi {
-                    let from = &signal[oh * output_width + ow_lo..oh * output_width + ow_hi];
-                    let row = &mut plane[(oh * stride.0 + ky_off - padding.0) * input_width..]
-                        [..input_width];
-                    if stride.1 == 1 {
-                        let start = ow_lo + kx_off - padding.1;
-                        for (o, &g) in row[start..start + from.len()].iter_mut().zip(from) {
-                            *o += tap * g;
-                        }
-                    } else {
-                        for (i, &g) in from.iter().enumerate() {
-                            row[(ow_lo + i) * stride.1 + kx_off - padding.1] += tap * g;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Lanes a direct weight gradient sums each dot product across, so the sum
-/// vectorizes. Fixed, so the answer does not depend on the machine.
-const DOT_LANES: usize = 8;
-
-/// [`column_weight_gradient`] without the columns: one task per kernel slice
-/// `(oc, ic)`, which reads each pair of rows once for all of its taps.
-fn weight_gradient_direct<T: ConvScalar>(
-    gradient: &mut [T],
-    image: &[T],
-    source: &[T],
-    geometry: &ConvGeometry,
-) {
-    let taps = geometry.kernel_h * geometry.kernel_w;
-    par_out_chunks(gradient, taps, &|first, slice| {
-        #[cfg(target_arch = "x86_64")]
-        if crate::ops::simd::simd_capabilities().avx2_fma {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { weight_slice_avx2(slice, first / taps, image, source, geometry) };
-        }
-        weight_slice(slice, first / taps, image, source, geometry)
-    });
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn weight_slice_avx2<T: ConvScalar>(
-    slice: &mut [T],
-    index: usize,
-    image: &[T],
-    source: &[T],
-    geometry: &ConvGeometry,
-) {
-    weight_slice(slice, index, image, source, geometry)
-}
-
-/// Kernel slice `index = oc * (in_channels / groups) + local` of
-/// [`weight_gradient_direct`].
-#[inline(always)]
-fn weight_slice<T: ConvScalar>(
-    slice: &mut [T],
-    index: usize,
-    image: &[T],
-    source: &[T],
-    geometry: &ConvGeometry,
-) {
-    let ConvGeometry {
-        batch_size,
-        in_channels,
-        input_height,
-        input_width,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height,
-        output_width,
-        stride,
-        padding,
-        dilation,
-        groups,
-    } = *geometry;
-    let group_in = in_channels / groups;
-    let group_out = out_channels / groups;
-    let (oc, local) = (index / group_in, index % group_in);
-    let ic = (oc / group_out) * group_in + local;
-    let plane_in = input_height * input_width;
-    let plane_out = output_height * output_width;
-    let taps = kernel_h * kernel_w;
-    // One row of lanes per tap: 8 per tap, a few kilobytes at the widest
-    // kernels this path takes.
-    let mut lanes = vec![[T::default(); DOT_LANES]; taps];
-    for n in 0..batch_size {
-        let signal = &source[(n * out_channels + oc) * plane_out..][..plane_out];
-        let picture = &image[(n * in_channels + ic) * plane_in..][..plane_in];
-        for ky in 0..kernel_h {
-            let ky_off = ky * dilation.0;
-            let (oh_lo, oh_hi) =
-                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-            for kx in 0..kernel_w {
-                let kx_off = kx * dilation.1;
-                let (ow_lo, ow_hi) =
-                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-                if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                    continue;
-                }
-                let acc = &mut lanes[ky * kernel_w + kx];
-                for oh in oh_lo..oh_hi {
-                    let from = &signal[oh * output_width + ow_lo..oh * output_width + ow_hi];
-                    let row = &picture[(oh * stride.0 + ky_off - padding.0) * input_width..]
-                        [..input_width];
-                    if stride.1 == 1 {
-                        let start = ow_lo + kx_off - padding.1;
-                        let read = &row[start..start + from.len()];
-                        let (g_blocks, g_tail) = from.as_chunks::<DOT_LANES>();
-                        let (x_blocks, x_tail) = read.as_chunks::<DOT_LANES>();
-                        for (g, x) in g_blocks.iter().zip(x_blocks) {
-                            for lane in 0..DOT_LANES {
-                                acc[lane] += g[lane] * x[lane];
-                            }
-                        }
-                        for (lane, (&g, &x)) in g_tail.iter().zip(x_tail).enumerate() {
-                            acc[lane] += g * x;
-                        }
-                    } else {
-                        for (i, &g) in from.iter().enumerate() {
-                            acc[i % DOT_LANES] +=
-                                g * row[(ow_lo + i) * stride.1 + kx_off - padding.1];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for (slot, acc) in slice.iter_mut().zip(&lanes) {
-        let mut total = T::default();
-        for &value in acc {
-            total += value;
-        }
-        *slot = total;
-    }
-}
-
-/// Convolve by accumulating each tap straight from the input: one task per
-/// output plane, which adds each tap's weight times the input rows it reads,
-/// shifted, into its own rows. Each output sums its taps in the lowered order,
-/// channel-major, and then adds its bias, as the GEMM path does.
-fn conv2d_direct<T: ConvScalar>(
-    output: &mut [T],
-    input: &[T],
-    weight: &[T],
-    bias: Option<&[T]>,
-    geometry: &ConvGeometry,
-) {
-    let ohw = geometry.output_height * geometry.output_width;
-    par_out_chunks(output, ohw, &|first, plane| {
-        let index = first / ohw;
-        let (n, oc) = (index / geometry.out_channels, index % geometry.out_channels);
-        #[cfg(target_arch = "x86_64")]
-        if crate::ops::simd::simd_capabilities().avx2_fma {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { direct_plane_avx2(plane, n, oc, input, weight, bias, geometry) };
-        }
-        direct_plane(plane, n, oc, input, weight, bias, geometry)
-    });
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn direct_plane_avx2<T: ConvScalar>(
-    plane: &mut [T],
-    n: usize,
-    oc: usize,
-    input: &[T],
-    weight: &[T],
-    bias: Option<&[T]>,
-    geometry: &ConvGeometry,
-) {
-    direct_plane(plane, n, oc, input, weight, bias, geometry)
-}
-
-/// One output plane `(n, oc)` of [`conv2d_direct`].
-#[inline(always)]
-fn direct_plane<T: ConvScalar>(
-    plane: &mut [T],
-    n: usize,
-    oc: usize,
-    input: &[T],
-    weight: &[T],
-    bias: Option<&[T]>,
-    geometry: &ConvGeometry,
-) {
-    let ConvGeometry {
-        in_channels,
-        input_height,
-        input_width,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height,
-        output_width,
-        stride,
-        padding,
-        dilation,
-        groups,
-        ..
-    } = *geometry;
-    let group_in = in_channels / groups;
-    let group = oc / (out_channels / groups);
-    let input_plane = input_height * input_width;
-    for local in 0..group_in {
-        let ic = group * group_in + local;
-        let source = &input[(n * in_channels + ic) * input_plane..][..input_plane];
-        for ky in 0..kernel_h {
-            let ky_off = ky * dilation.0;
-            let (oh_lo, oh_hi) =
-                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-            for kx in 0..kernel_w {
-                let kx_off = kx * dilation.1;
-                let (ow_lo, ow_hi) =
-                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-                if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                    continue;
-                }
-                let tap = weight[((oc * group_in + local) * kernel_h + ky) * kernel_w + kx];
-                for oh in oh_lo..oh_hi {
-                    let row = &source[(oh * stride.0 + ky_off - padding.0) * input_width..]
-                        [..input_width];
-                    let out = &mut plane[oh * output_width + ow_lo..oh * output_width + ow_hi];
-                    if stride.1 == 1 {
-                        let start = ow_lo + kx_off - padding.1;
-                        let span = out.len();
-                        for (o, &x) in out.iter_mut().zip(&row[start..start + span]) {
-                            *o += tap * x;
-                        }
-                    } else {
-                        for (i, o) in out.iter_mut().enumerate() {
-                            *o += tap * row[(ow_lo + i) * stride.1 + kx_off - padding.1];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let Some(bias) = bias {
-        for o in plane.iter_mut() {
-            *o += bias[oc];
-        }
-    }
-}
-
 /// Scratch the lowering may hold at once, in bytes.
 ///
 /// Large enough that the GEMM sees a few thousand columns, which is where it
@@ -1656,22 +1071,40 @@ fn conv2d_forward<T: ConvScalar>(
     Ok(T::into_tensor_data(output, input.device()))
 }
 
-/// im2col + GEMM forward pass, accumulated in the element type: float64's
-/// [`ConvScalar::convolve`].
+/// What multiplies a block of the lowered columns by the kernel: given the
+/// block's `width`, its `[K, width]` columns, and the `[C_out, width]`
+/// products to fill.
+type BlockProducts<'a, T> = dyn FnMut(usize, &[T], &mut [T]) -> Result<()> + 'a;
+
+/// The convolution through its lowered columns: each block of output
+/// positions lowered into a `[K, width]` matrix, `K = C_in * kH * kW` running
+/// channel-major, which `products` multiplies by the kernel into `[C_out,
+/// width]`, and that placed into the `[N, C_out, OH, OW]` output.
 ///
-/// Lower each output position's receptive field into a column of `cols`
-/// (`[K, N*out_h*out_w]`, `K = C_in*kH*kW`), then a single matrix multiply
-/// `weight[C_out, K] @ cols` produces `[C_out, N*out_h*out_w]`, which is
-/// scattered (with bias) into the `[N, C_out, out_h, out_w]` output. `weight`
-/// is already laid out as `[C_out, K]`, so it needs no repacking. This routes
-/// the arithmetic through the tuned GEMM instead of a naive per-output
-/// accumulation, and produces the same cross-correlation result.
-fn convolve_plain<T: ConvScalar>(
-    input_data: &[T],
-    weight_data: &[T],
-    bias_data: Option<&[T]>,
-    geom: &ConvGeometry,
-) -> Vec<T> {
+/// The kernel is already laid out as `[C_out, K / groups]`, and a group's
+/// rows of the lowered matrix are contiguous because `k` runs channel-major
+/// -- so the groups are `groups` products over row-blocks of the same three
+/// buffers, with no repacking.
+///
+/// Lowering the whole image set at once means `K * N * OH * OW` elements of
+/// scratch -- 944MB for a 32x3x224x224 stem -- written once and read straight
+/// back out of main memory. A block is lowered, multiplied and placed while
+/// it is still in cache instead, which bounds the scratch whatever the image
+/// is.
+///
+/// The block is a run of output *positions*, not of output rows. Rows bound
+/// the scratch only while one row fits in it: a single row costs `K *
+/// output_width`, so a 1-D convolution -- one row, a million columns -- asked
+/// for that whole product however small the budget was. With a million-tap
+/// kernel that is 17.6TB, and the allocation failure aborts the process
+/// rather than raising. Whole rows are taken whenever one fits, so that each
+/// copy starts on a row boundary; only a row too wide for the budget gets a
+/// block that starts or ends part way along one.
+fn convolve_lowered<T: ConvScalar>(
+    input: &[T],
+    geometry: &ConvGeometry,
+    products: &mut BlockProducts<'_, T>,
+) -> Result<Vec<T>> {
     let ConvGeometry {
         batch_size,
         in_channels,
@@ -1680,124 +1113,205 @@ fn convolve_plain<T: ConvScalar>(
         kernel_w,
         output_height,
         output_width,
-        groups,
         ..
-    } = *geom;
-
+    } = *geometry;
     let ohw = output_height * output_width;
     let k_dim = in_channels * kernel_h * kernel_w;
-    let kh_kw = kernel_h * kernel_w;
-    // Per-group shapes. The lowered `cols` still covers every input channel,
-    // and a group's rows within it are contiguous because `k` runs
-    // channel-major -- so the groups are `groups` GEMMs over row-blocks of the
-    // same three buffers, with no repacking.
+    let mut output = vec![T::default(); batch_size * out_channels * ohw];
+    if output.is_empty() {
+        return Ok(output);
+    }
+    let per_column = (k_dim * std::mem::size_of::<T>()).max(1);
+    let positions_total = batch_size * ohw;
+    let budget = (COL_BLOCK_BYTES / per_column).clamp(1, positions_total);
+    let block_n = if budget >= output_width {
+        (budget / output_width) * output_width
+    } else {
+        budget
+    };
+    let mut cols = vec![T::default(); k_dim * block_n];
+    let mut block = vec![T::default(); out_channels * block_n];
+
+    let mut first = 0;
+    while first < positions_total {
+        let last = (first + block_n).min(positions_total);
+        let width = last - first;
+        lower_positions::<T>(input, &mut cols, first, last, geometry);
+        products(
+            width,
+            &cols[..k_dim * width],
+            &mut block[..out_channels * width],
+        )?;
+
+        // `[C_out, width]` into `[N, C_out, oh, ow]`. A block is a run of
+        // output positions, so within one image each channel takes a
+        // contiguous run of its plane, and a block that reaches the end of an
+        // image carries on into the next. Every plane the block touches is
+        // one task of a single dispatch: dispatched image by image, a batch
+        // of eight 30x30 images paid the pool's round trip eight times.
+        let first_image = first / ohw;
+        let last_image = (last - 1) / ohw + 1;
+        let region = &mut output[first_image * out_channels * ohw..last_image * out_channels * ohw];
+        let block = &block;
+        par_out_chunks(region, ohw, &|start, plane| {
+            let index = start / ohw;
+            let (n, oc) = (first_image + index / out_channels, index % out_channels);
+            let image_start = n * ohw;
+            let from = first.max(image_start) - image_start;
+            let to = last.min(image_start + ohw) - image_start;
+            plane[from..to]
+                .copy_from_slice(&block[oc * width + (image_start + from - first)..][..to - from]);
+        });
+        first = last;
+    }
+    Ok(output)
+}
+
+/// The terms of entry `k` of output channel `oc`'s kernel slice in a weight
+/// gradient: each value of the signal's channel beside the value of the
+/// image its tap reads for it, over every image.
+fn weight_terms<T: Copy>(
+    oc: usize,
+    k: usize,
+    image: &[T],
+    source: &[T],
+    geometry: &ConvGeometry,
+) -> (Vec<T>, Vec<T>) {
+    let ConvGeometry {
+        batch_size,
+        in_channels,
+        input_height,
+        input_width,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+        dilation,
+        groups,
+    } = *geometry;
     let group_in = in_channels / groups;
     let group_out = out_channels / groups;
-    let group_k = group_in * kh_kw;
-
-    let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
-
-    if direct_pays(geom) {
-        if !output_vec.is_empty() {
-            conv2d_direct(&mut output_vec, input_data, weight_data, bias_data, geom);
+    let kh_kw = kernel_h * kernel_w;
+    let (local, tap) = (k / kh_kw, k % kh_kw);
+    let ky_off = (tap / kernel_w) * dilation.0;
+    let kx_off = (tap % kernel_w) * dilation.1;
+    let ic = (oc / group_out) * group_in + local;
+    let (oh_lo, oh_hi) = in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+    let (ow_lo, ow_hi) = in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+    let span = ow_hi - ow_lo;
+    let (mut signal, mut reads) = (Vec::new(), Vec::new());
+    for n in 0..batch_size {
+        for oh in oh_lo..oh_hi {
+            let ih = oh * stride.0 + ky_off - padding.0;
+            let from = ((n * out_channels + oc) * output_height + oh) * output_width + ow_lo;
+            signal.extend_from_slice(&source[from..from + span]);
+            let row =
+                &image[((n * in_channels + ic) * input_height + ih) * input_width..][..input_width];
+            reads.extend((ow_lo..ow_hi).map(|ow| row[ow * stride.1 + kx_off - padding.1]));
         }
-        return output_vec;
+    }
+    (signal, reads)
+}
+
+/// What the tests of the rounded convolutions share: a geometry from a
+/// convolution's arguments, and every term of it from the definition.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::ConvGeometry;
+
+    pub(crate) fn geometry(
+        (batch, channels, height, width): (usize, usize, usize, usize),
+        (outputs, kernel): (usize, (usize, usize)),
+        (stride, padding, dilation): ((usize, usize), (usize, usize), (usize, usize)),
+        groups: usize,
+    ) -> ConvGeometry {
+        let span = |k: usize, d: usize| d * (k - 1) + 1;
+        ConvGeometry {
+            batch_size: batch,
+            in_channels: channels,
+            input_height: height,
+            input_width: width,
+            out_channels: outputs,
+            kernel_h: kernel.0,
+            kernel_w: kernel.1,
+            output_height: (height + 2 * padding.0 - span(kernel.0, dilation.0)) / stride.0 + 1,
+            output_width: (width + 2 * padding.1 - span(kernel.1, dilation.1)) / stride.1 + 1,
+            stride,
+            padding,
+            dilation,
+            groups,
+        }
     }
 
-    if !output_vec.is_empty() {
-        // Lowering the whole image set at once means `k_dim * n_cols` elements
-        // of scratch -- 944MB for a 32x3x224x224 stem -- written once and read
-        // straight back out of main memory by the GEMM. A block of output rows
-        // is lowered, multiplied and scattered while it is still in cache
-        // instead, which bounds the scratch whatever the image is and lands the
-        // GEMM near the column count it runs fastest at (below about a thousand
-        // columns its efficiency falls off a cliff; above about eight thousand
-        // it starts paying for memory again).
-        // The block is a run of output *positions*, not of output rows. Rows
-        // bound the scratch only while one row fits in it: a single row costs
-        // `k_dim * output_width`, so a 1-D convolution -- one row, a million
-        // columns -- asked for that whole product however small the budget
-        // was. With a million-tap kernel that is 17.6TB, and the allocation
-        // failure aborts the process rather than raising. A 64-tap filter over
-        // a million samples is the same shape at a size that works, and it
-        // lowered 256MB of scratch for an input of 4.
-        let per_column = (k_dim * std::mem::size_of::<T>()).max(1);
-        let positions_total = batch_size * ohw;
-        let budget = (COL_BLOCK_BYTES / per_column).clamp(1, positions_total.max(1));
-        // Whole rows whenever one fits, which is every shape that worked
-        // before this: each copy then starts on a row boundary, as it did when
-        // the block was counted in rows. Only a row too wide for the budget
-        // gets a block that starts or ends part way along one.
-        let row_aligned = output_width > 0 && budget >= output_width;
-        let block_n = if row_aligned {
-            (budget / output_width) * output_width
-        } else {
-            budget
-        };
+    /// Where tap `k` of output `o` reads the input, written from the
+    /// definition rather than from the kernels' ranges.
+    fn read_at(
+        o: usize,
+        k: usize,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        extent: usize,
+    ) -> Option<usize> {
+        let at = (o * stride + k * dilation) as isize - padding as isize;
+        (0..extent as isize).contains(&at).then_some(at as usize)
+    }
 
-        let mut cols = vec![T::default(); k_dim * block_n];
-        let mut gemm_out = vec![T::default(); out_channels * block_n];
-
-        let mut first = 0;
-        while first < positions_total {
-            let last = (first + block_n).min(positions_total);
-            let width = last - first;
-
-            lower_positions::<T>(input_data, &mut cols, first, last, geom);
-
-            for g in 0..groups {
-                // SAFETY: within group `g`, `weight_data` offset by
-                // `g * group_out * group_k` is [group_out, group_k], `cols`
-                // offset by `g * group_k * width` is [group_k, width], and
-                // `gemm_out` offset by `g * group_out * width` is
-                // [group_out, width]. All three are row-blocks of contiguous
-                // row-major buffers whose lengths are exactly `groups` times
-                // these, so no block runs past its allocation and no two groups
-                // overlap.
-                unsafe {
-                    T::gemm(
-                        group_out,
-                        group_k,
-                        width,
-                        weight_data.as_ptr().add(g * group_out * group_k),
-                        cols.as_ptr().add(g * group_k * width),
-                        gemm_out.as_mut_ptr().add(g * group_out * width),
-                    );
-                }
-            }
-
-            // Scatter [C_out, width] into [N, C_out, oh, ow], adding bias. A
-            // block is a run of output positions, so within one image each
-            // channel takes a contiguous run of its plane, and a block that
-            // reaches the end of an image carries on into the next. Every plane
-            // the block touches is one task of a single dispatch: dispatched
-            // image by image, a batch of eight 30x30 images paid the pool's
-            // round trip eight times -- most of an 850us 3-to-16 channel conv
-            // whose multiply takes 127.
-            let first_image = first / ohw;
-            let last_image = (last - 1) / ohw + 1;
-            let region =
-                &mut output_vec[first_image * out_channels * ohw..last_image * out_channels * ohw];
-            par_out_chunks(region, ohw, &|start, plane| {
-                let index = start / ohw;
-                let (n, oc) = (first_image + index / out_channels, index % out_channels);
-                let image_start = n * ohw;
-                let from = first.max(image_start) - image_start;
-                let to = last.min(image_start + ohw) - image_start;
-                let source = &gemm_out[oc * width + (image_start + from - first)..][..to - from];
-                for (o, &v) in plane[from..to].iter_mut().zip(source) {
-                    *o = v;
-                    if let Some(bd) = bias_data {
-                        *o += bd[oc];
+    /// Every term of the convolution, as `(output, input, tap)` indices.
+    pub(crate) fn terms(g: &ConvGeometry) -> Vec<(usize, usize, usize)> {
+        let group_in = g.in_channels / g.groups;
+        let group_out = g.out_channels / g.groups;
+        let mut all = Vec::new();
+        for n in 0..g.batch_size {
+            for oc in 0..g.out_channels {
+                for oh in 0..g.output_height {
+                    for ow in 0..g.output_width {
+                        for local in 0..group_in {
+                            let ic = (oc / group_out) * group_in + local;
+                            for ky in 0..g.kernel_h {
+                                for kx in 0..g.kernel_w {
+                                    let (Some(ih), Some(iw)) = (
+                                        read_at(
+                                            oh,
+                                            ky,
+                                            g.stride.0,
+                                            g.padding.0,
+                                            g.dilation.0,
+                                            g.input_height,
+                                        ),
+                                        read_at(
+                                            ow,
+                                            kx,
+                                            g.stride.1,
+                                            g.padding.1,
+                                            g.dilation.1,
+                                            g.input_width,
+                                        ),
+                                    ) else {
+                                        continue;
+                                    };
+                                    let output = ((n * g.out_channels + oc) * g.output_height + oh)
+                                        * g.output_width
+                                        + ow;
+                                    let input = ((n * g.in_channels + ic) * g.input_height + ih)
+                                        * g.input_width
+                                        + iw;
+                                    let tap = ((oc * group_in + local) * g.kernel_h + ky)
+                                        * g.kernel_w
+                                        + kx;
+                                    all.push((output, input, tap));
+                                }
+                            }
+                        }
                     }
                 }
-            });
-
-            first = last;
+            }
         }
+        all
     }
-
-    output_vec
 }
 
 #[cfg(test)]

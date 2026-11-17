@@ -1897,6 +1897,24 @@ impl Carried {
     }
 }
 
+impl Carried {
+    /// A total of `sum + error`, within `slack` of what it stands for.
+    pub(crate) fn of(sum: f64, error: f64, slack: f64) -> Self {
+        Carried { sum, error, slack }
+    }
+
+    /// The total's sum, its error and its slack.
+    pub(crate) fn parts(self) -> (f64, f64, f64) {
+        (self.sum, self.error, self.slack)
+    }
+
+    /// The total with the dot of `a` and `b` added to it, carried as
+    /// [`dot_f64`] carries one: a dot taken a stretch at a time.
+    pub(crate) fn with_dot(self, a: &[f64], b: &[f64]) -> Self {
+        self.merge(f64::carried_dot(a, b))
+    }
+}
+
 /// The float64 nearest the dot of the `count` `pairs` that `carried`
 /// carries, when the bound says which it is.
 fn settled_dot(

@@ -13,9 +13,9 @@
 //! A kernel `[C_out, C_in / groups, kD, kH, kW]` is already that plane's
 //! kernel, `[C_out, C_in / groups * kD, kH, kW]`, with each group's channels
 //! together. Each entry is then one sum of the products of every tap of its
-//! window, the bias in it -- for float32 the float nearest its exact value,
-//! as a plane's are -- where each depth tap was convolved on its own and the
-//! planes added, a rounding for each and one for the bias.
+//! window, the bias in it -- the float nearest its exact value, as a plane's
+//! are -- where each depth tap was convolved on its own and the planes
+//! added, a rounding for each and one for the bias.
 //!
 //! The gradients follow. The kernel's is that plane's, over the same signal.
 //! The input's sets the output's gradient side by side the same way, a
@@ -208,9 +208,8 @@ pub(crate) fn slices_outside<T: ConvScalar>(
 /// whose channels are each output slice's depth taps.
 ///
 /// `stride`, `padding` and `dilation` are along the depth, the height and
-/// the width. For float32, each entry of the output, and of each gradient,
-/// is the float nearest its exact value, the bias added before the one
-/// rounding.
+/// the width. Each entry of the output, and of each gradient, is the float
+/// nearest its exact value, the bias added before the one rounding.
 pub fn conv3d(
     input: &Tensor,
     weight: &Tensor,

@@ -606,7 +606,7 @@ impl ConvTranspose2dBackward {
                 // The image is the gradient of the grid that was written, and
                 // the signal is the input that was scattered -- the convolution
                 // weight gradient with the roles the forward gave them.
-                let grad_weight = T::weight_gradient(go, input, &geometry);
+                let grad_weight = T::weight_gradient(go, input, &geometry)?;
                 let grad = Tensor::new(
                     Arc::new(T::into_tensor_data(grad_weight, device)),
                     self.weight.shape().clone(),
@@ -739,7 +739,7 @@ impl Conv2dBackward {
         // The input gradient scatters the signal back through the kernel, which
         // is the operation `conv_transpose2d` performs forwards.
         if self.input_requires_grad {
-            let grad_input = T::scatter(go, weight, None, &geometry);
+            let grad_input = T::scatter(go, weight, None, &geometry)?;
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_input, device)),
                 self.input.shape().clone(),
@@ -751,7 +751,7 @@ impl Conv2dBackward {
         }
 
         if self.weight_requires_grad {
-            let grad_weight = T::weight_gradient(input, go, &geometry);
+            let grad_weight = T::weight_gradient(input, go, &geometry)?;
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_weight, device)),
                 self.weight.shape().clone(),
@@ -816,7 +816,7 @@ impl Conv3dBackward {
         if self.input_requires_grad {
             let weight = T::slice(self.weight.data()).ok_or_else(mismatched)?;
             let spread = shape.stack_gradient(flowing);
-            let planes = T::scatter(&spread, &shape.kernel_by_tap(weight), None, &shape.spread());
+            let planes = T::scatter(&spread, &shape.kernel_by_tap(weight), None, &shape.spread())?;
             let plane = shape.input[1] * shape.input[2];
             let cells =
                 crate::ops::conv::slices_inside(&planes, shape.input[0], shape.in_channels, plane);
@@ -832,7 +832,7 @@ impl Conv3dBackward {
                 shape.out_channels,
                 plane,
             );
-            let taps = T::weight_gradient(&shape.stack_input(input), &planes, &shape.stacked());
+            let taps = T::weight_gradient(&shape.stack_input(input), &planes, &shape.stacked())?;
             accumulate_grad(gradients, self.weight_id, gradient(taps, &self.weight))?;
         }
 

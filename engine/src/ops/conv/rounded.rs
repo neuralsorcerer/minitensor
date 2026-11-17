@@ -40,7 +40,8 @@
 //! no rounding and is the exact one, which is rounded from there.
 
 use super::{
-    COL_BLOCK_BYTES, ConvGeometry, direct_pays, images_per_block, in_bounds_range, lower_positions,
+    ConvGeometry, convolve_lowered, direct_pays, images_per_block, in_bounds_range,
+    lower_positions, weight_terms,
 };
 use crate::error::Result;
 use crate::ops::arithmetic::exact_sum::{dot_f32, exact_dot_to};
@@ -109,7 +110,7 @@ fn norms_margin(count: usize) -> f64 {
 
 /// The convolution of `input` by `weight`, `bias` added, every entry the
 /// float32 nearest its exact value; the shapes are those
-/// [`super::convolve_plain`] takes.
+/// [`super::ConvScalar::convolve`] takes.
 pub(super) fn convolve(
     input: &[f32],
     weight: &[f32],
@@ -128,12 +129,9 @@ pub(super) fn convolve(
         ..
     } = *geometry;
     let ohw = output_height * output_width;
-    let mut output = vec![0.0f32; batch_size * out_channels * ohw];
-    if output.is_empty() {
-        return Ok(output);
-    }
     if direct_pays(geometry) {
-        par_out_chunks(&mut output, ohw, &|first, plane| {
+        let mut output = vec![0.0f32; batch_size * out_channels * ohw];
+        par_out_chunks(&mut output, ohw.max(1), &|first, plane| {
             let index = first / ohw;
             convolve_plane(
                 plane,
@@ -147,29 +145,11 @@ pub(super) fn convolve(
         return Ok(output);
     }
 
-    // Blocked by output position as the float64 path is, for the reasons it
-    // gives; each group's block is a product rounded once, its bias the
-    // product's addend.
-    let kh_kw = kernel_h * kernel_w;
-    let k_dim = in_channels * kh_kw;
+    // Each group's block of the lowered columns is a product rounded once,
+    // its bias the product's addend.
     let group_out = out_channels / groups;
-    let group_k = (in_channels / groups) * kh_kw;
-    let per_column = (k_dim * std::mem::size_of::<f32>()).max(1);
-    let positions_total = batch_size * ohw;
-    let budget = (COL_BLOCK_BYTES / per_column).clamp(1, positions_total);
-    let block_n = if budget >= output_width {
-        (budget / output_width) * output_width
-    } else {
-        budget
-    };
-    let mut cols = vec![0.0f32; k_dim * block_n];
-    let mut products = vec![0.0f32; out_channels * block_n];
-
-    let mut first = 0;
-    while first < positions_total {
-        let last = (first + block_n).min(positions_total);
-        let width = last - first;
-        lower_positions::<f32>(input, &mut cols, first, last, geometry);
+    let group_k = (in_channels / groups) * kernel_h * kernel_w;
+    convolve_lowered(input, geometry, &mut |width, cols, block| {
         for g in 0..groups {
             rounded_affine_products_in_engine_f32(
                 1,
@@ -190,29 +170,11 @@ pub(super) fn convolve(
                     values: &bias[g * group_out..][..group_out],
                     strides: [0, 1, 0],
                 }),
-                &mut products[g * group_out * width..][..group_out * width],
+                &mut block[g * group_out * width..][..group_out * width],
             )?;
         }
-
-        // `[C_out, width]` into `[N, C_out, oh, ow]`, a plane per task as the
-        // float64 path places its block.
-        let first_image = first / ohw;
-        let last_image = (last - 1) / ohw + 1;
-        let region = &mut output[first_image * out_channels * ohw..last_image * out_channels * ohw];
-        let products = &products;
-        par_out_chunks(region, ohw, &|start, plane| {
-            let index = start / ohw;
-            let (n, oc) = (first_image + index / out_channels, index % out_channels);
-            let image_start = n * ohw;
-            let from = first.max(image_start) - image_start;
-            let to = last.min(image_start + ohw) - image_start;
-            plane[from..to].copy_from_slice(
-                &products[oc * width + (image_start + from - first)..][..to - from],
-            );
-        });
-        first = last;
-    }
-    Ok(output)
+        Ok(())
+    })
 }
 
 /// Output plane `(n, oc)` of [`convolve`] straight from the input: each
@@ -507,7 +469,7 @@ fn forward_terms(
 
 /// `col2im(weight^T @ source)`, `bias` added to each channel of the grid,
 /// every entry the float32 nearest its exact value; the shapes are those
-/// [`super::scatter_columns`] takes.
+/// [`super::ConvScalar::scatter`] takes.
 pub(super) fn scatter(
     source: &[f32],
     weight: &[f32],
@@ -891,7 +853,7 @@ fn scatter_terms(
 }
 
 /// `source @ im2col(image)^T`, every entry the float32 nearest its exact
-/// value; the shapes are those [`super::column_weight_gradient`] takes.
+/// value; the shapes are those [`super::ConvScalar::weight_gradient`] takes.
 pub(super) fn weight_gradient(image: &[f32], source: &[f32], geometry: &ConvGeometry) -> Vec<f32> {
     let ConvGeometry {
         batch_size: batch,
@@ -1312,47 +1274,13 @@ fn weight_entry(
     source: &[f32],
     geometry: &ConvGeometry,
 ) -> f32 {
-    let ConvGeometry {
-        batch_size,
-        in_channels,
-        input_height,
-        input_width,
-        out_channels,
-        kernel_h,
-        kernel_w,
-        output_height,
-        output_width,
-        stride,
-        padding,
-        dilation,
-        groups,
-    } = *geometry;
-    let group_in = in_channels / groups;
-    let group_out = out_channels / groups;
-    let kh_kw = kernel_h * kernel_w;
-    let (local, tap) = (k / kh_kw, k % kh_kw);
-    let ky_off = (tap / kernel_w) * dilation.0;
-    let kx_off = (tap % kernel_w) * dilation.1;
-    let ic = (oc / group_out) * group_in + local;
-    let (oh_lo, oh_hi) = in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-    let (ow_lo, ow_hi) = in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-    let span = ow_hi - ow_lo;
-    let (mut signal, mut reads) = (Vec::new(), Vec::new());
-    for n in 0..batch_size {
-        for oh in oh_lo..oh_hi {
-            let ih = oh * stride.0 + ky_off - padding.0;
-            let from = ((n * out_channels + oc) * output_height + oh) * output_width + ow_lo;
-            signal.extend_from_slice(&source[from..from + span]);
-            let row =
-                &image[((n * in_channels + ic) * input_height + ih) * input_width..][..input_width];
-            reads.extend((ow_lo..ow_hi).map(|ow| row[ow * stride.1 + kx_off - padding.1]));
-        }
-    }
+    let (signal, reads) = weight_terms(oc, k, image, source, geometry);
     dot_f32(&signal, &reads)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{geometry, terms};
     use super::*;
 
     /// Values spread over twelve binades, a few of them whole.
@@ -1373,97 +1301,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    fn geometry(
-        (batch, channels, height, width): (usize, usize, usize, usize),
-        (outputs, kernel): (usize, (usize, usize)),
-        (stride, padding, dilation): ((usize, usize), (usize, usize), (usize, usize)),
-        groups: usize,
-    ) -> ConvGeometry {
-        let span = |k: usize, d: usize| d * (k - 1) + 1;
-        ConvGeometry {
-            batch_size: batch,
-            in_channels: channels,
-            input_height: height,
-            input_width: width,
-            out_channels: outputs,
-            kernel_h: kernel.0,
-            kernel_w: kernel.1,
-            output_height: (height + 2 * padding.0 - span(kernel.0, dilation.0)) / stride.0 + 1,
-            output_width: (width + 2 * padding.1 - span(kernel.1, dilation.1)) / stride.1 + 1,
-            stride,
-            padding,
-            dilation,
-            groups,
-        }
-    }
-
-    /// Where tap `k` of output `o` reads the input, written from the
-    /// definition rather than from the kernels' ranges.
-    fn read_at(
-        o: usize,
-        k: usize,
-        stride: usize,
-        padding: usize,
-        dilation: usize,
-        extent: usize,
-    ) -> Option<usize> {
-        let at = (o * stride + k * dilation) as isize - padding as isize;
-        (0..extent as isize).contains(&at).then_some(at as usize)
-    }
-
-    /// Every term of the convolution, as `(output, input, tap)` indices.
-    fn terms(g: &ConvGeometry) -> Vec<(usize, usize, usize)> {
-        let group_in = g.in_channels / g.groups;
-        let group_out = g.out_channels / g.groups;
-        let mut all = Vec::new();
-        for n in 0..g.batch_size {
-            for oc in 0..g.out_channels {
-                for oh in 0..g.output_height {
-                    for ow in 0..g.output_width {
-                        for local in 0..group_in {
-                            let ic = (oc / group_out) * group_in + local;
-                            for ky in 0..g.kernel_h {
-                                for kx in 0..g.kernel_w {
-                                    let (Some(ih), Some(iw)) = (
-                                        read_at(
-                                            oh,
-                                            ky,
-                                            g.stride.0,
-                                            g.padding.0,
-                                            g.dilation.0,
-                                            g.input_height,
-                                        ),
-                                        read_at(
-                                            ow,
-                                            kx,
-                                            g.stride.1,
-                                            g.padding.1,
-                                            g.dilation.1,
-                                            g.input_width,
-                                        ),
-                                    ) else {
-                                        continue;
-                                    };
-                                    let output = ((n * g.out_channels + oc) * g.output_height + oh)
-                                        * g.output_width
-                                        + ow;
-                                    let input = ((n * g.in_channels + ic) * g.input_height + ih)
-                                        * g.input_width
-                                        + iw;
-                                    let tap = ((oc * group_in + local) * g.kernel_h + ky)
-                                        * g.kernel_w
-                                        + kx;
-                                    all.push((output, input, tap));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        all
     }
 
     /// Each of `count` sums of the products `pairs` files under it, plus
