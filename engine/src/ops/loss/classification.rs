@@ -6,7 +6,7 @@
 
 use crate::ops::arithmetic::mul;
 use crate::ops::map::{
-    VECTOR_F32_PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks, unary_map,
+    VECTOR_F32_PAR_THRESHOLD, outputs_per_task, par_out_chunks, unary_map,
     unary_map_blocks_threshold,
 };
 use crate::ops::util::NegLogSigmoid;
@@ -258,67 +258,6 @@ pub(crate) fn compute_bce_with_logits_elementwise(
         logits.dtype(),
         logits.device(),
         false,
-    ))
-}
-
-pub(crate) fn compute_huber_elementwise(
-    abs_diff: &Tensor,
-    diff: &Tensor,
-    delta: f64,
-) -> Result<Tensor> {
-    let output_data = match abs_diff.dtype() {
-        DataType::Float32 => {
-            let abs_data = abs_diff.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from abs_diff")
-            })?;
-            let diff_data = diff.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from diff")
-            })?;
-            let delta_f32 = delta as f32;
-            TensorData::from_vec::<f32>(
-                binary_map(abs_data, diff_data, |abs_val: f32, d: f32| {
-                    if abs_val <= delta_f32 {
-                        0.5 * d * d
-                    } else {
-                        delta_f32 * (abs_val - 0.5 * delta_f32)
-                    }
-                }),
-                DataType::Float32,
-                abs_diff.device(),
-            )
-        }
-        DataType::Float64 => {
-            let abs_data = abs_diff.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from abs_diff")
-            })?;
-            let diff_data = diff.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from diff")
-            })?;
-            TensorData::from_vec::<f64>(
-                binary_map(abs_data, diff_data, |abs_val: f64, d: f64| {
-                    if abs_val <= delta {
-                        0.5 * d * d
-                    } else {
-                        delta * (abs_val - 0.5 * delta)
-                    }
-                }),
-                DataType::Float64,
-                abs_diff.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Huber loss only supported for floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        abs_diff.shape().clone(),
-        abs_diff.dtype(),
-        abs_diff.device(),
-        abs_diff.requires_grad(),
     ))
 }
 

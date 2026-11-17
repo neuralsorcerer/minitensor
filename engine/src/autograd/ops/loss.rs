@@ -128,6 +128,9 @@ pub struct HuberLossBackward {
     /// almost never do, so their gradient chain is skipped entirely.
     pub input_requires_grad: [bool; 2],
     pub delta: f64,
+    /// What the loss's terms are over: one for Huber, and `beta` for
+    /// smooth-L1, whose gradient is Huber's over it.
+    pub divisor: f64,
     pub reduction: String,
     pub diff: Tensor,
 }
@@ -189,6 +192,10 @@ impl GradientFunction for HuberLossBackward {
             false,
         );
 
+        if self.divisor != 1.0 {
+            let divisor = create_scalar_tensor(self.divisor, dtype, device)?;
+            base_grad = arithmetic::div(&base_grad, &divisor)?;
+        }
         if self.reduction == "mean" {
             let scale = create_scalar_tensor(1.0 / numel as f64, dtype, device)?;
             base_grad = arithmetic::mul(&base_grad, &scale)?;

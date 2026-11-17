@@ -17,7 +17,7 @@ use crate::{
     ops::util::create_scalar_tensor,
     ops::{
         activation::{abs as activation_abs, exp, log_softmax, log1p},
-        arithmetic::{add, div as divide, mul, sub},
+        arithmetic::{add, mul, sub},
         reduction::{mean, sum},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -953,6 +953,9 @@ pub fn focal_loss(
 /// - For |x| <= delta: 0.5 * x²
 /// - For |x| > delta: delta * (|x| - 0.5 * delta)
 ///
+/// Each term is the float nearest its exact value for the exact difference,
+/// and so are the sum and the mean; `delta` is read at the operands' width.
+///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
 /// * `targets` - Ground truth targets tensor
@@ -967,56 +970,8 @@ pub fn huber_loss(
     delta: f64,
     reduction: &str,
 ) -> Result<Tensor> {
-    // Validate inputs
-    let (predictions, targets) = difference_operands(predictions, targets)?;
-    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
-
     check_huber_delta(delta)?;
-
-    // The forward is computed on detached data (the exact gradient is provided
-    // by HuberLossBackward from the stored diff), so gate on the inputs and
-    // enable grad on the loss explicitly.
-    let needs_grad = manual_backward_needed(&[predictions, targets]);
-
-    let (loss, diff_for_grad) = {
-        let _guard = NoGradGuard::new();
-
-        // Compute absolute differences: |predictions - targets|
-        let diff = sub(predictions, targets)?;
-        let diff_for_grad = diff.clone().detach();
-        let abs_diff = activation_abs(&diff.detach())?;
-
-        // Compute Huber loss element-wise. The threshold stays an `f64` and is
-        // cast once per dtype inside; it used to also be materialised as a
-        // scalar tensor and handed over unread, which cost an allocation per
-        // call and made the comparison look elementwise when it is not.
-        let huber_values = compute_huber_elementwise(&abs_diff, &diff, delta)?;
-
-        // Apply reduction
-        let n = huber_values.numel() as f64;
-        let loss = reduce_detached(huber_values, reduction, n, None)?;
-        (loss, diff_for_grad)
-    };
-
-    // Set up gradient function if needed
-    if needs_grad {
-        let grad_fn = Arc::new(HuberLossBackward {
-            predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets.shape().dims().to_vec(),
-            input_ids: [predictions.id(), targets.id()],
-            input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
-            delta,
-            reduction: reduction.to_string(),
-            diff: diff_for_grad,
-        });
-
-        let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
-
-        Ok(loss_with_grad)
-    } else {
-        Ok(loss)
-    }
+    huber_shaped(predictions, targets, (delta, false), reduction)
 }
 
 /// Smooth L1 loss.
@@ -1024,10 +979,9 @@ pub fn huber_loss(
 /// `SmoothL1(x) = 0.5 * x² / beta` for `|x| < beta`, else `|x| - 0.5 * beta`.
 ///
 /// Related to [`huber_loss`] by `huber(x, delta) == delta * smooth_l1(x, beta =
-/// delta)`; the two coincide only at `1.0`, which is why this could previously
-/// be a bare call to `huber_loss(.., 1.0, ..)`. The scaling goes through a
-/// differentiable division so the gradient picks up the `1 / beta` factor
-/// rather than being huber's.
+/// delta)`; the two coincide only at `1.0`. Each term is the float nearest
+/// its exact value -- the Huber term over `beta` without a rounding between
+/// -- and so are the sum and the mean.
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
@@ -1044,17 +998,57 @@ pub fn smooth_l1_loss(
     check_smooth_l1_beta(beta)?;
     // The quadratic region shrinks to nothing as `beta` goes to zero and the
     // loss becomes `|x - y|` exactly: the limit, taken directly rather than
-    // dividing by zero.
-    if beta == 0.0 {
+    // dividing by zero -- as it is for a `beta` the operands' width holds
+    // only as a zero.
+    let common = crate::ops::binary::promote_division_dtype(predictions.dtype(), targets.dtype());
+    let narrow = common == DataType::Float32 && beta as f32 == 0.0;
+    if beta == 0.0 || narrow {
         return mae_loss(predictions, targets, reduction);
     }
+    huber_shaped(predictions, targets, (beta, true), reduction)
+}
 
-    let loss = huber_loss(predictions, targets, beta, reduction)?;
-    if beta == 1.0 {
+/// A Huber-shaped loss: each term the Huber term with `delta`, over `delta`
+/// where `smooth`, the float nearest its exact value, as are their sum and
+/// mean. The gradient comes from the rounded difference, clamped to `delta`.
+fn huber_shaped(
+    predictions: &Tensor,
+    targets: &Tensor,
+    (delta, smooth): (f64, bool),
+    reduction: &str,
+) -> Result<Tensor> {
+    let (predictions, targets) = difference_operands(predictions, targets)?;
+    let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
+
+    // The forward is computed on detached data, and the gradient provided by
+    // HuberLossBackward from the stored difference; see
+    // [`manual_backward_needed`].
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
+    let (loss, diff_for_grad) = {
+        let _guard = NoGradGuard::new();
+        let loss = huber_values(predictions, targets, (delta, smooth), reduction)?;
+        let diff = if needs_grad {
+            Some(sub(predictions, targets)?.detach())
+        } else {
+            None
+        };
+        (loss, diff)
+    };
+
+    let Some(diff) = diff_for_grad else {
         return Ok(loss);
-    }
-    let scale = create_scalar_tensor(beta, loss.dtype(), loss.device())?;
-    divide(&loss, &scale)
+    };
+    let grad_fn = Arc::new(HuberLossBackward {
+        predictions_shape: predictions.shape().dims().to_vec(),
+        targets_shape: targets.shape().dims().to_vec(),
+        input_ids: [predictions.id(), targets.id()],
+        input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
+        delta,
+        divisor: if smooth { delta } else { 1.0 },
+        reduction: reduction.to_string(),
+        diff,
+    });
+    with_grad_fn(loss.requires_grad_(true), grad_fn)
 }
 
 /// Log-cosh loss for robust regression
@@ -1179,6 +1173,74 @@ fn squared_differences(predictions: &Tensor, targets: &Tensor) -> Result<Tensor>
     Ok(Tensor::new(
         Arc::new(data),
         p.shape().clone(),
+        p.dtype(),
+        p.device(),
+        false,
+    ))
+}
+
+/// The terms of a Huber-shaped loss of `predictions - targets`, with
+/// `delta` read at the predictions' width, for `"none"`, or their sum or
+/// mean as a 0-d tensor: each the float nearest its exact value; see
+/// `arithmetic::exact_sum::huber_terms`. An integer target is taken exactly,
+/// as by [`exact_difference_loss`].
+fn huber_values(
+    predictions: &Tensor,
+    targets: &Tensor,
+    (delta, smooth): (f64, bool),
+    reduction: &str,
+) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_sum::Output;
+    use crate::ops::arithmetic::exact_sum::{Huber, huber_terms, huber_total};
+    /// The terms, or their total over the count a reduction divides by.
+    fn values<T: Output>(
+        (x, y, lows): (&[f64], &[f64], Option<&[f64]>),
+        huber: Huber,
+        reduction: &str,
+    ) -> Vec<T> {
+        match reduction {
+            "none" => huber_terms(x, y, lows, huber),
+            "mean" => vec![huber_total(x, y, lows, huber, x.len())],
+            _ => vec![huber_total(x, y, lows, huber, 1)],
+        }
+    }
+    if !matches!(reduction, "none" | "mean" | "sum") {
+        return Err(invalid_reduction(reduction, false));
+    }
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let missing = || MinitensorError::internal_error("loss: a typed slice");
+    let x: Cow<'_, [f64]> = match p.dtype() {
+        DataType::Float64 => Cow::Borrowed(p.data().as_f64_slice().ok_or_else(missing)?),
+        _ => Cow::Owned(widened(&p)?),
+    };
+    let (y, lows): (Cow<'_, [f64]>, Option<Vec<f64>>) = match t.dtype() {
+        DataType::Float64 => (
+            Cow::Borrowed(t.data().as_f64_slice().ok_or_else(missing)?),
+            None,
+        ),
+        DataType::Float32 => (Cow::Owned(widened(&t)?), None),
+        _ => {
+            let (highs, lows) = integer_parts(&t)?;
+            (Cow::Owned(highs), lows)
+        }
+    };
+    let operands = (&x[..], &y[..], lows.as_deref());
+    let data = if p.dtype() == DataType::Float32 {
+        let delta = f64::from(delta as f32);
+        let terms = values::<f32>(operands, Huber { delta, smooth }, reduction);
+        TensorData::from_vec(terms, p.dtype(), p.device())
+    } else {
+        let terms = values::<f64>(operands, Huber { delta, smooth }, reduction);
+        TensorData::from_vec(terms, p.dtype(), p.device())
+    };
+    let shape = if reduction == "none" {
+        p.shape().clone()
+    } else {
+        Shape::scalar()
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
         p.dtype(),
         p.device(),
         false,

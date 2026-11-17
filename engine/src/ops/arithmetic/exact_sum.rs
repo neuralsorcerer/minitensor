@@ -41,6 +41,10 @@ use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 mod covariance;
 pub(crate) use self::covariance::{Refusal, Sample, covariances};
 
+#[path = "exact_huber.rs"]
+mod huber;
+pub(crate) use self::huber::{Huber, huber_terms, huber_total};
+
 #[path = "exact_pool.rs"]
 mod pool;
 pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotient};
