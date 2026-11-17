@@ -15,6 +15,10 @@ Each formed its terms from pieces that cancel exactly where a model does well:
   rounding;
 * `log_cosh_loss` took `|d| + log1p(exp(-2|d|)) - log 2`, a number near
   `log 2` less `log 2` for a small difference, tens of thousands of ulps out.
+  Its first repair, `log1p(u^2 / (2 (1 + u)))` for `u = expm1(|d|)`, doubled
+  the error of `expm1` and rounded four times more: up to four ulps, more
+  where `expm1` is coarser. `cosh(d) - 1` is now a series with its leading
+  term exact, and every piece's rounding is carried to one at the end.
 
 Each term is now formed without cancelling, in float64, and a float32 one is
 narrowed once.
@@ -131,7 +135,28 @@ def test_log_cosh_of_a_small_difference(dtype):
     with localcontext() as context:
         context.prec = 80
         want = [_nearest(_log_cosh(float(a), float(b)), dtype) for a, b in zip(p, t)]
-    _check(got, want, dtype, 3)
+    _check(got, want, dtype, 2)
+
+
+def test_log_cosh_on_either_side_of_one():
+    # Where the two forms meet, and the stretch below it that rounded most.
+    rng = np.random.default_rng(1193)
+    d = rng.choice([-1.0, 1.0], 600) * np.concatenate(
+        [
+            rng.uniform(0.05, 1.0, 300),
+            rng.uniform(1.0, 3.0, 200),
+            1 + rng.uniform(-1e-9, 1e-9, 100),
+        ]
+    )
+    p = rng.standard_normal(600)
+    t = p - d
+    got = F.log_cosh_loss(mt.Tensor(p), mt.Tensor(t), reduction="none").tolist()
+    with localcontext() as context:
+        context.prec = 80
+        want = [
+            _nearest(_log_cosh(float(a), float(b)), "float64") for a, b in zip(p, t)
+        ]
+    _check(got, want, "float64", 2)
 
 
 def test_log_cosh_ends_and_reductions():

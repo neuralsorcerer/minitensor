@@ -1151,26 +1151,59 @@ pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) ->
     with_grad_fn(loss.requires_grad_(true), grad_fn)
 }
 
-/// `log(cosh(d))` for the difference `d = head + tail`, a two-sum's pair.
+/// `log(cosh(d))` for the difference `d = head + tail`, a two-sum's pair,
+/// with each piece's rounding carried to one at the end.
 ///
-/// Below `|d| = 20` it is the logarithm of one plus `cosh(d) - 1`, taken as
-/// `u^2 / (2 (1 + u))` for `u = expm1(|d|)`, which cancels nothing; above,
-/// `|d| - log 2 + log1p(exp(-2|d|))`, where `|d|` is far the larger. The
-/// tail moves the value by the slope, `tanh(d)`, times itself.
+/// Below `|d| = 1` it is `log1p(c)` for `c = cosh(d) - 1`, which cancels
+/// nothing: `c` is the series `d^2/2 + d^4/24 + ...` as a pair, its leading
+/// term formed exactly, and the pair's tail moves the logarithm of its head
+/// by the slope, `1 / (1 + c)`. From `1` up it is `|d| - log 2` -- exact, as
+/// a pair against `log 2` in two parts -- plus `log1p(exp(-2|d|))`, at most a
+/// third of it. The tail of `d` moves the value by `tanh(d)` times itself.
+///
+/// It took `log1p(u^2 / (2 (1 + u)))` for `u = expm1(|d|)` below 20, which
+/// doubles the error of `expm1` in `u^2` and rounds four times besides: up to
+/// four ulps, more with a coarser `expm1`.
 fn log_cosh_term(head: f64, tail: f64) -> f64 {
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
+    /// `log 2` less the float64 nearest it.
+    const LN_2_LOW: f64 = 2.319_046_813_846_299_6e-17;
+    /// `1 / (2k)!` for `k` from 2 to 9: the series of `cosh(d) - 1 - d^2/2`
+    /// in `s = d^2`, to the term below `2^-53` of the whole at `|d| = 1`.
+    const SERIES: [f64; 8] = [
+        1.0 / 24.0,
+        1.0 / 720.0,
+        1.0 / 40_320.0,
+        1.0 / 3_628_800.0,
+        1.0 / 479_001_600.0,
+        1.0 / 87_178_291_200.0,
+        1.0 / 20_922_789_888_000.0,
+        1.0 / 6_402_373_705_728_000.0,
+    ];
+
     if !head.is_finite() {
         // NaN stays NaN; an infinite difference, or one past the largest
         // float, has an infinite loss.
         return head.abs();
     }
+    let slope = head.tanh() * tail;
     let magnitude = head.abs();
-    let value = if magnitude < 20.0 {
-        let u = magnitude.exp_m1();
-        (u * u / (2.0 * (1.0 + u))).ln_1p()
-    } else {
-        (magnitude - std::f64::consts::LN_2) + (-2.0 * magnitude).exp().ln_1p()
-    };
-    value + head.tanh() * tail
+    if magnitude >= 1.0 {
+        let (excess, excess_low) = two_sum(magnitude, -std::f64::consts::LN_2);
+        let rest = (-2.0 * magnitude).exp().ln_1p();
+        return excess + (((excess_low - LN_2_LOW) + rest) + slope);
+    }
+    let half = 0.5 * magnitude;
+    let leading = magnitude * half;
+    if leading < 1e-290 {
+        // `d^2/2` rounded once, and nothing past it within reach of the
+        // float: the series' next term is `d^2/12` of this one.
+        return leading + slope;
+    }
+    let s = magnitude * magnitude;
+    let series = SERIES.iter().rev().fold(0.0, |acc, &c| acc * s + c) * s * s;
+    let (c, c_low) = two_sum(leading, product_error(magnitude, half, leading) + series);
+    c.ln_1p() + (c_low / (1.0 + c) + slope)
 }
 
 // Helper functions
