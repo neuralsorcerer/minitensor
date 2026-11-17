@@ -259,6 +259,34 @@ fn point<T: Element + Output, const FMA: bool>(
     }
 }
 
+/// [`ratio_of_products`], the stencils' slow path, one copy for each build
+/// rather than one at every stencil: the build with fused multiply-adds
+/// compiled with them.
+#[inline(always)]
+fn ratio<T: Output, const FMA: bool>(numerator: &[Product], denominator: &[Product]) -> T {
+    #[cfg(target_arch = "x86_64")]
+    if FMA {
+        // SAFETY: a build with fused multiply-adds runs only where fma was
+        // detected, in `rows_fused`.
+        return unsafe { ratio_fused(numerator, denominator) };
+    }
+    ratio_plain(numerator, denominator)
+}
+
+/// [`ratio`] without fused multiply-adds.
+#[inline(never)]
+fn ratio_plain<T: Output>(numerator: &[Product], denominator: &[Product]) -> T {
+    ratio_of_products::<T, false>(numerator, denominator)
+}
+
+/// [`ratio`] compiled with fused multiply-adds.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+#[inline(never)]
+fn ratio_fused<T: Output>(numerator: &[Product], denominator: &[Product]) -> T {
+    ratio_of_products::<T, true>(numerator, denominator)
+}
+
 /// A float as a pair.
 fn single(value: f64) -> (f64, f64) {
     (value, 0.0)
@@ -276,7 +304,7 @@ fn even_difference<T: Output, const FMA: bool>(ahead: f64, behind: f64, divisor:
         return T::narrow((ahead - behind) / divisor);
     }
     difference_over::<T, FMA>(ahead, behind, divisor).unwrap_or_else(|| {
-        ratio_of_products::<T, FMA>(
+        ratio::<T, FMA>(
             &[Product::new(
                 [gap(ahead, behind), single(1.0), single(1.0)],
                 false,
@@ -304,7 +332,7 @@ fn even_edge<T: Output, const FMA: bool>(f: [f64; 3], h: f64, last: bool) -> T {
             negative ^ last,
         )
     };
-    ratio_of_products::<T, FMA>(
+    ratio::<T, FMA>(
         &[
             term(f[0], 3.0, true),
             term(f[1], 4.0, false),
@@ -320,7 +348,7 @@ fn uneven_slope<T: Output, const FMA: bool>(f: [f64; 2], x: [f64; 2]) -> T {
     if !(f.iter().chain(&x).all(|value| value.is_finite())) {
         return T::narrow((f[1] - f[0]) / (x[1] - x[0]));
     }
-    ratio_of_products::<T, FMA>(
+    ratio::<T, FMA>(
         &[Product::new(
             [gap(f[1], f[0]), single(1.0), single(1.0)],
             false,
@@ -349,7 +377,7 @@ fn uneven_inside<T: Output, const FMA: bool>(f: [f64; 3], x: [f64; 3]) -> T {
         return even_difference::<T, FMA>(f[2], f[0], 2.0 * step);
     }
     let (behind, ahead, span) = (gap(x[1], x[0]), gap(x[2], x[1]), gap(x[2], x[0]));
-    ratio_of_products::<T, FMA>(
+    ratio::<T, FMA>(
         &[
             Product::new([behind, behind, gap(f[2], f[1])], false),
             Product::new([ahead, ahead, gap(f[1], f[0])], false),
@@ -386,7 +414,7 @@ fn uneven_first<T: Output, const FMA: bool>(f: [f64; 3], x: [f64; 3]) -> T {
     }
     let (first, second, total) = (gap(x[1], x[0]), gap(x[2], x[1]), gap(x[2], x[0]));
     let (f0, f1, f2) = (single(f[0]), single(f[1]), single(f[2]));
-    ratio_of_products::<T, FMA>(
+    ratio::<T, FMA>(
         &[
             Product::new([total, total, f1], false),
             Product::new([first, second, f0], true),
@@ -417,7 +445,7 @@ fn uneven_last<T: Output, const FMA: bool>(f: [f64; 3], x: [f64; 3]) -> T {
     }
     let (first, second, total) = (gap(x[1], x[0]), gap(x[2], x[1]), gap(x[2], x[0]));
     let (f0, f1, f2) = (single(f[0]), single(f[1]), single(f[2]));
-    ratio_of_products::<T, FMA>(
+    ratio::<T, FMA>(
         &[
             Product::new([second, second, f0], false),
             Product::new([total, total, f1], true),
