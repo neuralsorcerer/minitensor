@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 pub mod activation;
+pub mod affine_grid;
 pub mod arithmetic;
 pub mod attention;
 mod batch_norm;

@@ -46,6 +46,7 @@ from ._shape import (
     _normalize_axis,
     broadcast_to,
 )
+from .autograd import Function as _Function
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -1097,6 +1098,21 @@ def lp_pool2d(
     )
 
 
+class _AffineGrid(_Function):
+    """The grid of each affine map, each entry rounded once, with its gradient
+    in the maps, each entry rounded once too."""
+
+    @staticmethod
+    def forward(ctx, matrix, spatial, align_corners):
+        ctx.spatial, ctx.align_corners = spatial, align_corners
+        return _F._affine_grid(matrix, spatial, align_corners)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad = _F._affine_grid_backward(grad_output, ctx.spatial, ctx.align_corners)
+        return grad, None, None
+
+
 def affine_grid(theta: object, size: object, align_corners: bool = False) -> Tensor:
     """The sampling grid an affine transform describes, for `grid_sample`.
 
@@ -1106,14 +1122,15 @@ def affine_grid(theta: object, size: object, align_corners: bool = False) -> Ten
     spatial transformer, and the gradient reaches `theta`, which is what lets
     the transform be learned rather than specified.
 
-    The base grid -- the normalised coordinate of every output position --
-    depends only on the output size, so NumPy builds it, per "Where an
-    operation belongs" in `docs/development.md`. `align_corners` decides
-    whether -1 and 1 name the outer sample centres or the edges of the volume,
-    and it must match what `grid_sample` is then given.
+    A coordinate along an axis of `L` samples is `(2i + 1 - L) / L`, each
+    sample at the centre of its own cell, or with `align_corners`
+    `(2i + 1 - L) / (L - 1)`, the ends exactly -1 and 1. `align_corners` must
+    match what `grid_sample` is then given. Each entry of the grid is the float
+    nearest `theta` applied to the exact coordinates, and so is each entry of
+    the gradient in `theta`; an integer `theta` widens as `normalize`'s does.
     """
 
-    matrix = _atleast_tensor(theta)
+    matrix = _require_float(_atleast_tensor(theta), "affine_grid")
     if matrix.ndim() != 3:
         raise ValueError(
             f"affine_grid expects a batch of matrices, got {matrix.ndim()} dimensions"
@@ -1132,25 +1149,7 @@ def affine_grid(theta: object, size: object, align_corners: bool = False) -> Ten
         )
     if any(value < 1 for value in sizes):
         raise ValueError(f"affine_grid requires positive sizes, got {sizes}")
-
-    # One axis at a time: with the corners aligned the ends are exactly -1 and
-    # 1, and without them each sample sits at the centre of its own cell.
-    # Either way a coordinate is a whole number over the length, divided once:
-    # `(2i + 1) / L - 1` rounded the quotient and then the difference.
-    def _coordinates(length: int) -> "_np.ndarray":
-        steps = 2.0 * _np.arange(length)
-        if align_corners:
-            return (steps - (length - 1)) / (length - 1) if length > 1 else _np.zeros(1)
-        return (steps + (1 - length)) / length
-
-    # `grid_sample` reads coordinates in `x, y (, z)` order, which is the
-    # reverse of the axes they index, so the spatial sizes are reversed here.
-    axes = _np.meshgrid(*[_coordinates(length) for length in spatial], indexing="ij")
-    base = _np.stack([*reversed(axes), _np.ones(spatial)], axis=-1)
-
-    homogeneous = _constant_like(base.reshape(1, -1, rank + 1), matrix)
-    mapped = _F.matmul(homogeneous, _F.transpose(matrix, -1, -2))
-    return mapped.reshape([sizes[0], *spatial, rank])
+    return _AffineGrid.apply(matrix, spatial, bool(align_corners))
 
 
 # --- normalizing over something other than the batch ------------------------

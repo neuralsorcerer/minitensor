@@ -174,9 +174,6 @@ def _f32(shape, fill=None):
 _MIXES_NUMPY_WITH_TENSORS = {
     "unfold": lambda: mt.functional.unfold(_f32((1, 2, 5, 5)), 2, padding=1),
     "fold": lambda: mt.functional.fold(_f32((1, 8, 36)), (5, 5), 2, padding=1),
-    "affine_grid": lambda: mt.functional.affine_grid(
-        _f32((1, 2, 3), fill=1.0), (1, 1, 3, 3)
-    ),
     "embedding": lambda: mt.functional.embedding(
         mt.Tensor.from_numpy(np.array([0, 1], dtype=np.int64)), _f32((4, 3)), 0
     ),

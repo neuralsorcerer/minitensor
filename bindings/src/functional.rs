@@ -870,6 +870,37 @@ pub fn normalized_rounded(
         .map_err(_convert_error)
 }
 
+/// The sampling grid of a batch of affine maps over an output of the
+/// spatial sizes `size`, each entry the float nearest its exact value.
+/// Behind `affine_grid`, which differentiates.
+#[pyfunction]
+#[pyo3(name = "_affine_grid", signature = (theta, size, align_corners))]
+pub fn affine_grid_rounded(
+    theta: &Bound<PyAny>,
+    size: Vec<usize>,
+    align_corners: bool,
+) -> PyResult<PyTensor> {
+    let theta = borrow_tensor(theta)?;
+    engine::ops::affine_grid::affine_grid(theta.tensor(), &size, align_corners)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+/// The gradient of `_affine_grid` in its maps, from `grad`, each entry the
+/// float nearest its exact value.
+#[pyfunction]
+#[pyo3(name = "_affine_grid_backward", signature = (grad, size, align_corners))]
+pub fn affine_grid_backward_rounded(
+    grad: &Bound<PyAny>,
+    size: Vec<usize>,
+    align_corners: bool,
+) -> PyResult<PyTensor> {
+    let grad = borrow_tensor(grad)?;
+    engine::ops::affine_grid::affine_grid_backward(grad.tensor(), &size, align_corners)
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
 /// The covariance matrix of the rows of `input`, or with `correlation` their correlation matrix.
 ///
 /// Each entry is the float nearest the exact one; `fweights` and `aweights`
@@ -2497,6 +2528,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(affine_grid_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(affine_grid_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(covariance_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
