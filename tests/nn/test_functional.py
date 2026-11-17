@@ -1545,11 +1545,14 @@ def test_binary_cross_entropy_matches_its_definition(dtype, reduction):
     predictions[:3] = [0.0, 1.0, np.nan]
     targets[:3] = [1.0, 0.0, 1.0]
 
+    # In float64, and `log(1 - p)` as `log1p(-p)`: `1 - p` rounded first
+    # takes most of the digits of a small prediction's loss.
+    wide_p, wide_t = predictions.astype(np.float64), targets.astype(np.float64)
     with np.errstate(divide="ignore", invalid="ignore"):
-        log_p = np.maximum(np.log(predictions), -100.0)
-        log_q = np.maximum(np.log(1.0 - predictions), -100.0)
+        log_p = np.maximum(np.log(wide_p), -100.0)
+        log_q = np.maximum(np.log1p(-wide_p), -100.0)
     log_p[2] = log_q[2] = np.nan
-    want = 0.0 - (targets * log_p + (1.0 - targets) * log_q)
+    want = 0.0 - (wide_t * log_p + (1.0 - wide_t) * log_q)
 
     got = F.binary_cross_entropy(
         mt.from_numpy(predictions), mt.from_numpy(targets), reduction=reduction

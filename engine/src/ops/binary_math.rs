@@ -360,23 +360,30 @@ float_pair!(
 
 // --- xlogy -----------------------------------------------------------------
 
-float_kernel!(
-    /// `x * log(y)`, defined as `0` wherever `x` is zero.
-    ///
-    /// That is the limit the entropy and cross-entropy formulas need: the
-    /// plain product gives `0 * -inf = NaN` at `x = 0, y = 0`, which is the
-    /// case those formulas hit most. A NaN `y` still poisons the result, since
-    /// then there is no limit to take.
-    xlogy_f32,
-    xlogy_f64,
-    |x, y| {
-        if x == 0.0 && !y.is_nan() {
-            0.0
-        } else {
-            x * y.ln()
-        }
+/// `x * log(y)`, defined as `0` wherever `x` is zero.
+///
+/// That is the limit the entropy and cross-entropy formulas need: the plain
+/// product gives `0 * -inf = NaN` at `x = 0, y = 0`, which is the case those
+/// formulas hit most. A NaN `y` still poisons the result, since then there is
+/// no limit to take.
+///
+/// A float32 pair is taken in float64 and narrowed once: the logarithm
+/// rounded to float32 and then the product rounded again, and a third of the
+/// answers were an ulp out.
+#[inline(always)]
+fn xlogy_f32(x: f32, y: f32) -> f32 {
+    xlogy_f64(f64::from(x), f64::from(y)) as f32
+}
+
+#[doc = "See [`xlogy_f32`]."]
+#[inline(always)]
+fn xlogy_f64(x: f64, y: f64) -> f64 {
+    if x == 0.0 && !y.is_nan() {
+        0.0
+    } else {
+        x * y.ln()
     }
-);
+}
 float_pair!(
     /// `d/dx (x log y) = log y`.
     XLOGY_D_X,

@@ -11,13 +11,13 @@ use std::borrow::Cow;
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
-        HuberLossBackward, KLDivLossBackward, MAELossBackward, MSELossBackward, NoGradGuard,
+        HuberLossBackward, KLDivLossBackward, LogCoshLossBackward, MAELossBackward,
+        MSELossBackward, NoGradGuard,
     },
     error::{MinitensorError, Result},
-    ops::util::create_scalar_tensor,
     ops::{
-        activation::{abs as activation_abs, exp, log_softmax, log1p},
-        arithmetic::{add, mul, sub},
+        activation::{abs as activation_abs, exp, log_softmax},
+        arithmetic::sub,
         reduction::{mean, sum},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -550,13 +550,17 @@ pub fn binary_cross_entropy_loss(
     let loss = {
         let _guard = NoGradGuard::new();
 
-        // BCE: -[targets * log(predictions) + (1 - targets) * log(1 - predictions)].
-        // The logs are clamped to >= -100 so a saturated prediction (exactly
-        // 0 or 1) yields a finite loss instead of +inf.
-        let one = create_scalar_tensor(1.0, predictions.dtype(), predictions.device())?;
-        let log_predictions = log_tensor(predictions)?;
-        let log_one_minus_predictions = log_tensor(&sub(&one, predictions)?)?;
-        let negative_bce = bce_terms(targets, &log_predictions, &log_one_minus_predictions)?;
+        // BCE: -[targets * log(predictions) + (1 - targets) * log(1 - predictions)],
+        // in float64 and narrowed once. The logs are clamped to >= -100 so a
+        // saturated prediction (exactly 0 or 1) yields a finite loss instead
+        // of +inf, and `log(1 - p)` is `log1p(-p)`: `1 - p` rounded first,
+        // and for a small prediction against a target of 0 -- a loss near
+        // `p` -- the rounding was most of the answer.
+        let negative_bce = wide_terms(predictions, targets, |p, t| {
+            let floor = |log: f64| if log < -100.0 { -100.0 } else { log };
+            let (log_p, log_q) = (floor(p.ln()), floor((-p).ln_1p()));
+            0.0 - (t * log_p + (1.0 - t) * log_q)
+        })?;
 
         // Apply reduction
         let n = negative_bce.numel() as f64;
@@ -639,15 +643,43 @@ macro_rules! float_ternary {
     }};
 }
 
-/// Binary cross entropy's elementwise terms from its two logarithms. The
-/// clamp is a comparison, not `max`, so a NaN still propagates as `clip`
-/// propagated it.
-fn bce_terms(targets: &Tensor, log_p: &Tensor, log_q: &Tensor) -> Result<Tensor> {
-    Ok(float_ternary!(targets, log_p, log_q, |y, lp, lq| {
-        let lp = if lp < -100.0 { -100.0 } else { lp };
-        let lq = if lq < -100.0 { -100.0 } else { lq };
-        0.0 - (y * lp + (1.0 - y) * lq)
-    }))
+/// A loss's elementwise terms: `term(a, b)` of each pair of `a` and `b`, one
+/// float dtype and shape, taken in float64 and narrowed once to that dtype.
+fn wide_terms(
+    a: &Tensor,
+    b: &Tensor,
+    term: impl Fn(f64, f64) -> f64 + Send + Sync,
+) -> Result<Tensor> {
+    let (a, b) = (a.contiguous()?, b.contiguous()?);
+    let missing = || MinitensorError::internal_error("loss operands are not the loss's dtype");
+    let data = match a.dtype() {
+        DataType::Float32 => {
+            let x = a.data().as_f32_slice().ok_or_else(missing)?;
+            let y = b.data().as_f32_slice().ok_or_else(missing)?;
+            let values = crate::ops::map::binary_map(x, y, |x: f32, y: f32| {
+                term(f64::from(x), f64::from(y)) as f32
+            });
+            TensorData::from_vec(values, DataType::Float32, a.device())
+        }
+        DataType::Float64 => {
+            let x = a.data().as_f64_slice().ok_or_else(missing)?;
+            let y = b.data().as_f64_slice().ok_or_else(missing)?;
+            let values = crate::ops::map::binary_map(x, y, &term);
+            TensorData::from_vec(values, DataType::Float64, a.device())
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "this loss needs floating-point inputs, got {other:?}"
+            )));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        a.shape().clone(),
+        a.dtype(),
+        a.device(),
+        false,
+    ))
 }
 
 /// Binary cross entropy computed directly from logits.
@@ -755,6 +787,32 @@ pub(crate) fn kl_div_batch_size(predictions: &Tensor) -> f64 {
     }
 }
 
+/// `t log(t / p)`, a term of `kl_div` for a target `t` and a prediction `p`,
+/// neither negative; zero where the target is.
+///
+/// The logarithm of the ratio, not the difference of two: where the two are
+/// near each other, as a good prediction's are, `log t - log p` cancelled
+/// down to the roundings of the two logarithms, and terms were tens of ulps
+/// out. Within a factor of two of each other the difference `t - p` is exact
+/// and the term is `log1p((t - p) / p)`; further apart it is the logarithm of
+/// the rounded ratio, which is at least `log 2` and so keeps the ratio's
+/// relative error; and where the ratio leaves the normal floats, the
+/// logarithms are far enough apart for their difference.
+fn kl_term(t: f64, p: f64) -> f64 {
+    if t == 0.0 {
+        return 0.0;
+    }
+    let ratio = t / p;
+    let log_ratio = if (0.5..=2.0).contains(&ratio) {
+        ((t - p) / p).ln_1p()
+    } else if ratio.is_normal() {
+        ratio.ln()
+    } else {
+        t.ln() - p.ln()
+    };
+    t * log_ratio
+}
+
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
     let (predictions, targets) = loss_operands(predictions, targets)?;
@@ -769,23 +827,18 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
     let loss = {
         let _guard = NoGradGuard::new();
 
-        // Compute elementwise targets * (log_tensor(targets) - log_tensor(predictions))
-        let log_targets = log_tensor(targets)?;
-        let log_predictions = log_tensor(predictions)?;
-
+        // Each term `target * log(target / prediction)`, in float64 and
+        // narrowed once; see [`kl_term`].
+        //
         // A zero in the target makes that product `0 * -inf`, which is NaN, and
         // one NaN term takes the whole reduction with it. A zero-probability
         // class is an ordinary thing to ask for -- a one-hot target is nothing
         // but zeros and a one -- so `kl_div` against one returned NaN rather
         // than a loss. The term is defined as zero there, which is also its
-        // limit as the target goes to zero, so the elementwise result is masked
-        // rather than the logarithm being nudged away from the singularity.
-        // Masking the result rather than the log also covers a zero *and* a
-        // zero prediction at the same position, where the log difference is
-        // `-inf - -inf`.
-        let kld = float_ternary!(targets, &log_targets, &log_predictions, |t, lt, lp| {
-            if t == 0.0 { 0.0 } else { t * (lt - lp) }
-        });
+        // limit as the target goes to zero, so the result is taken as zero
+        // rather than the logarithm being nudged away from the singularity --
+        // a zero *and* a zero prediction at the same position included.
+        let kld = wide_terms(targets, predictions, kl_term)?;
 
         // Apply reduction.
         //
@@ -1051,10 +1104,15 @@ fn huber_shaped(
     with_grad_fn(loss.requires_grad_(true), grad_fn)
 }
 
-/// Log-cosh loss for robust regression
+/// Log-cosh loss for robust regression: `log(cosh(p - t))`, each term the
+/// value of the exact difference in float64, narrowed once for float32; see
+/// [`log_cosh_term`]. The gradient, `tanh(p - t)`, comes from
+/// `LogCoshLossBackward`.
 ///
-/// Computes log_tensor(cosh(x)) where x = predictions - targets using a numerically
-/// stable formulation: |x| + log1p(exp(-2|x|)) - log_tensor(2).
+/// It was `|d| + log1p(exp(-2|d|)) - log 2`, which is right where the
+/// difference is large and cancels where it is small: the loss there is near
+/// `d^2 / 2` and came out with the error of a number near `log 2`, tens of
+/// thousands of ulps.
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
@@ -1063,16 +1121,56 @@ fn huber_shaped(
 pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
+    let (loss, diff) = {
+        let _guard = NoGradGuard::new();
+        let diff = sub(predictions, targets)?.detach();
+        // The exact difference as a two-sum's pair where both operands are
+        // floats of one width; an integer target leaves the difference the
+        // float nearest it.
+        let values = if targets.dtype() == predictions.dtype() {
+            wide_terms(predictions, targets, |p, t| {
+                let (head, tail) = crate::ops::arithmetic::rounded_once::two_sum(p, -t);
+                log_cosh_term(head, tail)
+            })?
+        } else {
+            wide_terms(&diff, &diff, |d, _| log_cosh_term(d, 0.0))?
+        };
+        let n = values.numel() as f64;
+        (reduce_detached(values, reduction, n, None)?, diff)
+    };
+    if !needs_grad {
+        return Ok(loss);
+    }
+    let grad_fn = Arc::new(LogCoshLossBackward {
+        input_ids: [predictions.id(), targets.id()],
+        input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
+        reduction: reduction.to_string(),
+        diff,
+    });
+    with_grad_fn(loss.requires_grad_(true), grad_fn)
+}
 
-    let diff = sub(predictions, targets)?;
-    let diff_abs = activation_abs(&diff)?;
-    let neg_two = create_scalar_tensor(-2.0, diff.dtype(), diff.device())?;
-    let exp_term = exp(&mul(&diff_abs, &neg_two)?)?;
-    let log1p_term = log1p(&exp_term)?;
-    let log2 = create_scalar_tensor(std::f64::consts::LN_2, diff.dtype(), diff.device())?;
-    let log_cosh = sub(&add(&diff_abs, &log1p_term)?, &log2)?;
-
-    reduce_loss(log_cosh, reduction)
+/// `log(cosh(d))` for the difference `d = head + tail`, a two-sum's pair.
+///
+/// Below `|d| = 20` it is the logarithm of one plus `cosh(d) - 1`, taken as
+/// `u^2 / (2 (1 + u))` for `u = expm1(|d|)`, which cancels nothing; above,
+/// `|d| - log 2 + log1p(exp(-2|d|))`, where `|d|` is far the larger. The
+/// tail moves the value by the slope, `tanh(d)`, times itself.
+fn log_cosh_term(head: f64, tail: f64) -> f64 {
+    if !head.is_finite() {
+        // NaN stays NaN; an infinite difference, or one past the largest
+        // float, has an infinite loss.
+        return head.abs();
+    }
+    let magnitude = head.abs();
+    let value = if magnitude < 20.0 {
+        let u = magnitude.exp_m1();
+        (u * u / (2.0 * (1.0 + u))).ln_1p()
+    } else {
+        (magnitude - std::f64::consts::LN_2) + (-2.0 * magnitude).exp().ln_1p()
+    };
+    value + head.tanh() * tail
 }
 
 // Helper functions

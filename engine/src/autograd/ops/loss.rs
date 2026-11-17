@@ -217,6 +217,42 @@ impl GradientFunction for HuberLossBackward {
         &self.input_ids
     }
 }
+/// Gradient function for log-cosh loss: `tanh(p - t)` in the predictions
+/// and its negative in the targets, over the count for a mean.
+pub struct LogCoshLossBackward {
+    pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] need a gradient.
+    pub input_requires_grad: [bool; 2],
+    pub reduction: String,
+    /// `p - t`, rounded once.
+    pub diff: Tensor,
+}
+
+impl GradientFunction for LogCoshLossBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let mut base = crate::ops::activation::tanh(&self.diff)?;
+        if self.reduction == "mean" {
+            let count = self.diff.numel().max(1) as f64;
+            let scale = create_scalar_tensor(1.0 / count, base.dtype(), base.device())?;
+            base = arithmetic::mul(&base, &scale)?;
+        }
+        let pred_grad = arithmetic::mul(&base, grad_output)?;
+        if self.input_requires_grad[1] {
+            let target_grad = arithmetic::neg(&pred_grad)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if self.input_requires_grad[0] {
+            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient function for Cross Entropy loss
 pub struct CrossEntropyLossBackward {
     pub predictions_shape: Vec<usize>,

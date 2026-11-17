@@ -5,11 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::ops::arithmetic::mul;
-use crate::ops::map::{
-    VECTOR_F32_PAR_THRESHOLD, outputs_per_task, par_out_chunks, unary_map,
-    unary_map_blocks_threshold,
-};
-use crate::ops::util::NegLogSigmoid;
+use crate::ops::map::{VECTOR_F32_PAR_THRESHOLD, outputs_per_task, par_out_chunks, unary_map};
 use crate::{
     error::{MinitensorError, Result},
     ops::{comparison, selection::masked_fill_scalar},
@@ -163,88 +159,84 @@ pub(crate) fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
     ))
 }
 
-/// Compute Huber loss element-wise
-/// Elementwise binary cross entropy from logits, in the form that stays finite
-/// at every logit magnitude:
+/// Elementwise binary cross entropy from logits, `w` the positive weight
+/// (one without it):
 ///
 /// ```text
-/// loss = (1 - t) * x + (1 + (w - 1) * t) * (log(1 + exp(-|x|)) + max(-x, 0))
+/// loss = (1 - t) x + c softplus(-x),   c = (1 - t) + w t
+///      = k |x| + c log(1 + exp(-|x|)), k = 1 - t for x >= 0, w t below
 /// ```
 ///
-/// The bracketed term is `-log(sigmoid(x))` rewritten so `exp` is only ever
-/// called on a non-positive argument. Written the obvious way instead —
-/// `-t*log(sigmoid(x)) - (1-t)*log(1-sigmoid(x))` — the inner `sigmoid`
-/// saturates to exactly 0 or 1 in f32 by |x| ~= 89 and the logarithm returns
-/// -inf, so the loss has to be clamped and its gradient is lost. Here nothing
-/// ever saturates, so no clamp is needed and the value is exact.
+/// The second form is the same number, and for a target in `[0, 1]` and a
+/// weight not negative its two terms are not negative: nothing cancels. The
+/// first cancelled where the logit is negative and the target near zero --
+/// `(1 - t) x` near `x` against `softplus(-x)` near `-x` -- and at a logit of
+/// -20 against a target of 0 the loss of 2.06e-9 came out with the error of a
+/// number near 20, some 10^9 ulps. `exp` is only ever taken of a number that
+/// is not positive, so nothing overflows, and no sigmoid is formed to
+/// saturate: the obvious `-t log(sigmoid(x)) - (1 - t) log(1 - sigmoid(x))`
+/// reached `log(0)` by `|x| = 89` in float32 and had to be clamped, losing the
+/// gradient.
+///
+/// A float32 loss is taken in float64 and narrowed once, through a
+/// vectorized kernel where there is no weight. At an infinite logit the loss
+/// is `k |x|`, and nothing where `k` is: a target of one against `+inf` is a
+/// perfect prediction.
 pub(crate) fn compute_bce_with_logits_elementwise(
     logits: &Tensor,
     targets: &Tensor,
     pos_weight: Option<&Tensor>,
 ) -> Result<Tensor> {
-    macro_rules! loss_for {
-        ($ty:ty, $slice:ident, $dtype:expr) => {{
-            let x = logits.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from logits")
-            })?;
-            let t = targets.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from targets")
-            })?;
-            let weight = match pos_weight {
-                Some(w) => Some(w.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get slice from pos_weight")
-                })?),
-                None => None,
-            };
-            // The loss given `-log(sigmoid(x))`, which is the only part of it
-            // that costs anything.
-            //
-            // At an infinite logit one of the two terms is `0 * inf` (`t = 1`
-            // against `+inf`) or the pair is `inf - inf` (`-inf`, where the
-            // softplus grows as `-x`). The loss there is the limit,
-            // `k * |x|` for the coefficient `k` of `|x|` -- `1 - t` above,
-            // `w t` below -- and 0 when that coefficient is: a target of 1
-            // against a logit of `+inf` is a perfect prediction.
-            let combine = |x: $ty, t: $ty, w: $ty, neg_log_sigmoid: $ty| {
-                if x.is_infinite() {
-                    let k = if x > 0.0 { 1.0 - t } else { w * t };
-                    if k == 0.0 { 0.0 } else { k * x.abs() }
-                } else {
-                    (1.0 - t) * x + (1.0 + (w - 1.0) * t) * neg_log_sigmoid
+    let missing = || MinitensorError::internal_error("binary_cross_entropy_with_logits: a slice");
+    let data = match logits.dtype() {
+        DataType::Float32 => {
+            let x = logits.data().as_f32_slice().ok_or_else(missing)?;
+            let t = targets.data().as_f32_slice().ok_or_else(missing)?;
+            let values = match pos_weight {
+                None => {
+                    let kernel = crate::ops::simd::F32Kernel::select();
+                    // SAFETY: the block closure is one `F32Kernel` method
+                    // call, which writes every element of the block.
+                    unsafe {
+                        crate::ops::map::binary_map_blocks_threshold(
+                            x,
+                            t,
+                            VECTOR_F32_PAR_THRESHOLD,
+                            crate::ops::map::PAR_CHUNK,
+                            |x, t, out| kernel.bce_with_logits(x, t, out),
+                        )
+                    }
+                }
+                Some(w) => {
+                    let w = w.data().as_f32_slice().ok_or_else(missing)?;
+                    let mut values = vec![0f32; x.len()];
+                    par_out_chunks(&mut values, outputs_per_task(3), &|offset, block| {
+                        for (i, o) in block.iter_mut().enumerate() {
+                            let at = offset + i;
+                            let term = bce_logit_term(x[at].into(), t[at].into(), w[at].into());
+                            *o = term as f32;
+                        }
+                    });
+                    values
                 }
             };
-
-            // One pass, with the transcendental done a block at a time rather
-            // than an element at a time. It used to be two scalar `libm` calls
-            // per element -- `exp` then `ln_1p` -- inside an element-wise map;
-            // `neg_log_sigmoid_into` reaches the vectorized `softplus` kernel
-            // for float32. The block lands in the output buffer and the rest
-            // of the loss is finished over it there, while it is still in
-            // cache, so nothing is materialised that was not already needed.
-            let mut values = vec![<$ty>::default(); x.len()];
-            par_out_chunks(&mut values, outputs_per_task(3), &|offset, out_block| {
-                let block = &x[offset..offset + out_block.len()];
-                <$ty>::neg_log_sigmoid_into(block, out_block);
-                match weight {
-                    Some(w) => {
-                        for (i, o) in out_block.iter_mut().enumerate() {
-                            *o = combine(block[i], t[offset + i], w[offset + i], *o);
-                        }
-                    }
-                    None => {
-                        for (i, o) in out_block.iter_mut().enumerate() {
-                            *o = combine(block[i], t[offset + i], 1.0, *o);
-                        }
-                    }
+            TensorData::from_vec::<f32>(values, DataType::Float32, logits.device())
+        }
+        DataType::Float64 => {
+            let x = logits.data().as_f64_slice().ok_or_else(missing)?;
+            let t = targets.data().as_f64_slice().ok_or_else(missing)?;
+            let w = pos_weight
+                .map(|w| w.data().as_f64_slice().ok_or_else(missing))
+                .transpose()?;
+            let mut values = vec![0f64; x.len()];
+            par_out_chunks(&mut values, outputs_per_task(3), &|offset, block| {
+                for (i, o) in block.iter_mut().enumerate() {
+                    let at = offset + i;
+                    *o = bce_logit_term(x[at], t[at], w.map_or(1.0, |w| w[at]));
                 }
             });
-            TensorData::from_vec::<$ty>(values, $dtype, logits.device())
-        }};
-    }
-
-    let data = match logits.dtype() {
-        DataType::Float32 => loss_for!(f32, as_f32_slice, DataType::Float32),
-        DataType::Float64 => loss_for!(f64, as_f64_slice, DataType::Float64),
+            TensorData::from_vec::<f64>(values, DataType::Float64, logits.device())
+        }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "binary_cross_entropy_with_logits requires floating point tensors",
@@ -261,71 +253,20 @@ pub(crate) fn compute_bce_with_logits_elementwise(
     ))
 }
 
-/// Compute natural logarithm of tensor elements
-/// `log`, with the whole non-positive half mapped to `-inf` rather than to
-/// `-inf` at zero and NaN below it.
-///
-/// The losses reach this with probabilities, where a zero is an ordinary
-/// saturated prediction rather than a mistake, and each caller clamps the
-/// `-inf` to a finite floor straight afterwards.
-///
-/// It was a serial scalar loop over the whole tensor, writing into a buffer
-/// that had just been zeroed for it -- so every loss built on it paid for one
-/// core and one wasted pass. `log` has a vectorized kernel and the map
-/// combinators are parallel and write-once; the only thing the kernel does
-/// not do is send negatives to `-inf`, and that is a comparison over a block
-/// already in cache.
-pub(crate) fn log_tensor(tensor: &Tensor) -> Result<Tensor> {
-    let output_data = match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let kernel = crate::ops::simd::F32Kernel::select();
-            // SAFETY: `log` writes every element of each block it is given,
-            // and the pass after it only overwrites what is already there.
-            let out = unsafe {
-                unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
-                    kernel.log(src, dst);
-                    for (d, &value) in dst.iter_mut().zip(src.iter()) {
-                        if value <= 0.0 {
-                            d.write(f32::NEG_INFINITY);
-                        }
-                    }
-                })
-            };
-            TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device())
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            TensorData::from_vec::<f64>(
-                unary_map(input_data, |value: f64| {
-                    if value <= 0.0 {
-                        f64::NEG_INFINITY
-                    } else {
-                        value.ln()
-                    }
-                }),
-                DataType::Float64,
-                tensor.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Logarithm only supported for floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
+/// One term of [`compute_bce_with_logits_elementwise`] in float64:
+/// `k |x| + c log(1 + exp(-|x|))`. A NaN logit is NaN whatever the
+/// coefficients.
+#[inline(always)]
+fn bce_logit_term(x: f64, t: f64, w: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let magnitude = x.abs();
+    let tail = (-magnitude).exp().ln_1p();
+    let k = if x >= 0.0 { 1.0 - t } else { w * t };
+    let c = (1.0 - t) + w * t;
+    let linear = if k == 0.0 { 0.0 } else { k * magnitude };
+    linear + if c == 0.0 { 0.0 } else { c * tail }
 }
 
 /// Negate tensor elements

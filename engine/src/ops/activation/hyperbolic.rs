@@ -853,17 +853,13 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     ))
 }
 
-/// `x` above zero and `scale * expm1(x)` below, through the vectorized
-/// `expm1`, then a select over the block while it is still in cache.
+/// `positive_scale * x` above zero and `negative_scale * expm1(x)` below,
+/// through one vectorized kernel that forms both in float64 and narrows once.
 ///
 /// Built on `expm1` rather than `exp(x) - 1`: near zero the subtraction
 /// cancels every digit, and `elu(-1e-8)` in float32 came out as exactly 0.
 /// The scalar `exp_m1` that fixes that is three times the cost of the
 /// vectorized one.
-///
-/// The scales are float64 and the products taken there, so each is rounded
-/// once into float32: as float32 constants multiplied in float32, `selu`'s
-/// were each half an ulp out before the product rounded too.
 fn scaled_expm1_unit_f32(
     tensor: &Tensor,
     positive_scale: f64,

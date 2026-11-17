@@ -1203,6 +1203,31 @@ fn log_add_exp_core<const FMA: bool>(a: f64, b: f64, ln_base: f64, log_base_e: f
     high + log_core::<FMA, true>(u, c) * log_base_e
 }
 
+/// Binary cross entropy of a logit `x` against a target `t`, in float64 and
+/// rounded once: `(1 - t) x + log(1 + exp(-x))`, as `k |x| + log(1 + exp(-|x|))`
+/// for `k = 1 - t` where `x` is not negative and `t` below -- two terms that
+/// do not cancel for a target in `[0, 1]`. At an infinite logit the loss is
+/// `k |x|`, and nothing where `k` is.
+#[inline(always)]
+fn bce_with_logits_one<const FMA: bool>(x: f32, t: f32) -> f32 {
+    let (xd, td) = (x as f64, t as f64);
+    let magnitude = xd.abs();
+    // A comparison rather than `max`, so that a NaN stays one.
+    let decay = if -magnitude < -SOFTPLUS_LIMIT {
+        -SOFTPLUS_LIMIT
+    } else {
+        -magnitude
+    };
+    let (two_pow_n, r) = reduce_exp::<FMA>(decay);
+    let w = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    let u = 1.0 + w;
+    let c = w - (u - 1.0);
+    let tail = log_core::<FMA, true>(u, c);
+    let k = if xd >= 0.0 { 1.0 - td } else { td };
+    let linear = if k == 0.0 { 0.0 } else { k * magnitude };
+    (linear + tail) as f32
+}
+
 /// `log(e^a + e^b)` for one float32 pair. See [`log_add_exp_core`].
 #[inline(always)]
 fn logaddexp_one<const FMA: bool>(a: f32, b: f32) -> f32 {
@@ -2033,6 +2058,12 @@ block_kernel2_fallback!(
     atan2_block_avx2
 );
 block_kernel2!(
+    bce_with_logits_block,
+    bce_with_logits_one,
+    bce_with_logits_block_avx512,
+    bce_with_logits_block_avx2
+);
+block_kernel2!(
     logaddexp_block,
     logaddexp_one,
     logaddexp_block_avx512,
@@ -2624,6 +2655,21 @@ impl F32Kernel {
             atan2_block,
             atan2_block_avx512,
             atan2_block_avx2
+        )
+    }
+
+    /// Write the binary cross entropy of each logit of `x` against its
+    /// target in `t` into `out`; see `bce_with_logits_one`.
+    #[inline]
+    pub(crate) fn bce_with_logits(self, x: &[f32], t: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            x,
+            t,
+            out,
+            bce_with_logits_block,
+            bce_with_logits_block_avx512,
+            bce_with_logits_block_avx2
         )
     }
 
