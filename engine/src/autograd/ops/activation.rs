@@ -13,7 +13,9 @@ use crate::{
     error::{MinitensorError, Result},
     ops::activation::units::UnitParams,
     ops::map::{binary_map, par_out_chunks_gated},
-    ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
+    ops::util::{
+        accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64,
+    },
     tensor::{DataType, Strides, Tensor, TensorData},
 };
 use num_traits::Float;
@@ -1084,26 +1086,36 @@ pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send 
         grad_input,
         group,
         |_, go_block, log_block, out_block| {
+            // Each gradient in float64 and rounded once, against the sum of
+            // the slice's in float64.
             if after == 1 {
                 // Along the last axis a block is one contiguous row, so its
                 // probabilities come from the forward's `exp` kernel -- the
-                // vectorised one for float32 -- in one call, where the loop
-                // below takes a scalar `exp` per element.
-                let sum = go_block.iter().fold(T::zero(), |acc, &g| acc + g);
-                T::exp_shifted_into(log_block, T::zero(), out_block);
-                for (out, &g) in out_block.iter_mut().zip(go_block) {
-                    *out = g - *out * sum;
+                // vectorised one for float32 -- a piece at a time, where the
+                // loop below takes a scalar `exp` per element.
+                const PIECE: usize = 256;
+                let sum = accurate_indexed_sum(go_block.len(), 0.0f64, |k| go_block[k].wide());
+                let mut probabilities = [0.0f64; PIECE];
+                for ((go, logs), out) in go_block
+                    .chunks(PIECE)
+                    .zip(log_block.chunks(PIECE))
+                    .zip(out_block.chunks_mut(PIECE))
+                {
+                    let probabilities = &mut probabilities[..logs.len()];
+                    T::exp_shifted_into(logs, T::zero(), probabilities);
+                    for ((o, &g), &p) in out.iter_mut().zip(go).zip(probabilities.iter()) {
+                        *o = T::narrow(g.wide() - p * sum);
+                    }
                 }
                 return;
             }
             for base in 0..after {
-                let mut sum = T::zero();
-                for k in 0..dim_size {
-                    sum = sum + go_block[base + k * after];
-                }
+                let sum =
+                    accurate_indexed_sum(dim_size, 0.0f64, |k| go_block[base + k * after].wide());
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    out_block[idx] = go_block[idx] - log_block[idx].exp() * sum;
+                    let p = log_block[idx].wide().exp();
+                    out_block[idx] = T::narrow(go_block[idx].wide() - p * sum);
                 }
             }
         },

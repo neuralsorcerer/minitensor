@@ -2434,14 +2434,26 @@ assert row_std.shape == (2, 3)
 
 ### Elementwise math & activation
 
-- `softmax`, `log_softmax`. The total of `exp(x - max)` is carried in float64,
-  and `log_softmax` is `(x - max) - log1p(rest)` with `rest` the total less the
-  maximum's own term, which is exactly one: taking the logarithm of the whole
-  total and subtracting `max + log(total)` cancelled the small part of a
-  confident prediction away, and the float32 log-probability of the logits
-  `[20, 0 x 999]` came out 7% off -- and `cross_entropy` with it. `logsumexp`
-  is `max + log1p(rest)` the same way, so `logsumexp([0, -20])` is `2.06e-9`
-  rather than 0. Both are within about an ulp; `softmax` within two.
+- `softmax`, `log_softmax`. Each term `exp(x - max)` is taken of the exact
+  difference and kept in float64 with its total, which in float64 carries
+  each addition's error, and each result rounds once from them: a float32
+  probability or log-probability is the float32 nearest its exact value,
+  along any axis and under a mask, and a float64 one within three ulps for a
+  probability and one or two for a log-probability. Rounding the difference
+  first put its error into the exponent, `|x - max|` ulps of the answer: a
+  float64 probability at a spread of 30 was 24 ulps out, and a float32 one
+  down a non-last axis 49; and a float32 term rounded before its quotient
+  left a quarter of the probabilities an ulp out. `log_softmax` is
+  `(x - max) - log1p(rest)` with `rest` the total less the maximum's own
+  term, which is exactly one: taking the logarithm of the whole total and
+  subtracting `max + log(total)` cancelled the small part of a confident
+  prediction away, and the float32 log-probability of the logits
+  `[20, 0 x 999]` came out 7% off -- and `cross_entropy` with it, which is
+  now the float32 nearest its value too. `logsumexp` is `max + log1p(rest)`
+  the same way, so `logsumexp([0, -20])` is `2.06e-9` rather than 0; a
+  float32 one is the float32 nearest its value and a float64 one within an
+  ulp. The gradient of a float32 `log_softmax` is taken in float64 and
+  rounded once.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors

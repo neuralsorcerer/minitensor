@@ -821,17 +821,75 @@ fn exp_one<const FMA: bool>(x: f32) -> f32 {
     exp_core::<FMA>(x as f64) as f32
 }
 
-/// `exp(x - shift)` for one float32, the pass `softmax` spends about half its
-/// time in.
+/// `exp(x - shift)` in float64 for each float32 of `input`, the pass
+/// `softmax` spends about half its time in.
 ///
 /// The shift is what keeps `exp` from overflowing on a large input, so it can
 /// never be folded away; taking it as a parameter is what lets the vectorized
-/// kernel do the subtraction too, rather than handing back a buffer for a
-/// scalar loop to subtract from. It also subtracts in float64, where
-/// `softmax`'s own loop subtracted in float32 and rounded twice.
+/// kernel do the subtraction too. The difference is taken in float64, where a
+/// float32 and a shift that is itself a float32 differ exactly, and the
+/// exponential is left in float64: a softmax that rounded its terms to
+/// float32 rounded its quotients twice, and a quarter of its probabilities
+/// came out an ulp from the nearest float32.
 #[inline(always)]
-fn exp_shifted_one<const FMA: bool>(x: f32, shift: f64, _unused: f64) -> f32 {
-    exp_core::<FMA>(x as f64 - shift) as f32
+fn exp_shifted_wide_block<const FMA: bool>(input: &[f32], out: &mut [f64], shift: f64) {
+    for (o, &x) in out.iter_mut().zip(input) {
+        *o = exp_wide_core::<FMA>(x as f64 - shift);
+    }
+}
+
+/// Where [`exp_wide_core`] stops following its argument down: `exp(-700)` is
+/// 1e-304, and no float32 result of a softmax -- a term's share of a total of
+/// at least one, or the logarithm of one plus the others -- can tell it from
+/// anything smaller, however many of them are added: `exp_core`'s floor of
+/// `exp(-110)` could, past a thousand of them.
+const EXP_WIDE_FLOOR: f64 = -700.0;
+
+/// `exp` in float64 for the terms of a float32 softmax, which stay in float64
+/// until its result rounds: `exp_core` with its floor at [`EXP_WIDE_FLOOR`],
+/// and zero at `-inf` -- the term of an entry that takes no part, whose
+/// log-probability's partner must come out an exact zero rather than a tiny
+/// negative one that rounds to `-0.0`.
+#[inline(always)]
+fn exp_wide_core<const FMA: bool>(xd: f64) -> f64 {
+    let (two_pow_n, r) = reduce_exp::<FMA>(xd.clamp(EXP_WIDE_FLOOR, EXP_LIMIT));
+    let y = fma_or::<FMA>(two_pow_n, expm1_poly::<FMA>(r), two_pow_n);
+    if xd == f64::NEG_INFINITY { 0.0 } else { y }
+}
+
+/// [`exp_shifted_wide_block`] with a shift per element: the column maxima a
+/// softmax down a non-last axis subtracts. Subtracted in float32, the
+/// difference rounded, and that rounding is `|x - shift|` float32 ulps of the
+/// exponential -- 49 of a probability at a spread of 15.
+#[inline(always)]
+fn exp_diff_wide_block<const FMA: bool>(input: &[f32], shift: &[f32], out: &mut [f64]) {
+    for ((o, &x), &m) in out.iter_mut().zip(input).zip(shift) {
+        *o = exp_wide_core::<FMA>(x as f64 - m as f64);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+fn exp_shifted_wide_avx512(input: &[f32], out: &mut [f64], shift: f64) {
+    exp_shifted_wide_block::<true>(input, out, shift)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn exp_shifted_wide_avx2(input: &[f32], out: &mut [f64], shift: f64) {
+    exp_shifted_wide_block::<true>(input, out, shift)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+fn exp_diff_wide_avx512(input: &[f32], shift: &[f32], out: &mut [f64]) {
+    exp_diff_wide_block::<true>(input, shift, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn exp_diff_wide_avx2(input: &[f32], shift: &[f32], out: &mut [f64]) {
+    exp_diff_wide_block::<true>(input, shift, out)
 }
 
 /// `base^x` as `exp(x * ln base)` for one float32, the mirror of
@@ -848,9 +906,10 @@ fn exp_shifted_one<const FMA: bool>(x: f32, shift: f64, _unused: f64) -> f32 {
 /// directions (`2^128` is already infinity and `2^-150` already zero), so
 /// nothing representable reaches it.
 ///
-/// It is kept separate from `exp_shifted_one` rather than merged into an
-/// `a*x - b` form: `softmax` spends about half its time in the shifted one,
-/// and a runtime multiply by 1.0 is not a constant the compiler can fold away.
+/// It is kept separate from `exp_shifted_wide_block` rather than merged into
+/// an `a*x - b` form: `softmax` spends about half its time in the shifted
+/// one, and a runtime multiply by 1.0 is not a constant the compiler can fold
+/// away.
 #[inline(always)]
 fn exp_scaled_one<const FMA: bool>(x: f32, ln_base: f64, _unused: f64) -> f32 {
     exp_core::<FMA>(x as f64 * ln_base) as f32
@@ -2112,12 +2171,6 @@ block_kernel_param!(
     softplus_block_avx2
 );
 block_kernel_param!(
-    exp_shifted_block,
-    exp_shifted_one,
-    exp_shifted_block_avx512,
-    exp_shifted_block_avx2
-);
-block_kernel_param!(
     log_scaled_block,
     log_scaled_one,
     log_scaled_block_avx512,
@@ -2476,19 +2529,44 @@ impl F32Kernel {
         )
     }
 
-    /// Write `exp(input[i] - shift)` into every element of `out`.
+    /// Write `exp(input[i] - shift)` into every element of `out`, in
+    /// float64; see [`exp_shifted_wide_block`].
     #[inline]
-    pub(crate) fn exp_shifted(self, input: &[f32], out: &mut [MaybeUninit<f32>], shift: f64) {
-        dispatch_param!(
-            self,
-            input,
-            out,
-            shift,
-            0.0,
-            exp_shifted_block,
-            exp_shifted_block_avx512,
-            exp_shifted_block_avx2
-        )
+    pub(crate) fn exp_shifted_wide(self, input: &[f32], out: &mut [f64], shift: f64) {
+        assert_eq!(input.len(), out.len(), "kernel block length mismatch");
+        match self.0 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `select` returned this variant only after
+            // `is_x86_feature_detected!` confirmed avx512f on this CPU.
+            Backend::Avx512 => unsafe { exp_shifted_wide_avx512(input, out, shift) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as above, for avx2 and fma.
+            Backend::Avx2Fma => unsafe { exp_shifted_wide_avx2(input, out, shift) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::NativeFma => exp_shifted_wide_block::<true>(input, out, shift),
+            Backend::Portable => exp_shifted_wide_block::<false>(input, out, shift),
+        }
+    }
+
+    /// Write `exp(input[i] - shift[i])` into every element of `out`, in
+    /// float64; see [`exp_diff_wide_block`].
+    #[inline]
+    pub(crate) fn exp_diff_wide(self, input: &[f32], shift: &[f32], out: &mut [f64]) {
+        assert!(
+            input.len() == out.len() && shift.len() == out.len(),
+            "kernel block length mismatch"
+        );
+        match self.0 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as in `exp_shifted_wide`.
+            Backend::Avx512 => unsafe { exp_diff_wide_avx512(input, shift, out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as in `exp_shifted_wide`.
+            Backend::Avx2Fma => unsafe { exp_diff_wide_avx2(input, shift, out) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::NativeFma => exp_diff_wide_block::<true>(input, shift, out),
+            Backend::Portable => exp_diff_wide_block::<false>(input, shift, out),
+        }
     }
 
     /// Write `-log(sigmoid(input[i]))` into every element of `out`.
@@ -3100,10 +3178,10 @@ mod tests {
         }
     }
 
-    /// `exp_shifted` is the one kernel that takes its argument in two
-    /// pieces, so it needs a check of its own: every backend has to agree
-    /// with the others, and all of them with `exp(x - shift)` evaluated in
-    /// float64 and rounded once.
+    /// The shifted exponentials are the kernels that take their argument in
+    /// two pieces and answer in float64, so they need a check of their own:
+    /// every backend within a few float64 ulps of `exp(x - shift)` and, once
+    /// narrowed, on the same float32 as the others.
     ///
     /// The shifts are the ones `softmax` actually produces -- the maximum of
     /// the slice, so the largest argument is exactly zero -- including the
@@ -3131,41 +3209,39 @@ mod tests {
             f32::NEG_INFINITY,
             f32::INFINITY,
         ];
-        let shifts = [0.0f64, 1.0, -1.0, 88.0, 700.0, 1e20, f32::MAX as f64];
+        let shifts = [0.0f32, 1.0, -1.0, 88.0, 700.0, 1e20, f32::MAX];
 
         for &shift in &shifts {
-            let mut reference_run: Option<Vec<f32>> = None;
+            let mut reference_run: Option<Vec<u32>> = None;
+            let tiled = vec![shift; inputs.len()];
             for backend in available() {
-                let mut out = vec![MaybeUninit::uninit(); inputs.len()];
-                F32Kernel(backend).exp_shifted(&inputs, &mut out, shift);
-                let got: Vec<f32> = out
-                    .into_iter()
-                    .map(|v| unsafe { v.assume_init() })
-                    .collect();
+                let mut whole = vec![0.0f64; inputs.len()];
+                F32Kernel(backend).exp_shifted_wide(&inputs, &mut whole, shift as f64);
+                let mut each = vec![0.0f64; inputs.len()];
+                F32Kernel(backend).exp_diff_wide(&inputs, &tiled, &mut each);
+                let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&whole), bits(&each), "the forms differ at {backend:?}");
 
-                for (&x, &have) in inputs.iter().zip(got.iter()) {
-                    let want = (x as f64 - shift).exp() as f32;
-                    if want.is_nan() {
+                for (&x, &have) in inputs.iter().zip(whole.iter()) {
+                    let argument = x as f64 - shift as f64;
+                    let want = argument.clamp(EXP_WIDE_FLOOR, EXP_LIMIT).exp();
+                    if argument.is_nan() {
                         assert!(have.is_nan(), "{x} - {shift} on {backend:?}");
-                        continue;
+                    } else if argument == f64::NEG_INFINITY {
+                        assert_eq!(have.to_bits(), 0, "exp({x} - {shift}) on {backend:?}");
+                    } else {
+                        assert!(
+                            (have - want).abs() <= want * 4.0 * f64::EPSILON,
+                            "exp({x} - {shift}) on {backend:?}: {have} against {want}"
+                        );
                     }
-                    if !want.is_finite() {
-                        // Overflow and underflow have to land on the same
-                        // side, not merely close to it.
-                        assert_eq!(have, want, "exp({x} - {shift}) on {backend:?}");
-                        continue;
-                    }
-                    let tolerance = (want.abs() * 4.0 * f32::EPSILON).max(f32::MIN_POSITIVE);
-                    assert!(
-                        (have - want).abs() <= tolerance,
-                        "exp({x} - {shift}) on {backend:?}: {have} against {want}"
-                    );
                 }
 
+                let narrowed: Vec<u32> = whole.iter().map(|&v| (v as f32).to_bits()).collect();
                 match &reference_run {
-                    None => reference_run = Some(got),
+                    None => reference_run = Some(narrowed),
                     Some(first) => assert_eq!(
-                        &got, first,
+                        &narrowed, first,
                         "backends disagree on exp(x - {shift}) at {backend:?}"
                     ),
                 }
@@ -3275,12 +3351,8 @@ mod tests {
     /// has to happen before the exponential and not after.
     #[test]
     fn exp_shifted_survives_arguments_whose_exponential_would_not() {
-        let mut out = vec![MaybeUninit::uninit(); 2];
-        F32Kernel::select().exp_shifted(&[200.0, 100.0], &mut out, 200.0);
-        let got: Vec<f32> = out
-            .into_iter()
-            .map(|v| unsafe { v.assume_init() })
-            .collect();
+        let mut got = vec![0.0f64; 2];
+        F32Kernel::select().exp_shifted_wide(&[200.0, 100.0], &mut got, 200.0);
         assert_eq!(got[0], 1.0);
         assert!(got[1] > 0.0 && got[1].is_finite(), "got {}", got[1]);
         assert!((200.0f32).exp().is_infinite(), "the premise of the shift");

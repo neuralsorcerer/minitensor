@@ -372,27 +372,19 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
 
     #[inline(always)]
     fn chunk_body<T: ShiftedExp, const P: usize>(chunk: &[T], top: T, skip: Option<usize>) -> f64 {
-        let mut buffer = [T::zero(); P];
-        let mut sums = [0.0f64; LANES];
+        let mut buffer = [0.0f64; P];
+        let mut sum = crate::ops::activation::CarriedSum::default();
         for (index, piece) in chunk.chunks(P).enumerate() {
             let terms = &mut buffer[..piece.len()];
             T::exp_shifted_into(piece, top, terms);
             if let Some(at) = skip.and_then(|at| at.checked_sub(index * P))
                 && at < terms.len()
             {
-                terms[at] = T::zero();
+                terms[at] = 0.0;
             }
-            let (blocks, rest) = terms.as_chunks::<LANES>();
-            for block in blocks {
-                for lane in 0..LANES {
-                    sums[lane] += block[lane].wide();
-                }
-            }
-            for (lane, &v) in rest.iter().enumerate() {
-                sums[lane] += v.wide();
-            }
+            sum.add(T::total(terms));
         }
-        crate::ops::simd::pairwise_lanes(&mut sums)
+        sum.value()
     }
 
     let chunks = run.len().div_ceil(RUN_SUM_CHUNK).max(1);
