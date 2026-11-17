@@ -210,24 +210,22 @@ class _Normalized(_Function):
 
     @staticmethod
     def forward(ctx, tensor, p, axis, eps):
-        result = _F._normalized(tensor, p, axis, eps)
+        result, over = _F._normalized(tensor, p, axis, eps, False)
         ctx.save_for_backward(tensor)
-        ctx.p, ctx.axis, ctx.eps, ctx.result = p, axis, eps, result
+        ctx.p, ctx.axis, ctx.eps, ctx.result, ctx.over = p, axis, eps, result, over
         return result
 
     @staticmethod
     def backward(ctx, grad_output):
         (tensor,) = ctx.saved_tensors
         norm = _F.norm(tensor, ctx.p, [ctx.axis], True)
-        length = _F.clamp(norm, ctx.eps, None)
-        # Above the floor the length moves with the slice: along its own
-        # direction for the 2-norm, and along the signs for the 1-norm. A
-        # NaN `eps` is no floor, as it is in the forward.
+        # Over its norm, which the forward decided exactly, the length moves
+        # with the slice: along its own direction for the 2-norm, and along
+        # the signs for the 1-norm. Over the floor it does not.
         direction = ctx.result if ctx.p == 2 else _F.sign(tensor)
         along = _F.sum(ctx.result * grad_output, [ctx.axis], True)
-        moving = (grad_output - direction * along) / length
-        floored = _F.where(norm < ctx.eps, grad_output / length, moving)
-        return floored, None, None, None
+        moving = (grad_output - direction * along) / norm
+        return _F.where(ctx.over, moving, grad_output / ctx.eps), None, None, None
 
 
 def normalize(

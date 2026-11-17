@@ -18,8 +18,14 @@
 //!
 //! A zero keeps the sign additions give it: negative only when every value
 //! added, the destination's own among them, is a negative zero.
+//!
+//! A scattered product is grouped the same way, a block of destinations at
+//! a time: a destination two factors or fewer reach is one multiplication,
+//! which rounds once as it is, and one more reach is the value nearest the
+//! exact product of them, as `prod` gives it.
 
 use super::{BinTotal, Carried, Element, LANES, Output, Tallies, mean_to, sum_to};
+use crate::ops::arithmetic::exact_product::product_to;
 use crate::ops::map::par_out_chunks;
 
 /// Destinations a block keeps totals for at once, 32 bytes each: a block's
@@ -132,11 +138,46 @@ struct Scratch<T> {
     totals: Vec<BinTotal>,
 }
 
+/// What a destination becomes of the values that reach it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Sum,
+    Mean,
+    /// Their product; with `nonzero`, of those that are not zeros, and one
+    /// for none.
+    Product {
+        nonzero: bool,
+    },
+}
+
 /// Add each run's sources into its destinations in `out`: `source(o, i, j)`
 /// is the destination within run `o` that source `(i, j)` of it adds to, and
 /// the value it adds. Each destination is rounded once from the exact sum,
 /// or mean, of its values.
 pub(crate) fn add_scattered<T, S>(out: &mut [T], shape: Scatter, source: S)
+where
+    T: Element + Output + Default + std::ops::Add<Output = T>,
+    S: Fn(usize, usize, usize) -> (usize, T) + Sync,
+{
+    let kind = if shape.mean { Kind::Mean } else { Kind::Sum };
+    scattered(out, shape, kind, source);
+}
+
+/// Multiply each run's sources into its destinations in `out`, as
+/// [`add_scattered`] adds them -- `shape.mean` aside: each destination
+/// something reaches is rounded once from the exact product of its values,
+/// and of its own where `shape.own`; with `nonzero`, of those that are not
+/// zeros, one for none.
+pub(crate) fn multiply_scattered<T, S>(out: &mut [T], shape: Scatter, nonzero: bool, source: S)
+where
+    T: Element + Output + Default + std::ops::Add<Output = T>,
+    S: Fn(usize, usize, usize) -> (usize, T) + Sync,
+{
+    scattered(out, shape, Kind::Product { nonzero }, source);
+}
+
+/// [`add_scattered`] and [`multiply_scattered`], a destination of `kind`.
+fn scattered<T, S>(out: &mut [T], shape: Scatter, kind: Kind, source: S)
 where
     T: Element + Output + Default + std::ops::Add<Output = T>,
     S: Fn(usize, usize, usize) -> (usize, T) + Sync,
@@ -156,14 +197,21 @@ where
             totals: Vec::new(),
         };
         for (offset, run) in part.chunks_mut(chunk).enumerate() {
-            add_run(run, start / chunk + offset, &shape, &source, &mut scratch);
+            let o = start / chunk + offset;
+            add_run(run, o, &shape, kind, &source, &mut scratch);
         }
     });
 }
 
-/// One run of [`add_scattered`].
-fn add_run<T, S>(run: &mut [T], o: usize, shape: &Scatter, source: &S, scratch: &mut Scratch<T>)
-where
+/// One run of [`scattered`].
+fn add_run<T, S>(
+    run: &mut [T],
+    o: usize,
+    shape: &Scatter,
+    kind: Kind,
+    source: &S,
+    scratch: &mut Scratch<T>,
+) where
     T: Element + Output + Default + std::ops::Add<Output = T>,
     S: Fn(usize, usize, usize) -> (usize, T) + Sync,
 {
@@ -172,7 +220,7 @@ where
         rows,
         inner,
         own,
-        mean,
+        ..
     } = *shape;
     // How many sources each block of destinations takes, and whether any
     // destination takes more than one.
@@ -196,7 +244,7 @@ where
             offsets[slot / SLOTS + 1] += 1;
         }
     }
-    if !repeated && !mean {
+    if !repeated && kind == Kind::Sum {
         // One value at each destination it reaches: one addition.
         for i in 0..rows {
             for j in 0..inner {
@@ -214,7 +262,7 @@ where
             rows,
             inner,
         };
-        return settle_block(run, &arrivals, own, mean, totals);
+        return settle_block(run, &arrivals, own, kind, totals);
     }
 
     // The sources a block at a time, each beside its place in the block, in
@@ -237,7 +285,7 @@ where
     par_out_chunks(run, SLOTS, &|start, part| {
         let block = start / SLOTS;
         let arrivals = Paired(&pairs[offsets[block]..offsets[block + 1]]);
-        settle_block(part, &arrivals, own, mean, &mut Vec::new());
+        settle_block(part, &arrivals, own, kind, &mut Vec::new());
     });
 }
 
@@ -246,12 +294,16 @@ fn settle_block<T: Element + Output>(
     part: &mut [T],
     arrivals: &impl Arrivals<T>,
     own: bool,
-    mean: bool,
+    kind: Kind,
     totals: &mut Vec<BinTotal>,
 ) {
     if arrivals.none() {
         return;
     }
+    let mean = match kind {
+        Kind::Product { nonzero } => return multiply_block(part, arrivals, own, nonzero),
+        kind => kind == Kind::Mean,
+    };
     totals.clear();
     totals.resize(part.len(), BinTotal::EMPTY);
     arrivals.each(|slot, value| totals[slot].add(value.wide()));
@@ -289,6 +341,63 @@ fn settle_block<T: Element + Output>(
             kept.push(*place);
         }
         *place = if mean { mean_to(&kept) } else { sum_to(&kept) };
+    }
+}
+
+/// One block of destinations as the products of the sources that reach
+/// them; see [`multiply_scattered`].
+fn multiply_block<T: Element + Output>(
+    part: &mut [T],
+    arrivals: &impl Arrivals<T>,
+    own: bool,
+    nonzero: bool,
+) {
+    let len = part.len();
+    let kept = |value: T| !nonzero || value.wide() != 0.0;
+    // How many factors each destination takes, its own value first where it
+    // counts.
+    let (mut arrived, mut counts) = (vec![false; len], vec![0u32; len]);
+    arrivals.each(|slot, value| {
+        arrived[slot] = true;
+        counts[slot] += u32::from(kept(value));
+    });
+    let first = |at: usize, value: T| own && arrived[at] && kept(value);
+    // More than two side by side from `starts[at]`, to be multiplied out
+    // exactly; two or fewer one multiplication at most, from the first.
+    let mut starts = vec![0usize; len + 1];
+    for (at, &value) in part.iter().enumerate() {
+        counts[at] += u32::from(first(at, value));
+        let many = if counts[at] > 2 {
+            counts[at] as usize
+        } else {
+            0
+        };
+        starts[at + 1] = starts[at] + many;
+    }
+    let mut factors = vec![T::narrow(1.0); starts[len]];
+    let mut cursor = starts[..len].to_vec();
+    for (at, place) in part.iter_mut().enumerate() {
+        let counted = first(at, *place);
+        if counts[at] > 2 && counted {
+            factors[cursor[at]] = *place;
+            cursor[at] += 1;
+        } else if arrived[at] && !counted {
+            *place = T::narrow(1.0);
+        }
+    }
+    arrivals.each(|slot, value| {
+        if !kept(value) {
+        } else if counts[slot] > 2 {
+            factors[cursor[slot]] = value;
+            cursor[slot] += 1;
+        } else {
+            part[slot] = T::narrow(part[slot].widen() * value.wide());
+        }
+    });
+    for (at, place) in part.iter_mut().enumerate() {
+        if counts[at] > 2 {
+            *place = product_to(&factors[starts[at]..starts[at + 1]]);
+        }
     }
 }
 
@@ -472,6 +581,67 @@ mod tests {
         for (destinations, sources) in [(5, 40), (300, 2000), (3 * SLOTS + 11, 9000)] {
             check(|value| value as f32, destinations, sources, 31);
             check(|value| value, destinations, sources, 37);
+        }
+    }
+
+    #[test]
+    fn every_destination_is_its_exact_product() {
+        // Factors near one, so that a product of many stays in range, with
+        // zeros among them; most at a few destinations, the rest spread.
+        for (destinations, sources) in [(5, 40), (300, 2000), (3 * SLOTS + 11, 9000)] {
+            let near_one = |seed: u64, len: usize| -> Vec<f64> {
+                values(seed, len)
+                    .iter()
+                    .map(|value| {
+                        let zero = (value.to_bits() >> 3).is_multiple_of(29);
+                        if zero { 0.0 } else { 1.0 + value }
+                    })
+                    .collect()
+            };
+            let base = near_one(47, destinations);
+            let added = near_one(53, sources);
+            let slots: Vec<usize> = values(59, sources)
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let spread = (value.to_bits() >> 7) as usize;
+                    let reach = if index.is_multiple_of(3) {
+                        destinations
+                    } else {
+                        17
+                    };
+                    spread % destinations.min(reach)
+                })
+                .collect();
+            for (own, nonzero) in [(true, false), (false, false), (true, true), (false, true)] {
+                let mut out = base.clone();
+                let shape = Scatter {
+                    chunk: destinations,
+                    rows: sources,
+                    inner: 1,
+                    own,
+                    mean: false,
+                };
+                multiply_scattered(&mut out, shape, nonzero, |_, i, _| (slots[i], added[i]));
+                for (slot, &got) in out.iter().enumerate() {
+                    let arriving = slots.iter().zip(&added).filter(|(at, _)| **at == slot);
+                    let mut kept: Vec<f64> = arriving.map(|(_, value)| *value).collect();
+                    if kept.is_empty() {
+                        assert_eq!(got.to_bits(), base[slot].to_bits());
+                        continue;
+                    }
+                    if own {
+                        kept.push(base[slot]);
+                    }
+                    kept.retain(|value| !nonzero || *value != 0.0);
+                    let want: f64 = product_to(&kept);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "own {own}, nonzero {nonzero}"
+                    );
+                }
+            }
         }
     }
 

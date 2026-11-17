@@ -5,7 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::ops::arithmetic::exact_sum::{Scatter, add_scattered, add_scattered_rows};
+use crate::ops::arithmetic::exact_sum::{
+    Element, Output, Scatter, add_scattered, add_scattered_rows, multiply_scattered,
+};
 use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::{ScatterAddBackward, ScatterBackward, ScatterReduceBackward},
@@ -348,10 +350,7 @@ fn scatter_impl(
                         own: include_self,
                         mean: reduce == Reduction::Mean,
                     };
-                    add_scattered(dst, shape, |o, i, j| {
-                        let pos = o * idx_chunk + i * inner + j;
-                        (layout.indices[pos] as usize * inner + j, updates[pos])
-                    });
+                    add_scattered(dst, shape, arrivals_of(&layout, updates));
                 }
             }
             out
@@ -413,9 +412,35 @@ fn scatter_impl(
     }
 
     let totalled = matches!(reduce, Reduction::Sum | Reduction::Mean);
+    let multiplied = reduce == Reduction::Prod;
+    let read = || MinitensorError::invalid_operation("Tensor data access failed for scatter");
     let data = match dtype {
         DataType::Float32 if totalled => scatter_totals!(f32, as_f32_slice, as_f32_slice_mut),
         DataType::Float64 if totalled => scatter_totals!(f64, as_f64_slice, as_f64_slice_mut),
+        DataType::Float32 if multiplied => {
+            let (base, updates) = (tensor.data().as_f32_slice(), src.data().as_f32_slice());
+            let mut out = base.ok_or_else(read)?.to_vec();
+            multiply_arrivals(
+                &mut out,
+                updates.ok_or_else(read)?,
+                &layout,
+                include_self,
+                false,
+            );
+            TensorData::from_vec_f32(out, device)
+        }
+        DataType::Float64 if multiplied => {
+            let (base, updates) = (tensor.data().as_f64_slice(), src.data().as_f64_slice());
+            let mut out = base.ok_or_else(read)?.to_vec();
+            multiply_arrivals(
+                &mut out,
+                updates.ok_or_else(read)?,
+                &layout,
+                include_self,
+                false,
+            );
+            TensorData::from_vec_f64(out, device)
+        }
         DataType::Float32 => dispatch!(f32, as_f32_slice, as_f32_slice_mut),
         DataType::Float64 => dispatch!(f64, as_f64_slice, as_f64_slice_mut),
         DataType::Int32 => dispatch!(i32, as_i32_slice, as_i32_slice_mut),
@@ -503,6 +528,40 @@ fn scatter_impl(
     }
 
     Ok(output)
+}
+
+/// Where each source of a scatter goes in its run, and its value: the
+/// `source` of [`add_scattered`] and [`multiply_scattered`], one for every
+/// float scatter of a dtype.
+fn arrivals_of<'a, T: Copy + Sync>(
+    layout: &'a ScatterLayout,
+    updates: &'a [T],
+) -> impl Fn(usize, usize, usize) -> (usize, T) + Sync + 'a {
+    let (inner, idx_chunk) = (layout.inner, layout.index_dim * layout.inner);
+    move |o, i, j| {
+        let pos = o * idx_chunk + i * inner + j;
+        (layout.indices[pos] as usize * inner + j, updates[pos])
+    }
+}
+
+/// `out` with each destination of a float scatter that values arrive at
+/// the value nearest the exact product of them, and of its own value where
+/// `own`; zeros left out where `nonzero`, and an empty product one.
+fn multiply_arrivals<T: Element + Output + Default + std::ops::Add<Output = T>>(
+    out: &mut [T],
+    updates: &[T],
+    layout: &ScatterLayout,
+    own: bool,
+    nonzero: bool,
+) {
+    let shape = Scatter {
+        chunk: layout.input_dim * layout.inner,
+        rows: layout.index_dim,
+        inner: layout.inner,
+        own,
+        mean: false,
+    };
+    multiply_scattered(out, shape, nonzero, arrivals_of(layout, updates));
 }
 
 /// Write `src` into a copy of `tensor` at the positions named by `index`.
@@ -718,6 +777,16 @@ pub(crate) fn scatter_reduce_backward(
             let zero = <$ty>::default();
             let mut for_input = vec![zero; input.numel()];
             let mut for_src = vec![zero; src.numel()];
+            // For `Prod`, the value nearest the exact product of each
+            // destination's contributions that are not zero.
+            let mut nonzero = if include_self {
+                base.to_vec()
+            } else {
+                vec![1 as $ty; input.numel()]
+            };
+            if reduce == Reduction::Prod {
+                multiply_arrivals(&mut nonzero, values, layout, include_self, true);
+            }
 
             for o in 0..outer {
                 let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
@@ -725,32 +794,20 @@ pub(crate) fn scatter_reduce_backward(
                 let src_base = o * idx_chunk;
 
                 // How many contributions reached each destination, and -- for
-                // `Prod` -- how many were zero and what the rest multiply to.
+                // `Prod` -- how many were zero.
                 let mut arrivals = vec![0usize; in_chunk];
                 let mut zeros = vec![0usize; in_chunk];
-                let mut nonzero = vec![1 as $ty; in_chunk];
                 for pos in 0..idx_chunk {
                     let d = idx[pos] as usize * inner + pos % inner;
                     arrivals[d] += 1;
-                    let v = values[src_base + pos];
-                    if v == zero {
-                        zeros[d] += 1;
-                    } else {
-                        nonzero[d] *= v;
-                    }
+                    zeros[d] += usize::from(values[src_base + pos] == zero);
                 }
                 if include_self {
                     for d in 0..in_chunk {
-                        if arrivals[d] > 0 {
-                            let v = base[dst_base + d];
-                            if v == zero {
-                                zeros[d] += 1;
-                            } else {
-                                nonzero[d] *= v;
-                            }
-                        }
+                        zeros[d] += usize::from(arrivals[d] > 0 && base[dst_base + d] == zero);
                     }
                 }
+                let nonzero = &nonzero[dst_base..dst_base + in_chunk];
 
                 // The destination's own gradient. A destination nothing wrote
                 // to is the input untouched, so its gradient passes straight
@@ -865,8 +922,9 @@ fn excluding<T: Copy + PartialEq + std::ops::Div<Output = T>>(
     zero: T,
 ) -> T {
     match zeros {
-        // Nothing was zero, so dividing the product of everything by my own
-        // factor is safe and exact.
+        // Nothing was zero: the product of everything, rounded once, over my
+        // own factor, within two roundings of the product of the others --
+        // where the whole product stayed in range.
         0 => nonzero / mine,
         // Exactly one zero: every other factor's product includes it and is
         // therefore zero, and the zero's own excluded product is the rest.

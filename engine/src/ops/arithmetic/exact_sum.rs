@@ -51,7 +51,7 @@ pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotie
 
 #[path = "exact_scatter.rs"]
 mod scatter;
-pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows};
+pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows, multiply_scattered};
 
 #[path = "exact_standard.rs"]
 mod standard;
@@ -5115,26 +5115,34 @@ fn exact_distance<I: Element, T: Output>(x: &[I], y: &[I], euclidean: bool, shif
 
 /// Each of `values` over the greater of their 2-norm -- their 1-norm with
 /// `taxicab` -- and `floor`, into `out`, each the value nearest the exact
-/// quotient; `scratch` is room for the values' magnitudes scaled into range.
+/// quotient; or with `capped`, each times `floor` over the norm where the
+/// norm exceeds `floor`, and as it is where it does not: the values scaled
+/// back to a norm of `floor`. `scratch` is room for the values' magnitudes
+/// scaled into range. Whether the values were taken over their norm, rather
+/// than over the floor or as they are.
 ///
 /// A quotient does not move when the values are scaled by a power of two,
 /// so they are, to bring the largest magnitude into `[1, 2)`; there the norm
-/// is carried as [`root_of`] or [`sum_to`] carries it, its inverse taken as
-/// a pair, and each magnitude times that settled by a bound. Where the
-/// bound cannot say, or a magnitude is too small for its scaled copy to be
-/// exact, the quotient is formed in whole numbers: the root of the value's
-/// square over the exact sum of the squares, or the value over the exact
-/// sum of the magnitudes. A norm below a positive `floor` -- decided
-/// exactly where the bound cannot -- leaves each value over the floor,
-/// rounded once. A NaN makes NaN of every quotient, an infinity what
-/// dividing by an infinite norm gives, and a zero norm with no floor NaN.
+/// is carried as [`root_of`] or [`sum_to`] carries it, `1` -- or the cap --
+/// over it taken as a pair, and each magnitude times that settled by a
+/// bound. Where the bound cannot say, or a magnitude is too small for its
+/// scaled copy to be exact, the quotient is formed in whole numbers: the
+/// root of the value's square, times the cap's, over the exact sum of the
+/// squares, or the value, times the cap, over the exact sum of the
+/// magnitudes. A norm below a positive `floor` -- or for a cap, at or below
+/// it -- decided exactly where the bound cannot, leaves each value over the
+/// floor, rounded once, or as it is. A NaN makes NaN of every quotient, an
+/// infinity what dividing by an infinite norm gives, and a zero norm with no
+/// floor NaN; a cap of zero leaves `x · 0` of each value, and one of an
+/// infinity each as it is.
 pub(crate) fn normalized<I: Element, T: Output>(
     values: &[I],
     out: &mut [T],
     taxicab: bool,
     floor: f64,
+    capped: bool,
     scratch: &mut Vec<f64>,
-) {
+) -> bool {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     fn with_fma<I: Element, T: Output>(
@@ -5142,18 +5150,19 @@ pub(crate) fn normalized<I: Element, T: Output>(
         out: &mut [T],
         taxicab: bool,
         floor: f64,
+        capped: bool,
         scratch: &mut Vec<f64>,
-    ) {
-        normalized_with::<I, T, true>(values, out, taxicab, floor, scratch);
+    ) -> bool {
+        normalized_with::<I, T, true>(values, out, taxicab, floor, capped, scratch)
     }
     // A float32 answer comes from plain float64 sums nearly always, and has
     // no use for a second build of the rest.
     #[cfg(target_arch = "x86_64")]
     if fused() && !T::PLAIN {
         // SAFETY: avx2 and fma were detected on this CPU.
-        return unsafe { with_fma(values, out, taxicab, floor, scratch) };
+        return unsafe { with_fma(values, out, taxicab, floor, capped, scratch) };
     }
-    normalized_with::<I, T, false>(values, out, taxicab, floor, scratch);
+    normalized_with::<I, T, false>(values, out, taxicab, floor, capped, scratch)
 }
 
 /// [`normalized`], the products' errors by a fused multiply-add where `FMA`.
@@ -5163,14 +5172,37 @@ fn normalized_with<I: Element, T: Output, const FMA: bool>(
     out: &mut [T],
     taxicab: bool,
     floor: f64,
+    capped: bool,
     scratch: &mut Vec<f64>,
-) {
+) -> bool {
     debug_assert_eq!(values.len(), out.len());
     // The floor as the output's dtype holds it.
     let floor = T::narrow(floor).widen();
     let floored = floor > 0.0;
-    if T::PLAIN && plain_normalized(values, out, taxicab, floor) {
-        return;
+    if capped && !(floored && floor < f64::INFINITY) {
+        // A cap of nothing takes every norm that is not zero back to
+        // `x · 0` of each value, and one of an infinity takes none; a NaN
+        // makes NaN of each.
+        let nan = values.iter().any(|value| value.wide().is_nan());
+        let mut scaled = nan;
+        for (slot, value) in out.iter_mut().zip(values) {
+            let value = value.wide();
+            let nothing = floor == 0.0;
+            scaled |= nothing && value != 0.0;
+            *slot = T::narrow(if nan {
+                f64::NAN
+            } else if nothing {
+                value * 0.0
+            } else {
+                value
+            });
+        }
+        return scaled;
+    }
+    if T::PLAIN
+        && let Some(over) = plain_normalized(values, out, taxicab, floor, capped)
+    {
+        return over;
     }
     // A quotient under `2^-900` may have lost bits in its scaled magnitude,
     // or its product's error be too small to hold, and is formed exactly.
@@ -5224,7 +5256,7 @@ fn normalized_with<I: Element, T: Output, const FMA: bool>(
                 for (slot, value) in out.iter_mut().zip(values) {
                     *slot = T::narrow(value.wide() / divisor);
                 }
-                return;
+                return special || !floored;
             }
             // `2^-shift` as two powers of two, each in the normal range.
             let shift = binary_exponent(largest);
@@ -5254,7 +5286,7 @@ fn normalized_with<I: Element, T: Output, const FMA: bool>(
     } else {
         let (norm, rest, bound, ordinary) = root_parts::<FMA>(carried);
         if !ordinary {
-            return exact_normalized(values, out, taxicab, floor);
+            return exact_normalized(values, out, taxicab, floor, capped);
         }
         (norm, rest, bound)
     };
@@ -5269,25 +5301,29 @@ fn normalized_with<I: Element, T: Output, const FMA: bool>(
         } else if limit < low {
             false
         } else {
-            below_floor(values, taxicab, floor)
+            below_floor(values, taxicab, floor, capped)
         };
         if below {
-            for (slot, value) in out.iter_mut().zip(values) {
-                *slot = over_floor(value.wide(), floor);
-            }
-            return;
+            return floored_values(values, out, floor, capped);
         }
     }
-    // `1 / (norm + rest)` as a pair, within `12u²` of itself: the
-    // reciprocal's remainder is exact, and what the pair leaves out is the
-    // square of terms each under `u`, and three roundings.
-    let inverse = 1.0 / norm;
+    // `scale / (norm + rest)` as a pair, within `12u²` of itself: the
+    // quotient's remainder is exact, and what the pair leaves out is the
+    // square of terms each under `u`, and three roundings. A quotient too
+    // small for its remainder to be exact leaves the values to whole
+    // numbers.
+    let scale = if capped { floor } else { 1.0 };
+    let inverse = scale / norm;
     let remainder = if FMA {
-        (-norm).mul_add(inverse, 1.0)
+        (-norm).mul_add(inverse, scale)
     } else {
-        -((norm * inverse - 1.0) + product_error(norm, inverse, norm * inverse))
+        let product = norm * inverse;
+        -((product - scale) + product_error(norm, inverse, product))
     };
-    let tail = inverse * (remainder - rest * inverse);
+    let tail = (remainder - rest * inverse) / norm;
+    if inverse.is_nan() || inverse < SMALL {
+        return exact_normalized(values, out, taxicab, floor, capped);
+    }
     let relative =
         (bound / norm * (1.0 + 2f64.powi(-40)) + 24.0 * 2f64.powi(-106)) * (1.0 + 2f64.powi(-40));
     // Each quotient settled without a branch, and whether any was not.
@@ -5319,32 +5355,54 @@ fn normalized_with<I: Element, T: Output, const FMA: bool>(
         *slot = rounded;
         open |= !settled;
     }
-    if !open {
-        return;
-    }
-    let total = norm_total(values, taxicab);
-    for (slot, value) in out.iter_mut().zip(values) {
-        if !quotient(value).1 {
-            *slot = quotient_by_norm(value.wide(), total.clone(), taxicab);
+    if open {
+        let total = norm_total(values, taxicab);
+        for (slot, value) in out.iter_mut().zip(values) {
+            if !quotient(value).1 {
+                *slot = quotient_by_norm(value.wide(), total.clone(), taxicab, scale);
+            }
         }
     }
+    true
+}
+
+/// `values` over `floor`, each rounded once, or with `capped` each as it
+/// is: a slice whose norm is under the floor; not taken over its norm.
+fn floored_values<I: Element, T: Output>(
+    values: &[I],
+    out: &mut [T],
+    floor: f64,
+    capped: bool,
+) -> bool {
+    for (slot, value) in out.iter_mut().zip(values) {
+        let value = value.wide();
+        *slot = if capped {
+            T::narrow(value)
+        } else {
+            over_floor(value, floor)
+        };
+    }
+    false
 }
 
 /// [`normalized`] for a float32 answer from a plain float64 norm, the
-/// floor already in the output's dtype: the sum of the squares or of the
-/// magnitudes within `(n - 1)u` of itself, its root within half that and a
-/// rounding more, and each quotient by the inverse within two roundings
-/// more -- some thirty bits finer than a float32 place. Rounding is
-/// monotonic, so a quotient whose two ends narrow alike is settled; whether
-/// every one was. Where not, or where the norm is not plainly in range and
-/// clear of the floor, `out` is for writing again.
+/// floor already in the output's dtype and a cap in range: the sum of the
+/// squares or of the magnitudes within `(n - 1)u` of itself, its root within
+/// half that and a rounding more, and each quotient by `1` -- or the cap --
+/// over it within two roundings more, some thirty bits finer than a float32
+/// place. Rounding is monotonic, so a quotient whose two ends narrow alike
+/// is settled. What [`normalized`] answers where every one was, or where a
+/// norm plainly under a cap leaves the values as they are; none where not,
+/// or where the norm is not plainly in range and clear of the floor, and
+/// `out` is for writing again.
 #[inline(always)]
 fn plain_normalized<I: Element, T: Output>(
     values: &[I],
     out: &mut [T],
     taxicab: bool,
     floor: f64,
-) -> bool {
+    capped: bool,
+) -> Option<bool> {
     debug_assert!(T::PLAIN);
     const U: f64 = 1.0 / (1u64 << 53) as f64;
     let mut lanes = [0f64; LANES];
@@ -5362,7 +5420,7 @@ fn plain_normalized<I: Element, T: Output>(
     let total: f64 = lanes.iter().sum();
     let range = f64::from_bits((1023 - 900) << 52)..=f64::from_bits((1023 + 900) << 52);
     if !range.contains(&total) {
-        return false;
+        return None;
     }
     let count = values.len() as f64;
     let (norm, relative) = if taxicab {
@@ -5372,12 +5430,14 @@ fn plain_normalized<I: Element, T: Output>(
     };
     let relative = relative * 1.01;
     if floor > 0.0 && norm * (1.0 - 2.0 * relative) <= floor {
-        // At or near the floor: the carried norm decides.
-        return false;
+        // Plainly under a cap, the values as they are; else at or near the
+        // floor, and the carried norm decides.
+        return (capped && norm * (1.0 + 2.0 * relative) < floor)
+            .then(|| floored_values(values, out, floor, capped));
     }
     // Each end a float64 ulp further out for its own rounding.
     let relative = relative + 2.0 * U;
-    let inverse = 1.0 / norm;
+    let inverse = if capped { floor } else { 1.0 } / norm;
     let mut settled = true;
     for (slot, value) in out.iter_mut().zip(values) {
         let quotient = value.wide() * inverse;
@@ -5385,7 +5445,7 @@ fn plain_normalized<I: Element, T: Output>(
         *slot = T::narrow(quotient);
         settled &= T::narrow(quotient - bound) == T::narrow(quotient + bound);
     }
-    settled
+    settled.then_some(true)
 }
 
 /// `floor(log2(value))` of a positive finite value, subnormals included.
@@ -5411,11 +5471,12 @@ fn norm_total<I: Element>(values: &[I], taxicab: bool) -> Total {
     total.expect("finite values")
 }
 
-/// Whether the norm of `values`, all finite, lies below `floor`: the exact
-/// sum of the squares against its square, or of the magnitudes against it.
+/// Whether the norm of `values`, all finite, lies below `floor` -- or with
+/// `at`, at or below it: the exact sum of the squares against its square,
+/// or of the magnitudes against it.
 #[cold]
 #[inline(never)]
-fn below_floor<I: Element>(values: &[I], taxicab: bool, floor: f64) -> bool {
+fn below_floor<I: Element>(values: &[I], taxicab: bool, floor: f64, at: bool) -> bool {
     let total = if taxicab {
         let magnitudes = values.iter().map(|value| value.wide().abs());
         Total::of_wide(magnitudes.chain(std::iter::once(-floor)))
@@ -5423,7 +5484,8 @@ fn below_floor<I: Element>(values: &[I], taxicab: bool, floor: f64) -> bool {
         let squares = values.iter().map(|value| (value.wide(), value.wide()));
         Total::of_products(squares.chain(std::iter::once((floor, -floor))))
     };
-    total.expect("finite values").difference().0
+    let (negative, limbs, _) = total.expect("finite values").difference();
+    negative || (at && limbs.iter().all(|&limb| limb == 0))
 }
 
 /// The value nearest `value / floor`: the quotient rounded once, and the
@@ -5434,21 +5496,21 @@ fn over_floor<T: Output>(value: f64, floor: f64) -> T {
     T::settle(quotient, remainder, 0.0).unwrap_or_else(|| T::narrow(quotient))
 }
 
-/// The value nearest `value` over the norm whose exact sum is `total`: the
-/// root of its square over the sum of the squares, signed, or the value over
-/// the sum of the magnitudes.
+/// The value nearest `value` times `scale`, finite and positive, over the
+/// norm whose exact sum is `total`: the root of their squares' product over
+/// the sum of the squares, signed, or their product over the sum of the
+/// magnitudes. A zero keeps its sign.
 #[cold]
 #[inline(never)]
-fn quotient_by_norm<T: Output>(value: f64, total: Total, taxicab: bool) -> T {
-    let numerator = if taxicab {
-        Total::of_wide(std::iter::once(value))
-    } else {
-        Total::of_products(std::iter::once((value, value)))
-    };
-    let numerator = numerator.expect("a finite value");
-    if taxicab {
-        return numerator.quotient(total);
+fn quotient_by_norm<T: Output>(value: f64, total: Total, taxicab: bool, scale: f64) -> T {
+    if value == 0.0 {
+        return T::narrow(value);
     }
+    if taxicab {
+        let numerator = Total::of_products(std::iter::once((value, scale)));
+        return numerator.expect("a finite value").quotient(total);
+    }
+    let numerator = Total::of_quads(&[[value, value, scale, scale]]);
     let magnitude: T = numerator.quotient_root(total);
     if value < 0.0 {
         T::narrow(-magnitude.widen())
@@ -5457,21 +5519,26 @@ fn quotient_by_norm<T: Output>(value: f64, total: Total, taxicab: bool) -> T {
     }
 }
 
-/// [`normalized`] of a norm too far out for the carried one, every quotient
-/// formed in whole numbers.
+/// [`normalized`] of a norm too far out for the carried one, or a quotient
+/// too small for it, every quotient formed in whole numbers.
 #[cold]
 #[inline(never)]
-fn exact_normalized<I: Element, T: Output>(values: &[I], out: &mut [T], taxicab: bool, floor: f64) {
-    if floor > 0.0 && below_floor(values, taxicab, floor) {
-        for (slot, value) in out.iter_mut().zip(values) {
-            *slot = over_floor(value.wide(), floor);
-        }
-        return;
+fn exact_normalized<I: Element, T: Output>(
+    values: &[I],
+    out: &mut [T],
+    taxicab: bool,
+    floor: f64,
+    capped: bool,
+) -> bool {
+    if floor > 0.0 && below_floor(values, taxicab, floor, capped) {
+        return floored_values(values, out, floor, capped);
     }
     let total = norm_total(values, taxicab);
+    let scale = if capped { floor } else { 1.0 };
     for (slot, value) in out.iter_mut().zip(values) {
-        *slot = quotient_by_norm(value.wide(), total.clone(), taxicab);
+        *slot = quotient_by_norm(value.wide(), total.clone(), taxicab, scale);
     }
+    true
 }
 
 /// The cosine of the angle between `a` and `b`: their dot over the product
@@ -5599,7 +5666,7 @@ fn cosine_with<I: Element, T: Output, const FMA: bool>(
     // What the small values could add, their bits or their products'
     // errors lost among the subnormals.
     let lost = a.len() as f64 * f64::from_bits(4);
-    let below = |which: usize| below_floor(if which == 0 { a } else { b }, false, floor);
+    let below = |which: usize| below_floor(if which == 0 { a } else { b }, false, floor, false);
     carried
         .settled::<T, FMA>(lost, floor, below)
         .unwrap_or_else(|| exact_cosine(a, b, floor))
@@ -5821,7 +5888,7 @@ fn exact_cosine<I: Element, T: Output>(a: &[I], b: &[I], floor: f64) -> T {
         return T::narrow(f64::NAN);
     };
     let floored = |values: &[I], squares: Total| {
-        if floor > 0.0 && below_floor(values, false, floor) {
+        if floor > 0.0 && below_floor(values, false, floor, false) {
             Total::of_products(std::iter::once((floor, floor))).expect("a finite floor")
         } else {
             squares

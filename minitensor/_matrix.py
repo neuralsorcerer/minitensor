@@ -29,8 +29,10 @@ import operator as _operator
 import struct as _struct
 
 from . import _core as _C
+from ._derived import _require_float, _rounded_once
 from ._elementwise import signbit as _signbit
 from ._shape import _atleast_tensor, _element_count, _normalize_axis, _operand_pair
+from .autograd import Function as _Function
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -374,25 +376,86 @@ def logdet(input: object) -> Tensor:
 # --- rescaling --------------------------------------------------------------
 
 
+class _Renormed(_Function):
+    """Each sub-tensor along `axis` whose 1- or 2-norm exceeds `maxnorm`
+    scaled back to it, each element rounded once, and every other as it is;
+    with the gradient of that."""
+
+    @staticmethod
+    def forward(ctx, tensor, p, axis, maxnorm):
+        # The sub-tensors as the slices of a matrix along one axis: its
+        # columns where `axis` is the last, read in place, and otherwise the
+        # rows of `axis` moved to the front, which only a middle axis copies.
+        shape, length = list(tensor.shape), int(tensor.shape[axis])
+        if axis == len(shape) - 1 and axis > 0:
+            result, scaled = _F._normalized(
+                tensor.reshape([-1, length]), p, 0, maxnorm, True
+            )
+            result = result.reshape(shape)
+        else:
+            moved = _F.movedim(tensor, axis, 0)
+            result, scaled = _F._normalized(
+                moved.reshape([length, -1]), p, 1, maxnorm, True
+            )
+            result = _F.movedim(result.reshape(list(moved.shape)), 0, axis)
+        ctx.save_for_backward(tensor)
+        ctx.p, ctx.axis, ctx.maxnorm = p, axis, maxnorm
+        ctx.scaled = scaled.reshape([-1 if i == axis else 1 for i in range(len(shape))])
+        return result.contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (tensor,) = ctx.saved_tensors
+        others = [i for i in range(tensor.ndim()) if i != ctx.axis]
+        if others:
+            norm = _F.norm(tensor, ctx.p, others, True)
+        else:
+            norm = _F.abs(tensor)
+        # A scaled sub-tensor is `x · maxnorm / |x|`, and its length moves
+        # with it: along its own direction for the 2-norm, and along the
+        # signs for the 1-norm. One left as it is passes the gradient on.
+        unit = tensor / norm
+        direction = unit if ctx.p == 2 else _F.sign(tensor)
+        along = unit * grad_output
+        if others:
+            along = _F.sum(along, others, True)
+        moving = (grad_output - direction * along) * (ctx.maxnorm / norm)
+        return _F.where(ctx.scaled, moving, grad_output), None, None, None
+
+
 def renorm(input: object, p: float, dim: int, maxnorm: float) -> Tensor:
     """Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`.
 
-    The ones already under it are left exactly as they are, not rescaled by a
-    factor of one: an untouched row has to come back bit-for-bit, which is what
-    makes this usable as an embedding constraint applied every step.
+    Each such sub-tensor becomes `x * maxnorm / ||x||_p`, so that its norm is
+    `maxnorm`. The ones at or under it are left exactly as they are, not
+    rescaled by a factor of one: an untouched row has to come back
+    bit-for-bit, which is what makes this usable as an embedding constraint
+    applied every step.
+
+    For `p` 1 and 2 the comparison is with the exact norm, and each scaled
+    element is the float nearest its exact value, `maxnorm` as the dtype
+    holds it; an integer input widens as `normalize`'s does. Any other `p`
+    compares and divides by the norm as computed. A NaN in a sub-tensor
+    makes NaN of all of it.
     """
 
     tensor = _atleast_tensor(input)
-    if maxnorm < 0:
+    maxnorm = float(maxnorm)
+    if not maxnorm >= 0:
         raise ValueError(f"renorm requires a non-negative maxnorm, got {maxnorm}")
     axis = _normalize_axis(dim, tensor.ndim(), "renorm")
+    if _rounded_once(p):
+        tensor = _require_float(tensor, "renorm")
+        if tensor.numel() == 0:
+            return tensor * 1
+        return _Renormed.apply(tensor, float(p), axis, maxnorm)
 
     # The norm of each slice, over every axis but `dim`, kept broadcastable.
     others = [i for i in range(tensor.ndim()) if i != axis]
     norms = _F.norm(tensor, p, others, True) if others else _F.abs(tensor)
-    # `clamp_max` on the *ratio* rather than a branch: a slice under the limit
-    # gets a factor of exactly 1, and multiplying by 1 is exact.
-    scale = _F.clamp_max(maxnorm / _F.clamp_min(norms, 1e-30), 1.0)
+    # A factor of exactly 1 where the norm is at or under the limit, and
+    # multiplying by 1 is exact; a NaN norm is neither, and makes NaN.
+    scale = _F.where(norms <= maxnorm, 1.0, maxnorm / norms)
     return tensor * scale
 
 

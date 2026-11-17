@@ -115,7 +115,7 @@ of convenience aliases.
 | `nancumsum(input, dim=None)` | The running sum along `dim` treating NaN as zero, so a NaN contributes nothing rather than poisoning every total after it. With no `dim` the tensor is flattened first. |
 | `nancumprod(input, dim=None)` | The running product along `dim` treating NaN as one. |
 | `ediff1d(input, to_end=None, to_begin=None)` | The differences between consecutive elements of the flattened tensor, with optional values joined on at either end -- which is what makes this the one to reach for when the result has to line up with something of the original length. An integer input's differences are taken exactly, in int64, and rounded once to the dtype the ends promote it to. |
-| `normalize(input, p=2.0, dim=1, eps=1e-12)` | `input` scaled so each slice along `dim` has unit `p`-norm. `eps` is a floor *under* the norm rather than a term added to it, so a zero vector comes back as zero and every other vector is divided by its own norm -- adding `eps` would shrink all of them. For `p` 1 and 2 each element is the float nearest the exact element over the exact norm, or over `eps` as the dtype holds it where the norm is smaller, which side of the floor a slice falls on decided exactly; a slice whose squares or whose sum pass either end of the float range is scaled like any other. Any other `p` divides by the norm as computed. |
+| `normalize(input, p=2.0, dim=1, eps=1e-12)` | `input` scaled so each slice along `dim` has unit `p`-norm. `eps` is a floor *under* the norm rather than a term added to it, so a zero vector comes back as zero and every other vector is divided by its own norm -- adding `eps` would shrink all of them. For `p` 1 and 2 each element is the float nearest the exact element over the exact norm, or over `eps` as the dtype holds it where the norm is smaller, which side of the floor a slice falls on decided exactly -- and the gradient takes the same side; a slice whose squares or whose sum pass either end of the float range is scaled like any other. Any other `p` divides by the norm as computed. |
 | `pairwise_distance(input, other, p=2.0, eps=1e-6, keepdim=False)` | The `p`-distance between corresponding rows: the diagonal of `cdist`, at `n` distances rather than `n * m`. Operands broadcast. `eps` is added to the difference, biasing every distance up by `eps * d ** (1 / p)`. It is a default, not a requirement: where two rows coincide this library's `norm` answers a zero gradient rather than NaN, so `eps=0.0` gives the true distance safely. For `p` 1 and 2 each distance is the float nearest the exact one, `eps` included. |
 | `pdist(input, p=2.0)` | The `p`-distance between every pair of rows without the repeats: `n * (n - 1) / 2` values, ordered by row then column -- the strict upper triangle of `cdist(x, x)`. Built from the pairs rather than from that matrix, so it forms half as many differences as it would discard. For `p` 1 and 2 each distance is the float nearest the exact one. |
 | `diff(input, n=1, dim=-1, prepend=None, append=None)` | The `n`-th discrete difference along `dim`. `prepend` and `append` are joined on along `dim` first -- a scalar as one slice, a tensor matching every other dimension -- which is how a difference keeps the length of what it was taken from. Integers joined with float32 ends are worked in float64 and rounded to float32 once, so two large integers are not each rounded before their difference is taken. |
@@ -196,7 +196,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `tensorsolve(a, b, dims=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `dims` names axes of `a` to move to the end first. |
 | `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
-| `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
+| `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm` to `x * maxnorm / ||x||_p`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. For `p` 1 and 2 a sub-tensor is scaled exactly when its exact norm exceeds `maxnorm` as the dtype holds it, each scaled element is the float nearest its exact value, and the gradient follows the same decision; an integer input widens as `normalize`'s does. Any other `p` compares and divides by the norm as computed. A `NaN` in a sub-tensor makes `NaN` of all of it; nothing is over an infinite `maxnorm`, an infinite sub-tensor included. A negative or `NaN` `maxnorm` is refused. |
 | `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, each entry the float nearest its exact power, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
 | `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because generic numeric code asks for them defensively. |
 | `imag(input)` | Zero everywhere, as a detached constant -- written as `input * 0` it would answer NaN for an infinite input. |
@@ -1303,6 +1303,15 @@ products: each product's rounding is itself a float, and is scattered beside
 the rounded product. Rounding each product and then their sum had put a
 third of the destinations an ulp or more out.
 
+A float `"prod"` is rounded once at each destination too: the value nearest
+the exact product of what arrives, with the destination's own value when it
+takes part, as `prod` is. Multiplied in one at a time, it took a rounding for
+each value, and a running product that passed either end of the range on the
+way stayed there -- `1e200 * 1e200 * 1e-300` came out infinite where the
+product is `1e100`. A zero or an infinity among the factors makes a zero or an
+infinity signed by the parity of the negative ones, and a `NaN`, or a zero
+and an infinity together, `NaN`.
+
 The gradients that are sums of the entries reading one position are rounded
 once the same way: `gather`'s, `index_select`'s and so an embedding's where a
 row is looked up several times, `repeat_interleave`'s, and that of a value
@@ -1328,7 +1337,10 @@ from the slice's `NaN`s, which share its gradient, unless the reduction leaves
 product of every contribution *except* each one, and computes it by counting
 zeros rather than dividing the total: `total / factor` is the obvious form and
 it is wrong exactly when a factor is zero, which is when the other factors still
-have gradients worth reporting.
+have gradients worth reporting. Where no factor is zero it is the product of
+them all, rounded once as the forward's is, over the factor, so a product of
+the others in range stays in range however far the running product would have
+gone.
 
 ```python
 import minitensor as mt

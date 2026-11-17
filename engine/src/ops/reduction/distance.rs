@@ -120,9 +120,19 @@ pub fn cross_distances(a: &Tensor, b: &Tensor, p: f64) -> Result<Tensor> {
 
 /// Each slice of float `tensor` along `dim` over the greater of its
 /// `p`-norm, `p` 1 or 2, and `eps` -- `eps` as the dtype holds it -- each
-/// element the float nearest the exact quotient; see
-/// `arithmetic::exact_sum::normalized`. No gradient: `normalize` gives it.
-pub fn normalized_slices(tensor: &Tensor, p: f64, dim: usize, eps: f64) -> Result<Tensor> {
+/// element the float nearest the exact quotient; or with `capped`, each
+/// slice whose norm exceeds `eps`, which is not negative, times `eps` over
+/// its norm, and any other as it is. See
+/// `arithmetic::exact_sum::normalized`. With it, whether each slice was
+/// taken over its norm, `tensor`'s shape with one place along `dim`. No
+/// gradient: `normalize` and `renorm` give it.
+pub fn normalized_slices(
+    tensor: &Tensor,
+    p: f64,
+    dim: usize,
+    eps: f64,
+    capped: bool,
+) -> Result<(Tensor, Tensor)> {
     let taxicab = match p {
         1.0 => true,
         2.0 => false,
@@ -132,9 +142,10 @@ pub fn normalized_slices(tensor: &Tensor, p: f64, dim: usize, eps: f64) -> Resul
             )));
         }
     };
-    if dim >= tensor.ndim() {
+    if dim >= tensor.ndim() || (capped && (eps.is_nan() || eps < 0.0)) {
         return Err(MinitensorError::invalid_operation(format!(
-            "normalized_slices: dim {dim} is past the last of {} axes",
+            "normalized_slices takes one of the {} axes, and a cap that is a number not below \
+             zero; got axis {dim} and {eps}",
             tensor.ndim()
         )));
     }
@@ -144,16 +155,21 @@ pub fn normalized_slices(tensor: &Tensor, p: f64, dim: usize, eps: f64) -> Resul
     let missing = || MinitensorError::internal_error("normalized_slices: a float slice");
     let mut data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    // One flag a slice, empty slices included.
+    let mut kept = dims.to_vec();
+    kept[dim] = 1;
+    let mut over = vec![false; kept.iter().product()];
+    let setting = (len, inner, taxicab, eps, capped);
     match tensor.dtype() {
         DataType::Float32 => {
             let values = tensor.data().as_f32_slice().ok_or_else(missing)?;
             let out = data.as_f32_slice_mut().ok_or_else(missing)?;
-            over_norms(values, out, len, inner, taxicab, eps);
+            over_norms(values, out, &mut over, setting);
         }
         DataType::Float64 => {
             let values = tensor.data().as_f64_slice().ok_or_else(missing)?;
             let out = data.as_f64_slice_mut().ok_or_else(missing)?;
-            over_norms(values, out, len, inner, taxicab, eps);
+            over_norms(values, out, &mut over, setting);
         }
         other => {
             return Err(MinitensorError::invalid_operation(format!(
@@ -161,25 +177,32 @@ pub fn normalized_slices(tensor: &Tensor, p: f64, dim: usize, eps: f64) -> Resul
             )));
         }
     }
-    Ok(Tensor::new(
+    let over = Tensor::new(
+        Arc::new(TensorData::from_vec_bool(over, tensor.device())),
+        Shape::new(kept),
+        DataType::Bool,
+        tensor.device(),
+        false,
+    );
+    let quotients = Tensor::new(
         Arc::new(data),
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
         false,
-    ))
+    );
+    Ok((quotients, over))
 }
 
 /// [`normalized_slices`] of `values` laid out `[outer, len, inner]`, along
-/// the middle axis, into `out`, laid out the same: whole slices to a task,
-/// each gathered where it is not side by side.
+/// the middle axis, into `out`, laid out the same, and whether each slice
+/// was taken over its norm into `over`: whole slices to a task, each
+/// gathered where it is not side by side.
 fn over_norms<T: Element + Output>(
     values: &[T],
     out: &mut [T],
-    len: usize,
-    inner: usize,
-    taxicab: bool,
-    eps: f64,
+    over: &mut [bool],
+    (len, inner, taxicab, eps, capped): (usize, usize, bool, f64, bool),
 ) {
     if values.is_empty() || len == 0 {
         return;
@@ -187,26 +210,39 @@ fn over_norms<T: Element + Output>(
     let slab = len * inner;
     let slices = values.len() / len;
     let per_task = (TASK / len).max(1);
-    let parts = crate::parallel::Parts::of(out);
+    let (parts, flags) = (
+        crate::parallel::Parts::of(out),
+        crate::parallel::Parts::of(over),
+    );
     let task = |index: usize| {
         let (mut scratch, mut row, mut normal) = (Vec::new(), Vec::new(), Vec::new());
         for slice in index * per_task..((index + 1) * per_task).min(slices) {
             let base = slice / inner * slab + slice % inner;
-            if inner == 1 {
+            let taken = if inner == 1 {
                 // SAFETY: the slice's places are its own, inside `out`.
                 let out = unsafe { std::slice::from_raw_parts_mut(parts.start().add(base), len) };
-                normalized(&values[base..base + len], out, taxicab, eps, &mut scratch);
-                continue;
-            }
-            row.clear();
-            row.extend((0..len).map(|k| values[base + k * inner]));
-            normal.clear();
-            normal.resize(len, T::narrow(0.0));
-            normalized(&row, &mut normal, taxicab, eps, &mut scratch);
-            for (k, &value) in normal.iter().enumerate() {
-                // SAFETY: as above, a place at a time.
-                unsafe { *parts.start().add(base + k * inner) = value };
-            }
+                normalized(
+                    &values[base..base + len],
+                    out,
+                    taxicab,
+                    eps,
+                    capped,
+                    &mut scratch,
+                )
+            } else {
+                row.clear();
+                row.extend((0..len).map(|k| values[base + k * inner]));
+                normal.clear();
+                normal.resize(len, T::narrow(0.0));
+                let taken = normalized(&row, &mut normal, taxicab, eps, capped, &mut scratch);
+                for (k, &value) in normal.iter().enumerate() {
+                    // SAFETY: as above, a place at a time.
+                    unsafe { *parts.start().add(base + k * inner) = value };
+                }
+                taken
+            };
+            // SAFETY: the slice's flag is its own, inside `over`.
+            unsafe { *flags.start().add(slice) = taken };
         }
     };
     let tasks = slices.div_ceil(per_task);

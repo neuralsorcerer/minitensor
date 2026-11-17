@@ -844,21 +844,29 @@ pub fn cross_distances_rounded(a: &Bound<PyAny>, b: &Bound<PyAny>, p: f64) -> Py
         .map_err(_convert_error)
 }
 
-/// Each slice along `dim` over the greater of its `p`-norm and `eps`.
+/// Each slice along `dim` over the greater of its `p`-norm and `eps`, or
+/// with `capped` each slice whose norm exceeds `eps` scaled back to it.
 ///
-/// `p` is 1 or 2, and each element is the float nearest the exact
-/// quotient. Behind `normalize`, which differentiates.
+/// `p` is 1 or 2, and each element is the float nearest the exact value.
+/// With it, whether each slice was taken over its norm. Behind `normalize`
+/// and `renorm`, which differentiate.
 #[pyfunction]
-#[pyo3(name = "_normalized", signature = (input, p, dim, eps))]
+#[pyo3(name = "_normalized", signature = (input, p, dim, eps, capped))]
 pub fn normalized_rounded(
     input: &Bound<PyAny>,
     p: f64,
     dim: usize,
     eps: f64,
-) -> PyResult<PyTensor> {
+    capped: bool,
+) -> PyResult<(PyTensor, PyTensor)> {
     let input = borrow_tensor(input)?;
-    engine::ops::reduction::normalized_slices(input.tensor(), p, dim, eps)
-        .map(PyTensor::from_tensor)
+    engine::ops::reduction::normalized_slices(input.tensor(), p, dim, eps, capped)
+        .map(|(quotients, over)| {
+            (
+                PyTensor::from_tensor(quotients),
+                PyTensor::from_tensor(over),
+            )
+        })
         .map_err(_convert_error)
 }
 
