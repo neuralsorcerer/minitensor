@@ -1056,6 +1056,63 @@ pub(crate) fn rounded_nan_total(
     ))
 }
 
+/// For every element of float `tensor`, the product of the others in its
+/// slice over `dims` -- `prod`'s slope with respect to it -- each the float
+/// nearest the exact product; see `exact_product::products_of_others`. The
+/// reduced axes go last, so that each slice is one run, and come back after.
+pub(crate) fn products_of_others(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_product::products_of_others as others;
+    let shape = tensor.shape().dims().to_vec();
+    let mut reduced = dims.to_vec();
+    reduced.sort_unstable();
+    reduced.dedup();
+    let order: Vec<usize> = (0..shape.len())
+        .filter(|axis| !reduced.contains(axis))
+        .chain(reduced.iter().copied())
+        .collect();
+    let moved = tensor
+        .detach()
+        .permute(order.iter().map(|&axis| axis as isize).collect())?
+        .contiguous()?;
+    let len: usize = reduced.iter().map(|&axis| shape[axis]).product();
+    let missing = || MinitensorError::internal_error("a product without its float slice");
+    let data = match moved.dtype() {
+        DataType::Float32 => {
+            let values = moved.data().as_f32_slice().ok_or_else(missing)?;
+            let mut out = vec![0.0f32; values.len()];
+            if len > 0 {
+                crate::ops::map::par_out_chunks(&mut out, len, &|start, run| {
+                    others::<f32, f32>(&values[start..start + run.len()], run)
+                });
+            }
+            TensorData::from_vec_f32(out, tensor.device())
+        }
+        _ => {
+            let values = moved.data().as_f64_slice().ok_or_else(missing)?;
+            let mut out = vec![0.0f64; values.len()];
+            if len > 0 {
+                crate::ops::map::par_out_chunks(&mut out, len, &|start, run| {
+                    others::<f64, f64>(&values[start..start + run.len()], run)
+                });
+            }
+            TensorData::from_vec_f64(out, tensor.device())
+        }
+    };
+    let moved_shape: Vec<usize> = order.iter().map(|&axis| shape[axis]).collect();
+    let products = Tensor::new(
+        Arc::new(data),
+        Shape::new(moved_shape),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    );
+    let mut inverse = vec![0isize; order.len()];
+    for (at, &axis) in order.iter().enumerate() {
+        inverse[axis] = at as isize;
+    }
+    products.permute(inverse)?.contiguous()
+}
+
 /// The product of each slice of float `tensor` over `dims`, each the float
 /// nearest the exact product; see `arithmetic::exact_product`. Axes side by
 /// side are read where they lie, as one axis; others go last first, so that

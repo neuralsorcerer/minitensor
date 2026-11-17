@@ -1333,14 +1333,15 @@ the float nearest the gradient over their number. The elements a reduction did
 not read take nothing, an infinite gradient included; a `NaN` value was read
 from the slice's `NaN`s, which share its gradient, unless the reduction leaves
 `NaN` out, when it read nothing and nothing takes a gradient. `mode` is not differentiable at all.
-`"mean"` divides by the same count the forward divided by. `"prod"` needs the
-product of every contribution *except* each one, and computes it by counting
-zeros rather than dividing the total: `total / factor` is the obvious form and
-it is wrong exactly when a factor is zero, which is when the other factors still
-have gradients worth reporting. Where no factor is zero it is the product of
-them all, rounded once as the forward's is, over the factor, so a product of
-the others in range stays in range however far the running product would have
-gone.
+`"mean"` divides by the same count the forward divided by. `"prod"` gives
+each contribution the product of every other contribution to its destination,
+the destination's own value among them where it takes part: the float nearest
+the exact product, as `prod`'s slopes are, with a zero, an infinity or a NaN
+among the others making theirs as multiplying them out does. It was the
+product of them all over the contribution, which rounded twice, made NaN of an
+infinite contribution's slope, and took every slope out of the range with a
+product that left it -- two contributions of `1e300` had slopes of infinity
+where each is the other.
 
 ```python
 import minitensor as mt
@@ -2105,6 +2106,13 @@ doubles, where multiplying out gave `1.0` -- and runs to
 is. A NaN factor, or a zero beside an infinity, makes NaN; otherwise a zero
 makes a zero and an infinity an infinity, each signed by the count of
 negative factors.
+
+The gradient of `prod` gives each element the product of the others in its
+slice, the float nearest the exact product the same way: the whole product
+divided by the element, as it was, rounded twice, and where the whole product
+left the range took the slopes with it -- `prod([1e300, 1e300])` had slopes
+of infinity and `prod([1e-300, 1e-300])` of zero, where each is the other
+factor.
 
 A `float32` `logcumsumexp` carries its running value in `float64` and rounds
 it to `float32` once per element. The carry is some thirty bits finer than a

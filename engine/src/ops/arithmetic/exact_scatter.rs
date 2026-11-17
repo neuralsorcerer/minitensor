@@ -143,11 +143,8 @@ struct Scratch<T> {
 enum Kind {
     Sum,
     Mean,
-    /// Their product; with `nonzero`, of those that are not zeros, and one
-    /// for none.
-    Product {
-        nonzero: bool,
-    },
+    /// Their product.
+    Product,
 }
 
 /// Add each run's sources into its destinations in `out`: `source(o, i, j)`
@@ -166,14 +163,13 @@ where
 /// Multiply each run's sources into its destinations in `out`, as
 /// [`add_scattered`] adds them -- `shape.mean` aside: each destination
 /// something reaches is rounded once from the exact product of its values,
-/// and of its own where `shape.own`; with `nonzero`, of those that are not
-/// zeros, one for none.
-pub(crate) fn multiply_scattered<T, S>(out: &mut [T], shape: Scatter, nonzero: bool, source: S)
+/// and of its own where `shape.own`.
+pub(crate) fn multiply_scattered<T, S>(out: &mut [T], shape: Scatter, source: S)
 where
     T: Element + Output + Default + std::ops::Add<Output = T>,
     S: Fn(usize, usize, usize) -> (usize, T) + Sync,
 {
-    scattered(out, shape, Kind::Product { nonzero }, source);
+    scattered(out, shape, Kind::Product, source);
 }
 
 /// [`add_scattered`] and [`multiply_scattered`], a destination of `kind`.
@@ -301,7 +297,7 @@ fn settle_block<T: Element + Output>(
         return;
     }
     let mean = match kind {
-        Kind::Product { nonzero } => return multiply_block(part, arrivals, own, nonzero),
+        Kind::Product => return multiply_block(part, arrivals, own),
         kind => kind == Kind::Mean,
     };
     totals.clear();
@@ -346,27 +342,21 @@ fn settle_block<T: Element + Output>(
 
 /// One block of destinations as the products of the sources that reach
 /// them; see [`multiply_scattered`].
-fn multiply_block<T: Element + Output>(
-    part: &mut [T],
-    arrivals: &impl Arrivals<T>,
-    own: bool,
-    nonzero: bool,
-) {
+fn multiply_block<T: Element + Output>(part: &mut [T], arrivals: &impl Arrivals<T>, own: bool) {
     let len = part.len();
-    let kept = |value: T| !nonzero || value.wide() != 0.0;
     // How many factors each destination takes, its own value first where it
     // counts.
     let (mut arrived, mut counts) = (vec![false; len], vec![0u32; len]);
-    arrivals.each(|slot, value| {
+    arrivals.each(|slot, _| {
         arrived[slot] = true;
-        counts[slot] += u32::from(kept(value));
+        counts[slot] += 1;
     });
-    let first = |at: usize, value: T| own && arrived[at] && kept(value);
+    let first = |at: usize| own && arrived[at];
     // More than two side by side from `starts[at]`, to be multiplied out
     // exactly; two or fewer one multiplication at most, from the first.
     let mut starts = vec![0usize; len + 1];
-    for (at, &value) in part.iter().enumerate() {
-        counts[at] += u32::from(first(at, value));
+    for at in 0..len {
+        counts[at] += u32::from(first(at));
         let many = if counts[at] > 2 {
             counts[at] as usize
         } else {
@@ -377,7 +367,7 @@ fn multiply_block<T: Element + Output>(
     let mut factors = vec![T::narrow(1.0); starts[len]];
     let mut cursor = starts[..len].to_vec();
     for (at, place) in part.iter_mut().enumerate() {
-        let counted = first(at, *place);
+        let counted = first(at);
         if counts[at] > 2 && counted {
             factors[cursor[at]] = *place;
             cursor[at] += 1;
@@ -386,8 +376,7 @@ fn multiply_block<T: Element + Output>(
         }
     }
     arrivals.each(|slot, value| {
-        if !kept(value) {
-        } else if counts[slot] > 2 {
+        if counts[slot] > 2 {
             factors[cursor[slot]] = value;
             cursor[slot] += 1;
         } else {
@@ -613,7 +602,7 @@ mod tests {
                     spread % destinations.min(reach)
                 })
                 .collect();
-            for (own, nonzero) in [(true, false), (false, false), (true, true), (false, true)] {
+            for own in [true, false] {
                 let mut out = base.clone();
                 let shape = Scatter {
                     chunk: destinations,
@@ -622,7 +611,7 @@ mod tests {
                     own,
                     mean: false,
                 };
-                multiply_scattered(&mut out, shape, nonzero, |_, i, _| (slots[i], added[i]));
+                multiply_scattered(&mut out, shape, |_, i, _| (slots[i], added[i]));
                 for (slot, &got) in out.iter().enumerate() {
                     let arriving = slots.iter().zip(&added).filter(|(at, _)| **at == slot);
                     let mut kept: Vec<f64> = arriving.map(|(_, value)| *value).collect();
@@ -633,13 +622,8 @@ mod tests {
                     if own {
                         kept.push(base[slot]);
                     }
-                    kept.retain(|value| !nonzero || *value != 0.0);
                     let want: f64 = product_to(&kept);
-                    assert_eq!(
-                        got.to_bits(),
-                        want.to_bits(),
-                        "own {own}, nonzero {nonzero}"
-                    );
+                    assert_eq!(got.to_bits(), want.to_bits(), "own {own}");
                 }
             }
         }

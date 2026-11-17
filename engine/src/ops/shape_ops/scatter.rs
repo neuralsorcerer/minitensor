@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::arithmetic::exact_product::products_of_others;
 use crate::ops::arithmetic::exact_sum::{
     Element, Output, Scatter, add_scattered, add_scattered_rows, multiply_scattered,
 };
@@ -420,25 +421,13 @@ fn scatter_impl(
         DataType::Float32 if multiplied => {
             let (base, updates) = (tensor.data().as_f32_slice(), src.data().as_f32_slice());
             let mut out = base.ok_or_else(read)?.to_vec();
-            multiply_arrivals(
-                &mut out,
-                updates.ok_or_else(read)?,
-                &layout,
-                include_self,
-                false,
-            );
+            multiply_arrivals(&mut out, updates.ok_or_else(read)?, &layout, include_self);
             TensorData::from_vec_f32(out, device)
         }
         DataType::Float64 if multiplied => {
             let (base, updates) = (tensor.data().as_f64_slice(), src.data().as_f64_slice());
             let mut out = base.ok_or_else(read)?.to_vec();
-            multiply_arrivals(
-                &mut out,
-                updates.ok_or_else(read)?,
-                &layout,
-                include_self,
-                false,
-            );
+            multiply_arrivals(&mut out, updates.ok_or_else(read)?, &layout, include_self);
             TensorData::from_vec_f64(out, device)
         }
         DataType::Float32 => dispatch!(f32, as_f32_slice, as_f32_slice_mut),
@@ -546,13 +535,12 @@ fn arrivals_of<'a, T: Copy + Sync>(
 
 /// `out` with each destination of a float scatter that values arrive at
 /// the value nearest the exact product of them, and of its own value where
-/// `own`; zeros left out where `nonzero`, and an empty product one.
+/// `own`.
 fn multiply_arrivals<T: Element + Output + Default + std::ops::Add<Output = T>>(
     out: &mut [T],
     updates: &[T],
     layout: &ScatterLayout,
     own: bool,
-    nonzero: bool,
 ) {
     let shape = Scatter {
         chunk: layout.input_dim * layout.inner,
@@ -561,7 +549,7 @@ fn multiply_arrivals<T: Element + Output + Default + std::ops::Add<Output = T>>(
         own,
         mean: false,
     };
-    multiply_scattered(out, shape, nonzero, arrivals_of(layout, updates));
+    multiply_scattered(out, shape, arrivals_of(layout, updates));
 }
 
 /// Write `src` into a copy of `tensor` at the positions named by `index`.
@@ -777,37 +765,61 @@ pub(crate) fn scatter_reduce_backward(
             let zero = <$ty>::default();
             let mut for_input = vec![zero; input.numel()];
             let mut for_src = vec![zero; src.numel()];
-            // For `Prod`, the value nearest the exact product of each
-            // destination's contributions that are not zero.
-            let mut nonzero = if include_self {
-                base.to_vec()
-            } else {
-                vec![1 as $ty; input.numel()]
-            };
-            if reduce == Reduction::Prod {
-                multiply_arrivals(&mut nonzero, values, layout, include_self, true);
-            }
 
             for o in 0..outer {
                 let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
                 let dst_base = o * in_chunk;
                 let src_base = o * idx_chunk;
 
-                // How many contributions reached each destination, and -- for
-                // `Prod` -- how many were zero.
+                // How many contributions reached each destination.
                 let mut arrivals = vec![0usize; in_chunk];
-                let mut zeros = vec![0usize; in_chunk];
                 for pos in 0..idx_chunk {
-                    let d = idx[pos] as usize * inner + pos % inner;
-                    arrivals[d] += 1;
-                    zeros[d] += usize::from(values[src_base + pos] == zero);
+                    arrivals[idx[pos] as usize * inner + pos % inner] += 1;
                 }
-                if include_self {
+
+                if reduce == Reduction::Prod {
+                    // Each contribution's slope is the product of the
+                    // others reaching its destination, its own value first
+                    // where it takes part, each the float nearest the exact
+                    // product; see `products_of_others`. The contributions
+                    // are grouped by destination first, a count and a pass.
+                    let mut starts = vec![0usize; in_chunk + 1];
                     for d in 0..in_chunk {
-                        zeros[d] += usize::from(arrivals[d] > 0 && base[dst_base + d] == zero);
+                        starts[d + 1] = starts[d] + arrivals[d];
                     }
+                    let mut order = vec![0usize; idx_chunk];
+                    let mut cursor = starts[..in_chunk].to_vec();
+                    for pos in 0..idx_chunk {
+                        let d = idx[pos] as usize * inner + pos % inner;
+                        order[cursor[d]] = pos;
+                        cursor[d] += 1;
+                    }
+                    let (mut factors, mut slopes): (Vec<$ty>, Vec<$ty>) = (Vec::new(), Vec::new());
+                    let mine = usize::from(include_self);
+                    for d in 0..in_chunk {
+                        let seed = seeds[dst_base + d];
+                        if arrivals[d] == 0 {
+                            for_input[dst_base + d] = seed;
+                            continue;
+                        }
+                        let group = &order[starts[d]..starts[d + 1]];
+                        factors.clear();
+                        if include_self {
+                            factors.push(base[dst_base + d]);
+                        }
+                        factors.extend(group.iter().map(|&pos| values[src_base + pos]));
+                        slopes.clear();
+                        slopes.resize(factors.len(), zero);
+                        products_of_others::<$ty, $ty>(&factors, &mut slopes);
+                        if include_self {
+                            for_input[dst_base + d] = seed * slopes[0];
+                        }
+                        for (&pos, &slope) in group.iter().zip(&slopes[mine..]) {
+                            for_src[src_base + pos] = seed * slope;
+                        }
+                    }
+                    continue;
                 }
-                let nonzero = &nonzero[dst_base..dst_base + in_chunk];
 
                 // The destination's own gradient. A destination nothing wrote
                 // to is the input untouched, so its gradient passes straight
@@ -829,10 +841,6 @@ pub(crate) fn scatter_reduce_backward(
                             let n = (arrivals[d] + 1) as $ty;
                             for_input[dst_base + d] = seed / n;
                         }
-                        Reduction::Prod => {
-                            for_input[dst_base + d] =
-                                seed * excluding(zeros[d], nonzero[d], own, zero);
-                        }
                         // It was there before anything arrived, so it is the
                         // earliest claimant of a tie.
                         Reduction::Amax | Reduction::Amin if own == result[dst_base + d] => {
@@ -852,7 +860,6 @@ pub(crate) fn scatter_reduce_backward(
                             let n = (arrivals[d] + usize::from(include_self)) as $ty;
                             seed / n
                         }
-                        Reduction::Prod => seed * excluding(zeros[d], nonzero[d], v, zero),
                         Reduction::Amax | Reduction::Amin => {
                             if !claimed[d] && v == result[dst_base + d] {
                                 claimed[d] = true;
@@ -906,33 +913,6 @@ pub(crate) fn scatter_reduce_backward(
             )
         }),
     ))
-}
-
-/// The product of every contribution to a destination except `mine`.
-///
-/// Counted rather than divided. `total / mine` is the obvious form and it is
-/// wrong exactly when `mine` is zero -- which is the case that makes the
-/// question interesting, since that is when the product collapses and the other
-/// factors still have gradients.
-#[inline]
-fn excluding<T: Copy + PartialEq + std::ops::Div<Output = T>>(
-    zeros: usize,
-    nonzero: T,
-    mine: T,
-    zero: T,
-) -> T {
-    match zeros {
-        // Nothing was zero: the product of everything, rounded once, over my
-        // own factor, within two roundings of the product of the others --
-        // where the whole product stayed in range.
-        0 => nonzero / mine,
-        // Exactly one zero: every other factor's product includes it and is
-        // therefore zero, and the zero's own excluded product is the rest.
-        1 if mine == zero => nonzero,
-        1 => zero,
-        // Two or more zeros: excluding any single one still leaves a zero.
-        _ => zero,
-    }
 }
 
 #[cfg(test)]

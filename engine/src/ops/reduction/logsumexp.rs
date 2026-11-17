@@ -740,7 +740,6 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
     if result.requires_grad() {
         let grad_fn = Arc::new(ProdBackward {
             input: tensor.detach(),
-            result: result.clone(),
             input_id: tensor.id(),
             dims: dims_clone,
             keepdim,

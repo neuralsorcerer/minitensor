@@ -120,6 +120,35 @@ impl Product {
         .normalized()
     }
 
+    /// The product divided by `factor`, finite and nonzero: the pair's
+    /// quotient by the factor's mantissa, the leading part's remainder found
+    /// exactly and the trailing part's quotient rounded beside it, under two
+    /// steps of the bound together.
+    #[inline(always)]
+    fn over<const FMA: bool>(self, factor: f64) -> Self {
+        let (mantissa, shift) = split_factor(factor);
+        let q = self.hi / mantissa;
+        // `hi - q mantissa` is exact for a correctly rounded `q`, and so is
+        // either way of forming it: `hi - p` by Sterbenz, `p` within a factor
+        // of two of `hi`, and that less the product's exact error.
+        let remainder = if FMA {
+            (-q).mul_add(mantissa, self.hi)
+        } else {
+            let p = q * mantissa;
+            (self.hi - p) - product_error(q, mantissa, p)
+        };
+        let tail = (remainder + self.lo) / mantissa;
+        let hi = q + tail;
+        Self {
+            hi,
+            lo: tail - (hi - q),
+            exponent: self.exponent - shift,
+            negative: self.negative ^ factor.is_sign_negative(),
+            steps: self.steps + 2,
+        }
+        .normalized()
+    }
+
     /// The value nearest the exact product, when the bound says which it is.
     fn settled<T: Output>(self) -> Option<T> {
         let product = self.normalized();
@@ -222,6 +251,27 @@ fn step<const FMA: bool>(
     *lo = s - (next - p);
     *hi = next;
     *exponent += shift;
+}
+
+/// A finite, nonzero factor's magnitude as `m · 2^shift`, `m` in `[1, 2)`, a
+/// subnormal scaled into the normal range first, as [`step`] splits it.
+#[inline(always)]
+fn split_factor(value: f64) -> (f64, i64) {
+    const MANTISSA: u64 = (1 << 52) - 1;
+    const ONE: u64 = 1023 << 52;
+    let magnitude = value.abs();
+    let tiny = magnitude < f64::MIN_POSITIVE;
+    let scaled = if tiny {
+        magnitude * 2f64.powi(64)
+    } else {
+        magnitude
+    };
+    let bits = scaled.to_bits();
+    let mantissa = f64::from_bits((bits & MANTISSA) | ONE);
+    (
+        mantissa,
+        ((bits >> 52) as i64) - 1023 - if tiny { 64 } else { 0 },
+    )
 }
 
 /// One factor's magnitude, unsplit, into a fast lane's pair: `hi · value`
@@ -482,6 +532,76 @@ pub(crate) fn product_to<I: Element, T: Output>(values: &[I]) -> T {
         0 => T::narrow(1.0),
         len => Prefix::empty().rounded(len - 1, &|index| values[index].wide()),
     })
+}
+
+/// For each of `values`, the value nearest the exact product of all the
+/// others -- a product's slope with respect to that factor -- into `out`.
+///
+/// Each is the whole product, carried as a pair and an exponent, divided by
+/// its factor with the remainder kept exactly ([`Product::over`]), and
+/// settled as a product is, the factors formed again in whole numbers where
+/// the bound leaves it open. Rounded first and divided after, the product
+/// rounded twice, and where it left the range the slopes went with it:
+/// `prod([1e300, 1e300])` had slopes of infinity where each is the other
+/// factor, and `prod([1e-300, 1e-300])` of zero. A zero, an infinity or a NaN
+/// among the others makes their product as multiplying them out does.
+pub(crate) fn products_of_others<I: Element, T: Output>(values: &[I], out: &mut [T]) {
+    debug_assert_eq!(values.len(), out.len());
+    let ordinary = |value: f64| value.abs() > 0.0 && value.abs() < f64::INFINITY;
+    let (mut zeros, mut infinities, mut nans, mut negative) = (0usize, 0usize, 0usize, false);
+    for value in values.iter().map(|v| v.wide()) {
+        zeros += usize::from(value == 0.0);
+        infinities += usize::from(value.is_infinite());
+        nans += usize::from(value.is_nan());
+        negative ^= value.is_sign_negative();
+    }
+    if values.len() == 1 && zeros + infinities + nans <= 1 {
+        // No others: the empty product.
+        out[0] = T::narrow(1.0);
+        return;
+    }
+    if zeros + infinities + nans == 0 {
+        let (product, _) = carried_product(values);
+        let fma = fused();
+        for (index, (o, value)) in out.iter_mut().zip(values).enumerate() {
+            let quotient = if fma {
+                product.over::<true>(value.wide())
+            } else {
+                product.over::<false>(value.wide())
+            };
+            *o = quotient.settled().unwrap_or_else(|| {
+                // The others in whole numbers: every factor but this one.
+                let read = |k: usize| values[if k < index { k } else { k + 1 }].wide();
+                Prefix::empty().rounded(values.len() - 2, &read)
+            });
+        }
+        return;
+    }
+    // With one special factor, its own slope is the product of the others,
+    // all ordinary; every other slope takes the special one in.
+    let lone: Option<T> = (zeros + infinities + nans == 1).then(|| {
+        let rest: Vec<f64> = values
+            .iter()
+            .map(|v| v.wide())
+            .filter(|&v| ordinary(v))
+            .collect();
+        product_to(&rest)
+    });
+    for (o, value) in out.iter_mut().zip(values) {
+        let value = value.wide();
+        let zero = zeros - usize::from(value == 0.0) > 0;
+        let infinite = infinities - usize::from(value.is_infinite()) > 0;
+        let nan = nans - usize::from(value.is_nan()) > 0;
+        *o = match lone {
+            Some(lone) if !(zero | infinite | nan) => lone,
+            _ => T::narrow(special_value(
+                negative ^ value.is_sign_negative(),
+                zero,
+                infinite,
+                nan,
+            )),
+        };
+    }
 }
 
 /// The product of factors at least one of which is a zero, an infinity or a

@@ -180,10 +180,16 @@ fn shares_over_counts(grad: &Tensor, counts: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Gradient function for product reduction
+/// Gradient function for product reduction: each element's slope is the
+/// product of the others in its slice, the float nearest the exact one (see
+/// `exact_product::products_of_others`), times the output's gradient.
+///
+/// It was the whole product, rounded, over the element, with zeros taken
+/// apart: two roundings, and where the whole product left the range the
+/// slopes went with it -- `prod([1e300, 1e300])` had slopes of infinity and
+/// `prod([1e-300, 1e-300])` of zero, where each is the other factor.
 pub struct ProdBackward {
     pub input: Tensor,
-    pub result: Tensor,
     pub input_id: TensorId,
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
@@ -192,66 +198,15 @@ pub struct ProdBackward {
 impl GradientFunction for ProdBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let input = &self.input;
-        let input_shape = input.shape().dims().to_vec();
-        let dtype = input.dtype();
-        let device = input.device();
-
+        let input_shape = self.input.shape().dims().to_vec();
         // Broadcast the upstream gradient back over the reduced axes.
         let grad = expand_reduction_grad(grad_output, &input_shape, &self.dims, self.keepdim)?;
-
-        let reduce_dims: Option<Vec<isize>> = self
+        let dims = self
             .dims
-            .as_ref()
-            .map(|dims| dims.iter().map(|&d| d as isize).collect());
-
-        // d(prod)/dx_i is the product of the *other* elements in the reduction
-        // group. Computing it as `total_product / x_i` breaks when the group
-        // contains zeros (0 / 0 = NaN), so handle zeros explicitly:
-        //   - no zeros in the group:  grad_i = P / x_i
-        //   - exactly one zero:       grad_i = product of the non-zero elements
-        //                             at the zero position, 0 elsewhere
-        //   - two or more zeros:      grad_i = 0 everywhere
-        let zero = create_scalar_tensor(0.0, dtype, device)?;
-        let is_zero = crate::ops::comparison::eq(input, &zero)?; // bool mask
-        let is_zero_f = is_zero.astype(dtype)?;
-        let one = create_scalar_tensor(1.0, dtype, device)?;
-
-        // Per-group zero count and product of the non-zero elements.
-        let zero_count = reduction::sum(&is_zero_f, reduce_dims.clone(), true)?;
-        let safe_input = crate::ops::selection::where_op(&is_zero, &one, input)?;
-        let prod_nonzero = reduction::prod(&safe_input, reduce_dims, true)?;
-
-        let one_scalar = create_scalar_tensor(1.0, dtype, device)?;
-        let no_zero = crate::ops::comparison::eq(&zero_count, &zero)?;
-        let one_zero = crate::ops::comparison::eq(&zero_count, &one_scalar)?;
-
-        // The cases are folded into the per-group products first, where a
-        // select costs one value a group: `others` is P where the group has
-        // no zero and 0 where it has one, `at_zero` is P where it has exactly
-        // one and 0 otherwise. Then
-        //   grad_i = others / x_i + [x_i == 0] * at_zero,
-        // which is P / x_i without zeros, the product of the others at a lone
-        // zero, and 0 beside it -- with no 0 * inf: `others / x_i` is a
-        // division of 0 wherever the zero masks it, and `at_zero` is the only
-        // factor left that can be infinite.
-        use crate::ops::selection::where_op;
-        let others = where_op(&no_zero, &prod_nonzero, &zero)?;
-        let at_zero = where_op(&one_zero, &prod_nonzero, &zero)?;
-        let quotient = arithmetic::div(&others, &safe_input)?;
-        let per_element = if contains_non_finite(&at_zero) {
-            // `prod([1e300, -1e300, 0])`: the slope at the zero is the product
-            // of the others, which overflows as it should, and 0 * inf would
-            // make every position beside it NaN. A select keeps them apart.
-            where_op(&is_zero, &at_zero, &quotient)?
-        } else {
-            arithmetic::add(&quotient, &arithmetic::mul(&is_zero_f, &at_zero)?)?
-        };
-        let grad_input = arithmetic::mul(&grad, &per_element)?;
-        gradients.insert(self.input_id, grad_input);
-
+            .clone()
+            .unwrap_or_else(|| (0..input_shape.len()).collect());
+        let others = reduction::products_of_others(&self.input, &dims)?;
+        gradients.insert(self.input_id, arithmetic::mul(&grad, &others)?);
         Ok(gradients)
     }
 
@@ -816,21 +771,6 @@ pub struct SumBackward {
     pub dims: Option<Vec<usize>>,
     pub keepdim: bool,
 }
-/// Whether a float tensor holds an infinity or a NaN anywhere.
-fn contains_non_finite(tensor: &Tensor) -> bool {
-    match tensor.dtype() {
-        DataType::Float32 => tensor
-            .data()
-            .as_f32_slice()
-            .is_some_and(|values| values.iter().any(|v| !v.is_finite())),
-        DataType::Float64 => tensor
-            .data()
-            .as_f64_slice()
-            .is_some_and(|values| values.iter().any(|v| !v.is_finite())),
-        _ => false,
-    }
-}
-
 /// Whether a float tensor holds a NaN anywhere.
 ///
 /// A fold within each block rather than `any`, whose early exit keeps the
