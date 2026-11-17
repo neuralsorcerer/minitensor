@@ -213,7 +213,7 @@ fn cancelled_logaddexp2(high: f64, low: f64) -> f64 {
         let (sum, error) = two_sum(high, rest.0);
         sum + (error + rest.1)
     }
-    extended::fused!(body, high, low)
+    extended::fused!(body(high: f64, low: f64) -> f64)
 }
 
 /// `d/da log2(2^a + 2^b) = 2^a / (2^a + 2^b)`, the logistic function of

@@ -162,6 +162,31 @@ def test_slices_split_into_bands(dtype, shape):
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("dim", [0, 1])
+def test_logsumexp_of_log_probabilities(dtype, dim):
+    # Log-probabilities total one, less what rounding them left, and their
+    # logsumexp is the size of that rounding: float64 terms put an ulp of the
+    # largest logarithm into it, hundreds of millions of ulps of the answer.
+    rng = np.random.default_rng(1237 + dim)
+    for k in (2, 7, 40):
+        x = np.log(rng.dirichlet(np.ones(k), 40)).astype(dtype)
+        t = mt.Tensor(x if dim == 1 else x.T.copy(), dtype=dtype)
+        totals = F.logsumexp(t, dim).numpy()
+        for row, lse in zip(x, totals):
+            with localcontext() as context:
+                context.prec = 80
+                exact = sum(Decimal(float(v)).exp() for v in row).ln()
+            if dtype == "float32":
+                _check([lse], [exact], dtype, 0)
+            else:
+                # Within an ulp, or within 2^-100 of the terms where the sum
+                # is below 2^-50 of them: the precision of their pairs.
+                want = _nearest(exact, dtype)
+                slack = max(math.ulp(want), 2.0**-100 * max(1.0, float(-row.max())))
+                assert abs(float(lse) - want) <= slack, (lse, want)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("dim", [0, 1])
 def test_masked_softmax_rounds_once(dtype, dim):
     rng = np.random.default_rng(1229 + dim)
     x = (rng.standard_normal((10, 24)) * 8).astype(dtype)

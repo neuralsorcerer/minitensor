@@ -132,7 +132,10 @@ def test_add_module_takes_a_sequential_too():
 
 
 def test_training_reaches_every_level_of_a_nested_sequential():
-    model = Sequential([Sequential([DenseLayer(3, 4), ReLU()]), DenseLayer(4, 2)])
+    # `tanh` passes some gradient for every input, where a ReLU passes none
+    # once all its units start dead for the input below -- one start in
+    # sixteen, which made the test depend on the random state it ran in.
+    model = Sequential([Sequential([DenseLayer(3, 4), nn.Tanh()]), DenseLayer(4, 2)])
     before = {k: v.numpy().copy() for k, v in model.state_dict().items()}
 
     optimizer = optim.SGD(model.parameters(), lr=0.1)

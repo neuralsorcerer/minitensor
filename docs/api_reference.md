@@ -2452,8 +2452,14 @@ assert row_std.shape == (2, 3)
   now the float32 nearest its value too. `logsumexp` is `max + log1p(rest)`
   the same way, so `logsumexp([0, -20])` is `2.06e-9` rather than 0; a
   float32 one is the float32 nearest its value and a float64 one within an
-  ulp. The gradient of a float32 `log_softmax` is taken in float64 and
-  rounded once.
+  ulp. Where the total is near one -- log-probabilities, whose exponentials
+  total one less what rounding them left -- the logarithm is many times
+  smaller than the maximum it is added to, and float64 terms put an ulp of
+  that into it: a float64 `logsumexp` of normalised log-probabilities was
+  hundreds of millions of ulps out. Such a sum, and a float32 one whose
+  float64 value cannot settle its rounding, is formed again with every term
+  carried as a pair of floats, as `logaddexp` is. The gradient of a float32
+  `log_softmax` is taken in float64 and rounded once.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors

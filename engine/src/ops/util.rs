@@ -576,7 +576,7 @@ fn cancelled_log_add_exp(high: f64, low: f64) -> Option<f64> {
     if d.is_nan() || d < -700.0 {
         return None;
     }
-    Some(extended::fused!(body, high, low))
+    Some(extended::fused!(body(high: f64, low: f64) -> f64))
 }
 
 /// Map a linear index into an output tensor onto the corresponding element of

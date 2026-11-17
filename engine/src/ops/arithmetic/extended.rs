@@ -241,26 +241,26 @@ pub(crate) fn ln_1p<const FMA: bool>(w: Pair) -> Pair {
 
 /// Run `body`'s float64 arithmetic with `FMA` as the CPU allows: compiled with
 /// the fused multiply-add where it has one -- a third less work for every
-/// product of pairs -- and without it otherwise. `body` is a function of two
-/// floats, as each caller here is.
+/// product of pairs -- and without it otherwise. Written
+/// `fused!(body(name: Type, ...) -> Return)`, each `name` a local passed on.
 macro_rules! fused {
-    ($body:ident, $a:expr, $b:expr) => {{
+    ($body:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {{
         #[cfg(target_arch = "x86_64")]
         {
             #[target_feature(enable = "fma")]
-            fn with_fma(a: f64, b: f64) -> f64 {
-                $body::<true>(a, b)
+            fn with_fma($($arg: $ty),*) -> $ret {
+                $body::<true>($($arg),*)
             }
             if crate::ops::simd::simd_capabilities().avx2_fma {
                 // SAFETY: fma was detected on this CPU.
-                unsafe { with_fma($a, $b) }
+                unsafe { with_fma($($arg),*) }
             } else {
-                $body::<false>($a, $b)
+                $body::<false>($($arg),*)
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            $body::<{ cfg!(target_arch = "aarch64") }>($a, $b)
+            $body::<{ cfg!(target_arch = "aarch64") }>($($arg),*)
         }
     }};
 }

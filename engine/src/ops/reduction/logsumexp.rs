@@ -422,7 +422,70 @@ fn lse_run<T: ShiftedExp + Send + Sync>(run: &[T], spread: bool) -> T {
         0.0,
         |a, b| a + b,
     );
-    T::narrow(top.wide() + crate::ops::activation::log1p_of_rest(rest))
+    let log_total = crate::ops::activation::log1p_of_rest(rest);
+    let value = top.wide() + log_total;
+    if lse_settled::<T>(value, log_total) {
+        T::narrow(value)
+    } else {
+        let values: Vec<f64> = run.iter().map(|v| v.wide()).collect();
+        T::narrow(exact_logsumexp(&values, top.wide()))
+    }
+}
+
+/// Whether a log-sum-exp's float64 `value` -- the maximum plus the logarithm
+/// of the total, `log_total` -- stands: for float64, where it has not
+/// cancelled, the sum at least the logarithm it was formed from; for float32,
+/// where its rounding is settled, the value moved either way by a bound on its
+/// error rounding the same way.
+///
+/// A float32 total is a blocked float64 sum, a few hundred additions in a
+/// chain at most, so within 2^-44 of itself; the bound is twice that, and the
+/// logarithm's and the sum's own roundings. Where the sum is many times
+/// smaller than the logarithm the bound is a larger share of it, but a float32
+/// value is in doubt only near a point where its rounding changes.
+#[inline]
+fn lse_settled<T: ShiftedExp>(value: f64, log_total: f64) -> bool {
+    if T::CARRIES {
+        value.is_nan() || value.abs() >= log_total
+    } else {
+        const TOTAL: f64 = 1.0 / 8_796_093_022_208.0; // 2^-43
+        const VALUE: f64 = 1.0 / 4_503_599_627_370_496.0; // 2^-52
+        let bound = log_total * TOTAL + value.abs() * VALUE;
+        value.is_nan() || (value - bound) as f32 == (value + bound) as f32
+    }
+}
+
+/// `log(sum(exp(x)))` of a slice whose float64 value did not stand -- see
+/// [`lse_settled`] -- formed again with every term `exp(x - top)` carried as
+/// a pair of floats, the logarithm of their total too, and its sum with `top`
+/// rounded once; see `arithmetic::extended`. `top` is the slice's maximum,
+/// finite.
+///
+/// The sum of log-probabilities' exponentials is one, less what rounding them
+/// left, and its logarithm the size of that rounding: float64 terms put an ulp
+/// of the logarithm of the largest into it, and a float64 `logsumexp` of
+/// normalised log-probabilities was hundreds of millions of ulps out.
+#[cold]
+fn exact_logsumexp(values: &[f64], top: f64) -> f64 {
+    use crate::ops::arithmetic::extended::{self, Pair};
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    #[inline(always)]
+    fn body<const FMA: bool>(values: &[f64], top: f64) -> f64 {
+        // The total less one, so a total near one keeps its small part; the
+        // maximum's own term is one exactly. A term below `exp(-700)` is
+        // below anything the sum with `top` can hold.
+        let mut excess = Pair(-1.0, 0.0);
+        for &v in values {
+            let (d, e) = two_sum(v, -top);
+            if d >= -700.0 {
+                excess = excess.add(extended::exp::<FMA>(Pair(d, e)));
+            }
+        }
+        let l = extended::ln_1p::<FMA>(excess);
+        let (sum, error) = two_sum(top, l.0);
+        sum + (error + l.1)
+    }
+    extended::fused!(body(values: &[f64], top: f64) -> f64)
 }
 
 /// Log-sum-exp down each column of a row-major `(rows, cols)` slab; a single
@@ -505,15 +568,28 @@ fn lse_columns<T: ShiftedExp + Send + Sync>(slab: &[T], cols: usize, spread: boo
     );
 
     // The logarithm of each total split as `ExpTotal` splits it, so a total
-    // near one keeps its small part.
+    // near one keeps its small part; a column whose value does not stand is
+    // formed again from its terms as pairs.
     maxima
         .iter()
         .zip(&totals)
-        .map(|(&m, &t)| {
-            if m.is_finite() {
-                T::narrow(m.wide() + t.ln())
+        .enumerate()
+        .map(|(c, (&m, &t))| {
+            if !m.is_finite() {
+                return m;
+            }
+            let log_total = t.ln();
+            let value = m.wide() + log_total;
+            if lse_settled::<T>(value, log_total) {
+                T::narrow(value)
             } else {
-                m
+                let column: Vec<f64> = slab
+                    .iter()
+                    .skip(c)
+                    .step_by(cols)
+                    .map(|v| v.wide())
+                    .collect();
+                T::narrow(exact_logsumexp(&column, m.wide()))
             }
         })
         .collect()
