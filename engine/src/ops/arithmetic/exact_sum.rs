@@ -2361,17 +2361,33 @@ fn at_exactly<T: Trapezoid>(y: &[T], x: &[T]) -> T {
 /// value nearest the exact quotient though either total is past the
 /// largest float64, an infinity of the numerator's sign over a weight total
 /// that is exactly zero, and NaN for zero over zero.
+///
+/// A weighted sum carried as nothing is nothing only where no product was
+/// too small to split: one of two operands that are not zeros, within
+/// `2^-968` of zero, may have left less than itself or nothing at all, and
+/// over a weight total as small the mean is not small. Such a sum is taken
+/// exactly; one that is not nothing is at least `2^-900`, beside which
+/// whatever its smallest products lost is far within what a settled
+/// quotient keeps clear of.
 pub(crate) fn weighted_mean_row<I: Element, T: Output>(values: &[I], weights: &[I]) -> T {
     debug_assert_eq!(values.len(), weights.len());
     let numerator = I::carried_dot(values, weights);
     let denominator = carried_with(weights, true);
-    quotient_settled(numerator, denominator).unwrap_or_else(|| {
-        let pairs = values
+    let pairs = || {
+        values
             .iter()
             .zip(weights)
-            .map(|(&value, &weight)| (value.wide(), weight.wide()));
-        exact_quotient(pairs, weights.iter().map(|weight| weight.wide()))
-    })
+            .map(|(&value, &weight)| (value.wide(), weight.wide()))
+    };
+    let nothing = numerator.sum == 0.0 && numerator.error == 0.0 && numerator.slack == 0.0;
+    let lost =
+        nothing && pairs().any(|(x, y)| x != 0.0 && y != 0.0 && (x * y).abs() < 2f64.powi(-968));
+    let settled = if lost {
+        None
+    } else {
+        quotient_settled(numerator, denominator)
+    };
+    settled.unwrap_or_else(|| exact_quotient(pairs(), weights.iter().map(|weight| weight.wide())))
 }
 
 /// The value nearest `Σ values[i] · weights[i] / Σ weights[i]` for int64
@@ -7896,6 +7912,28 @@ mod tests {
         assert_eq!(
             weighted_mean_row::<f64, f64>(&[f64::INFINITY, 3.0], &[1.0, 1.0]),
             f64::INFINITY
+        );
+        // Products below the least subnormal over a weight total as small:
+        // the mean is an ordinary value, though the weighted sum, carried,
+        // is nothing -- with every product lost, and with two that cancel
+        // beside one that is lost.
+        assert_eq!(weighted_mean_row::<f64, f64>(&[1e-300], &[1e-30]), 1e-300);
+        assert_eq!(
+            weighted_mean_row::<f64, f64>(&[1e-300, 2e-300], &[1e-30, 3e-30]),
+            exact(&[1e-300, 2e-300], &[1e-30, 3e-30])
+        );
+        let (values, weights) = (
+            [1.0, 1.0, 2f64.powi(-800)],
+            [2f64.powi(-300), -2f64.powi(-300), 2f64.powi(-300)],
+        );
+        assert_eq!(
+            weighted_mean_row::<f64, f64>(&values, &weights),
+            2f64.powi(-800)
+        );
+        // Where a factor of each product is a zero the sum is nothing.
+        assert_eq!(
+            weighted_mean_row::<f64, f64>(&[0.0, 1e-300], &[1e-30, 0.0]).to_bits(),
+            0
         );
         let mut next = generator(0x5851_f42d_4c95_7f2d);
         let mut unit = move || (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5;

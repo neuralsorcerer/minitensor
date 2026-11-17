@@ -149,6 +149,40 @@ def test_totals_past_the_range_and_specials():
     )
 
 
+def test_products_below_the_least_float64():
+    # Values and weights whose products are too small for any float64, over
+    # a weight total as small: the mean is an ordinary value. The weighted
+    # sum, carried in floats, came to nothing, and the mean to zero.
+    cases = [
+        ([1e-300], [1e-30]),
+        ([1e-300, 2e-300], [1e-30, 3e-30]),
+        ([1e-200, 2e-200, -5e-201], [1e-150, 3e-150, 2e-150]),
+        ([3e-200, -1e-200], [1e-200, 2e-200]),
+        # Two products that cancel beside one that is lost.
+        ([1.0, 1.0, 2.0**-800], [2.0**-300, -(2.0**-300), 2.0**-300]),
+        # Products that are subnormal, and so lose their last bits.
+        ([1.5e-170, -2.5e-170, 3.25e-170], [1.1e-150, 2.3e-150, 0.7e-150]),
+    ]
+    for values, weights in cases:
+        got = mt.average(
+            mt.Tensor(values, dtype="float64"),
+            weights=mt.Tensor(weights, dtype="float64"),
+        ).item()
+        assert got == float(_exact(values, weights)), (values, weights)
+    # A zero for a factor of every product is a sum of nothing.
+    nothing = mt.average(
+        mt.Tensor([0.0, 1e-300], dtype="float64"),
+        weights=mt.Tensor([1e-30, 0.0], dtype="float64"),
+    ).item()
+    assert nothing == 0.0 and not math.copysign(1.0, nothing) < 0
+    rows = mt.average(
+        mt.Tensor([[1e-300, 2e-300], [1.0, 3.0]], dtype="float64"),
+        dim=1,
+        weights=mt.Tensor([[1e-30, 3e-30], [1.0, 1.0]], dtype="float64"),
+    ).tolist()
+    assert rows == [float(_exact([1e-300, 2e-300], [1e-30, 3e-30])), 2.0]
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_gradients_reach_values_and_weights(dtype):
     values = mt.tensor([1.0, 2.0, 4.0], dtype=dtype, requires_grad=True)
