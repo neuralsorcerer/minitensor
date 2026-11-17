@@ -42,12 +42,19 @@
 //! `2^-401`, is left to the exact dots, whose rules for those are the rule
 //! everywhere a dot is taken; so is a product with a single row or column,
 //! or too few entries to pay for the cutting.
+//!
+//! A product of at most [`ROWS_BY_COLUMNS`] rows whose right operand's rows
+//! lie along its storage is not cut either: each of its rows is taken
+//! against every column at once, each entry carried as `dot` carries one.
 
 use crate::error::{MinitensorError, Result};
-use crate::ops::arithmetic::exact_sum::{Output, dot_f64, exact_dot_to, exact_quads_f64};
+use crate::ops::arithmetic::exact_sum::{
+    Output, dot_columns_f64, dot_f64, exact_dot_to, exact_quads_f64,
+};
 use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
-use crate::ops::map::{par_out_chunks, par_out_chunks_mapped, par_out_chunks_sized};
+use crate::ops::map::{PAR_THRESHOLD, par_out_chunks, par_out_chunks_mapped, par_out_chunks_sized};
 use crate::ops::provider::Storage;
+use crate::parallel::Parts;
 use crate::tensor::{DataType, TensorData};
 
 use super::Affine;
@@ -70,9 +77,15 @@ const TASK: usize = 1 << 14;
 /// more than they spread.
 const SERIAL_BELOW: usize = 1 << 21;
 
-/// Columns of the right operand cut at a time where they lie across its
+/// Rows or columns of an operand cut at a time where they lie across its
 /// storage.
-const TILE: usize = 32;
+const TILE: usize = 256;
+
+/// The most rows a product is taken a row at a time for, each against every
+/// column of a right operand whose rows lie along its storage: past these
+/// the cut operands' three products cost less than as many rows carried as
+/// `dot` carries one.
+const ROWS_BY_COLUMNS: usize = 12;
 
 /// What an entry the bound leaves open is marked with until its exact dot
 /// is taken: a NaN, and one of another payload where its row and column
@@ -497,9 +510,14 @@ impl Cuts {
                 (*peak, *mark) = both;
             }
         } else {
-            for l in 0..k {
-                let source = &side.values[l * side.along..][..side.count];
-                peak_side(source, &mut peaks, &mut marks);
+            // A tile at a time, whose peaks stay in cache from one of its
+            // values to the next.
+            for from in (0..side.count).step_by(TILE) {
+                let to = (from + TILE).min(side.count);
+                for l in 0..k {
+                    let source = &side.values[l * side.along + from..][..to - from];
+                    peak_side(source, &mut peaks[from..to], &mut marks[from..to]);
+                }
             }
         }
         let mut cuts = Cuts {
@@ -672,74 +690,48 @@ fn cut_side_with(
     }
 }
 
-/// A tile of columns of the right operand, lying across its storage, cut
-/// for one run of `span` rows into `columns`: each column's rests and then
-/// its first pieces. `rows` is the operand from the run's first row and the
-/// tile's first column, its rows `along` apart.
+/// Several rows or columns lying across their storage, `count` of them
+/// side by side in each of the `steps` lines of `source`, which lie `along`
+/// apart: cut as [`cut_line_with`] cuts them, each by its own `cuts`, with
+/// what they add to their `sums`. Each line's first pieces go to `pieces`
+/// from `ones` and its rests from `rests`, the next line's `stride` further
+/// on; the two lie `count` apart at least.
 #[inline(always)]
-fn cut_tile_with(
-    (rows, along, span): (&[f64], usize, usize),
+fn cut_across_with(
+    (source, along, steps): (&[f64], usize, usize),
     cuts: (&Cuts, usize, f64),
     (values, squares, bits): (&mut [f64], &mut [f64], &mut [u64]),
-    columns: &mut [f64],
+    (pieces, ones, rests, stride, count): (&mut [f64], usize, usize, usize, usize),
 ) {
-    let count = columns.len() / (2 * span);
-    let (mut ones, mut rests) = ([0.0; TILE], [0.0; TILE]);
-    for step in 0..span {
+    for step in 0..steps {
+        let (ones, rests) = (ones + step * stride, rests + step * stride);
+        let (low, high) = pieces.split_at_mut(ones.max(rests));
+        let (low, high) = (&mut low[ones.min(rests)..][..count], &mut high[..count]);
+        let (ones, rests) = if ones < rests {
+            (low, high)
+        } else {
+            (high, low)
+        };
         cut_side_with(
-            &rows[step * along..][..count],
+            &source[step * along..][..count],
             cuts,
             (&mut *values, &mut *squares, &mut *bits),
-            &mut ones,
-            &mut rests,
+            ones,
+            rests,
         );
-        for (j, column) in columns.chunks_exact_mut(2 * span).enumerate() {
-            column[step] = rests[j];
-            column[span + step] = ones[j];
-        }
     }
 }
 
 wide! {
-    /// [`cut_tile_with`], in the widest lanes the CPU has.
-    fn cut_tile(source: (&[f64], usize, usize), cuts: (&Cuts, usize, f64), sums: (&mut [f64], &mut [f64], &mut [u64]), columns: &mut [f64]) = cut_tile_with
+    /// [`cut_across_with`], in the widest lanes the CPU has.
+    fn cut_across(source: (&[f64], usize, usize), cuts: (&Cuts, usize, f64), sums: (&mut [f64], &mut [f64], &mut [u64]), pieces: (&mut [f64], usize, usize, usize, usize)) = cut_across_with
 }
 
-/// A band of rows of the left operand, lying across its storage, cut into
-/// `ones` and `rests`, `k` values a row. `columns` is the operand from the
-/// band's first row, its columns `along` apart.
-#[inline(always)]
-fn cut_band_with(
-    (columns, along, k): (&[f64], usize, usize),
-    cuts: (&Cuts, usize, f64),
-    (values, squares, bits): (&mut [f64], &mut [f64], &mut [u64]),
-    (ones, rests): (&mut [f64], &mut [f64]),
-) {
-    let rows = ones.len() / k;
-    let (mut one, mut rest) = ([0.0; ROWS], [0.0; ROWS]);
-    for l in 0..k {
-        cut_side_with(
-            &columns[l * along..][..rows],
-            cuts,
-            (&mut *values, &mut *squares, &mut *bits),
-            &mut one,
-            &mut rest,
-        );
-        for row in 0..rows {
-            ones[row * k + l] = one[row];
-            rests[row * k + l] = rest[row];
-        }
-    }
-}
-
-wide! {
-    /// [`cut_band_with`], in the widest lanes the CPU has.
-    fn cut_band(source: (&[f64], usize, usize), cuts: (&Cuts, usize, f64), sums: (&mut [f64], &mut [f64], &mut [u64]), planes: (&mut [f64], &mut [f64])) = cut_band_with
-}
-
-/// The right operand cut into `out`, run after run: for each run, each
-/// column's rests and then its first pieces, column after column, so that
-/// a column's part of a run lies side by side; and each column's [`Sums`].
+/// The right operand cut into `out`, run after run, and each column's
+/// [`Sums`]. A run's pieces lie as the operand does: where its columns lie
+/// along its storage, each column's rests and then its first pieces, column
+/// after column; and where its rows do, a row of every column's rests for
+/// each row of the run, and then a row of their first pieces for each.
 fn cut_right(
     side: Side<'_>,
     cuts: &Cuts,
@@ -766,11 +758,11 @@ fn cut_right(
                     sums.add(j, cut_line(source, cuts.piece(j, grow), ones, rests));
                 }
             } else {
-                // A tile of columns at a time, so that the lines a run's
-                // rows are written down stay in cache from row to row.
-                for (tile, columns) in block.chunks_mut(TILE * 2 * span).enumerate() {
-                    let from = tile * TILE;
-                    cut_tile(
+                // A tile of columns at a time, whose sums stay in cache from
+                // row to row.
+                for from in (0..n).step_by(TILE) {
+                    let count = TILE.min(n - from);
+                    cut_across(
                         (&side.values[first * side.along + from..], side.along, span),
                         (cuts, from, grow),
                         (
@@ -778,7 +770,7 @@ fn cut_right(
                             &mut sums.rests[from..],
                             &mut sums.bits[from..],
                         ),
-                        columns,
+                        (&mut *block, span * n + from, from, n, count),
                     );
                 }
             }
@@ -795,8 +787,11 @@ fn cut_right(
     sums
 }
 
-/// Rows `first_row..` of the left operand cut into `out`: their first
-/// pieces, `k` a row, and then their rests; and each row's [`Sums`].
+/// Rows `first_row..` of the left operand cut into `out`, and each row's
+/// [`Sums`]. The pieces lie as the operand does: where its rows lie along
+/// its storage, their first pieces, `k` a row, and then their rests; and
+/// where its columns do, every row's first piece and then every row's rest
+/// for each of the `k` in turn.
 fn cut_left(
     side: Side<'_>,
     cuts: &Cuts,
@@ -808,8 +803,8 @@ fn cut_left(
     let rows = out.len() / (2 * k);
     let grow = power(width);
     let mut sums = Sums::of(rows);
-    let (ones, rests) = out.split_at_mut(rows * k);
     if side.upright() {
+        let (ones, rests) = out.split_at_mut(rows * k);
         for (row, (ones, rests)) in ones
             .chunks_exact_mut(k)
             .zip(rests.chunks_exact_mut(k))
@@ -820,11 +815,11 @@ fn cut_left(
             sums.add(row, cut_line(source, cuts.piece(i, grow), ones, rests));
         }
     } else {
-        cut_band(
+        cut_across(
             (&side.values[first_row..], side.along, k),
             (cuts, first_row, grow),
             (&mut sums.values, &mut sums.rests, &mut sums.bits),
-            (ones, rests),
+            (out, 0, rows, 2 * rows, rows),
         );
     }
     sums
@@ -976,6 +971,12 @@ fn special(terms: impl Iterator<Item = [f64; 3]>) -> Option<f64> {
 /// that underflowed leaves the whole to the exact sum of the triple
 /// products.
 fn affine_dot(row: &[f64], column: &[f64], alpha: f64, beta: f64, addend: f64) -> f64 {
+    if alpha == 1.0 {
+        // The addend is one more term of the dot.
+        let left: Vec<f64> = row.iter().copied().chain([beta]).collect();
+        let right: Vec<f64> = column.iter().copied().chain([addend]).collect();
+        return dot_f64(&left, &right);
+    }
     let triples = || {
         row.iter()
             .zip(column)
@@ -1014,6 +1015,62 @@ fn few(m: usize, k: usize, n: usize) -> bool {
     m == 1 || n == 1 || m * n * (250 + k + k / 4) < 12_000 + 10 * (m + n) * k
 }
 
+/// Whether a product of few rows, by a right operand whose rows lie along
+/// its storage, is taken a row at a time: each row against every column at
+/// once, carried as `dot` carries one, which costs less than the cutting
+/// does until there are some rows to share it.
+fn by_rows(m: usize, right: Side<'_>, scaling: Option<Scaling<'_>>) -> bool {
+    m <= ROWS_BY_COLUMNS && !right.upright() && scaling.is_none_or(|(alpha, ..)| alpha == 1.0)
+}
+
+/// Each row of a product by a right operand whose rows lie along its
+/// storage, as [`dot_columns_f64`] takes a row by its columns: an addend,
+/// scaled by `beta`, is one more term of each dot.
+fn row_products(
+    k: usize,
+    n: usize,
+    left: Side<'_>,
+    right: Side<'_>,
+    scaling: Option<Scaling<'_>>,
+    out: &mut [f64],
+) {
+    let row = |start: usize, line: &mut [f64]| {
+        let i = start / n;
+        let mut scales: Vec<f64> = (0..k).map(|l| left.at(i, l)).collect();
+        let mut added = Vec::new();
+        if let Some((_, beta, addend)) = scaling {
+            scales.push(beta);
+            added.extend((0..n).map(|j| addend(i, j)));
+        }
+        let added = &added[..];
+        let rows = |l: usize| -> &[f64] {
+            if l < k {
+                &right.values[l * right.along..][..n]
+            } else {
+                added
+            }
+        };
+        dot_columns_f64(&scales, &rows, line);
+    };
+    // A row's columns are shared out between the threads where it is wide;
+    // rows that are not, or that are as many as the threads, are a task
+    // each.
+    let rows = out.len() / n;
+    let wide = k * n >= PAR_THRESHOLD && n > COLUMNS;
+    if rows > 1 && rows * k * n >= PAR_THRESHOLD && !(wide && rows < threads()) {
+        par_out_chunks(out, n, &row);
+    } else {
+        out.chunks_mut(n)
+            .enumerate()
+            .for_each(|(i, line)| row(i * n, line));
+    }
+}
+
+/// The threads a product is shared out between.
+fn threads() -> usize {
+    crate::parallel::current_num_threads()
+}
+
 /// One product of `(m, k)` by `(k, n)` into `out`, each entry the float64
 /// nearest its exact value.
 fn product_f64(
@@ -1025,9 +1082,11 @@ fn product_f64(
     scaling: Option<Scaling<'_>>,
     out: &mut [f64],
 ) {
-    if few(m, k, n) {
+    if by_rows(m, right, scaling) {
+        row_products(k, n, left, right, scaling, out);
+    } else if few(m, k, n) {
         out.fill(OPEN);
-        exact_entries(k, n, left, right, None, scaling, out, m * n);
+        exact_entries(k, n, left, right, scaling, out, m * n);
     } else {
         split_product(m, k, n, left, right, scaling, out);
     }
@@ -1081,29 +1140,50 @@ fn split_product(
     let gamma = terms * UNIT / (1.0 - terms * UNIT) * slack;
     let folds = 2.0 * k.div_ceil(run) as f64 * UNIT;
     let lambda = 3.2 * folds * folds / (1.0 - folds) * slack;
-    // Bands of one height, but for the last: as many as keep each within
-    // `ROWS`, and one for each thread where that leaves them tall enough to
-    // give the kernel its due.
+    // Bands of one height, but for the last, each within `ROWS`. A task
+    // takes a section of a band's columns: where the bands are fewer than
+    // the threads each is shared out in sections of one width, so that the
+    // kernel lays out each part of the right pieces once, where shorter
+    // bands would have it lay out all of them again for each; and only
+    // where the columns are too few for that are the bands made shorter.
+    // Either is kept wide enough, or tall enough, to give the kernel its
+    // due.
     let threads = if spread {
         crate::parallel::current_num_threads()
     } else {
         1
     };
-    let bands = m.div_ceil(ROWS).max(threads.min(m / 32));
+    let bands = m.div_ceil(ROWS);
+    let sections = threads.div_ceil(bands).clamp(1, (n / 32).max(1));
+    let bands = bands.max(threads.div_ceil(sections).min(m / 32));
     let rows = m.div_ceil(bands);
-    let columns = n.div_ceil(n.div_ceil(COLUMNS));
+    let bands = m.div_ceil(rows);
     let rights = &rights[..];
-    let band = |start: usize, part: &mut [f64]| -> usize {
-        let (first_row, rows) = (start / n, part.len() / n);
-        // The band's first pieces and, after them, their rests.
-        let mut lefts = vec![0.0; 2 * rows * k];
-        let sums = cut_left(left, &left_cuts, first_row, k, bits, &mut lefts);
+    let lines = Parts::of(out);
+    let tile = |task: usize| -> usize {
+        let first_row = task / sections * rows;
+        let rows = rows.min(m - first_row);
+        // The section's columns, in chunks of one width within `COLUMNS`.
+        let (from, to) = (
+            task % sections * n / sections,
+            (task % sections + 1) * n / sections,
+        );
+        let columns = (to - from).div_ceil((to - from).div_ceil(COLUMNS));
+        // The band's pieces: its first pieces stacked on its rests, a row
+        // of the stack `lefts.0` apart and a term of a row `lefts.1`.
+        let mut pieces = vec![0.0; 2 * rows * k];
+        let sums = cut_left(left, &left_cuts, first_row, k, bits, &mut pieces);
+        let lefts = if left.upright() {
+            (k, 1)
+        } else {
+            (1, 2 * rows)
+        };
         // The pair, the two products of a run the kernel takes together,
         // and its third.
         let mut work = vec![0.0; 5 * rows * columns];
         let mut open = 0;
-        for first_column in (0..n).step_by(columns) {
-            let width = columns.min(n - first_column);
+        for first_column in (from..to).step_by(columns) {
+            let width = columns.min(to - first_column);
             let size = rows * width;
             let (pair, products) = work.split_at_mut(2 * rows * columns);
             let (high, low) = pair.split_at_mut(rows * columns);
@@ -1114,26 +1194,33 @@ fn split_product(
             low.fill(0.0);
             for start in (0..k).step_by(run) {
                 let span = run.min(k - start);
-                let column = 2 * start * n + first_column * 2 * span;
-                // SAFETY: `span` values from `start` of each of the `2 ·
-                // rows` rows of `k` the left pieces hold, and of each of
-                // `rows` rows of the left operand from `first_row`, lie
-                // inside them; `span` values from either half of each of
-                // `width` columns' `2 · span` of this run lie inside the
-                // right pieces; and the outputs hold `2 · rows · width` and
-                // `rows · width` values.
+                // Where this run's rests of the band's first column lie in
+                // the right pieces, how far on its first pieces do, and a
+                // row of either apart and a column.
+                let (rests, ones, down, over) = if right.upright() {
+                    (2 * start * n + first_column * 2 * span, span, 1, 2 * span)
+                } else {
+                    (2 * start * n + first_column, span * n, n, 1)
+                };
+                // SAFETY: `span` terms from `start` of each of the `2 ·
+                // rows` rows the left pieces stack, and of each of `rows`
+                // rows of the left operand from `first_row`, lie inside
+                // them; `span` rows of `width` columns of this run's rests,
+                // and of its first pieces, lie inside the right pieces; and
+                // the outputs hold `2 · rows · width` and `rows · width`
+                // values.
                 unsafe {
                     // The first pieces and the rests, by the first pieces.
                     super::gemm_strided_serial_f64(
                         2 * rows,
                         span,
                         width,
-                        lefts.as_ptr().add(start),
-                        k,
-                        1,
-                        rights.as_ptr().add(column + span),
-                        1,
-                        2 * span,
+                        pieces.as_ptr().add(start * lefts.1),
+                        lefts.0,
+                        lefts.1,
+                        rights.as_ptr().add(rests + ones),
+                        down,
+                        over,
                         stacked.as_mut_ptr(),
                         width,
                     );
@@ -1147,9 +1234,9 @@ fn split_product(
                             .add(first_row * left.across + start * left.along),
                         left.across,
                         left.along,
-                        rights.as_ptr().add(column),
-                        1,
-                        2 * span,
+                        rights.as_ptr().add(rests),
+                        down,
+                        over,
                         third.as_mut_ptr(),
                         width,
                     );
@@ -1158,9 +1245,8 @@ fn split_product(
                 add_exact(high, low, exact);
                 add_sum(high, low, rounded, third);
             }
-            for (row, ((line, highs), lows)) in part
-                .chunks_exact_mut(n)
-                .zip(high.chunks_exact(width))
+            for (row, (highs, lows)) in high
+                .chunks_exact(width)
                 .zip(low.chunks_exact(width))
                 .enumerate()
             {
@@ -1170,12 +1256,21 @@ fn split_product(
                     gamma * by.rests + lambda * (by.values + by.rests),
                     by.whole,
                 );
-                let line = &mut line[first_column..][..width];
                 let norms = (
                     &right_rests[first_column..][..width],
                     &right_sums[first_column..][..width],
                     &right_wholes[first_column..][..width],
                 );
+                // SAFETY: the tasks' bands share no row and a band's
+                // sections no column, so these `width` entries of row
+                // `first_row + row` of the output, which holds `m` rows of
+                // `n`, are this task's alone.
+                let line = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        lines.start().add((first_row + row) * n + first_column),
+                        width,
+                    )
+                };
                 let Some((alpha, beta, addend)) = scaling else {
                     open += settle_line(line, (highs, lows), norms, by);
                     continue;
@@ -1202,24 +1297,16 @@ fn split_product(
         open
     };
     let open: usize = if spread {
-        par_out_chunks_mapped(out, rows * n, &band)
+        crate::parallel::map_tasks(bands * sections, &tile)
             .into_iter()
             .sum()
     } else {
-        out.chunks_mut(rows * n)
-            .enumerate()
-            .map(|(nth, part)| band(nth * rows * n, part))
-            .sum()
+        (0..bands * sections).map(tile).sum()
     };
     if open > 0 {
-        let pieces = Some((rights, run, &right_cuts.keep[..]));
-        exact_entries(k, n, left, right, pieces, scaling, out, open);
+        exact_entries(k, n, left, right, scaling, out, open);
     }
 }
-
-/// The right operand's pieces as [`cut_right`] lays them, the length of
-/// their runs, and each column's mask: none for one cut as zeros.
-type Pieces<'a> = (&'a [f64], usize, &'a [u64]);
 
 /// The first and the last place at which `values` holds other than a
 /// zero, or `None` for nothing but zeros.
@@ -1255,24 +1342,20 @@ fn no_products(a: &[f64], b: &[f64]) -> bool {
 /// row and column: a zero where it was marked [`OPEN_AT_ZERO`] and every
 /// one of its products is one -- which the places its row and its column
 /// hold anything at say at a glance, where they lie apart, as a triangle's
-/// do -- and `dot` of the two otherwise. A column lying across its storage
-/// is put together from its `pieces`, each value the sum of its two, where
-/// there are any.
-#[allow(clippy::too_many_arguments)]
+/// do -- and `dot` of the two otherwise.
 fn exact_entries(
     k: usize,
     n: usize,
     left: Side<'_>,
     right: Side<'_>,
-    pieces: Option<Pieces<'_>>,
     scaling: Option<Scaling<'_>>,
     out: &mut [f64],
     open: usize,
 ) {
     // The right operand's columns are laid along their storage where they
     // lie across it, when enough entries are open to pay for laying them
-    // all: more where the pieces hold each column's runs side by side.
-    let lay = !right.upright() && open * 4 > if pieces.is_some() { 8 * n } else { n };
+    // all.
+    let lay = !right.upright() && open * 4 > n;
     let mut laid = Vec::new();
     if lay {
         laid = vec![0.0; n * k];
@@ -1324,17 +1407,7 @@ fn exact_entries(
                     &laid[j * k..][..k]
                 } else {
                     column.clear();
-                    match pieces {
-                        Some((pieces, run, keep)) if keep[j] != 0 => {
-                            for block in pieces.chunks(2 * run * n) {
-                                let span = block.len() / (2 * n);
-                                let (rests, ones) =
-                                    block[j * 2 * span..][..2 * span].split_at(span);
-                                column.extend(rests.iter().zip(ones).map(|(rest, one)| rest + one));
-                            }
-                        }
-                        _ => column.extend((0..k).map(|l| right.at(j, l))),
-                    }
+                    column.extend((0..k).map(|l| right.at(j, l)));
                     &column
                 };
                 if at_zero {
@@ -1437,6 +1510,7 @@ mod tests {
             (3, 16, 33, 90),
             (1, 20, 700, 24),
             (1, 132, 70, 260),
+            (1, 24, 100, 1000),
             (1, 2, 5000, 4),
             (2, 1, 40, 6),
             (2, 50, 17, 1),
@@ -1482,13 +1556,23 @@ mod tests {
 
     #[test]
     fn a_scaled_product_with_an_addend_rounds_once() {
-        for (batch, m, k, n) in [(1, 30, 200, 40), (2, 1, 30, 5), (2, 4, 3, 1), (1, 5, 0, 3)] {
+        // The third and the last are taken a row at a time where the right
+        // operand's rows lie along its storage and the scale is one.
+        for (batch, m, k, n) in [
+            (1, 30, 200, 40),
+            (2, 1, 30, 5),
+            (1, 7, 90, 300),
+            (2, 4, 3, 1),
+            (1, 5, 0, 3),
+            (3, 2, 9, 11),
+        ] {
             let lhs = values(41 + k as u64, batch * m * k, true);
             let rhs = values(43 + n as u64, batch * k * n, false);
             let bias = values(47, n, true);
             let full = values(53, batch * m * n, false);
             for (alpha, beta) in [
                 (1.0, 1.0),
+                (1.0, -3.5),
                 (-0.7, 2.5),
                 (3.0, 0.0),
                 (0.0, 1.0),
@@ -1499,37 +1583,39 @@ mod tests {
                     (&full[..], [m * n, n, 1]),
                     (&full[..1], [0, 0, 0]),
                 ] {
-                    let affine = Affine {
-                        alpha,
-                        beta,
-                        values: addend,
-                        strides,
-                    };
-                    let mut out = vec![f64::NAN; batch * m * n];
-                    rounded_affine_products_f64(
-                        batch,
-                        m,
-                        k,
-                        n,
-                        (&lhs, Storage::RowMajor),
-                        (&rhs, Storage::Transposed),
-                        Some(affine),
-                        &mut out,
-                    )
-                    .unwrap();
-                    let want = reference(
-                        batch,
-                        (m, k, n),
-                        (&lhs, Storage::RowMajor),
-                        (&rhs, Storage::Transposed),
-                        Some(affine),
-                    );
-                    assert_eq!(
-                        bits(&out),
-                        bits(&want),
-                        "{batch} x ({m}, {k}, {n}), alpha {alpha}, beta {beta}, strides \
-                         {strides:?}"
-                    );
+                    for rhs_storage in [Storage::Transposed, Storage::RowMajor] {
+                        let affine = Affine {
+                            alpha,
+                            beta,
+                            values: addend,
+                            strides,
+                        };
+                        let mut out = vec![f64::NAN; batch * m * n];
+                        rounded_affine_products_f64(
+                            batch,
+                            m,
+                            k,
+                            n,
+                            (&lhs, Storage::RowMajor),
+                            (&rhs, rhs_storage),
+                            Some(affine),
+                            &mut out,
+                        )
+                        .unwrap();
+                        let want = reference(
+                            batch,
+                            (m, k, n),
+                            (&lhs, Storage::RowMajor),
+                            (&rhs, rhs_storage),
+                            Some(affine),
+                        );
+                        assert_eq!(
+                            bits(&out),
+                            bits(&want),
+                            "{batch} x ({m}, {k}, {n}), alpha {alpha}, beta {beta}, strides \
+                             {strides:?}, {rhs_storage:?}"
+                        );
+                    }
                 }
             }
         }
@@ -1640,9 +1726,16 @@ mod tests {
     #[test]
     fn cancellation_far_ranges_and_special_values() {
         // Rows whose dots cancel far below their terms, rows and columns past
-        // the cut's range, a zero row, and rows with an infinity and a NaN,
-        // in a product large enough to be cut.
-        let (m, k, n) = (8, 64, 70);
+        // the cut's range, a zero row, and rows with an infinity and a NaN:
+        // in a product of few enough rows to be taken a row at a time, and
+        // in one that is cut.
+        for m in [8, 16] {
+            special_rows(m);
+        }
+    }
+
+    fn special_rows(m: usize) {
+        let (k, n) = (64, 70);
         let mut lhs = values(3, m * k, false);
         let rhs = values(5, k * n, true);
         lhs[..k].fill(0.0);

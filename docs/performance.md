@@ -216,34 +216,44 @@ small enough to bound; the three are taken on the engine's kernel a
 cache-sized band of the output at a time, in runs of 64 terms added into a
 pair of float64s without error, and the entries the bound leaves open are
 taken as their exact dots. It stays on the engine's kernel because the bands
-already fill the pool. Against the plain product it replaced -- NumPy's BLAS
-above the delegation threshold, the engine's kernel below it -- on the same
-4-core container:
+already fill the pool: a band is 128 rows at most, and where the bands are
+fewer than the threads each is shared out between them by its columns, so
+that the kernel lays each part of the right operand's pieces out once.
+Against the plain product it replaced -- NumPy's BLAS above the delegation
+threshold, the engine's kernel below it -- on one 4-core container:
 
 | product | plain | rounded once | ratio |
 | --- | --- | --- | --- |
-| 16x16 @ 16x16 | 0.8us | 4.8us | 6.0x |
-| 64x64 @ 64x64 | 10.8us | 72.8us | 6.7x |
-| 256x256 @ 256x256 | 0.24ms | 1.49ms | 6.3x |
-| 512x512 @ 512x512 | 1.51ms | 9.17ms | 6.1x |
-| 1024x1024 @ 1024x1024 | 10.1ms | 55.2ms | 5.5x |
-| 512x2048 @ 2048x512 | 5.67ms | 31.4ms | 5.5x |
-| 2048x64 @ 64x2048 | 4.27ms | 16.4ms | 3.8x |
-| 64x4096 @ 4096x64 | 0.33ms | 3.04ms | 9.3x |
-| 64 x (16x16 @ 16x16) | 23us | 102us | 4.4x |
-| 8 x (128x128 @ 128x128) | 0.63ms | 1.49ms | 2.4x |
-| `dense_layer`, 256 x 768 x 768 with a bias | 3.21ms | 10.6ms | 3.3x |
-| a 256x256 matrix by its inverse | 0.42ms | 15.8ms | 38x |
-| a 512x512 matrix by its inverse | 2.79ms | 69.9ms | 25x |
+| 16x16 @ 16x16 | 0.6us | 3.6us | 6.0x |
+| 64x64 @ 64x64 | 8.7us | 54.9us | 6.3x |
+| 256x256 @ 256x256 | 0.20ms | 1.13ms | 5.7x |
+| 512x512 @ 512x512 | 1.26ms | 6.06ms | 4.8x |
+| 1024x1024 @ 1024x1024 | 7.31ms | 41.0ms | 5.6x |
+| 512x2048 @ 2048x512 | 4.44ms | 23.6ms | 5.3x |
+| 2048x64 @ 64x2048 | 3.37ms | 12.7ms | 3.8x |
+| 64x4096 @ 4096x64 | 0.28ms | 2.29ms | 8.3x |
+| 64x576 @ 576x1820 | 0.66ms | 5.87ms | 8.9x |
+| 32x576 @ 576x1820 | 0.40ms | 3.93ms | 9.9x |
+| 8x576 @ 576x1820 | 0.24ms | 1.16ms | 4.8x |
+| 4x27 @ 27x16384 | 0.30ms | 0.32ms | 1.1x |
+| 64 x (16x16 @ 16x16) | 19us | 79us | 4.2x |
+| 8 x (128x128 @ 128x128) | 0.39ms | 1.18ms | 3.0x |
+| `dense_layer`, 256 x 768 x 768 with a bias | 1.42ms | 7.10ms | 5.0x |
+| a 256x256 matrix by its inverse | 0.21ms | 8.31ms | 40x |
+| a 512x512 matrix by its inverse | 1.26ms | 58.6ms | 47x |
 
 Three kernel products make the floor three; the cutting, the pair and the
-bound take it to five or six, and a short output over a long dot, whose
-operands are large beside it, to nine. The last two rows are the far end: a
-product that cancels throughout leaves every entry open, and each is then
-its exact dot -- carried in two float64s, in three where two do not settle
-it, and summed exactly where three do not. The plain product's answers
-there were not near: the entries that should be nothing came out a fifth of
-themselves off at the median.
+bound take it to five or six, and an output of a few dozen rows over a long
+dot, whose operands are large beside it and are laid out by the kernel for
+few rows' work, to eight or ten. A product of at most twelve rows by a right
+operand stored row by row is not cut: each of its rows is taken against
+every column at once, each entry carried as `dot` carries one, which costs
+less than the cutting until there are more rows to share it. The last two
+rows are the far end: a product that cancels throughout leaves every entry
+open, and each is then its exact dot -- carried in two float64s, in three
+where two do not settle it, and summed exactly where three do not. The plain
+product's answers there were not near: the entries that should be nothing
+came out a fifth of themselves off at the median.
 
 A product with a single row or column -- a matrix times a vector, or a vector
 times a matrix -- is not handed over. Each of its entries is a dot product,

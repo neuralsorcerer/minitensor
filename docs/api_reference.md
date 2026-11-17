@@ -1737,12 +1737,14 @@ product of ordinary random matrices thirty deep was the float64 nearest its
 exact dot and one in twelve of one a thousand deep, and the entries of a
 matrix by its inverse that should be nothing were a fifth of themselves off
 at the median. It costs three of the kernel's products and the passes
-between them: five and a half to six and a half times the plain float64
-product it replaces on square matrices from 16 to 1024 wide, two and a half
-to four and a half on a stack of small ones, a wide output over a short dot
-or a dense layer, nine on a short output over a long dot -- and twenty-five
-to forty where a product cancels throughout and every entry is its exact
-dot.
+between them: five to six and a half times the plain float64 product it
+replaces on square matrices from 16 to 1024 wide, three to five on a stack
+of small ones, a wide output over a short dot or a dense layer, eight to ten
+on an output of a few dozen rows or columns over a long dot -- and forty to
+fifty where a product cancels throughout and every entry is its exact dot.
+A product of at most twelve rows whose right operand is stored row by row
+is not cut at all: each row is taken against every column at once, each
+entry carried as `dot` carries one, at one to five times the plain product.
 
 `cross(other, dim=None)` of two float tensors takes each component,
 `x * y - z * w`, rounded once, in the wider of the two dtypes. Each product

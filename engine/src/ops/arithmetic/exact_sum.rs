@@ -6945,11 +6945,15 @@ pub(crate) fn dot_columns_f64<'a>(
     for (tile, parts) in parts.chunks(blocks).enumerate() {
         let first = tile * DOT_COLUMNS;
         for (j, slot) in out[first..first + parts[0].len()].iter_mut().enumerate() {
-            let carried = pairwise_fold(
-                parts.iter().map(|part| part[j]).collect(),
-                Carried::default(),
-                Carried::merge,
-            );
+            let carried = if blocks == 1 {
+                parts[0][j]
+            } else {
+                pairwise_fold(
+                    parts.iter().map(|part| part[j]).collect(),
+                    Carried::default(),
+                    Carried::merge,
+                )
+            };
             let column = (0..k).map(|step| (scales[step], rows(step)[first + j]));
             *slot =
                 settled_dot(carried, k, column.clone()).unwrap_or_else(|| exact_dot_f64(column));
