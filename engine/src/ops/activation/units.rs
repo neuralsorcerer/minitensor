@@ -152,18 +152,51 @@ unit_grad_kernel!(
 
 // --- hardsigmoid and hardswish ---------------------------------------------
 
-unit_kernel!(
-    /// The piecewise-linear stand-in for `sigmoid`: `0` below -3, `1` above 3,
-    /// `x/6 + 1/2` between. No exponential, which is the point of it.
-    HARDSIGMOID,
-    |x, _p| if x <= -3.0 {
-        0.0
-    } else if x >= 3.0 {
-        1.0
-    } else {
-        x / 6.0 + 0.5
+/// The piecewise-linear stand-in for `sigmoid`: `0` below -3, `1` above 3,
+/// `(x + 3) / 6` between. No exponential, which is the point of it.
+///
+/// Rounded once, as `(x + 3) / 6`: `x / 6 + 1/2` cancelled near -3, where the
+/// answer is small and the two terms are near `-1/2` and `1/2` -- a float64
+/// answer there was some 10^6 ulps out, and a float32 one a quarter of
+/// itself. A float32 `x` plus 3 is exact in float64, and its quotient by 6
+/// narrows as the exact one would; a float64 one is the exact sum over 6,
+/// settled by a bound.
+const HARDSIGMOID: UnitKernel = {
+    #[inline(always)]
+    fn narrow(x: f32, _p: UnitParams<f32>) -> f32 {
+        if x <= -3.0 {
+            0.0
+        } else if x >= 3.0 {
+            1.0
+        } else {
+            ((f64::from(x) + 3.0) / 6.0) as f32
+        }
     }
-);
+    #[inline(always)]
+    fn wide(x: f64, _p: UnitParams<f64>) -> f64 {
+        if x <= -3.0 {
+            0.0
+        } else if x >= 3.0 {
+            1.0
+        } else if x.is_nan() {
+            x
+        } else {
+            sum_over_six(x)
+        }
+    }
+    (narrow, wide)
+};
+
+/// The float64 nearest `(x + 3) / 6`, for `x` in `(-3, 3)`.
+#[inline(never)]
+fn sum_over_six(x: f64) -> f64 {
+    use crate::ops::arithmetic::exact_sum::{Product, difference_over, ratio_of_products_once};
+    difference_over::<f64, false>(x, -3.0, 6.0).unwrap_or_else(|| {
+        let term = |value: f64| Product::new([(value, 0.0), (1.0, 0.0), (1.0, 0.0)], false);
+        ratio_of_products_once(&[term(x), term(3.0)], &[term(6.0)])
+    })
+}
+
 unit_grad_kernel!(
     /// `1/6` on the sloped segment, zero on the flats.
     HARDSIGMOID_D,
@@ -192,14 +225,37 @@ const HARDSWISH: UnitKernel = {
     fn wide(x: f64, _p: UnitParams<f64>) -> f64 {
         if x <= -3.0 {
             0.0
-        } else if x >= 3.0 {
+        } else if x >= 3.0 || x == 0.0 || x.is_nan() {
             x
         } else {
-            x * (x + 3.0) / 6.0
+            swish_quotient(x)
         }
     }
     (narrow, wide)
 };
+
+/// The float64 nearest `x (x + 3) / 6`, for `x` in `(-3, 3)` and not zero:
+/// `x + 3` a two-sum's pair, `x` times each part carried with the product's
+/// error, settled by a bound, and the exact quotient where it cannot say.
+#[inline(never)]
+fn swish_quotient(x: f64) -> f64 {
+    use crate::ops::arithmetic::exact_sum::{
+        Carried, Product, ratio_of_products_once, ratio_settled,
+    };
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
+    let (sum, rest) = two_sum(x, 3.0);
+    let product = x * sum;
+    let error = product_error(x, sum, product);
+    let tail = x * rest;
+    let low = error + tail;
+    // The tail's rounding and the low part's, and what a product among the
+    // subnormals drops.
+    let slack = (tail.abs() + low.abs()) * 2f64.powi(-52) + f64::from_bits(4);
+    ratio_settled::<f64, false>(Carried::of(product, low, slack), (6.0, 0.0)).unwrap_or_else(|| {
+        let term = |a: f64, b: f64| Product::new([(a, 0.0), (b, 0.0), (1.0, 0.0)], false);
+        ratio_of_products_once(&[term(x, x), term(3.0, x)], &[term(6.0, 1.0)])
+    })
+}
 unit_grad_kernel!(
     /// `d/dx x(x+3)/6 = (2x+3)/6` on the quadratic segment; `0` and `1` on the
     /// flats either side.

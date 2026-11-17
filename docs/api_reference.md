@@ -2554,7 +2554,9 @@ assert row_std.shape == (2, 3)
   a width is counted correctly too, where an implementation built on `abs`
   would overflow -- its magnitude is one past what the signed type holds.
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
-- `softsign`, `rsqrt`, `reciprocal`, `sign` — `sign` of a zero is that zero:
+- `softsign`, `rsqrt`, `reciprocal`, `sign` — `softsign` is `x / (1 + |x|)`,
+  the float nearest the exact quotient, and `±1` at the infinities. `sign` of
+  a zero is that zero:
   `sign` is odd, so `sign(-0.0)` is `-0.0`, its bit kept as `copysign` and
   `signbit` read it; of a NaN it is the NaN.
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
@@ -2594,7 +2596,8 @@ assert row_std.shape == (2, 3)
   `exp(x * log(2))` rounds the exponent before using it, which costs the last
   few bits of every answer and all of them for a large `x`.
 - `sinc(input)` — `sin(pi x) / (pi x)`, taken as `1` at zero. The normalized
-  convention, so the zeros sit on the non-zero integers.
+  convention, so the zeros sit on the non-zero integers. A float32 input is
+  taken in float64 and narrowed once.
 - `lgamma(input)`, `digamma(input)` — `log |gamma(x)|` and its derivative.
   `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
   float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,
@@ -2727,7 +2730,9 @@ assert row_std.shape == (2, 3)
   out, since `erfc` would otherwise turn it into `x^2` ulps of the answer, and
   the tanh form's exponent is carried to twice a double's precision for the
   same reason. Both are within a few ulps in float64 down to where the answer
-  leaves the normal floats, and so are their gradients.
+  leaves the normal floats, and so are their gradients. A float32 `elu` or
+  `selu` is scaled in float64 before its one narrowing, where scaling an
+  `expm1` already rounded to float32 rounded twice.
 - `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
   leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
   band but subtracts `lambd` from the rest, so it stays continuous
@@ -2737,7 +2742,10 @@ assert row_std.shape == (2, 3)
 - `hardtanh(input, min_val=-1.0, max_val=1.0)`, and `relu6(input)` for the
   `[0, 6]` case that quantized networks use
 - `hardsigmoid(input)`, `hardswish(input)` — `sigmoid` and `silu` with the
-  exponential replaced by three straight lines, for the same reason
+  exponential replaced by three straight lines, for the same reason:
+  `(x + 3) / 6` and `x (x + 3) / 6` between -3 and 3. Each value is the float
+  nearest the exact one; `hardsigmoid` taken as `x / 6 + 1/2` cancelled near
+  -3, where its answer is small, and lost most of its digits there.
 - `mish(input)` — `x * tanh(softplus(x))`
 - `celu(input, alpha=1.0)` — `elu` rescaled so its slope is continuous at zero
   for every `alpha`, which `elu`'s is only at `alpha = 1`

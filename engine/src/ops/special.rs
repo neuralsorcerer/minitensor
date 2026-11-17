@@ -345,72 +345,58 @@ fn folded_for_sin<T: num_traits::Float>(r: T) -> T {
 /// `sin(u)` and `u` agree there to the last bit -- which is why only the
 /// derivative below needs a series.
 ///
-/// A block at a time, in three loops: the reductions, which are arithmetic and
-/// selects and vectorize; the sines, through the vectorized float32 kernel or
-/// float64's own; and the quotients. Written as one per-element body, the
-/// reduction kept the sine from being batched and cost the kernel 1.7x.
+/// A block at a time, the sines and then the quotients, in float64: a
+/// float32 tensor is taken through float64 and narrowed once at the end.
 fn sinc_values(tensor: &Tensor) -> Result<TensorData> {
     use crate::ops::map::{outputs_per_task, par_out_chunks};
-    let tensor = tensor.contiguous()?;
-    macro_rules! run {
-        ($ty:ty, $slice:ident, $pi:expr, $sin_block:expr) => {{
-            let xs = tensor.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("sinc: dtype does not match the data")
-            })?;
-            let mut out = vec![<$ty>::default(); xs.len()];
-            par_out_chunks(&mut out, outputs_per_task(1), &|offset, block| {
-                let x = &xs[offset..offset + block.len()];
-                // sinc is even, and each value is taken at its magnitude, so
-                // that `sinc(-x)` is `sinc(x)` to the bit: the zeros at the
-                // whole numbers had the sign of their argument.
-                let arguments: Vec<$ty> = x
-                    .iter()
-                    .map(|&v| $pi * folded_for_sin(reduced_mod_two(v.abs())))
-                    .collect();
-                $sin_block(&arguments, &mut *block);
-                for (o, &v) in block.iter_mut().zip(x) {
-                    let v = v.abs();
-                    let quotient = *o / ($pi * v);
-                    *o = if v == 0.0 {
-                        1.0
-                    } else if v.is_infinite() {
-                        0.0
-                    } else {
-                        quotient
-                    };
-                }
-            });
-            TensorData::from_vec::<$ty>(out, tensor.dtype(), tensor.device())
-        }};
+    let missing = || MinitensorError::internal_error("sinc: dtype does not match the data");
+    if tensor.dtype() == DataType::Float32 {
+        // In float64 and narrowed once: in float32 the product with pi, the
+        // sine and the quotient each rounded, and a third of the values were
+        // an ulp out.
+        let wide = sinc_values(&tensor.astype(DataType::Float64)?)?;
+        let values = wide.as_f64_slice().ok_or_else(missing)?;
+        let narrow = values.iter().map(|&value| value as f32).collect();
+        return Ok(TensorData::from_vec::<f32>(
+            narrow,
+            DataType::Float32,
+            tensor.device(),
+        ));
     }
-    Ok(match tensor.dtype() {
-        DataType::Float32 => run!(
-            f32,
-            as_f32_slice,
-            std::f32::consts::PI,
-            |a: &[f32], o: &mut [f32]| {
-                // An initialized `f32` is a valid `MaybeUninit<f32>`, and the
-                // kernel only writes.
-                let uninit = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        o.as_mut_ptr() as *mut std::mem::MaybeUninit<f32>,
-                        o.len(),
-                    )
-                };
-                crate::ops::simd::F32Kernel::select().sin(a, uninit);
-            }
-        ),
-        DataType::Float64 => run!(f64, as_f64_slice, PI, |a: &[f64], o: &mut [f64]| {
-            for (o, &a) in o.iter_mut().zip(a) {
-                *o = a.sin();
-            }
-        }),
-        other => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "sinc needs a floating-point tensor, got {other:?}"
-            )));
+    if tensor.dtype() != DataType::Float64 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "sinc needs a floating-point tensor, got {:?}",
+            tensor.dtype()
+        )));
+    }
+    let tensor = tensor.contiguous()?;
+    let xs = tensor.data().as_f64_slice().ok_or_else(missing)?;
+    let mut out = vec![0f64; xs.len()];
+    par_out_chunks(&mut out, outputs_per_task(1), &|offset, block| {
+        let x = &xs[offset..offset + block.len()];
+        // sinc is even, and each value is taken at its magnitude, so that
+        // `sinc(-x)` is `sinc(x)` to the bit: the zeros at the whole numbers
+        // had the sign of their argument.
+        for (o, &v) in block.iter_mut().zip(x) {
+            *o = (PI * folded_for_sin(reduced_mod_two(v.abs()))).sin();
         }
-    })
+        for (o, &v) in block.iter_mut().zip(x) {
+            let v = v.abs();
+            let quotient = *o / (PI * v);
+            *o = if v == 0.0 {
+                1.0
+            } else if v.is_infinite() {
+                0.0
+            } else {
+                quotient
+            };
+        }
+    });
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
 }
 
 unit_grad_kernel!(

@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use super::exact_sum::{Element, Output, Product, difference_over, ratio_of_products};
+use super::exact_sum::{
+    Element, Output, Product, difference_over, ratio_of_products, ratio_of_products_once,
+};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -270,13 +272,7 @@ fn ratio<T: Output, const FMA: bool>(numerator: &[Product], denominator: &[Produ
         // detected, in `rows_fused`.
         return unsafe { ratio_fused(numerator, denominator) };
     }
-    ratio_plain(numerator, denominator)
-}
-
-/// [`ratio`] without fused multiply-adds.
-#[inline(never)]
-fn ratio_plain<T: Output>(numerator: &[Product], denominator: &[Product]) -> T {
-    ratio_of_products::<T, false>(numerator, denominator)
+    ratio_of_products_once(numerator, denominator)
 }
 
 /// [`ratio`] compiled with fused multiply-adds.

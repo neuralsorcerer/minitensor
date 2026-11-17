@@ -869,20 +869,13 @@ fn scaled_expm1_unit_f32(
     positive_scale: f64,
     negative_scale: f64,
 ) -> Result<TensorData> {
-    // SAFETY: `expm1` initializes every element of `dst` before the select
-    // reads it back; see `map_f32_kernel`.
+    // Scaled in float64 before the one narrowing: scaling an `expm1` already
+    // rounded to float32 rounded twice, and `selu` was an ulp out for an
+    // eighth of its inputs.
+    // SAFETY: the kernel writes every element of `dst`; see `map_f32_kernel`.
     unsafe {
         map_f32_kernel(tensor, |kernel, src, dst| {
-            kernel.expm1(src, dst);
-            for (o, &x) in dst.iter_mut().zip(src) {
-                let em1 = o.assume_init_read();
-                // Both arms formed and one selected: as a branch on the sign
-                // it was mispredicted for half of any mixed-sign input, and
-                // cost five times the exponential it follows.
-                let positive = (positive_scale * f64::from(x)) as f32;
-                let negative = (negative_scale * f64::from(em1)) as f32;
-                o.write(std::hint::select_unpredictable(x > 0.0, positive, negative));
-            }
+            kernel.scaled_expm1(src, dst, positive_scale, negative_scale)
         })
     }
 }
@@ -961,10 +954,28 @@ float_unary_kernel!(softsign_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
 });
 
 float_unary_kernel!(softsign_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
-    // `inf / inf` at either end; the limits are -1 and 1.
+    // `inf / inf` at either end; the limits are -1 and 1. A zero is itself.
     if x.is_infinite() {
         return x.signum();
     }
-    let denom = 1.0 + x.abs();
-    x / denom
+    if x == 0.0 || x.is_nan() {
+        return x;
+    }
+    softsign_quotient(x)
 });
+
+/// The float64 nearest `x / (1 + |x|)`, for a finite `x` that is not zero:
+/// the denominator a two-sum's pair, settled by a bound, and the exact
+/// quotient where it cannot say. In float64 the sum and the quotient each
+/// rounded.
+#[inline(never)]
+fn softsign_quotient(x: f64) -> f64 {
+    use crate::ops::arithmetic::exact_sum::{
+        Carried, Product, ratio_of_products_once, ratio_settled,
+    };
+    let denominator = crate::ops::arithmetic::rounded_once::two_sum(1.0, x.abs());
+    ratio_settled::<f64, false>(Carried::of(x, 0.0, 0.0), denominator).unwrap_or_else(|| {
+        let term = |value: f64| Product::new([(value, 0.0), (1.0, 0.0), (1.0, 0.0)], false);
+        ratio_of_products_once(&[term(x)], &[term(1.0), term(x.abs())])
+    })
+}

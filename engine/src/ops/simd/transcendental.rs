@@ -893,6 +893,15 @@ fn expm1_one<const FMA: bool>(x: f32) -> f32 {
     expm1_core::<FMA>(x as f64) as f32
 }
 
+/// `positive · x` above zero and `negative · expm1(x)` elsewhere, in
+/// float64 and rounded once: `elu` and `selu`.
+#[inline(always)]
+fn scaled_expm1_one<const FMA: bool>(x: f32, positive: f64, negative: f64) -> f32 {
+    let xd = x as f64;
+    let below = negative * expm1_core::<FMA>(xd);
+    (if x > 0.0 { positive * xd } else { below }) as f32
+}
+
 #[inline(always)]
 fn sinh_one<const FMA: bool>(x: f32) -> f32 {
     sinh_core::<FMA>(x as f64) as f32
@@ -2100,6 +2109,12 @@ block_kernel!(
     neg_log_sigmoid_block_avx2
 );
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
+block_kernel_param!(
+    scaled_expm1_block,
+    scaled_expm1_one,
+    scaled_expm1_block_avx512,
+    scaled_expm1_block_avx2
+);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
 block_kernel!(cosh_block, cosh_one, cosh_block_avx512, cosh_block_avx2);
 block_kernel!(
@@ -2749,6 +2764,29 @@ impl F32Kernel {
             expm1_block,
             expm1_block_avx512,
             expm1_block_avx2
+        )
+    }
+
+    /// Write `positive * x` for each positive `x` of `input`, and
+    /// `negative * expm1(x)` for every other, into `out`, each in float64 and
+    /// rounded once.
+    #[inline]
+    pub(crate) fn scaled_expm1(
+        self,
+        input: &[f32],
+        out: &mut [MaybeUninit<f32>],
+        positive: f64,
+        negative: f64,
+    ) {
+        dispatch_param!(
+            self,
+            input,
+            out,
+            positive,
+            negative,
+            scaled_expm1_block,
+            scaled_expm1_block_avx512,
+            scaled_expm1_block_avx2
         )
     }
 

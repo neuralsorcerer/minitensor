@@ -2710,6 +2710,17 @@ pub(crate) fn ratio_of_products<T: Output, const FMA: bool>(
     .unwrap_or_else(|| exact_ratio_of_products(numerator, denominator))
 }
 
+/// [`ratio_of_products`] without fused multiply-adds, one copy for each
+/// output dtype: for a caller that wants it rarely, or not in a loop worth
+/// a copy of its own.
+#[inline(never)]
+pub(crate) fn ratio_of_products_once<T: Output>(
+    numerator: &[Product],
+    denominator: &[Product],
+) -> T {
+    ratio_of_products::<T, false>(numerator, denominator)
+}
+
 /// The sum of `products` carried, each product's pairs normalized by a
 /// two-sum: `a b c = (a1 + a2)(b1 + b2)(c1 + c2)` is its leading part
 /// `a1 b1 c1` split exactly, the three terms with one low part, and what is
