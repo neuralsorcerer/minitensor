@@ -7,6 +7,7 @@
 use super::*;
 use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
+use crate::autograd::LogSumExpBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::activation::{EXP_GROUP, ShiftedExp, exp_columns_into, lanes_to_columns};
@@ -47,12 +48,27 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
         return Ok(tensor.clone());
     }
 
-    // Fused fast path: single-axis log-sum-exp for tensors that don't require
-    // gradients (mirrors the var/std fast path). Avoids materializing the
-    // full-size shift/exp intermediates; the gradient path keeps the autograd
+    // The value is the fused one whatever the axes and whether or not a
+    // gradient is wanted, and the gradient its own: composed from `sub`,
+    // `exp`, `sum` and `log1p` in the input's dtype, the value rounded every
+    // term to float32 for a float32 input, took its exponents of rounded
+    // differences, and kept nothing of a sum that cancelled -- a float64
+    // `logsumexp` of normalised log-probabilities, with a gradient wanted,
+    // was 1e16 ulps out. Only an empty reduction, `log 0`, is left to the
     // composition below.
-    if !tensor.requires_grad() && dims.len() == 1 && tensor.shape().dims()[dims[0]] >= 1 {
-        return logsumexp_fused_single_axis(tensor, dims[0], keepdim);
+    let sizes = tensor.shape().dims();
+    if dims.iter().all(|&d| sizes[d] >= 1) {
+        let value = fused_logsumexp(tensor, &dims, keepdim)?;
+        if !(tensor.requires_grad() && crate::autograd::is_grad_enabled()) {
+            return Ok(value);
+        }
+        let grad_fn = Arc::new(LogSumExpBackward {
+            input_id: tensor.id(),
+            input: tensor.detach(),
+            dims,
+            keepdim,
+        });
+        return with_grad_fn(value.requires_grad_(true), grad_fn);
     }
 
     let mut max_tensor = tensor.clone();
@@ -193,7 +209,8 @@ fn negative_infinity_mask(tensor: &Tensor) -> Option<Tensor> {
     ))
 }
 
-/// Fused single-axis log-sum-exp for tensors that do not require gradients.
+/// Fused single-axis log-sum-exp, the value of every `logsumexp` but an empty
+/// one.
 ///
 /// The input is `outer` slabs of `(len, inner)` rows, and each column of each
 /// slab reduces to `max + ln(sum(exp(x - max)))`, with the maximum propagating
@@ -275,6 +292,65 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
         tensor.device(),
         false,
     ))
+}
+
+/// [`logsumexp_fused_single_axis`] over any set of axes: several are moved
+/// behind the rest and flattened into one, which holds each slice's terms in
+/// one contiguous run.
+fn fused_logsumexp(tensor: &Tensor, dims: &[usize], keepdim: bool) -> Result<Tensor> {
+    if let [axis] = dims {
+        return logsumexp_fused_single_axis(tensor, *axis, keepdim);
+    }
+    let (flat, _) = moved_behind(tensor, dims)?;
+    let value = logsumexp_fused_single_axis(&flat, flat.ndim() - 1, false)?;
+    if !keepdim {
+        return Ok(value);
+    }
+    let kept: Vec<usize> = tensor
+        .shape()
+        .dims()
+        .iter()
+        .enumerate()
+        .map(|(d, &size)| if dims.contains(&d) { 1 } else { size })
+        .collect();
+    shape_ops::reshape(&value, Shape::new(kept))
+}
+
+/// `tensor` with the axes in `dims` moved behind the rest, in order, and
+/// flattened into one, and the permutation that moved them.
+fn moved_behind(tensor: &Tensor, dims: &[usize]) -> Result<(Tensor, Vec<usize>)> {
+    let sizes = tensor.shape().dims();
+    let perm: Vec<usize> = (0..tensor.ndim())
+        .filter(|d| !dims.contains(d))
+        .chain(dims.iter().copied())
+        .collect();
+    let moved =
+        shape_ops::permute(tensor, perm.iter().map(|&d| d as isize).collect())?.contiguous()?;
+    let mut flat: Vec<usize> = perm[..perm.len() - dims.len()]
+        .iter()
+        .map(|&d| sizes[d])
+        .collect();
+    flat.push(dims.iter().map(|&d| sizes[d]).product());
+    Ok((shape_ops::reshape(&moved, Shape::new(flat))?, perm))
+}
+
+/// The softmax of `input` over the axes in `dims` together, the weights of
+/// `logsumexp`'s gradient: `softmax` itself for one axis, and for several,
+/// over them moved behind the rest and flattened, and put back.
+pub(crate) fn softmax_over(input: &Tensor, dims: &[usize]) -> Result<Tensor> {
+    if let [axis] = dims {
+        return activation::softmax(input, Some(*axis));
+    }
+    let sizes = input.shape().dims().to_vec();
+    let (flat, perm) = moved_behind(input, dims)?;
+    let weights = activation::softmax(&flat, Some(flat.ndim() - 1))?;
+    let moved: Vec<usize> = perm.iter().map(|&d| sizes[d]).collect();
+    let weights = shape_ops::reshape(&weights, Shape::new(moved))?;
+    let mut inverse = vec![0isize; perm.len()];
+    for (at, &d) in perm.iter().enumerate() {
+        inverse[d] = at as isize;
+    }
+    shape_ops::permute(&weights, inverse)?.contiguous()
 }
 
 /// Fewer slabs than this are each spread across the pool rather than handed

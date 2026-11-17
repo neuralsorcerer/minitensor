@@ -2458,8 +2458,12 @@ assert row_std.shape == (2, 3)
   that into it: a float64 `logsumexp` of normalised log-probabilities was
   hundreds of millions of ulps out. Such a sum, and a float32 one whose
   float64 value cannot settle its rounding, is formed again with every term
-  carried as a pair of floats, as `logaddexp` is. The gradient of a float32
-  `log_softmax` is taken in float64 and rounded once.
+  carried as a pair of floats, as `logaddexp` is. A `logsumexp` takes this
+  value over one axis or several, with a gradient wanted or not -- composed
+  from `sub`, `exp` and `sum` in the input's dtype, the tracked one was
+  1e16 ulps out on normalised log-probabilities -- and its gradient is the
+  softmax over the reduced axes. The gradient of a float32 `log_softmax` is
+  taken in float64 and rounded once.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors

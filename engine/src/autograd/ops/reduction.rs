@@ -1165,6 +1165,37 @@ impl GradientFunction for RmsNormBackward {
     }
 }
 
+/// Gradient of `logsumexp`: the output's gradient, repeated over the axes
+/// reduced away, times the softmax of the input over them.
+///
+/// The softmax is taken whole, as `softmax` takes it, rather than as
+/// `exp(x - logsumexp(x))`: that difference rounds into the exponent, and over
+/// a slice that is `-inf` throughout it is NaN where the softmax, and so the
+/// slope, is zero.
+pub struct LogSumExpBackward {
+    pub input_id: TensorId,
+    /// The input, detached.
+    pub input: Tensor,
+    pub dims: Vec<usize>,
+    pub keepdim: bool,
+}
+
+impl GradientFunction for LogSumExpBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let shape = self.input.shape().dims().to_vec();
+        let dims = Some(self.dims.clone());
+        let grad = expand_reduction_grad(grad_output, &shape, &dims, self.keepdim)?;
+        let weights = reduction::softmax_over(&self.input, &self.dims)?;
+        let mut gradients = FxHashMap::default();
+        gradients.insert(self.input_id, arithmetic::mul(&weights, &grad)?);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for a mean: the output's gradient over the count,
 /// repeated over the axes averaged away.
 ///

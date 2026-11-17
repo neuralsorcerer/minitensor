@@ -24,6 +24,10 @@ and the slab one where it is not.
 
 These are equality-of-accuracy tests. The point is not that either path hits a
 particular tolerance -- it is that the same call cannot mean two things.
+
+`logsumexp` has since stopped being two things: every one but an empty one
+takes the fused value, with its own gradient (see
+`test_logsumexp_gradient_path.py`), so for it these hold by construction.
 """
 
 from __future__ import annotations
