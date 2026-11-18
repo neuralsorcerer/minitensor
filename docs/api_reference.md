@@ -2114,6 +2114,20 @@ left the range took the slopes with it -- `prod([1e300, 1e300])` had slopes
 of infinity and `prod([1e-300, 1e-300])` of zero, where each is the other
 factor.
 
+The gradient of `cumprod` gives `x[i]` the float nearest the exact
+`Σ_{k ≥ i} g[k] · Π_{j ≤ k, j ≠ i} x[j]`, for `g` the gradient of the
+running products: the product of the factors before `i` times the sum
+`g[i] + x[i + 1] (g[i + 1] + ...)` taken from the end of the run back, each
+carried with its exponent apart and a bound on what its roundings came to,
+and formed exactly where the bounds cannot place the slope against a halfway
+point. It was the running sum of `g · cumprod` divided by `x[i]`, rounded at
+every step, and where a running product left the range the slopes went with
+it -- `[1e200, 1e200, 1e-200]` under a gradient of `[0, 0, 1]` had slopes of
+NaN where the first two are one. A zero, an infinity or a NaN among the
+values makes each slope what multiplying out its terms and adding them makes
+it: NaN for a NaN term or infinities of both signs, an infinity, or a zero
+that is negative only where every term is.
+
 A `float32` `logcumsumexp` carries its running value in `float64` and rounds
 it to `float32` once per element. The carry is some thirty bits finer than a
 `float32` place, so its error does not grow into anything a `float32` element

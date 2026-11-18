@@ -225,7 +225,6 @@ pub struct CumsumBackward {
 pub struct CumprodBackward {
     pub input_id: TensorId,
     pub input: Tensor,
-    pub output: Tensor,
     pub dim: usize,
 }
 
@@ -234,8 +233,7 @@ impl GradientFunction for CumprodBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let grad_input =
-            reduction::cumprod_backward(&self.input, &self.output, grad_output, self.dim)?;
+        let grad_input = reduction::cumprod_backward(&self.input, grad_output, self.dim)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)

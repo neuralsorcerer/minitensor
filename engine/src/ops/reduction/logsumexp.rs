@@ -871,8 +871,7 @@ pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     if result.requires_grad() {
         let grad_fn = Arc::new(CumprodBackward {
             input_id: tensor.id(),
-            input: tensor.clone(),
-            output: result.clone(),
+            input: tensor.detach(),
             dim,
         });
         with_grad_fn(result, grad_fn)
@@ -907,39 +906,75 @@ where
     Ok(())
 }
 
-/// Backward helper for cumulative product
-pub fn cumprod_backward(
-    input: &Tensor,
-    output: &Tensor,
-    grad: &Tensor,
-    dim: usize,
-) -> Result<Tensor> {
+/// The gradient of `cumprod` along `dim`: each element's slope, the value
+/// nearest `Σ_{k ≥ i} g[k] · Π_{j ≤ k, j ≠ i} x[j]` along its run for input
+/// `x` and the output's gradient `g`; see
+/// `arithmetic::exact_product::running_product_slopes`.
+pub fn cumprod_backward(input: &Tensor, grad: &Tensor, dim: usize) -> Result<Tensor> {
+    use crate::ops::arithmetic::exact_product::running_product_slopes as slopes;
     if dim >= input.ndim() {
         return Err(MinitensorError::dim_out_of_range(
             dim as isize,
             input.ndim(),
         ));
     }
-
-    let mut result_data = TensorData::zeros_on_device(input.numel(), input.dtype(), input.device());
-
-    match input.dtype() {
-        DataType::Float32 => cumprod_backward_f32(input, output, grad, &mut result_data, dim)?,
-        DataType::Float64 => cumprod_backward_f64(input, output, grad, &mut result_data, dim)?,
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Cumprod backward only supported for floating point tensors",
-            ));
-        }
+    if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
+        return Err(MinitensorError::invalid_operation(
+            "Cumprod backward only supported for floating point tensors",
+        ));
     }
-
-    Ok(Tensor::new(
-        Arc::new(result_data),
-        input.shape().clone(),
+    // The runs last, each contiguous.
+    let order: Vec<isize> = (0..input.ndim())
+        .filter(|&axis| axis != dim)
+        .chain([dim])
+        .map(|axis| axis as isize)
+        .collect();
+    let x = input.detach().permute(order.clone())?.contiguous()?;
+    let g = grad
+        .detach()
+        .astype(input.dtype())?
+        .permute(order.clone())?
+        .contiguous()?;
+    let len = input.shape().dims()[dim];
+    // Runs a task takes, enough to be worth one.
+    let chunk = len * (4096 / len.max(1)).max(1);
+    let missing = || MinitensorError::internal_error("cumprod backward: float slice");
+    let data = if input.dtype() == DataType::Float32 {
+        let (x, g) = (
+            x.data().as_f32_slice().ok_or_else(missing)?,
+            g.data().as_f32_slice().ok_or_else(missing)?,
+        );
+        let mut out = vec![0.0f32; x.len()];
+        crate::ops::map::par_out_chunks(&mut out, chunk, &|start, run| {
+            let end = start + run.len();
+            slopes::<f32, f32>(&x[start..end], &g[start..end], len, run)
+        });
+        TensorData::from_vec_f32(out, input.device())
+    } else {
+        let (x, g) = (
+            x.data().as_f64_slice().ok_or_else(missing)?,
+            g.data().as_f64_slice().ok_or_else(missing)?,
+        );
+        let mut out = vec![0.0f64; x.len()];
+        crate::ops::map::par_out_chunks(&mut out, chunk, &|start, run| {
+            let end = start + run.len();
+            slopes::<f64, f64>(&x[start..end], &g[start..end], len, run)
+        });
+        TensorData::from_vec_f64(out, input.device())
+    };
+    let mut inverse = vec![0isize; order.len()];
+    for (at, &axis) in order.iter().enumerate() {
+        inverse[axis as usize] = at as isize;
+    }
+    Tensor::new(
+        Arc::new(data),
+        x.shape().clone(),
         input.dtype(),
         input.device(),
         false,
-    ))
+    )
+    .permute(inverse)?
+    .contiguous()
 }
 
 /// Mean reduction along specified dimensions

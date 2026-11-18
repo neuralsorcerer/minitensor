@@ -10,20 +10,19 @@ Both were found by finite-difference gradcheck at the points the usual
 derivation cannot reach -- a zero inside a running product, and a variance with
 one sample -- rather than at a random interior point, where 64 ops all agreed.
 
-`cumprod`'s gradient divides the running sum by the input, so a zero needs its
-own handling. The code split at the first zero and got that case right, then
-took a *separate* branch for two or more zeros that set the whole run to zero:
+`cumprod`'s gradient once divided the running sum by the input, so a zero
+needed its own handling. The code split at the first zero and got that case
+right, then took a *separate* branch for two or more zeros that set the whole
+run to zero:
 
     cumprod([2, 0, 3, 0]).sum().backward()   ->  [0, 0, 0, 0]
     true gradient                            ->  [1, 8, 0, 0]
 
-The split at the first zero never needed a second case. Positions before it
-only see outputs before it, since every later one carries that zero as a
-factor; the position of the zero itself is assembled from a prefix and a
-running suffix product, and a second zero drives that suffix to zero on its own,
-so the terms beyond it drop out. Positions after the first zero are zero either
-way. So the fix was to delete the extra branch, and these tests sweep zero
-patterns exhaustively to keep it deleted.
+The gradient no longer divides by the input: each position's slope is the
+product of the factors before it times a sum taken from the end of the run
+back, so a zero is a factor like any other -- positions after it carry it,
+and the terms of a sum past it drop out on their own -- and every rank goes
+the same way. These tests sweep zero patterns exhaustively to keep it so.
 
 `var(unbiased=True)` over an axis of one element is NaN, because Bessel's
 correction divides by `n - 1`. That much was right. But it was produced by
@@ -134,9 +133,8 @@ def test_every_zero_pattern_in_a_short_run():
     ],
     ids=lambda v: "".join("z" if x == 0 else "n" for x in v),
 )
-def test_a_one_dimensional_run_has_its_own_kernel(values):
-    """Rank 1, rank 2 and rank 3 are three separate copies of the split, and a
-    2-D test leaves the 1-D one entirely unexercised."""
+def test_a_one_dimensional_run(values):
+    """A run that is the whole tensor, as well as a row of one."""
     analytic = _grad(lambda t: t.cumprod(0), values).numpy().astype(np.float64)
     np.testing.assert_allclose(
         analytic, _numeric(lambda t: t.cumprod(0), values), rtol=1e-4, atol=1e-6
@@ -166,7 +164,7 @@ def test_cumprod_gradient_along_either_dim(dim):
 
 
 def test_cumprod_gradient_on_a_three_dimensional_tensor():
-    """The N-D path is a fourth copy of the same split and had the same branch."""
+    """Runs along the last axis of a three-dimensional tensor."""
     values = [[[2.0, 0.0, 3.0, 0.0], [1.0, 2.0, 0.0, 0.0]]]
     analytic = _grad(lambda t: t.cumprod(2), values).numpy().astype(np.float64)
     np.testing.assert_allclose(

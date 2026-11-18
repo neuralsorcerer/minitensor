@@ -30,7 +30,7 @@
 //! bound, or past either end of the range by its exponent, without a branch.
 
 use super::exact_sum::{Element, Output, fused, product_of};
-use super::rounded_once::{product_error, rounded};
+use super::rounded_once::{product_error, rounded, two_sum};
 use crate::parallel::Parts;
 use std::sync::OnceLock;
 
@@ -164,16 +164,20 @@ impl Product {
         }
         let relative = (product.steps as f64 + 1.0) * PER_STEP_BOUND;
         let bound = product.hi * relative;
-        if exponent >= -1022 {
-            // Scaled exactly, `lo` short of the least subnormal at worst.
+        if exponent >= -969 {
+            // Scaled exactly, `lo` short of the least subnormal at worst,
+            // `2^-52` of the value's last place.
             let scale = power_of_two(exponent);
             let value = sign * (product.hi * scale);
             let rest = sign * (product.lo * scale);
             return T::settle(value, rest, bound * scale + f64::from_bits(2));
         }
-        // A float64 result among the subnormals, rounded on their grid:
-        // `k = (hi + lo) · 2^(exponent + 1074)` to the nearest whole number.
-        let scale = power_of_two(exponent + 1074);
+        // A float64 result near or among the subnormals, rounded on the grid
+        // of its last place, `2^grid`: `k = (hi + lo) · 2^(exponent - grid)`
+        // to the nearest whole number. Scaled to the value, `lo` could lose
+        // a good part of that last place.
+        let grid = (exponent - 52).max(-1074);
+        let scale = power_of_two(exponent - grid);
         let (whole, rest) = (product.hi * scale, product.lo * scale);
         let nearest = whole.round();
         let fraction = (whole - nearest) + rest;
@@ -187,7 +191,13 @@ impl Product {
         } else {
             return None;
         };
-        Some(T::narrow(sign * f64::from_bits(count as u64)))
+        // `k · 2^grid`, a subnormal's bits or a normal value's 53, exactly.
+        let unit = f64::from_bits(if grid < -1022 {
+            1 << (grid + 1074)
+        } else {
+            ((grid + 1023) as u64) << 52
+        });
+        Some(T::narrow(sign * (count * unit)))
     }
 }
 
@@ -604,6 +614,559 @@ pub(crate) fn products_of_others<I: Element, T: Output>(values: &[I], out: &mut 
     }
 }
 
+/// For factors `x` in runs of `len` and the gradient `g` of their running
+/// products, each factor's slope into `out`: the value nearest
+/// `Σ_{k ≥ i} g[k] · Π_{j ≤ k, j ≠ i} x[j]` along its run.
+///
+/// That is `A_i B_i`: `A_i` the product of the factors before `i`, carried
+/// as a [`Product`], and `B_i = g[i] + x[i + 1] B_{i + 1}` from the end of
+/// the run back, carried as a pair with the exact errors of its roundings
+/// gathered into a bound ([`Horner`]), each with its exponent kept apart, so
+/// that no partial product or sum leaves the range where the slope does not.
+/// The bounds settle a slope unless it lies within them of a halfway point
+/// or the terms of `B_i` cancel to nearly nothing; there the product before
+/// `i` is formed again in whole numbers, and where that is not enough the
+/// slope itself. Divided out of the running sum of `g · cumprod`, as it was,
+/// a slope rounded at every step, and where a running product left the range
+/// the slopes went with it: `[1e200, 1e200, 1e-200]` with `g = [0, 0, 1]`
+/// had slopes of NaN where they are one. A zero, an infinity or a NaN among
+/// the values makes each slope what multiplying out its terms and adding
+/// them makes it.
+pub(crate) fn running_product_slopes<I: Element, T: Output>(
+    x: &[I],
+    g: &[I],
+    len: usize,
+    out: &mut [T],
+) {
+    if len == 0 {
+        return;
+    }
+    let mut marks = Vec::new();
+    let (mut leads, mut ahead) = (Vec::with_capacity(SPAN), Vec::with_capacity(SPAN));
+    for ((x, g), out) in x.chunks(len).zip(g.chunks(len)).zip(out.chunks_mut(len)) {
+        let (read_x, read_g) = (|k: usize| x[k].wide(), |k: usize| g[k].wide());
+        // The products before the start of each span, a span's carried
+        // product at a time.
+        let spans = len.div_ceil(SPAN);
+        marks.clear();
+        marks.push(Lead::NONE);
+        for block in x[..(spans - 1) * SPAN].chunks(SPAN) {
+            let lead = *marks.last().expect("a first mark");
+            let (product, special) = block_product(block);
+            marks.push(if special {
+                block
+                    .iter()
+                    .fold(lead, |lead, value| lead.then(value.wide()))
+            } else {
+                Lead {
+                    product: lead.product.times::<false>(product),
+                    kind: kind_times(lead.kind, 2 + u8::from(product.negative)),
+                }
+            });
+        }
+        // The leads of `span` from where `leads` has them, `lead` the next.
+        let form = |leads: &mut Vec<Lead>, mut lead: Lead, span: usize, upto: usize| {
+            for index in span * SPAN + leads.len()..span * SPAN + upto {
+                leads.push(lead);
+                lead = lead.then(read_x(index));
+            }
+        };
+        leads.clear();
+        form(
+            &mut leads,
+            marks[spans - 1],
+            spans - 1,
+            len - (spans - 1) * SPAN,
+        );
+        let mut horner = Horner::new(read_g(len - 1));
+        let mut exact = None;
+        for span in (0..spans).rev() {
+            // As this span's slopes are found from its end back, the leads
+            // of the span before it are formed from its start: two chains of
+            // dependent steps, each going on while the other waits.
+            ahead.clear();
+            let mut next = marks[span.saturating_sub(1)];
+            for (offset, lead) in leads.iter().enumerate().rev() {
+                if span > 0 {
+                    ahead.push(next);
+                    next = next.then(read_x((span - 1) * SPAN + ahead.len() - 1));
+                }
+                let index = span * SPAN + offset;
+                if index + 1 < len {
+                    horner.step(read_x(index + 1), read_g(index));
+                }
+                out[index] = match sum_of_kinds(kinds_times(horner.kinds, lead.kind)) {
+                    Some(value) => T::narrow(value),
+                    None => horner.times(lead.product).unwrap_or_else(|| {
+                        horner.slowly(&read_x, &read_g, len, index, lead.product, &mut exact)
+                    }),
+                };
+            }
+            if span > 0 {
+                // After a short last span, the rest of the one before.
+                form(&mut ahead, next, span - 1, SPAN);
+            }
+            std::mem::swap(&mut leads, &mut ahead);
+        }
+    }
+}
+
+/// Indices whose leading products [`running_product_slopes`] keeps at once.
+const SPAN: usize = 256;
+
+/// What a number or a sum of terms is, for the slopes of running products:
+/// `2 · kind + sign` for a zero (kind 0), a finite nonzero number (1) or an
+/// infinity (2), and this for a NaN.
+const NAN_KIND: u8 = 6;
+
+#[inline(always)]
+fn kind_of(value: f64) -> u8 {
+    if value.is_nan() {
+        return NAN_KIND;
+    }
+    let kind = if value == 0.0 {
+        0
+    } else if value.is_infinite() {
+        2
+    } else {
+        1
+    };
+    2 * kind + u8::from(value.is_sign_negative())
+}
+
+/// The kind of a product of numbers of kinds `a` and `b`: NaN for a NaN or
+/// a zero and an infinity, as multiplying them out makes it.
+#[inline(always)]
+fn kind_times(a: u8, b: u8) -> u8 {
+    let (low, high) = ((a >> 1).min(b >> 1), (a >> 1).max(b >> 1));
+    if high == 3 || (low == 0 && high == 2) {
+        NAN_KIND
+    } else {
+        2 * if low == 0 { 0 } else { high } + ((a ^ b) & 1)
+    }
+}
+
+/// The kinds terms take, one bit a kind, each multiplied by a number of
+/// kind `by`.
+#[inline(always)]
+fn kinds_times(kinds: u8, by: u8) -> u8 {
+    match by {
+        2 => kinds,
+        // A negative finite factor turns each sign.
+        3 => ((kinds & 0b01_0101) << 1) | ((kinds & 0b10_1010) >> 1) | (kinds & 0b100_0000),
+        _ => (0..7)
+            .filter(|kind| kinds >> kind & 1 == 1)
+            .fold(0, |set, kind| set | 1 << kind_times(kind, by)),
+    }
+}
+
+/// The sum of terms of these kinds where they settle it -- NaN for a NaN
+/// among them or infinities of either sign, an infinity, or a zero,
+/// negative only where every term is -- and `None` where it is the finite
+/// sum of terms some of which are finite and nonzero.
+#[inline(always)]
+fn sum_of_kinds(kinds: u8) -> Option<f64> {
+    if kinds & 1 << NAN_KIND != 0 || kinds & 0b11_0000 == 0b11_0000 {
+        Some(f64::NAN)
+    } else if kinds & 0b01_0000 != 0 {
+        Some(f64::INFINITY)
+    } else if kinds & 0b10_0000 != 0 {
+        Some(f64::NEG_INFINITY)
+    } else if kinds & 0b1100 == 0 {
+        Some(if kinds == 0b10 { -0.0 } else { 0.0 })
+    } else {
+        None
+    }
+}
+
+/// The product of the factors before an index: its kind, and the carried
+/// product of those finite and nonzero.
+#[derive(Clone, Copy)]
+struct Lead {
+    product: Product,
+    kind: u8,
+}
+
+impl Lead {
+    const NONE: Self = Self {
+        product: Product::ONE,
+        kind: 2,
+    };
+
+    #[inline(always)]
+    fn then(mut self, factor: f64) -> Self {
+        self.kind = kind_times(self.kind, kind_of(factor));
+        if factor.abs() > 0.0 && factor.abs() < f64::INFINITY {
+            let product = &mut self.product;
+            let mut sign = u64::from(product.negative);
+            let (hi, lo, exponent) = (&mut product.hi, &mut product.lo, &mut product.exponent);
+            step::<false>(hi, lo, exponent, &mut sign, &mut false, factor);
+            renormalize(hi, lo, exponent);
+            product.steps += 1;
+            product.negative = sign == 1;
+        }
+        self
+    }
+}
+
+/// `B_i = g[i] + x[i + 1] B_{i + 1}`, from the end of a run back: the kinds
+/// of its terms, and its value `(hi + lo) · 2^exponent`, `|hi|` in `[1, 2)`
+/// or both zero, within `error · 2^exponent` of the exact sum.
+///
+/// Each step's roundings are found exactly and added to the error carried
+/// over, which the factor scales as it does the value, so the bound is what
+/// the roundings came to -- zero where none rounded, as where small whole
+/// numbers cancel to nothing -- rather than a count of steps times the sum of
+/// the terms' magnitudes, which grew with the run.
+struct Horner {
+    hi: f64,
+    lo: f64,
+    error: f64,
+    exponent: i64,
+    kinds: u8,
+}
+
+/// Steps of [`PER_STEP`] past which a slope is formed exactly rather than
+/// settled by its bound: under `2^-55` of it, the bound cannot carry a
+/// value at the top of the range across the point where it overflows.
+const LOOSE_STEPS: f64 = (1u64 << 48) as f64;
+/// `2^-900`: below this, as a part of a value whose leading part is in
+/// `[1, 8)`, a product's error or a scaled value may fall among the
+/// subnormals and round, and a step where one does adds [`STRAY`], `2^-1000`
+/// and far more than such roundings come to, to the bound.
+const FAINT: f64 = f64::from_bits(123 << 52);
+const STRAY: f64 = f64::from_bits(23 << 52);
+
+impl Horner {
+    fn new(g: f64) -> Self {
+        let mut horner = Self {
+            hi: 0.0,
+            lo: 0.0,
+            error: 0.0,
+            exponent: 0,
+            kinds: 1 << kind_of(g),
+        };
+        horner.restart(g);
+        horner
+    }
+
+    /// The value `g` exactly; zero for a zero, an infinity or a NaN, whose
+    /// sums the kinds settle.
+    #[inline(always)]
+    fn restart(&mut self, g: f64) {
+        let (mantissa, exponent) = if g.abs() > 0.0 && g.abs() < f64::INFINITY {
+            split_factor(g)
+        } else {
+            (0.0, 0)
+        };
+        self.hi = if g < 0.0 { -mantissa } else { mantissa };
+        self.lo = 0.0;
+        self.error = 0.0;
+        self.exponent = exponent;
+    }
+
+    /// `B_{i + 1}` to `B_i`: the product's parts and their errors split
+    /// exactly, the smaller of the product and `g` brought to the other's
+    /// scale, and the sum found exactly but for the trailing parts' sum,
+    /// whose error is found exactly too.
+    #[inline(always)]
+    fn step(&mut self, x: f64, g: f64) {
+        self.kinds = kinds_times(self.kinds, kind_of(x)) | 1 << kind_of(g);
+        if !(x.abs() > 0.0 && x.abs() < f64::INFINITY) || (self.hi == 0.0 && self.error == 0.0) {
+            // `x B_{i + 1}` is zero, or the kinds settle every sum it reaches.
+            self.restart(g);
+            return;
+        }
+        let (mantissa, shift) = split_factor(x);
+        let mut high = self.hi * mantissa;
+        let low = self.lo * mantissa;
+        let low_error = product_error(self.lo, mantissa, low);
+        let (mut low, sum_error) = two_sum(low, product_error(self.hi, mantissa, high));
+        if x < 0.0 {
+            (high, low) = (-high, -low);
+        }
+        let mut error = self.error * mantissa + (low_error.abs() + sum_error.abs());
+        let mut exponent = self.exponent + shift;
+        let mut stray = false;
+        if g.abs() > 0.0 && g.abs() < f64::INFINITY {
+            let (g_mantissa, g_exponent) = split_factor(g);
+            let mut term = if g < 0.0 { -g_mantissa } else { g_mantissa };
+            let k = g_exponent - exponent;
+            if k > 1 {
+                (high, low, error) = (scaled(high, -k), scaled(low, -k), scaled(error, -k));
+                exponent = g_exponent;
+            } else {
+                term = scaled(term, k);
+            }
+            stray = k.abs() > 900;
+            let (total, carried) = two_sum(high, term);
+            let (rest, rest_error) = two_sum(carried, low);
+            (high, low) = (total, rest);
+            error += rest_error.abs();
+        }
+        let (hi, lo) = two_sum(high, low);
+        stray |= (hi != 0.0 && hi.abs() < FAINT) || (lo != 0.0 && lo.abs() < FAINT);
+        // Rounded up: five roundings of `2^-53` at most.
+        let error = (error + if stray { STRAY } else { 0.0 }) * (1.0 + 1.0 / (1u64 << 50) as f64);
+        if hi.abs() < FAINT {
+            // Cancelled past all measure, or exactly with a bound.
+            (self.hi, self.lo, self.error) =
+                (hi, lo, if hi == 0.0 { error } else { f64::INFINITY });
+            self.exponent = exponent;
+            return;
+        }
+        let shift = ((hi.to_bits() >> 52) & 0x7ff) as i64 - 1023;
+        let scale = power_of_two(-shift);
+        self.hi = hi * scale;
+        self.lo = lo * scale;
+        self.error = error * scale;
+        self.exponent = exponent + shift;
+    }
+
+    /// `lead · B_i` rounded once, where the bound settles it.
+    #[inline(always)]
+    fn times<T: Output>(&self, lead: Product) -> Option<T> {
+        if self.hi == 0.0 {
+            // Terms that cancel exactly come to a positive zero.
+            return (self.error == 0.0).then(|| T::narrow(0.0));
+        }
+        // `|hi|` is at least one, so `error` is at least the error relative
+        // to it.
+        let steps = (self.error * (1.0 / PER_STEP) * (1.0 + 1.0 / (1u64 << 40) as f64)).ceil();
+        if steps.is_nan() || steps >= LOOSE_STEPS {
+            return None;
+        }
+        let value = Product {
+            hi: self.hi.abs(),
+            lo: if self.hi < 0.0 { -self.lo } else { self.lo },
+            exponent: self.exponent,
+            negative: self.hi < 0.0,
+            steps: steps as u64,
+        };
+        lead.times::<false>(value).settled()
+    }
+}
+
+impl Horner {
+    /// `lead · B_index` where the bound on the carried product before it
+    /// left it open: that product formed again in whole numbers 128 bits
+    /// wide, whose bound is a step or two where the carried one's grew by a
+    /// step a factor -- and where that is not enough, the slope exactly.
+    #[cold]
+    #[inline(never)]
+    fn slowly<T: Output>(
+        &self,
+        x: &dyn Fn(usize) -> f64,
+        g: &dyn Fn(usize) -> f64,
+        len: usize,
+        index: usize,
+        lead: Product,
+        exact: &mut Option<(Exact, usize)>,
+    ) -> T {
+        if lead.steps > 2 {
+            let mut wide = Wide::one(2);
+            for k in 0..index {
+                wide.times_factor(x(k));
+            }
+            // The leading 53 bits, and the other 75 rounded once: `2^-106`
+            // of the product, a third of a step, and the cuts' `2^-127`
+            // each a far smaller part of one.
+            let whole = (u128::from(wide.limbs[1]) << 64) | u128::from(wide.limbs[0]);
+            let (hi, lo) = two_sum(
+                (whole >> 75) as f64 / (1u64 << 52) as f64,
+                (whole & ((1 << 75) - 1)) as f64 / (1u128 << 127) as f64,
+            );
+            let lead = Product {
+                hi,
+                lo,
+                exponent: wide.exponent + 127,
+                negative: wide.negative,
+                steps: 1 + (wide.cuts >> 20) as u64,
+            }
+            .normalized();
+            if let Some(slope) = self.times(lead) {
+                return slope;
+            }
+        }
+        exact_slope(x, g, len, index, exact).map_or(T::narrow(0.0), |slope| {
+            nearest(slope.negative, &slope.limbs, slope.exponent)
+        })
+    }
+}
+
+/// `value · 2^k` for `k` at most one, rounded once where it falls among the
+/// subnormals and to zero far below them.
+#[inline(always)]
+fn scaled(value: f64, k: i64) -> f64 {
+    if k < -1100 {
+        return value * 0.0;
+    }
+    let half = k / 2;
+    value * power_of_two(half) * power_of_two(k - half)
+}
+
+/// A finite number in whole numbers, exactly: `±limbs · 2^exponent`, the
+/// limbs little-endian with neither end zero, and none for zero.
+#[derive(Clone, Default)]
+struct Exact {
+    limbs: Vec<u64>,
+    exponent: i64,
+    negative: bool,
+}
+
+impl Exact {
+    /// The number times `factor`, finite.
+    fn times(&mut self, factor: f64) {
+        if factor == 0.0 {
+            self.limbs.clear();
+        }
+        if self.limbs.is_empty() {
+            return;
+        }
+        let (odd, shift) = odd_part(factor);
+        self.negative ^= factor < 0.0;
+        self.exponent += shift;
+        let mut carry = 0u64;
+        for limb in &mut self.limbs {
+            let full = u128::from(*limb) * u128::from(odd) + u128::from(carry);
+            *limb = full as u64;
+            carry = (full >> 64) as u64;
+        }
+        if carry != 0 {
+            self.limbs.push(carry);
+        }
+    }
+
+    /// The number plus `term`, finite.
+    fn plus(&mut self, term: f64) {
+        if term == 0.0 {
+            return;
+        }
+        let (odd, shift) = odd_part(term);
+        if self.limbs.is_empty() {
+            *self = Self {
+                limbs: vec![odd],
+                exponent: shift,
+                negative: term < 0.0,
+            };
+            return;
+        }
+        if shift < self.exponent {
+            // Down to the term's scale: whole limbs below, then bits.
+            let gap = (self.exponent - shift) as usize;
+            let bits = gap % 64;
+            if bits > 0 {
+                let mut carry = 0;
+                for limb in &mut self.limbs {
+                    let next = *limb >> (64 - bits);
+                    *limb = (*limb << bits) | carry;
+                    carry = next;
+                }
+                if carry != 0 {
+                    self.limbs.push(carry);
+                }
+            }
+            self.limbs.splice(0..0, std::iter::repeat_n(0, gap / 64));
+            self.exponent = shift;
+        }
+        let offset = (shift - self.exponent) as usize;
+        let word = offset / 64;
+        let wide = u128::from(odd) << (offset % 64);
+        let parts = [wide as u64, (wide >> 64) as u64];
+        if self.limbs.len() < word + 2 {
+            self.limbs.resize(word + 2, 0);
+        }
+        let opposite = (term < 0.0) != self.negative;
+        let mut carry = false;
+        for (index, limb) in self.limbs[word..].iter_mut().enumerate() {
+            let part = parts.get(index).copied().unwrap_or(0);
+            let (value, first) = if opposite {
+                limb.overflowing_sub(part)
+            } else {
+                limb.overflowing_add(part)
+            };
+            let (value, second) = if opposite {
+                value.overflowing_sub(u64::from(carry))
+            } else {
+                value.overflowing_add(u64::from(carry))
+            };
+            *limb = value;
+            carry = first | second;
+            if !carry && index >= 1 {
+                break;
+            }
+        }
+        if carry && !opposite {
+            self.limbs.push(1);
+        } else if carry {
+            // The term was the larger: the difference, negated in two's
+            // complement, and the sign turned.
+            let mut carry = true;
+            for limb in &mut self.limbs {
+                let (value, over) = (!*limb).overflowing_add(u64::from(carry));
+                *limb = value;
+                carry = over;
+            }
+            self.negative = !self.negative;
+        }
+        while self.limbs.last() == Some(&0) {
+            self.limbs.pop();
+        }
+        let low = self.limbs.iter().take_while(|&&limb| limb == 0).count();
+        self.limbs.drain(..low);
+        self.exponent += 64 * low as i64;
+    }
+}
+
+/// A finite, nonzero value's magnitude as an odd whole number and the power
+/// of two it is times.
+#[inline(always)]
+fn odd_part(value: f64) -> (u64, i64) {
+    let bits = value.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let fraction = bits & ((1 << 52) - 1);
+    let (whole, shift) = if biased == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), biased - 1075)
+    };
+    let zeros = whole.trailing_zeros();
+    (whole >> zeros, shift + i64::from(zeros))
+}
+
+/// The slope at `index` exactly, where its bound leaves it open: `B_index`
+/// carried on in whole numbers from where `state` last left it, then times
+/// every factor before `index`. `None` for zero, which the sum of finite
+/// nonzero terms that cancel is positive.
+#[cold]
+#[inline(never)]
+fn exact_slope(
+    x: &dyn Fn(usize) -> f64,
+    g: &dyn Fn(usize) -> f64,
+    len: usize,
+    index: usize,
+    state: &mut Option<(Exact, usize)>,
+) -> Option<Exact> {
+    let (sum, at) = state.get_or_insert_with(|| {
+        let mut sum = Exact::default();
+        sum.plus(g(len - 1));
+        (sum, len - 1)
+    });
+    while *at > index {
+        *at -= 1;
+        sum.times(x(*at + 1));
+        sum.plus(g(*at));
+    }
+    if sum.limbs.is_empty() {
+        return None;
+    }
+    let mut slope = sum.clone();
+    for k in 0..index {
+        slope.times(x(k));
+    }
+    Some(slope)
+}
+
 /// The product of factors at least one of which is a zero, an infinity or a
 /// NaN.
 #[cold]
@@ -891,18 +1454,9 @@ impl Wide {
     /// times the limbs, the limb that then falls off the bottom a cut unless
     /// it is zero, and the power of two into the exponent.
     fn times_factor(&mut self, value: f64) {
-        let bits = value.to_bits();
-        self.negative ^= bits >> 63 == 1;
-        let biased = ((bits >> 52) & 0x7ff) as i64;
-        let fraction = bits & ((1 << 52) - 1);
-        let (whole, shift) = if biased == 0 {
-            (fraction, -1074)
-        } else {
-            (fraction | (1 << 52), biased - 1075)
-        };
-        let zeros = whole.trailing_zeros();
-        let odd = whole >> zeros;
-        self.exponent += shift + i64::from(zeros);
+        self.negative ^= value.is_sign_negative();
+        let (odd, shift) = odd_part(value);
+        self.exponent += shift;
         if odd == 1 {
             return;
         }
