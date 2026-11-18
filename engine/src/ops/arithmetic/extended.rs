@@ -244,7 +244,7 @@ pub(crate) fn ln_1p<const FMA: bool>(w: Pair) -> Pair {
 /// product of pairs -- and without it otherwise. Written
 /// `fused!(body(name: Type, ...) -> Return)`, each `name` a local passed on.
 macro_rules! fused {
-    ($body:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {{
+    ($body:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty) => {{
         #[cfg(target_arch = "x86_64")]
         {
             #[target_feature(enable = "fma")]

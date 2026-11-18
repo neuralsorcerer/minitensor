@@ -23,28 +23,29 @@ once, and a float64 one within a couple of ulps.
 
 from __future__ import annotations
 
+import decimal
 import math
+from decimal import Decimal
 from fractions import Fraction
 
-import mpmath
 import numpy as np
 import pytest
 
 import minitensor as mt
 from minitensor import functional as F
 
-mpmath.mp.prec = 300
-M = mpmath
+# Each reference is formed to a hundred places -- some 330 bits -- and then
+# rounded once.
+_PLACES = 100
 
 
 def _rounded(value, dtype: str) -> float:
-    """The float nearest an mpmath value, ties to even, rounded once."""
+    """The float nearest a decimal value, ties to even, rounded once."""
 
-    value = M.mpf(value)
+    value = Decimal(value)
     if value == 0:
         return 0.0
-    sign, man, exponent, _ = value._mpf_
-    exact = Fraction(int(man)) * Fraction(2) ** int(exponent)
+    exact = Fraction(abs(value))
     digits, least, top = (24, -149, 128) if dtype == "float32" else (53, -1074, 1024)
     e = exact.numerator.bit_length() - exact.denominator.bit_length()
     if Fraction(2) ** e > exact:
@@ -52,25 +53,25 @@ def _rounded(value, dtype: str) -> float:
     unit = Fraction(2) ** max(e - (digits - 1), least)
     near = round(exact / unit) * unit
     out = math.inf if near >= Fraction(2) ** top else float(near)
-    return -out if sign else out
+    return -out if value < 0 else out
 
 
 def _sigmoid(x):
-    return 1 / (1 + M.exp(-x))
+    return 1 / (1 + (-x).exp())
 
 
-_SELU_SCALE = M.mpf("1.0507009873554804934193349852946")
-_SELU_ALPHA = M.mpf("1.6732632423543772848170429916717")
+_SELU_SCALE = Decimal("1.0507009873554804934193349852946")
+_SELU_ALPHA = Decimal("1.6732632423543772848170429916717")
 
 _SLOPES = {
-    "tanh": (lambda t: t.tanh(), lambda x: 1 / M.cosh(x) ** 2),
+    "tanh": (lambda t: t.tanh(), lambda x: 4 / (x.exp() + (-x).exp()) ** 2),
     "sigmoid": (lambda t: t.sigmoid(), lambda x: _sigmoid(x) * _sigmoid(-x)),
-    "elu": (lambda t: F.elu(t), lambda x: 1 if x > 0 else M.exp(x)),
+    "elu": (lambda t: F.elu(t), lambda x: 1 if x > 0 else x.exp()),
     "selu": (
         lambda t: F.selu(t),
-        lambda x: _SELU_SCALE if x > 0 else _SELU_SCALE * _SELU_ALPHA * M.exp(x),
+        lambda x: _SELU_SCALE if x > 0 else _SELU_SCALE * _SELU_ALPHA * x.exp(),
     ),
-    "expm1": (lambda t: t.expm1(), lambda x: M.exp(x)),
+    "expm1": (lambda t: t.expm1(), lambda x: x.exp()),
     "softplus": (lambda t: F.softplus(t), lambda x: _sigmoid(x)),
     "logsigmoid": (lambda t: F.logsigmoid(t), lambda x: _sigmoid(-x)),
     "softsign": (lambda t: F.softsign(t), lambda x: 1 / (1 + abs(x)) ** 2),
@@ -95,11 +96,12 @@ def test_slopes_far_out_are_not_zero(name):
     fn, slope = _SLOPES[name]
     x = [-700.0, -100.0, -40.0, -20.0, -10.0, 10.0, 20.0, 40.0, 100.0]
     got = _slopes(fn, x, "float64")
-    for v, g in zip(x, got):
-        want = _rounded(slope(M.mpf(v)), "float64")
-        assert _ulps(g, want) <= 2, (name, v, g, want)
-        if want != 0:
-            assert g != 0, (name, v)
+    with decimal.localcontext(prec=_PLACES):
+        for v, g in zip(x, got):
+            want = _rounded(slope(Decimal(v)), "float64")
+            assert _ulps(g, want) <= 2, (name, v, g, want)
+            if want != 0:
+                assert g != 0, (name, v)
 
 
 @pytest.mark.parametrize("name", sorted(_SLOPES))
@@ -111,9 +113,10 @@ def test_float32_slopes_are_the_nearest_float32(name):
     ).astype(np.float32)
     upstream = rng.standard_normal(len(x)).astype(np.float32)
     got = _slopes(fn, x, "float32", upstream)
-    for v, u, g in zip(x.tolist(), upstream.tolist(), got):
-        want = _rounded(M.mpf(u) * slope(M.mpf(v)), "float32")
-        assert g == want, (name, v, u, g, want)
+    with decimal.localcontext(prec=_PLACES):
+        for v, u, g in zip(x.tolist(), upstream.tolist(), got):
+            want = _rounded(Decimal(u) * slope(Decimal(v)), "float32")
+            assert g == want, (name, v, u, g, want)
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
@@ -125,16 +128,16 @@ def test_inverse_functions_near_one_and_far_out(dtype):
             lambda x: 1 / (1 - x * x),
             near + [-v for v in near],
         ),
-        "asin": (lambda t: t.asin(), lambda x: 1 / M.sqrt(1 - x * x), near),
-        "acos": (lambda t: t.acos(), lambda x: -1 / M.sqrt(1 - x * x), near),
+        "asin": (lambda t: t.asin(), lambda x: 1 / (1 - x * x).sqrt(), near),
+        "acos": (lambda t: t.acos(), lambda x: -1 / (1 - x * x).sqrt(), near),
         "acosh": (
             lambda t: t.acosh(),
-            lambda x: 1 / M.sqrt(x * x - 1),
+            lambda x: 1 / (x * x - 1).sqrt(),
             [1 + 2.0**-k for k in (3, 10, 20, 30, 40)] + [1e10, 1e30, 1e200],
         ),
         "asinh": (
             lambda t: t.asinh(),
-            lambda x: 1 / M.sqrt(x * x + 1),
+            lambda x: 1 / (x * x + 1).sqrt(),
             [-1e200, -3.0, 1e-8, 1e10, 1e30, 1e300],
         ),
         "atan": (
@@ -149,12 +152,13 @@ def test_inverse_functions_near_one_and_far_out(dtype):
             x = x[np.abs(x) < 3e38]
             x = x[np.abs(x.astype(np.float32)) != 1.0]
         got = _slopes(fn, x.tolist(), dtype)
-        for v, g in zip(np.asarray(x, dtype=dtype).tolist(), got):
-            want = _rounded(slope(M.mpf(v)), dtype)
-            if dtype == "float32":
-                assert g == want, (name, v, g, want)
-            else:
-                assert _ulps(g, want) <= 2, (name, v, g, want)
+        with decimal.localcontext(prec=_PLACES):
+            for v, g in zip(np.asarray(x, dtype=dtype).tolist(), got):
+                want = _rounded(slope(Decimal(v)), dtype)
+                if dtype == "float32":
+                    assert g == want, (name, v, g, want)
+                else:
+                    assert _ulps(g, want) <= 2, (name, v, g, want)
 
 
 def test_a_softplus_slope_keeps_the_rounding_of_beta_x():
@@ -164,7 +168,8 @@ def test_a_softplus_slope_keeps_the_rounding_of_beta_x():
     x = np.array([-600.0, -300.0, -77.0, -20.0])
     t = mt.Tensor(x, dtype="float64", requires_grad=True)
     F.softplus(t, beta=0.7).backward(mt.Tensor(np.ones(4), dtype="float64"))
-    for v, g in zip(x.tolist(), t.grad.tolist()):
-        want = _rounded(_sigmoid(M.mpf(0.7) * M.mpf(v)), "float64")
-        assert _ulps(g, want) <= 2, (v, g, want)
+    with decimal.localcontext(prec=_PLACES):
+        for v, g in zip(x.tolist(), t.grad.tolist()):
+            want = _rounded(_sigmoid(Decimal(0.7) * Decimal(v)), "float64")
+            assert _ulps(g, want) <= 2, (v, g, want)
     mt.clear_autograd_graph()

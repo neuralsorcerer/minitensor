@@ -298,12 +298,14 @@ fn rounded_prefixes<T: Output>(
             let emit: &mut dyn FnMut(usize, f64, f64) = &mut |at, value, rest| {
                 slab[at] = T::settle(value, rest, 0.0).unwrap_or_else(|| T::narrow(value));
             };
-            extended::fused!(prefixes(
-                dim_size: usize,
-                inner: usize,
-                read: &dyn Fn(usize) -> f64,
-                emit: &mut dyn FnMut(usize, f64, f64)
-            ) -> ())
+            extended::fused!(
+                prefixes(
+                    dim_size: usize,
+                    inner: usize,
+                    read: &dyn Fn(usize) -> f64,
+                    emit: &mut dyn FnMut(usize, f64, f64),
+                ) -> ()
+            )
         }
     });
 }

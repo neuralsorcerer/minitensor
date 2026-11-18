@@ -24,10 +24,12 @@ within about `2^-100` of the exact one.
 
 from __future__ import annotations
 
+import decimal
 import math
+from decimal import Decimal
 from fractions import Fraction
+from functools import lru_cache
 
-import mpmath
 import numpy as np
 import pytest
 
@@ -37,13 +39,12 @@ from minitensor import functional as F
 _DIGITS = {"float32": (24, -149, 128), "float64": (53, -1074, 1024)}
 
 
-def _rounded(value, dtype: str) -> float:
-    """The float nearest an mpmath value, ties to even, rounded once."""
+def _rounded(value: Decimal, dtype: str) -> float:
+    """The float nearest a decimal value, ties to even, rounded once."""
 
-    sign, man, exponent, _ = value._mpf_
-    if man == 0:
+    if value == 0:
         return 0.0
-    exact = Fraction(int(man)) * Fraction(2) ** int(exponent)
+    exact = Fraction(abs(value))
     digits, least, top = _DIGITS[dtype]
     e = exact.numerator.bit_length() - exact.denominator.bit_length()
     if Fraction(2) ** e > exact:
@@ -51,21 +52,35 @@ def _rounded(value, dtype: str) -> float:
     unit = Fraction(2) ** max(e - (digits - 1), least)
     near = round(exact / unit) * unit
     out = math.inf if near >= Fraction(2) ** top else float(near)
-    return -out if sign else out
+    return -out if value < 0 else out
+
+
+@lru_cache(maxsize=None)
+def _exp(value: float, digits: int) -> Decimal:
+    """`e^value` to `digits` places, kept for values that come again."""
+
+    with decimal.localcontext(prec=digits):
+        return Decimal(value).exp()
+
+
+def _totals(x):
+    """The running sums of `e^x`, each to the context's precision."""
+
+    digits, total, out = decimal.getcontext().prec, Decimal(0), []
+    for v in x:
+        total += _exp(float(v), digits)
+        out.append(total)
+    return out
 
 
 def _prefixes(x):
-    total, out = mpmath.mpf(0), []
-    for v in x:
-        total += mpmath.exp(mpmath.mpf(float(v)))
-        out.append(mpmath.log(total))
-    return out
+    return [total.ln() for total in _totals(x)]
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_every_prefix_is_the_nearest_float(dtype):
     rng = np.random.default_rng(1701)
-    with mpmath.workprec(160):
+    with decimal.localcontext(prec=50):
         for scale in (0.01, 3.0, 300.0):
             x = (rng.standard_normal(1500) * scale).astype(dtype)
             got = F.logcumsumexp(mt.Tensor(x, dtype=dtype), 0).tolist()
@@ -79,17 +94,17 @@ def test_a_long_run_does_not_drift(dtype):
     rng = np.random.default_rng(1709)
     x = (rng.standard_normal(100_000) * 3).astype(dtype)
     got = F.logcumsumexp(mt.Tensor(x, dtype=dtype), 0).numpy()
-    with mpmath.workprec(120):
-        want = _prefixes(x)
-    for at in range(0, len(x), 997):
-        assert float(got[at]) == _rounded(want[at], dtype), at
+    with decimal.localcontext(prec=40):
+        totals = _totals(x)
+        for at in range(0, len(x), 997):
+            assert float(got[at]) == _rounded(totals[at].ln(), dtype), at
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_along_every_axis(dtype):
     rng = np.random.default_rng(1721)
     x = (rng.standard_normal((4, 5, 6)) * 4).astype(dtype)
-    with mpmath.workprec(160):
+    with decimal.localcontext(prec=50):
         for dim in range(3):
             got = np.moveaxis(
                 F.logcumsumexp(mt.Tensor(x, dtype=dtype), dim).numpy(), dim, -1
@@ -129,15 +144,13 @@ def _softmax(prefix):
         return [("nan",)] * len(prefix)
     count = sum(v == inf for v in prefix)
     if count:
-        return [
-            ("pos", mpmath.mpf(1) / count) if v == inf else ("zero",) for v in prefix
-        ]
+        return [("pos", Decimal(1) / count) if v == inf else ("zero",) for v in prefix]
     if all(v == -inf for v in prefix):
         return [("zero",)] * len(prefix)
-    total = mpmath.fsum(mpmath.exp(mpmath.mpf(v)) for v in prefix if v != -inf)
+    digits = decimal.getcontext().prec
+    total = sum((_exp(v, digits) for v in prefix if v != -inf), Decimal(0))
     return [
-        ("zero",) if v == -inf else ("pos", mpmath.exp(mpmath.mpf(v)) / total)
-        for v in prefix
+        ("zero",) if v == -inf else ("pos", _exp(v, digits) / total) for v in prefix
     ]
 
 
@@ -163,7 +176,7 @@ def _exact_slopes(x, g, dtype, cancelled=None):
             elif share[0] == "zero" or weight == 0:
                 terms.append(("zero", math.copysign(1.0, weight) < 0))
             else:
-                terms.append(("pos", mpmath.mpf(weight) * share[1]))
+                terms.append(("pos", Decimal(weight) * share[1]))
         infinities = {t[1] for t in terms if t[0] == "inf"}
         if any(t[0] == "nan" for t in terms) or len(infinities) == 2:
             out.append(math.nan)
@@ -173,10 +186,10 @@ def _exact_slopes(x, g, dtype, cancelled=None):
             out.append(-0.0 if all(t[1] for t in terms) else 0.0)
         else:
             finite = [t[1] for t in terms if t[0] == "pos"]
-            total = mpmath.fsum(finite)
+            total = sum(finite, Decimal(0))
             if cancelled is not None:
-                size = mpmath.fsum(abs(t) for t in finite)
-                cancelled.append(abs(total) < size * mpmath.mpf(2) ** -100)
+                size = sum((abs(t) for t in finite), Decimal(0))
+                cancelled.append(abs(total) < size * Decimal(2) ** -100)
             out.append(_rounded(total, dtype))
             continue
         if cancelled is not None:
@@ -198,7 +211,7 @@ def _same(got, want):
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_every_slope_is_the_nearest_float(dtype):
     rng = np.random.default_rng(1723)
-    with mpmath.workprec(200):
+    with decimal.localcontext(prec=80):
         for scale, mixed in ((3.0, False), (3.0, True), (30.0, False), (300.0, True)):
             x = (rng.standard_normal(60) * scale).astype(dtype)
             g = rng.standard_normal(60) if mixed else np.abs(rng.standard_normal(60))
@@ -211,7 +224,7 @@ def test_slopes_along_every_axis(dtype):
     rng = np.random.default_rng(1733)
     x = (rng.standard_normal((3, 4, 5)) * 5).astype(dtype)
     g = rng.standard_normal((3, 4, 5)).astype(dtype)
-    with mpmath.workprec(200):
+    with decimal.localcontext(prec=80):
         for dim in range(3):
             got = np.moveaxis(np.array(_slopes(x, g, dtype, dim)), dim, -1)
             runs = np.moveaxis(x, dim, -1).reshape(-1, x.shape[dim])
@@ -228,7 +241,7 @@ def test_slopes_at_the_ends(dtype):
     inf, nan = math.inf, math.nan
     values = [0.0, 1.0, -2.0, 3.5, inf, -inf, nan, 700.0, -700.0]
     weights = [0.0, -0.0, 1.0, -1.0, 2.5, inf, -inf, nan]
-    with mpmath.workprec(4000):
+    with decimal.localcontext(prec=1210):
         for _ in range(250):
             n = int(rng.integers(1, 6))
             x = [values[j] for j in rng.integers(0, len(values), n)]
