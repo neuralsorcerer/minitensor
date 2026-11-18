@@ -502,13 +502,6 @@ where
 /// mispredicted for half of any mixed-sign input, which cost float64 sigmoid
 /// as much again as its exponential.
 #[inline]
-pub(crate) fn stable_sigmoid_f32(x: f32) -> f32 {
-    let e = (-x.abs()).exp();
-    std::hint::select_unpredictable(x >= 0.0, 1.0, e) / (1.0 + e)
-}
-
-/// [`stable_sigmoid_f32`] in double precision.
-#[inline]
 pub(crate) fn stable_sigmoid_f64(x: f64) -> f64 {
     let e = (-x.abs()).exp();
     std::hint::select_unpredictable(x >= 0.0, 1.0, e) / (1.0 + e)
@@ -735,13 +728,10 @@ mod tests {
 
     #[test]
     fn stable_sigmoid_saturates_instead_of_producing_nan() {
-        // The naive `1/(1 + e^-x)` overflows to `inf` for x <= -104 in f32 and
-        // then divides inf by inf; these must be plain 0 and 1.
-        assert_eq!(stable_sigmoid_f32(-200.0), 0.0);
-        assert_eq!(stable_sigmoid_f32(200.0), 1.0);
+        // The naive `1/(1 + e^-x)` overflows to `inf` for x <= -710 and then
+        // divides inf by inf; these must be plain 0 and 1.
         assert_eq!(stable_sigmoid_f64(-800.0), 0.0);
         assert_eq!(stable_sigmoid_f64(800.0), 1.0);
-        assert_eq!(stable_sigmoid_f32(0.0), 0.5);
         assert_eq!(stable_sigmoid_f64(0.0), 0.5);
         // Symmetry: sigmoid(-x) == 1 - sigmoid(x).
         for x in [0.5f64, 1.0, 3.25, 12.0] {

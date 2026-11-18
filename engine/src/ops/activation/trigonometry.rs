@@ -871,7 +871,7 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(EluBackward {
             input_id: tensor.id(),
-            output: output.clone().detach(),
+            input: tensor.detach(),
             alpha,
         });
 
@@ -909,7 +909,7 @@ pub fn selu(tensor: &Tensor) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(SeluBackward {
             input_id: tensor.id(),
-            output: output.clone().detach(),
+            input: tensor.detach(),
         });
 
         with_grad_fn(output, grad_fn)

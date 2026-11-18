@@ -396,19 +396,17 @@ impl GradientFunction for Log1pBackward {
 /// Gradient function for expm1
 pub struct Expm1Backward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
 }
 
 impl GradientFunction for Expm1Backward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx expm1(x) = e^x, taken of the input: as `expm1(x) + 1` of the
+        // rounded output it was a difference of two numbers near -1, zero
+        // from x = -38 in float64 where e^x is not.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "expm1", &f64::exp)?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let one = create_scalar_tensor(1.0, self.output.dtype(), self.output.device())?;
-        let term = arithmetic::add(&self.output.detach(), &one)?;
-        let grad = arithmetic::mul(&term, grad_output)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -500,17 +498,14 @@ pub struct AsinBackward {
 
 impl GradientFunction for AsinBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx asin(x) = 1 / sqrt((1 - x)(1 + x)): `1 - x` is exact near one,
+        // where `1 - x^2` lost the digits of `x^2` -- millions of ulps a
+        // millionth below one.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "asin", &|x| {
+            1.0 / ((1.0 - x) * (1.0 + x)).sqrt()
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(asin(x)) = grad_output / sqrt(1 - x^2)
-        let square = arithmetic::mul(&self.input, &self.input)?;
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let denom = arithmetic::sub(&one, &square)?;
-        let sqrt = denom.sqrt()?;
-        let grad = arithmetic::div(grad_output, &sqrt)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -518,6 +513,9 @@ impl GradientFunction for AsinBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+
+/// Past this, `x^2` can leave the float64 range; see `AtanBackward`.
+const LARGE_SQUARE: f64 = (1u64 << 60) as f64;
 
 /// Gradient function for inverse cosine
 pub struct AcosBackward {
@@ -527,18 +525,12 @@ pub struct AcosBackward {
 
 impl GradientFunction for AcosBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx acos(x) = -1 / sqrt((1 - x)(1 + x)), as for `asin`.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "acos", &|x| {
+            -1.0 / ((1.0 - x) * (1.0 + x)).sqrt()
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(acos(x)) = -grad_output / sqrt(1 - x^2)
-        let square = arithmetic::mul(&self.input, &self.input)?;
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let denom = arithmetic::sub(&one, &square)?;
-        let sqrt = denom.sqrt()?;
-        let frac = arithmetic::div(grad_output, &sqrt)?;
-        let grad = arithmetic::neg(&frac)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -555,16 +547,19 @@ pub struct AtanBackward {
 
 impl GradientFunction for AtanBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx atan(x) = 1 / (1 + x^2), as `r^2 / (1 + r^2)` with `r = 1/x`
+        // where `x^2` would overflow and leave nothing of a slope that is
+        // still a float.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "atan", &|x| {
+            if x.abs() <= LARGE_SQUARE {
+                1.0 / (1.0 + x * x)
+            } else {
+                let r = 1.0 / x;
+                r * r / (1.0 + r * r)
+            }
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(atan(x)) = grad_output / (1 + x^2)
-        let square = arithmetic::mul(&self.input, &self.input)?;
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let denom = arithmetic::add(&one, &square)?;
-        let grad = arithmetic::div(grad_output, &denom)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -629,17 +624,18 @@ pub struct AsinhBackward {
 
 impl GradientFunction for AsinhBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx asinh(x) = 1 / sqrt(1 + x^2), as `|r| / sqrt(1 + r^2)` with
+        // `r = 1/x` where `x^2` would overflow.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "asinh", &|x| {
+            if x.abs() <= LARGE_SQUARE {
+                1.0 / (1.0 + x * x).sqrt()
+            } else {
+                let r = (1.0 / x).abs();
+                r / (1.0 + r * r).sqrt()
+            }
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(asinh(x)) = grad_output / sqrt(1 + x^2)
-        let square = arithmetic::mul(&self.input, &self.input)?;
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let denom = arithmetic::add(&square, &one)?;
-        let sqrt = denom.sqrt()?;
-        let grad = arithmetic::div(grad_output, &sqrt)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -656,18 +652,13 @@ pub struct AcoshBackward {
 
 impl GradientFunction for AcoshBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx acosh(x) = 1 / (sqrt(x - 1) sqrt(x + 1)): `x - 1` exact near
+        // one, and no product of the two to overflow.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "acosh", &|x| {
+            1.0 / ((x - 1.0).sqrt() * (x + 1.0).sqrt())
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(acosh(x)) = grad_output / sqrt((x - 1)(x + 1))
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let x_minus_one = arithmetic::sub(&self.input, &one)?;
-        let x_plus_one = arithmetic::add(&self.input, &one)?;
-        let product = arithmetic::mul(&x_minus_one, &x_plus_one)?;
-        let sqrt = product.sqrt()?;
-        let grad = arithmetic::div(grad_output, &sqrt)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -684,16 +675,13 @@ pub struct AtanhBackward {
 
 impl GradientFunction for AtanhBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        // d/dx atanh(x) = 1 / ((1 - x)(1 + x)): `1 - x` is exact near one,
+        // where `1 - x^2` lost the digits of `x^2`.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "atanh", &|x| {
+            1.0 / ((1.0 - x) * (1.0 + x))
+        })?;
         let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(atanh(x)) = grad_output / (1 - x^2)
-        let square = arithmetic::mul(&self.input, &self.input)?;
-        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
-        let denom = arithmetic::sub(&one, &square)?;
-        let grad = arithmetic::div(grad_output, &denom)?;
         gradients.insert(self.input_id, grad);
-
         Ok(gradients)
     }
 
@@ -719,7 +707,7 @@ impl GradientFunction for LogBaseBackward {
         gradients.reserve(1);
 
         let ln_base = self.ln_base;
-        let grad = unary_chain_grad_f64(&self.input, grad_output, "log_base", move |x| {
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "log_base", &move |x| {
             1.0 / (x * ln_base)
         })?;
         gradients.insert(self.input_id, grad);
@@ -749,7 +737,7 @@ impl GradientFunction for ErfBackward {
         gradients.reserve(1);
 
         let scale = self.scale;
-        let grad = unary_chain_grad_f64(&self.input, grad_output, "erf", move |x| {
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "erf", &move |x| {
             scale * (-x * x).exp()
         })?;
         gradients.insert(self.input_id, grad);

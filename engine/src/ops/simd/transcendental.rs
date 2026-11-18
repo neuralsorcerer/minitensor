@@ -1435,6 +1435,38 @@ fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     (local * gout as f64) as f32
 }
 
+/// `t = exp(-k|x|)` for the logistic-shaped slopes below, by the reduction
+/// every kernel here shares. Past `-LOGISTIC_LIMIT` it is below anything a
+/// float32 slope can show, and a NaN passes through.
+#[inline(always)]
+fn tail_exp<const FMA: bool>(scaled: f64) -> f64 {
+    let v = if scaled < -LOGISTIC_LIMIT {
+        -LOGISTIC_LIMIT
+    } else {
+        scaled
+    };
+    let (two_pow_n, r) = reduce_exp::<FMA>(v);
+    two_pow_n * (1.0 + expm1_poly::<FMA>(r))
+}
+
+/// `d/dx tanh(x) = 4t / (1 + t)^2` for `t = exp(-2|x|)`, times the incoming
+/// gradient: of the input, with no difference of numbers near one in it.
+#[inline(always)]
+fn tanh_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    let t = tail_exp::<FMA>(-2.0 * (x as f64).abs());
+    let u = 1.0 + t;
+    (4.0 * t / (u * u) * gout as f64) as f32
+}
+
+/// `d/dx sigmoid(x) = t / (1 + t)^2` for `t = exp(-|x|)`, times the incoming
+/// gradient.
+#[inline(always)]
+fn sigmoid_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    let t = tail_exp::<FMA>(-(x as f64).abs());
+    let u = 1.0 + t;
+    (t / (u * u) * gout as f64) as f32
+}
+
 /// Past this `mish(x)` is `x` and its slope 1, to within float64: the factor
 /// `tanh(softplus(x))` is short of one by `2 exp(-2x)`, 8.5e-18 here.
 const MISH_UPPER: f64 = 20.0;
@@ -2288,6 +2320,18 @@ block_kernel!(
     gelu_tanh_block_avx2
 );
 block_kernel2!(
+    tanh_backward_block,
+    tanh_backward_one,
+    tanh_backward_block_avx512,
+    tanh_backward_block_avx2
+);
+block_kernel2!(
+    sigmoid_backward_block,
+    sigmoid_backward_one,
+    sigmoid_backward_block_avx512,
+    sigmoid_backward_block_avx2
+);
+block_kernel2!(
     silu_backward_block,
     silu_backward_one,
     silu_backward_block_avx512,
@@ -2586,6 +2630,39 @@ impl F32Kernel {
             mish_block,
             mish_block_avx512,
             mish_block_avx2
+        )
+    }
+
+    /// Write the tanh gradient for `input`, scaled by `grad`, into `out`.
+    #[inline]
+    pub(crate) fn tanh_backward(self, input: &[f32], grad: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            input,
+            grad,
+            out,
+            tanh_backward_block,
+            tanh_backward_block_avx512,
+            tanh_backward_block_avx2
+        )
+    }
+
+    /// Write the sigmoid gradient for `input`, scaled by `grad`, into `out`.
+    #[inline]
+    pub(crate) fn sigmoid_backward(
+        self,
+        input: &[f32],
+        grad: &[f32],
+        out: &mut [MaybeUninit<f32>],
+    ) {
+        dispatch2!(
+            self,
+            input,
+            grad,
+            out,
+            sigmoid_backward_block,
+            sigmoid_backward_block_avx512,
+            sigmoid_backward_block_avx2
         )
     }
 

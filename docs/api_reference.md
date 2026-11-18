@@ -2807,6 +2807,19 @@ assert row_std.shape == (2, 3)
   leaves the normal floats, and so are their gradients. A float32 `elu` or
   `selu` is scaled in float64 before its one narrowing, where scaling an
   `expm1` already rounded to float32 rounded twice.
+- Gradients are taken of the input, in float64, with no difference of
+  numbers near one in them: `tanh`'s as `4t / (1 + t)^2` and `sigmoid`'s as
+  `t / (1 + t)^2` for `t = exp(-2|x|)` and `exp(-|x|)`, and `elu`'s and
+  `selu`'s as `alpha e^x`. Written in the rounded output -- `1 - y^2`,
+  `y (1 - y)`, `y + alpha` -- they lost their digits once the output
+  saturated, and were zero where they are not: `tanh`'s from `|x| = 19` in
+  float64 and 9 in float32. So are `expm1`'s (`e^x`, not `expm1(x) + 1`),
+  `asin`'s, `acos`'s and `atanh`'s (`(1 - x)(1 + x)` rather than `1 - x^2`,
+  millions of ulps out a millionth below one), and `acosh`'s, `asinh`'s and
+  `atan`'s, with no `x^2` to overflow past `1e154`. A float32 gradient --
+  these, `softplus`'s, `softsign`'s and every unit's below -- is the float32
+  nearest its exact value, the incoming gradient's product rounded once with
+  it; a float64 one is within a couple of ulps.
 - `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
   leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
   band but subtracts `lambd` from the rest, so it stays continuous

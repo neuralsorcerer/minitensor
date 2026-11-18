@@ -100,9 +100,12 @@ macro_rules! unit_grad_kernel {
     ($(#[$meta:meta])* $name:ident, |$x:pat_param, $g:pat_param, $p:pat_param| $body:expr) => {
         $(#[$meta])*
         const $name: UnitGradKernel = {
+            // A float32 gradient is the float64 one rounded once: in float32
+            // each step of the body rounded, and the incoming gradient's
+            // product again.
             #[inline(always)]
-            fn narrow($x: f32, $g: f32, $p: UnitParams<f32>) -> f32 {
-                $body
+            fn narrow(x: f32, g: f32, p: UnitParams<f32>) -> f32 {
+                wide(f64::from(x), f64::from(g), p.map(f64::from)) as f32
             }
             #[inline(always)]
             fn wide($x: f64, $g: f64, $p: UnitParams<f64>) -> f64 {

@@ -12,10 +12,8 @@ use super::*;
 use crate::{
     error::{MinitensorError, Result},
     ops::activation::units::UnitParams,
-    ops::map::{binary_map, par_out_chunks_gated},
-    ops::util::{
-        accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64,
-    },
+    ops::map::par_out_chunks_gated,
+    ops::util::{accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
 use num_traits::Float;
@@ -33,35 +31,30 @@ fn single(input_id: TensorId, grad: Tensor) -> FxHashMap<TensorId, Tensor> {
 impl GradientFunction for SoftplusBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         // d/dx softplus(x) = sigmoid(beta * x); above the threshold the forward
-        // pass is the identity, so the gradient passes straight through.
-        let beta32 = self.beta as f32;
-        let thr32 = self.threshold as f32;
-        let (beta64, thr64) = (self.beta, self.threshold);
-        let grad = unary_chain_grad(
-            &self.input,
-            grad_output,
-            "Softplus",
-            // `1/(1 + exp(-s))` overflows for large negative `s` and returns a
-            // zero gradient where the true one is still representable -- at
-            // x = -95 it was 0 against 5.5e-42. The stable form branches on the
-            // sign and keeps it.
-            move |x: f32, gout: f32| {
-                let scaled = beta32 * x;
-                if scaled > thr32 {
-                    gout
-                } else {
-                    gout * stable_sigmoid_f32(scaled)
-                }
-            },
-            move |x: f64, gout: f64| {
-                let scaled = beta64 * x;
-                if scaled > thr64 {
-                    gout
-                } else {
-                    gout * stable_sigmoid_f64(scaled)
-                }
-            },
-        )?;
+        // pass is the identity, so the gradient passes straight through. The
+        // logistic of `-|v|` cannot overflow, and the rounding of `beta * x`,
+        // which it turns into `|beta * x|` ulps of a far tail, is taken back
+        // through its own slope, as the forward does. In float64 throughout,
+        // the forward's threshold test included.
+        let (beta, threshold) = (self.beta, self.threshold);
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "Softplus", &move |x| {
+            let scaled = beta * x;
+            if scaled > threshold {
+                return 1.0;
+            }
+            let rounding = if scaled.abs() < 1e300 {
+                crate::ops::simd::product_error::<false>(beta, x, scaled)
+            } else {
+                0.0
+            };
+            let decay = (-scaled.abs()).exp();
+            let share = if scaled > 0.0 {
+                1.0 / (1.0 + decay)
+            } else {
+                decay / (1.0 + decay)
+            };
+            share + share * (1.0 - share) * rounding
+        })?;
         Ok(single(self.input_id, grad))
     }
 
@@ -147,7 +140,7 @@ impl GradientFunction for GeluBackward {
         // forward pass: `0.5*(1 + tanh(v))` is the logistic `s`, and
         // `sech^2(v) = 1 - tanh(v)^2` is `4*s*(1 - s)`. Written the obvious way
         // this gradient was 1% wrong at x = -10 and lost every digit past that.
-        let grad = unary_chain_grad_f64(&self.input, grad_output, "GELU", move |x: f64| {
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "GELU", &move |x: f64| {
             // The limits, where either formula would form `inf * 0`.
             if x.is_infinite() {
                 return if x > 0.0 { 1.0 } else { 0.0 };
@@ -175,22 +168,18 @@ impl GradientFunction for GeluBackward {
 /// Gradient function for ELU activation
 pub struct EluBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
     pub alpha: f64,
 }
 impl GradientFunction for EluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        // Expressed in the saved *output*: for x <= 0, elu(x) = alpha*(e^x - 1)
-        // so d/dx = alpha*e^x = elu(x) + alpha.
-        let alpha32 = self.alpha as f32;
-        let alpha64 = self.alpha;
-        let grad = unary_chain_grad(
-            &self.output,
-            grad_output,
-            "ELU",
-            move |out: f32, gout: f32| gout * if out > 0.0 { 1.0 } else { out + alpha32 },
-            move |out: f64, gout: f64| gout * if out > 0.0 { 1.0 } else { out + alpha64 },
-        )?;
+        // For x <= 0, elu(x) = alpha (e^x - 1) and d/dx = alpha e^x, taken of
+        // the input: as `elu(x) + alpha` it was a difference of two numbers
+        // near -alpha, zero from x = -38 in float64 where e^x is not.
+        let alpha = self.alpha;
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "ELU", &move |x| {
+            if x > 0.0 { 1.0 } else { alpha * x.exp() }
+        })?;
         Ok(single(self.input_id, grad))
     }
 
@@ -201,36 +190,22 @@ impl GradientFunction for EluBackward {
 /// Gradient function for SELU activation
 pub struct SeluBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
 }
 /// SELU's fixed constants (Klambauer et al., 2017).
-const SELU_SCALE_F32: f32 = 1.050_701;
-const SELU_ALPHA_F32: f32 = 1.673_263_2;
 const SELU_SCALE_F64: f64 = 1.050_700_987_355_480_5;
 const SELU_ALPHA_F64: f64 = 1.673_263_242_354_377_2;
 impl GradientFunction for SeluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        // As with ELU, in terms of the saved output: for x <= 0,
-        // selu(x) = scale*alpha*(e^x - 1), so d/dx = selu(x) + scale*alpha.
-        let grad = unary_chain_grad(
-            &self.output,
-            grad_output,
-            "SELU",
-            |out: f32, gout: f32| {
-                gout * if out > 0.0 {
-                    SELU_SCALE_F32
-                } else {
-                    out + SELU_SCALE_F32 * SELU_ALPHA_F32
-                }
-            },
-            |out: f64, gout: f64| {
-                gout * if out > 0.0 {
-                    SELU_SCALE_F64
-                } else {
-                    out + SELU_SCALE_F64 * SELU_ALPHA_F64
-                }
-            },
-        )?;
+        // As with ELU, of the input: for x <= 0, selu(x) = scale alpha
+        // (e^x - 1), so d/dx = scale alpha e^x.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "SELU", &|x| {
+            if x > 0.0 {
+                SELU_SCALE_F64
+            } else {
+                SELU_SCALE_F64 * SELU_ALPHA_F64 * x.exp()
+            }
+        })?;
         Ok(single(self.input_id, grad))
     }
 
@@ -243,8 +218,11 @@ pub struct SiluBackward {
     pub input_id: TensorId,
     pub input: Tensor,
 }
-/// The float32 SiLU gradient, through the vectorized kernel.
-fn silu_backward_f32(input: &Tensor, grad_output: &Tensor) -> Result<Tensor> {
+/// A float32 gradient through one of the vectorized kernels, `op` the
+/// kernel's method: SiLU's, tanh's or sigmoid's.
+type KernelBackward =
+    fn(crate::ops::simd::F32Kernel, &[f32], &[f32], &mut [std::mem::MaybeUninit<f32>]);
+fn kernel_backward_f32(input: &Tensor, grad_output: &Tensor, op: KernelBackward) -> Result<Tensor> {
     let saved = input.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from saved tensor")
     })?;
@@ -265,7 +243,7 @@ fn silu_backward_f32(input: &Tensor, grad_output: &Tensor) -> Result<Tensor> {
             gout,
             crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
             crate::ops::map::PAR_CHUNK,
-            |x, g, dst| kernel.silu_backward(x, g, dst),
+            |x, g, dst| op(kernel, x, g, dst),
         )
     };
     Ok(Tensor::new(
@@ -289,10 +267,14 @@ impl GradientFunction for SiluBackward {
         // from `1/(e + 1)` rather than by subtraction -- past x = 40 the
         // subtraction returns exactly zero.
         if self.input.dtype() == DataType::Float32 {
-            let grad = silu_backward_f32(&self.input, grad_output)?;
+            let grad = kernel_backward_f32(
+                &self.input,
+                grad_output,
+                crate::ops::simd::F32Kernel::silu_backward,
+            )?;
             return Ok(single(self.input_id, grad));
         }
-        let grad = unary_chain_grad_f64(&self.input, grad_output, "SiLU", |x: f64| {
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "SiLU", &|x: f64| {
             // The limits, where the formula would form `inf * 0`.
             if x.is_infinite() {
                 return if x > 0.0 { 1.0 } else { 0.0 };
@@ -358,19 +340,10 @@ pub struct SoftsignBackward {
 impl GradientFunction for SoftsignBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         // d/dx x/(1 + |x|) = 1 / (1 + |x|)^2.
-        let grad = unary_chain_grad(
-            &self.input,
-            grad_output,
-            "Softsign",
-            |x: f32, gout: f32| {
-                let denom = 1.0 + x.abs();
-                gout / (denom * denom)
-            },
-            |x: f64, gout: f64| {
-                let denom = 1.0 + x.abs();
-                gout / (denom * denom)
-            },
-        )?;
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "Softsign", &|x| {
+            let denom = 1.0 + x.abs();
+            1.0 / (denom * denom)
+        })?;
         Ok(single(self.input_id, grad))
     }
 
@@ -745,94 +718,29 @@ impl GradientFunction for LogSoftmaxBackward {
     }
 }
 /// Gradient function for tanh
-/// Fuse an elementwise backward over the saved output and the incoming
-/// gradient into one pass.
-///
-/// `tanh` and `sigmoid` were the only two backward kernels built by chaining
-/// public tensor ops -- `Tensor::ones`, then `sub`, then `mul`, then `mul` --
-/// and they were the only two whose backward cost far more than their forward.
-/// Every other elementwise backward here sits at 1.2x-1.7x of its forward;
-/// sigmoid was at 4.7x (32.3ms against 6.9ms on a 2048x1024 f32 tensor) because
-/// each link allocated and traversed a full-size tensor. Folding the expression
-/// into a single `binary_map` leaves one allocation and one pass.
-fn fused_elementwise_backward<F32, F64>(
-    output: &Tensor,
-    grad_output: &Tensor,
-    input_id: TensorId,
-    gradients: &mut FxHashMap<TensorId, Tensor>,
-    f32_op: F32,
-    f64_op: F64,
-) -> Result<()>
-where
-    F32: Fn(f32, f32) -> f32 + Send + Sync,
-    F64: Fn(f64, f64) -> f64 + Send + Sync,
-{
-    let grad_data = match output.dtype() {
-        DataType::Float32 => {
-            let out = output.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice for backward")
-            })?;
-            let grad = grad_output.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 gradient slice")
-            })?;
-            TensorData::from_vec::<f32>(
-                binary_map(out, grad, f32_op),
-                DataType::Float32,
-                output.device(),
-            )
-        }
-        DataType::Float64 => {
-            let out = output.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice for backward")
-            })?;
-            let grad = grad_output.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 gradient slice")
-            })?;
-            TensorData::from_vec::<f64>(
-                binary_map(out, grad, f64_op),
-                DataType::Float64,
-                output.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "gradients are only defined for floating point tensors",
-            ));
-        }
-    };
-    gradients.insert(
-        input_id,
-        Tensor::new(
-            Arc::new(grad_data),
-            output.shape().clone(),
-            output.dtype(),
-            output.device(),
-            false,
-        ),
-    );
-    Ok(())
-}
-
 pub struct TanhBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
 }
 impl GradientFunction for TanhBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(tanh(x)) = (1 - tanh²(x)) * grad_output
-        fused_elementwise_backward(
-            &self.output,
-            grad_output,
-            self.input_id,
-            &mut gradients,
-            |y: f32, g: f32| (1.0 - y * y) * g,
-            |y: f64, g: f64| (1.0 - y * y) * g,
-        )?;
-
-        Ok(gradients)
+        // d/dx tanh(x) = sech^2(x) = 4t / (1 + t)^2 for t = e^(-2|x|), taken of
+        // the input: as `1 - tanh^2` of the rounded output it was a difference
+        // of two numbers near one -- thousands of ulps out from |x| = 5 and
+        // zero from |x| = 19 in float64, 9 in float32, where it is not.
+        if self.input.dtype() == DataType::Float32 {
+            let grad = kernel_backward_f32(
+                &self.input,
+                grad_output,
+                crate::ops::simd::F32Kernel::tanh_backward,
+            )?;
+            return Ok(single(self.input_id, grad));
+        }
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "tanh", &|x| {
+            let t = (-2.0 * x.abs()).exp();
+            4.0 * t / ((1.0 + t) * (1.0 + t))
+        })?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -842,24 +750,27 @@ impl GradientFunction for TanhBackward {
 /// Gradient function for sigmoid
 pub struct SigmoidBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
 }
 impl GradientFunction for SigmoidBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // d/dx(sigmoid(x)) = sigmoid(x) * (1 - sigmoid(x)) * grad_output
-        fused_elementwise_backward(
-            &self.output,
-            grad_output,
-            self.input_id,
-            &mut gradients,
-            |y: f32, g: f32| y * (1.0 - y) * g,
-            |y: f64, g: f64| y * (1.0 - y) * g,
-        )?;
-
-        Ok(gradients)
+        // d/dx sigmoid(x) = sigmoid(x) sigmoid(-x) = t / (1 + t)^2 for
+        // t = e^(-|x|), taken of the input: as `y (1 - y)` of the rounded
+        // output it lost the digits of `1 - y` for large x, and was zero
+        // from x = 37 in float64 where it is not.
+        if self.input.dtype() == DataType::Float32 {
+            let grad = kernel_backward_f32(
+                &self.input,
+                grad_output,
+                crate::ops::simd::F32Kernel::sigmoid_backward,
+            )?;
+            return Ok(single(self.input_id, grad));
+        }
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "sigmoid", &|x| {
+            let t = (-x.abs()).exp();
+            t / ((1.0 + t) * (1.0 + t))
+        })?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {

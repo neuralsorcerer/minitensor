@@ -305,7 +305,7 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(Expm1Backward {
             input_id: tensor.id(),
-            output: output.clone().detach(),
+            input: tensor.detach(),
         });
 
         with_grad_fn(output, grad_fn)
@@ -770,7 +770,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(TanhBackward {
             input_id: tensor.id(),
-            output: output.clone(),
+            input: tensor.detach(),
         });
 
         let mut output_with_grad = output;
@@ -813,7 +813,7 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(SigmoidBackward {
             input_id: tensor.id(),
-            output: output.clone(),
+            input: tensor.detach(),
         });
 
         let mut output_with_grad = output;
