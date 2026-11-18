@@ -12,7 +12,8 @@ from the exact total -- eighty times the error `sum` makes -- so
 `cumsum(x)[-1]` and `x.sum()` disagreed in the fifth digit; `logcumsumexp`
 ended 0.0125 off, a sum wrong by more than one percent; and over 100,000
 factors near one `cumprod` drifted 9e-6 from the exact product. The running
-value is now carried in float64, and each element is the float32 nearest it.
+value is now carried wider -- in float64, and for `logcumsumexp` as pairs of
+floats -- and each element is the float32 nearest it.
 """
 
 from __future__ import annotations

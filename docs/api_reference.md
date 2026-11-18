@@ -2128,12 +2128,31 @@ values makes each slope what multiplying out its terms and adding them makes
 it: NaN for a NaN term or infinities of both signs, an infinity, or a zero
 that is negative only where every term is.
 
-A `float32` `logcumsumexp` carries its running value in `float64` and rounds
-it to `float32` once per element. The carry is some thirty bits finer than a
-`float32` place, so its error does not grow into anything a `float32` element
-shows, but an element can still miss the `float32` nearest its exact value
-where that value lies within the carry's error of a halfway point between
-two `float32`s. The result is still `float32`.
+Every prefix of `logcumsumexp`, `float32` or `float64`, is the float nearest
+a value within about 2^-100 of its exact `log(Σ exp(x))`. Folding each value
+into the rounded running value put a rounding into every step that every
+later one kept: of a thousand `float64` prefixes of standard normals 857 were
+an ulp or more out, and of a hundred thousand some 99. A prefix is carried
+instead as its largest value and the excess of `Σ exp(x - max)` over one as a
+pair of floats, each term taken of the exact difference and the total
+rescaled when a larger value comes; terms below `exp(-708)` of the largest are
+kept apart, at their own scale, for the gradient. The result is still the
+input's dtype.
+
+The gradient of `logcumsumexp` gives `x[i]` the float nearest
+`Σ_{k ≥ i} g[k] s_k(i)`, for `g` the output's gradient and `s_k` the softmax
+of the prefix to `k` -- the slope `logsumexp` gives each entry of a slice --
+summed from the end of the run back as pairs scaled apart from their
+exponents, with what those sums cannot hold kept beside them, so that a slope
+whose larger terms land exactly halfway between two floats is rounded by the
+side the rest lies on. It was `exp(x + log(Σ g exp(-y)))` of the rounded
+outputs, its sums run as logarithms, positive and negative `g` apart and
+subtracted at the end: `float64` slopes were tens to thousands of ulps out,
+and where the two parts cancelled `float32` ones thousands. As for
+`logsumexp`, a slope whose terms cancel to below 2^-100 of themselves is
+within 2^-100 of them rather than within an ulp. Each prefix's slopes follow
+softmax at the ends: a prefix holding `+inf` shares its slope among its
+infinities, one of `-inf` alone passes none, and one holding a NaN passes NaN.
 
 `logcumsumexp` is not `cumsum` of `exp`, and the difference is the reason it
 exists. `exp` of a log-probability underflows to zero long before a real
@@ -2153,8 +2172,8 @@ print(positions.numpy())
 
 # A distribution's total is one, so the log of its running total ends at zero.
 weights = mt.Tensor(np.log(np.full(2000, 1 / 2000)), dtype="float64")
-# `abs` only so the printed sign is stable: the last log-add lands a few
-# ulp either side of zero.
+# `abs` only so the printed sign is stable: the total is one up to the
+# rounding of log(1/2000), either side of it.
 print(abs(round(float(mt.logcumsumexp(weights).numpy()[-1]), 12)))
 ```
 
@@ -2554,7 +2573,8 @@ assert row_std.shape == (2, 3)
   cannot settle the rounding, formed as the float64 one is -- and a float64
   one is within an ulp or two; past a cancellation of 2^50, where `b^a + b^b`
   is one to within the rounding of its operands, within 2^-100 of them.
-  `logcumsumexp` and `ctc_loss` add the same way.
+  `ctc_loss` adds the same way; `logcumsumexp` carries each whole prefix as
+  pairs and rounds it once, below.
 - `ldexp(input, other)` — `input * 2**other`. An integer `other`, a Python int
   included, is applied to the exponent: one rounding, and only where the answer
   is subnormal, so `ldexp(2**1000, -1100)` is `2**-100` and `ldexp(0, 5000)` is

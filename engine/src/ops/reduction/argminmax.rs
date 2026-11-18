@@ -107,63 +107,6 @@ pub(crate) fn scan_along_dim<I, A, W, F>(
     });
 }
 
-/// A float32 scan, its running value carried in float64 and rounded once per
-/// element: `combine` folds each next element into the running value.
-///
-/// Carried in float32, every step rounded the running value, and the error
-/// grew with the length: over a million values the last element of `cumsum`
-/// was 7e-6 from the exact total, eighty times what `sum` makes of the same
-/// values, and `logcumsumexp`'s ended 0.0125 off -- a sum wrong by more than
-/// one percent, carried in its logarithm. In float64 the drift stays far
-/// below anything float32 can show, so each element is the float32 nearest
-/// its running value. One past float32's range is infinite where it is, and
-/// the ones after it come back when the running value does.
-pub(crate) fn scan_wide_f32(
-    output: &mut [f32],
-    input: &[f32],
-    dim_size: usize,
-    inner: usize,
-    reverse: bool,
-    combine: impl Fn(f64, f64) -> f64 + Sync,
-) {
-    let slab = dim_size * inner;
-    if slab == 0 {
-        return;
-    }
-    debug_assert_eq!(output.len(), input.len());
-    let run = |out: &mut [f32], inp: &[f32]| {
-        // The first element starts the total, rather than a zero it is added
-        // to: `0.0 + -0.0` is `0.0`, and the running sum of `[-0.0]` is `-0.0`.
-        let order = |d: usize| if reverse { dim_size - 1 - d } else { d };
-        if inner == 1 {
-            let mut acc = f64::from(inp[order(0)]);
-            out[order(0)] = inp[order(0)];
-            for d in 1..dim_size {
-                let at = order(d);
-                acc = combine(acc, f64::from(inp[at]));
-                out[at] = acc as f32;
-            }
-            return;
-        }
-        let first = order(0) * inner;
-        let mut acc: Vec<f64> = inp[first..first + inner]
-            .iter()
-            .map(|&v| f64::from(v))
-            .collect();
-        out[first..first + inner].copy_from_slice(&inp[first..first + inner]);
-        for d in 1..dim_size {
-            let row = order(d) * inner;
-            for (i, total) in acc.iter_mut().enumerate() {
-                *total = combine(*total, f64::from(inp[row + i]));
-                out[row + i] = *total as f32;
-            }
-        }
-    };
-    par_out_chunks(output, slab, &|start, out_slab| {
-        run(out_slab, &input[start..start + out_slab.len()])
-    });
-}
-
 macro_rules! cumprod_forward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty, $acc:ty) => {
         pub(crate) fn $name(

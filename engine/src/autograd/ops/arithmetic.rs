@@ -1591,7 +1591,6 @@ impl GradientFunction for CummaxBackward {
 pub struct LogcumsumexpBackward {
     pub input_id: TensorId,
     pub input: Tensor,
-    pub output: Tensor,
     pub dim: usize,
 }
 
@@ -1601,7 +1600,7 @@ impl GradientFunction for LogcumsumexpBackward {
         gradients.reserve(1);
         gradients.insert(
             self.input_id,
-            reduction::logcumsumexp_backward(&self.input, &self.output, grad_output, self.dim)?,
+            reduction::logcumsumexp_backward(&self.input, grad_output, self.dim)?,
         );
         Ok(gradients)
     }

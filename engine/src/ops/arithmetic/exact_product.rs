@@ -717,10 +717,10 @@ const SPAN: usize = 256;
 /// What a number or a sum of terms is, for the slopes of running products:
 /// `2 · kind + sign` for a zero (kind 0), a finite nonzero number (1) or an
 /// infinity (2), and this for a NaN.
-const NAN_KIND: u8 = 6;
+pub(crate) const NAN_KIND: u8 = 6;
 
 #[inline(always)]
-fn kind_of(value: f64) -> u8 {
+pub(crate) fn kind_of(value: f64) -> u8 {
     if value.is_nan() {
         return NAN_KIND;
     }
@@ -737,7 +737,7 @@ fn kind_of(value: f64) -> u8 {
 /// The kind of a product of numbers of kinds `a` and `b`: NaN for a NaN or
 /// a zero and an infinity, as multiplying them out makes it.
 #[inline(always)]
-fn kind_times(a: u8, b: u8) -> u8 {
+pub(crate) fn kind_times(a: u8, b: u8) -> u8 {
     let (low, high) = ((a >> 1).min(b >> 1), (a >> 1).max(b >> 1));
     if high == 3 || (low == 0 && high == 2) {
         NAN_KIND
@@ -765,7 +765,7 @@ fn kinds_times(kinds: u8, by: u8) -> u8 {
 /// negative only where every term is -- and `None` where it is the finite
 /// sum of terms some of which are finite and nonzero.
 #[inline(always)]
-fn sum_of_kinds(kinds: u8) -> Option<f64> {
+pub(crate) fn sum_of_kinds(kinds: u8) -> Option<f64> {
     if kinds & 1 << NAN_KIND != 0 || kinds & 0b11_0000 == 0b11_0000 {
         Some(f64::NAN)
     } else if kinds & 0b01_0000 != 0 {
