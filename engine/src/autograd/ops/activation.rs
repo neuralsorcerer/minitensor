@@ -13,7 +13,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::activation::{infinite_slice_parts, slope_zeros, units::UnitParams},
     ops::map::par_out_chunks_gated,
-    ops::util::{accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f64},
+    ops::util::{broadcast_mask_index, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
 use num_traits::Float;
@@ -1001,32 +1001,42 @@ pub(crate) fn softmax_backward<T: crate::ops::activation::ShiftedExp + Send + Sy
         grad_input,
         group,
         |_, go_block, y_block, out_block| {
+            let mut stack = [0.0f64; 3 * SLICE_ON_STACK];
+            let mut heap = Vec::new();
+            let (p, g, products) = slice_scratch(dim_size, &mut stack, &mut heap);
             for base in 0..after {
                 let at = |k: usize| base + k * after;
-                let p = |k: usize| y_block[at(k)].wide();
-                let g = |k: usize| go_block[at(k)].wide();
-                let top = (1..dim_size).fold(0, |m, k| if p(k) > p(m) { k } else { m });
-                let rest_p =
-                    accurate_indexed_sum(dim_size, 0.0f64, |k| if k == top { 0.0 } else { p(k) });
-                let dot = accurate_indexed_sum(dim_size, 0.0f64, |k| g(k) * p(k));
-                let big = (1..dim_size).fold(0, |m, k| {
-                    if (g(k) * p(k)).abs() > (g(m) * p(m)).abs() {
-                        k
-                    } else {
-                        m
-                    }
-                });
-                let rest_dot = accurate_indexed_sum(dim_size, 0.0f64, |k| {
-                    if k == big { 0.0 } else { g(k) * p(k) }
-                });
                 for k in 0..dim_size {
-                    let not_p = if k == top { rest_p } else { 1.0 - p(k) };
+                    (p[k], g[k]) = (y_block[at(k)].wide(), go_block[at(k)].wide());
+                    products[k] = g[k] * p[k];
+                }
+                // The likeliest entry and the largest term of the dot, in one
+                // pass, and the sums as the forward takes its own.
+                let (mut top, mut big) = (0, 0);
+                for k in 1..dim_size {
+                    if p[k] > p[top] {
+                        top = k;
+                    }
+                    if products[k].abs() > products[big].abs() {
+                        big = k;
+                    }
+                }
+                let dot = T::total(products);
+                let (rest_dot, rest_p) = (sum_but::<T>(products, big), sum_but::<T>(p, top));
+                // `y (g (1 - y) - (dot - g y))` is `y (g - dot)`, and only at
+                // the likeliest entry and the largest term does the sum of
+                // the rest decide it.
+                for k in 0..dim_size {
+                    out_block[at(k)] = T::narrow(p[k] * (g[k] - dot));
+                }
+                for k in [top, big] {
+                    let not_p = if k == top { rest_p } else { 1.0 - p[k] };
                     let others = if k == big {
                         rest_dot
                     } else {
-                        dot - g(k) * p(k)
+                        dot - products[k]
                     };
-                    out_block[at(k)] = T::narrow(p(k) * (g(k) * not_p - others));
+                    out_block[at(k)] = T::narrow(p[k] * (g[k] * not_p - others));
                 }
             }
         },
@@ -1131,7 +1141,7 @@ fn log_softmax_slice<T: crate::ops::activation::ShiftedExp>(
         }
     }
     if z[top].is_infinite() {
-        let sum = accurate_indexed_sum(n, 0.0f64, |k| g[k]);
+        let sum = T::total(g);
         let (infinities, nan) = infinite_slice_parts(z.iter().copied());
         let share = if nan {
             f64::NAN
@@ -1149,15 +1159,14 @@ fn log_softmax_slice<T: crate::ops::activation::ShiftedExp>(
         return;
     }
     T::exp_shifted_into(z, z[top], terms);
-    // The slice's sums, in one pass: of `g`, of `g` but the largest, and of
-    // the terms but the likeliest's, which is one.
-    let SliceSums([sum, rest_g, rest_terms]) = accurate_indexed_sum(n, SliceSums([0.0; 3]), |k| {
-        SliceSums([
-            g[k],
-            if k == big { 0.0 } else { g[k] },
-            if k == top { 0.0 } else { terms[k] },
-        ])
-    });
+    // The slice's sums, in one pass, each carrying its additions' errors: of
+    // `g`, of `g` but the largest, and of the terms but the likeliest's,
+    // which is one.
+    // As the forward sums its terms, each sum but one entry the sums of the
+    // two sides of it.
+    let sum = T::total(g);
+    let rest_g = sum_but::<T>(g, big);
+    let rest_terms = sum_but::<T>(terms, top);
     let total = 1.0 + rest_terms;
     // `g (1 - p) - p (S - g)` is `g - p S`, and only at the likeliest entry,
     // where `1 - p` can be all but cancelled, and the largest gradient, where
@@ -1179,19 +1188,11 @@ fn log_softmax_slice<T: crate::ops::activation::ShiftedExp>(
     }
 }
 
-/// Three sums of a slice taken side by side in one pass.
-#[derive(Clone, Copy)]
-struct SliceSums([f64; 3]);
-
-impl std::ops::Add for SliceSums {
-    type Output = Self;
-
-    #[inline(always)]
-    fn add(self, other: Self) -> Self {
-        let ([a, b, c], [x, y, z]) = (self.0, other.0);
-        Self([a + x, b + y, c + z])
-    }
+/// The sum of `values` but the one at `skip`, as `T` sums a softmax's terms.
+fn sum_but<T: crate::ops::activation::ShiftedExp>(values: &[f64], skip: usize) -> f64 {
+    T::total(&values[..skip]) + T::total(&values[skip + 1..])
 }
+
 /// `log_softmax` backward restricted to the unmasked positions, from the
 /// input: each slice's unmasked entries as [`log_softmax_backward`] takes a
 /// whole slice, and zero at the masked ones.

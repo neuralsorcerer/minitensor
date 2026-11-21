@@ -9,7 +9,6 @@ use crate::autograd::with_grad_fn;
 use std::borrow::Cow;
 
 use crate::ops::map::par_out_chunks_gated;
-use crate::ops::util::accurate_indexed_sum;
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
@@ -19,8 +18,8 @@ use crate::{
     error::{MinitensorError, Result},
     ops::{
         activation::{
-            ShiftedExp, abs as activation_abs, infinite_slice_parts, less_offset, log_softmax,
-            log1p_of_rest, softmax,
+            CarriedSum, ShiftedExp, abs as activation_abs, infinite_slice_parts, less_offset,
+            log_softmax, log1p_of_rest, softmax,
         },
         arithmetic::sub,
         reduction::{mean, sum},
@@ -1528,16 +1527,19 @@ pub(crate) fn focal_pass<T: ShiftedExp + Send + Sync>(
                 Focal::Loss => {
                     // A class without target mass adds nothing, though its
                     // `-ln p` may be infinite, and is not formed.
-                    let sum = accurate_indexed_sum(classes, 0.0f64, |k| {
-                        let tk = t[k].wide();
-                        if tk == 0.0 {
-                            0.0
-                        } else {
-                            tk * s.q(terms, k).powf(gamma) * -ln_p(k)
+                    let mut sum = CarriedSum::default();
+                    for (k, &tk) in t.iter().enumerate() {
+                        let tk = tk.wide();
+                        if tk != 0.0 {
+                            sum.add(tk * s.q(terms, k).powf(gamma) * -ln_p(k));
                         }
-                    });
+                    }
                     // A NaN row is NaN, whatever its targets.
-                    let loss = if s.top_q.is_nan() { f64::NAN } else { sum };
+                    let loss = if s.top_q.is_nan() {
+                        f64::NAN
+                    } else {
+                        sum.value()
+                    };
                     o[0] = T::narrow(alpha * loss * up);
                 }
                 Focal::Targets => {
@@ -1561,7 +1563,6 @@ pub(crate) fn focal_pass<T: ShiftedExp + Send + Sync>(
                         };
                         (k, -t[k].wide() * q.powf(gamma) * (1.0 + bent))
                     }));
-                    let total = accurate_indexed_sum(mass.len(), 0.0f64, |i| mass[i].1);
                     let big = (1..mass.len()).fold(0, |m, i| {
                         if mass[i].1.abs() > mass[m].1.abs() {
                             i
@@ -1569,9 +1570,14 @@ pub(crate) fn focal_pass<T: ShiftedExp + Send + Sync>(
                             m
                         }
                     });
-                    let rest = accurate_indexed_sum(mass.len(), 0.0f64, |i| {
-                        if i == big { 0.0 } else { mass[i].1 }
-                    });
+                    let (mut total, mut rest) = (CarriedSum::default(), CarriedSum::default());
+                    for (i, &(_, u)) in mass.iter().enumerate() {
+                        total.add(u);
+                        if i != big {
+                            rest.add(u);
+                        }
+                    }
+                    let (total, rest) = (total.value(), rest.value());
                     // A class without target mass: `-alpha p sum(u)`, its term
                     // times one factor for the row.
                     let scale = -(alpha * total * up) / s.total;
