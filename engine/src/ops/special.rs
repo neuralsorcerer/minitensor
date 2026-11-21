@@ -1047,6 +1047,14 @@ fn bessel_reciprocals(order: u32) -> &'static [(f64, f64)] {
 
 #[inline(always)]
 fn bessel_series_with<const FMA: bool>(order: u32, t: f64) -> f64 {
+    let (total, total_low) = bessel_series_parts::<FMA>(order, t);
+    total + total_low
+}
+
+/// [`bessel_series_with`]'s sum before its one rounding: the float nearest it
+/// and what that leaves, a pair to about 2^-100 of it.
+#[inline(always)]
+fn bessel_series_parts<const FMA: bool>(order: u32, t: f64) -> (f64, f64) {
     use crate::ops::simd::product_error;
     let reciprocals = bessel_reciprocals(order);
     let half = t / 2.0;
@@ -1072,7 +1080,7 @@ fn bessel_series_with<const FMA: bool>(order: u32, t: f64) -> f64 {
         total = sum;
         k += 1;
     }
-    total + total_low
+    (total, total_low)
 }
 
 /// [`bessel_series`] without the roundings carried, which is what float32
@@ -1384,35 +1392,103 @@ bessel_kernel!(
     I0E,
     |x, series| i0e_with(x, series)
 );
-bessel_grad_kernel!(
-    /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`; past the
-    /// crossover, the asymptotic series' own slope, odd as `i0e` is even.
-    I0E_D,
-    |x, g, series| {
+/// `g` times the slope of `exp(-|x|) I_order(x)` below the crossover, in
+/// float64: `sign(x) exp(-t) (I_1(t) - I_0(t))` for order zero and
+/// `exp(-t) (I_0(t) - I_1(t) / t - I_1(t))` for order one, `t = |x|`, from
+/// both series and `exp(-t)` as pairs, rounded once.
+///
+/// The terms agree to `2t` parts in one as `t` nears the crossover, and as
+/// the difference of `i1e` and `i0e` each rounded the slope was a hundred
+/// ulps out there; order one's also crosses zero by `t = 1.54`, where it had
+/// no digit right. In pairs each is within 2^-95 of its terms.
+#[inline(always)]
+fn scaled_bessel_slope<const FMA: bool>(order: u32, x: f64, g: f64) -> f64 {
+    use crate::ops::arithmetic::extended::exp_pair;
+    let t = x.abs();
+    if t == 0.0 {
+        // Order zero's kink, whose one-sided slopes are -1 and 1; order
+        // one's `I_1(t) / t` is its limit, 1/2.
+        return if order == 0 { 0.0 * g } else { 0.5 * g };
+    }
+    let parts = |order: u32| {
+        let (high, low) = bessel_series_parts::<FMA>(order, t);
+        Pair(high, 0.0).add(Pair(low, 0.0))
+    };
+    let (zero, one) = (parts(0), parts(1));
+    let inner = if order == 0 {
+        one.add(zero.neg())
+    } else {
+        zero.add(one.div::<FMA>(Pair(t, 0.0)).neg()).add(one.neg())
+    };
+    let slope = exp_pair::<FMA>(Pair(-t, 0.0)).mul::<FMA>(inner);
+    let slope = if order == 0 && x < 0.0 {
+        slope.neg()
+    } else {
+        slope
+    };
+    slope.times_rounded::<FMA>(g)
+}
+
+/// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`; past the crossover,
+/// the asymptotic series' own slope, odd as `i0e` is even. Float32 takes the
+/// difference of the two plain series, exact to float32.
+const I0E_D: UnitGradKernel = {
+    fn narrow(x: f32, g: f32, _p: UnitParams<f32>) -> f32 {
+        let (x, g) = (f64::from(x), f64::from(g));
+        (if x.abs() >= BESSEL_CROSSOVER {
+            g * direction(x) * scaled_bessel_asymptotic_slope(0, x.abs())
+        } else {
+            g * (i1e_with(x, plain_bessel_series) - direction(x) * i0e_with(x, plain_bessel_series))
+        }) as f32
+    }
+    fn wide(x: f64, g: f64, _p: UnitParams<f64>) -> f64 {
         if x.abs() >= BESSEL_CROSSOVER {
             g * direction(x) * scaled_bessel_asymptotic_slope(0, x.abs())
         } else {
-            g * (i1e_with(x, series) - direction(x) * i0e_with(x, series))
+            let order = 0;
+            crate::ops::arithmetic::extended::fused!(
+                scaled_bessel_slope(order: u32, x: f64, g: f64) -> f64
+            )
         }
     }
-);
+    (narrow, wide)
+};
 bessel_kernel!(
     /// `exp(-|x|) I_1(x)`.
     I1E,
     |x, series| i1e_with(x, series)
 );
-bessel_grad_kernel!(
-    /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`; past
-    /// the crossover, the asymptotic series' own slope, even as `i1e` is odd.
-    I1E_D,
-    |x, g, series| {
+/// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`; past the
+/// crossover, the asymptotic series' own slope, even as `i1e` is odd, and
+/// about its zero near 1.5451 its series there, in either dtype: the plain
+/// difference left a float32 slope there an ulp out.
+const I1E_D: UnitGradKernel = {
+    fn narrow(x: f32, g: f32, _p: UnitParams<f32>) -> f32 {
+        let (x, g) = (f64::from(x), f64::from(g));
+        (if x.abs() >= BESSEL_CROSSOVER {
+            g * scaled_bessel_asymptotic_slope(1, x.abs())
+        } else if let Some(slope) = crate::ops::activation::slope_zeros::I1E.near(x.abs()) {
+            g * slope
+        } else {
+            g * (i0e_with(x, plain_bessel_series)
+                - scaled_i1_over_x(x)
+                - direction(x) * i1e_with(x, plain_bessel_series))
+        }) as f32
+    }
+    fn wide(x: f64, g: f64, _p: UnitParams<f64>) -> f64 {
         if x.abs() >= BESSEL_CROSSOVER {
             g * scaled_bessel_asymptotic_slope(1, x.abs())
+        } else if let Some(slope) = crate::ops::activation::slope_zeros::I1E.near(x.abs()) {
+            g * slope
         } else {
-            g * (i0e_with(x, series) - scaled_i1_over_x(x) - direction(x) * i1e_with(x, series))
+            let order = 1;
+            crate::ops::arithmetic::extended::fused!(
+                scaled_bessel_slope(order: u32, x: f64, g: f64) -> f64
+            )
         }
     }
-);
+    (narrow, wide)
+};
 
 /// `i0(input)`, the modified Bessel function of the first kind, order zero.
 pub fn i0(tensor: &Tensor) -> Result<Tensor> {

@@ -2746,6 +2746,15 @@ assert row_std.shape == (2, 3)
   ulp everywhere, and `i0` and `i1` below thirty; above it those are the scaled
   forms times `exp(|x|)`, within an ulp and a half, and finite up to 713.99
   where `exp(|x|)` alone overflows at 709.78.
+
+  The scaled forms' slopes, `sign(x) (i1e - i0e)` and `i0e - i1e/x - sign(x)
+  i1e`, subtract terms that agree to `2|x|` parts in one as `|x|` nears thirty:
+  below it both series are taken as pairs, unrounded, and `exp(-|x|)` with
+  them, so each slope rounds once and is within about half an ulp -- formed
+  from the rounded scaled values it was a hundred ulps out by thirty. `i1e`'s
+  slope also crosses zero at `|x| = 1.5451`, and about it is its Taylor series
+  there, within an ulp and a half. Above thirty each is the asymptotic series'
+  own slope.
 - `erfcx(input)` — `exp(x**2) erfc(x)`. `erfc` underflows to zero a little past
   26 and `exp(x**2)` overflows a little past 26.6, so above there the product is
   `inf * 0` — while the value it reaches for is ordinary: `erfcx(30)` is

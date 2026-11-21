@@ -4,7 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! The slopes of `silu`, `gelu`, its tanh form and `mish` about their zeros.
+//! The slopes of `silu`, `gelu`, its tanh form and `mish` about their zeros,
+//! and of `i1e`, the scaled Bessel function, about its zero near 1.5451.
 //!
 //! Each of these slopes is a sum of two terms that cancel where it crosses
 //! zero, a little below the origin: `s (1 + x s(-x))` near -1.2785 for silu,
@@ -73,6 +74,32 @@ impl<const N: usize> SlopeZero<N> {
         (d.abs() < SPAN_F32, d * p)
     }
 }
+
+/// `i1e'(x) = e^-x (I_0(x) - I_1(x)/x - I_1(x))`, zero near 1.5451 and even,
+/// so taken of `|x|`. Its terms are some thirty times the slope's derivative
+/// there, so in pairs the inputs nearest the zero were still a few hundred
+/// ulps out. Fifteen terms leave the tail under 2^-59 of the slope.
+pub(crate) const I1E: SlopeZero<15> = SlopeZero {
+    root: Pair(1.5451272579925426, 1.0630756383046672e-16),
+    span: (-0.25, 0.25),
+    terms: [
+        -0.050026009428196336,
+        0.05270624306827756,
+        -0.03294765027144757,
+        0.015214710546345076,
+        -0.005637298635904482,
+        0.0017519744494522965,
+        -0.0004698272352216896,
+        0.00011090891073943863,
+        -2.339400875441182e-05,
+        4.4609566412340774e-06,
+        -7.762965862564373e-07,
+        1.242451415616038e-07,
+        -1.8408581059402866e-08,
+        2.53904624567133e-09,
+        -3.275824922300628e-10,
+    ],
+};
 
 /// `silu'(x) = s(x) (1 + x s(-x))`, zero near -1.2785.
 pub(crate) const SILU: SlopeZero<34> = SlopeZero {
