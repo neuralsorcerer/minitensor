@@ -216,6 +216,63 @@ pub(crate) fn exp<const FMA: bool>(x: Pair) -> Pair {
     power.add(power.mul::<FMA>(e)).scaled(2f64.powi(n as i32))
 }
 
+/// A float64 kept as `m 2^e`, `|m|` in `[1/2, 1)` and the exponent apart: for
+/// a product with a factor below float64's normal range -- a logit's slope
+/// past 708, a normal density past 37 -- which float64 holds there only to its
+/// last few bits, while other factors bring the product back up where every
+/// bit shows. A product of them rounds once, as it is formed.
+#[derive(Clone, Copy)]
+pub(crate) struct Scaled(f64, i32);
+
+impl Scaled {
+    /// `x`, split; a zero, an infinity or a NaN as itself, with no exponent.
+    pub(crate) fn of(x: f64) -> Scaled {
+        if x == 0.0 || !x.is_finite() {
+            return Scaled(x, 0);
+        }
+        let (x, shift) = if x.abs() < f64::MIN_POSITIVE {
+            (x * 2f64.powi(64), -64)
+        } else {
+            (x, 0)
+        };
+        let bits = x.to_bits();
+        let field = ((bits >> 52) & 0x7ff) as i32;
+        let m = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
+        Scaled(m, field - 1022 + shift)
+    }
+
+    /// `m 2^e`, from [`crate::ops::simd::exp_split`]'s parts of `e^v`.
+    pub(crate) fn exp_parts((m, e): (f64, i32)) -> Scaled {
+        let s = Scaled::of(m);
+        Scaled(s.0, s.1 + e)
+    }
+
+    pub(crate) fn times(self, other: Scaled) -> Scaled {
+        let p = Scaled::of(self.0 * other.0);
+        Scaled(p.0, p.1 + self.1 + other.1)
+    }
+
+    /// The float64 nearest `m 2^e`, rounded once.
+    pub(crate) fn value(self) -> f64 {
+        let (m, e) = (self.0, self.1);
+        let power = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
+        if m == 0.0 || !m.is_finite() {
+            m
+        } else if e > 1024 {
+            f64::INFINITY.copysign(m)
+        } else if e > 1023 {
+            (m * 2.0) * power(1023)
+        } else if e >= -1021 {
+            m * power(e)
+        } else if e >= -2095 {
+            // Exact to the normal range and then one rounding into it.
+            (m * power(e + 1074)) * f64::from_bits(1)
+        } else {
+            0.0f64.copysign(m)
+        }
+    }
+}
+
 /// `exp` of a pair at most 708 in size, as a pair: one copy for each build of
 /// its callers, the fused one compiled with the fused multiply-add as theirs
 /// are, rather than one at each of their call sites.

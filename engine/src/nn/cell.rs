@@ -14,7 +14,7 @@
 //! kept apart where float64 alone would not hold them -- are the parts that
 //! would otherwise be written twice, so they are written here once.
 
-use crate::ops::arithmetic::extended::{Pair, exp_pair_any_cpu};
+use crate::ops::arithmetic::extended::{Pair, Scaled, exp_pair_any_cpu};
 use crate::ops::arithmetic::rounded_once::product_error;
 use crate::ops::map::SIMD_PAR_CHUNK;
 use crate::ops::simd::{exp_below_zero, exp_split};
@@ -167,63 +167,6 @@ pub(crate) fn tanh_and_slope_near(x: f64, e: f64) -> (f64, f64) {
     (y + slope * e, slope - 2.0 * (y * slope) * e)
 }
 
-/// A float64 kept as `m 2^e`, `|m|` in `[1/2, 1)` and the exponent apart: for
-/// gradients with a factor below float64's normal range -- a logit's slope
-/// past 708, say -- which float64 holds there only to its last few bits,
-/// while other factors bring their product back up where every bit shows.
-/// A product of them rounds once, as the gradient is formed.
-#[derive(Clone, Copy)]
-pub(crate) struct Scaled(f64, i32);
-
-impl Scaled {
-    /// `x`, split; a zero, an infinity or a NaN as itself, with no exponent.
-    pub(crate) fn of(x: f64) -> Scaled {
-        if x == 0.0 || !x.is_finite() {
-            return Scaled(x, 0);
-        }
-        let (x, shift) = if x.abs() < f64::MIN_POSITIVE {
-            (x * 2f64.powi(64), -64)
-        } else {
-            (x, 0)
-        };
-        let bits = x.to_bits();
-        let field = ((bits >> 52) & 0x7ff) as i32;
-        let m = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
-        Scaled(m, field - 1022 + shift)
-    }
-
-    /// `m 2^e`: `e^v` from [`exp_split`]'s parts.
-    fn split((m, e): (f64, i32)) -> Scaled {
-        let s = Scaled::of(m);
-        Scaled(s.0, s.1 + e)
-    }
-
-    pub(crate) fn times(self, other: Scaled) -> Scaled {
-        let p = Scaled::of(self.0 * other.0);
-        Scaled(p.0, p.1 + self.1 + other.1)
-    }
-
-    /// The float64 nearest `m 2^e`, rounded once.
-    pub(crate) fn value(self) -> f64 {
-        let (m, e) = (self.0, self.1);
-        let power = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
-        if m == 0.0 || !m.is_finite() {
-            m
-        } else if e > 1024 {
-            f64::INFINITY.copysign(m)
-        } else if e > 1023 {
-            (m * 2.0) * power(1023)
-        } else if e >= -1021 {
-            m * power(e)
-        } else if e >= -2095 {
-            // Exact to the normal range and then one rounding into it.
-            (m * power(e + 1074)) * f64::from_bits(1)
-        } else {
-            0.0f64.copysign(m)
-        }
-    }
-}
-
 /// [`logistic_near`] as [`Scaled`] values: past 708, where `t = e^-|x|` leaves
 /// the normal range, `t` itself is the smaller of the two values and the slope
 /// -- `1 + t` is one there -- moved by `e` as `e^-|x + e|` is.
@@ -233,7 +176,7 @@ pub(crate) fn logistic_scaled(x: f64, e: f64) -> [Scaled; 3] {
         return [Scaled::of(s), Scaled::of(rest), Scaled::of(slope)];
     }
     let outward = if x > 0.0 { e } else { -e };
-    let t = Scaled::split(exp_split(-x.abs())).times(Scaled::of(1.0 - outward));
+    let t = Scaled::exp_parts(exp_split(-x.abs())).times(Scaled::of(1.0 - outward));
     let one = Scaled::of(1.0);
     if x > 0.0 { [one, t, t] } else { [t, one, t] }
 }
@@ -247,7 +190,7 @@ pub(crate) fn tanh_scaled(x: f64, e: f64) -> [Scaled; 2] {
     }
     let outward = if x > 0.0 { e } else { -e };
     let slope =
-        Scaled::split(exp_split(-2.0 * x.abs())).times(Scaled::of(4.0 * (1.0 - 2.0 * outward)));
+        Scaled::exp_parts(exp_split(-2.0 * x.abs())).times(Scaled::of(4.0 * (1.0 - 2.0 * outward)));
     [Scaled::of(1.0f64.copysign(x)), slope]
 }
 

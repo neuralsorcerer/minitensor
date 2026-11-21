@@ -157,6 +157,17 @@ impl GradientFunction for GeluBackward {
             }
             // Each factor with the rounding of its argument taken back, as in
             // the forward pass; see `ops::gaussian`.
+            // Where the density leaves float64's normal range and the slope
+            // does not; see `ops::gaussian`.
+            if approximate {
+                if x < -20.0
+                    && let Some((_, slope)) = crate::ops::gaussian::gelu_tanh_far(x)
+                {
+                    return slope;
+                }
+            } else if x < crate::ops::gaussian::GELU_ERF_FAR {
+                return crate::ops::gaussian::gelu_erf_far(x).1;
+            }
             if approximate {
                 // `1 - s` is the form at `-x`, which keeps its digits where
                 // the subtraction would cancel them.

@@ -28,9 +28,8 @@ import minitensor as mt
 from minitensor import functional as F
 
 _DIGITS = {"float32": (24, -149, 128), "float64": (53, -1074, 1024)}
-# The float64 constants of the tanh form.
-_K = Decimal(0.7978845608028654)
-_A = Decimal(0.044715)
+# The tanh form's cubic constant, exact; `sqrt(2/pi)` is formed with `_pi`.
+_A = Decimal("0.044715")
 
 
 def _rounded(value: Decimal, dtype: str) -> float:
@@ -98,9 +97,10 @@ def _gelu(x: Decimal) -> Decimal:
 
 
 def _gelu_tanh(x: Decimal) -> Decimal:
-    v = _K * (x + _A * x**3)
+    k = (2 / _pi()).sqrt()
+    v = k * (x + _A * x**3)
     sech2 = 4 / (v.exp() + (-v).exp()) ** 2
-    return 1 / (1 + (-2 * v).exp()) + x / 2 * sech2 * _K * (1 + 3 * _A * x * x)
+    return 1 / (1 + (-2 * v).exp()) + x / 2 * sech2 * k * (1 + 3 * _A * x * x)
 
 
 def _mish(x: Decimal) -> Decimal:
@@ -117,7 +117,7 @@ _CASES = {
     "gelu_tanh": (
         lambda t: F.gelu(t, approximate="tanh"),
         _gelu_tanh,
-        -0.7524614220710162,
+        -0.7524614220710163,
     ),
     "mish": (lambda t: F.mish(t), _mish, -1.1924312145154952),
 }

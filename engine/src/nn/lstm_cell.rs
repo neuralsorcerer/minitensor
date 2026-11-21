@@ -72,12 +72,12 @@ use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     error::{MinitensorError, Result},
     nn::cell::{
-        Scaled, band_width, finite_or_zero, logistic, logistic_pair, logistic_scaled,
-        par_row_bands, product_pair, sigmoid_block_f64, tanh_and_slope, tanh_and_slope_near,
-        tanh_block_f64, tanh_pair, tanh_scaled,
+        band_width, finite_or_zero, logistic, logistic_pair, logistic_scaled, par_row_bands,
+        product_pair, sigmoid_block_f64, tanh_and_slope, tanh_and_slope_near, tanh_block_f64,
+        tanh_pair, tanh_scaled,
     },
     ops::arithmetic::exact_sum::Output,
-    ops::arithmetic::extended::Pair,
+    ops::arithmetic::extended::{Pair, Scaled},
     ops::map::{
         EXPENSIVE_PAR_THRESHOLD, SIMD_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, build_vec,
         par_out_chunks, unary_map_blocks_threshold,

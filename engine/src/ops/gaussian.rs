@@ -45,7 +45,8 @@
 // against the paper, digit for digit.
 #![allow(clippy::excessive_precision)]
 
-use crate::ops::simd::product_error;
+use crate::ops::arithmetic::extended::Scaled;
+use crate::ops::simd::{exp_split, product_error};
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_2_SQRT_PI, SQRT_2};
 
 /// `Phi((x - mean) / std)`: the probability a normal draw falls at or below `x`.
@@ -116,11 +117,24 @@ pub(crate) fn standard_normal_pdf(z: f64) -> f64 {
 /// cancellation.
 #[inline]
 pub(crate) fn tanh_cdf(x: f64) -> f64 {
-    // `sqrt(2/pi)` and `sqrt(2/pi) * 0.044715`, each as a double and what it
-    // leaves out.
-    const LINEAR: (f64, f64) = (0.797_884_560_802_865_4, -4.984_654_404_555_46e-17);
-    const CUBIC: (f64, f64) = (0.035_677_408_136_300_125, -3.087_574_959_077_657_5e-19);
-    let (u, low) = if x.abs() < 1e100 {
+    let (u, low) = tanh_argument(x);
+    if u >= 0.0 {
+        1.0 / (1.0 + (-2.0 * u).exp() * (1.0 - 2.0 * low))
+    } else {
+        let r = (2.0 * u).exp() * (1.0 + 2.0 * low);
+        r / (1.0 + r)
+    }
+}
+
+/// `sqrt(2/pi)` and `sqrt(2/pi) * 0.044715`, each as a double and what it
+/// leaves out.
+const LINEAR: (f64, f64) = (0.797_884_560_802_865_4, -4.984_654_404_555_46e-17);
+const CUBIC: (f64, f64) = (0.035_677_408_136_300_125, -3.087_574_959_077_657_5e-19);
+
+/// [`tanh_cdf`]'s `u = sqrt(2/pi) (x + 0.044715 x^3)` as a pair, `(u, low)`.
+#[inline]
+fn tanh_argument(x: f64) -> (f64, f64) {
+    if x.abs() < 1e100 {
         let square = x * x;
         let cube = square * x;
         let cube_low =
@@ -139,13 +153,68 @@ pub(crate) fn tanh_cdf(x: f64) -> f64 {
         // Past this the cube cannot be split, and the answer is 0 or 1
         // whatever its last digits.
         (LINEAR.0 * x + CUBIC.0 * (x * x * x), 0.0)
-    };
-    if u >= 0.0 {
-        1.0 / (1.0 + (-2.0 * u).exp() * (1.0 - 2.0 * low))
-    } else {
-        let r = (2.0 * u).exp() * (1.0 + 2.0 * low);
-        r / (1.0 + r)
     }
+}
+
+/// Below this `phi(x)` lies within some ninety binades of float64's normal
+/// range and `Phi(x)` closer still: [`gelu_erf_far`] takes gelu and its slope
+/// there.
+pub(crate) const GELU_ERF_FAR: f64 = -37.0;
+
+/// gelu's `x Phi(x)` and its slope `Phi(x) + x phi(x)` for `x` below
+/// [`GELU_ERF_FAR`], where `phi(x)` and `Phi(x)` leave float64's normal range
+/// while the slope, and for a while gelu itself, does not.
+///
+/// As floats there the two kept only their last few bits, which `x` made some
+/// thirty ulps of the slope's. They are `-phi(x) M` and `phi(x) (x + M / |x|)`
+/// for `M = |x| Phi(x) / phi(x)`, from its asymptotic series
+/// `1 - 1/x^2 + 3/x^4 - 15/x^6 + ...`, eight terms of which are within 2^-60 of
+/// it from here down, with `phi(x)` kept as a [`Scaled`], its rounding of
+/// `x^2` put back as in [`standard_normal_pdf`], so that each rounds once.
+/// Past -40 both are below the smallest float.
+pub(crate) fn gelu_erf_far(x: f64) -> (f64, f64) {
+    const FRAC_1_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+    if x < -40.0 {
+        return (-0.0, -0.0);
+    }
+    let square = x * x;
+    let correction = 1.0 - 0.5 * product_error::<false>(x, x, square);
+    let density =
+        Scaled::exp_parts(exp_split(-0.5 * square)).times(Scaled::of(correction * FRAC_1_SQRT_2PI));
+    let t = 1.0 / square;
+    let mills = 1.0
+        + t * (-1.0
+            + t * (3.0 + t * (-15.0 + t * (105.0 + t * (-945.0 + t * (10395.0 - t * 135135.0))))));
+    (
+        density.times(Scaled::of(-mills)).value(),
+        density.times(Scaled::of(x - mills / x)).value(),
+    )
+}
+
+/// gelu's tanh form `x s(x)`, `s` = [`tanh_cdf`], and its slope, where its
+/// `u` is below -350, so that `r = e^(2u)` -- and with it `s` and
+/// `sech^2(u)` -- lies at or below float64's normal range while the slope,
+/// `r (1 + 2 x u')` there, does not; `None` above it.
+///
+/// As floats there they kept only their last few bits, which `x u'` -- some
+/// two thousand at `x = -21` -- made hundreds of ulps of the slope's. `r` is
+/// kept as a [`Scaled`], so that each rounds once, and is below 2^-1000:
+/// `1 + r` is one.
+pub(crate) fn gelu_tanh_far(x: f64) -> Option<(f64, f64)> {
+    let (u, low) = tanh_argument(x);
+    if u.is_nan() || u >= -350.0 {
+        return None;
+    }
+    if u < -50_000.0 {
+        // Below the smallest float whatever multiplies it.
+        return Some((-0.0, -0.0));
+    }
+    let r = Scaled::exp_parts(exp_split(2.0 * u)).times(Scaled::of(1.0 + 2.0 * low));
+    let rise = LINEAR.0 + 3.0 * CUBIC.0 * (x * x);
+    Some((
+        r.times(Scaled::of(x)).value(),
+        r.times(Scaled::of(1.0 + 2.0 * x * rise)).value(),
+    ))
 }
 
 /// The value `x` with `normal_cdf(x, mean, std) == p`, for `p` in `(0, 1)`.

@@ -835,6 +835,13 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
             if x == f64::NEG_INFINITY {
                 return -0.0;
             }
+            // Where `tanh_cdf(x)` leaves float64's normal range; `u` is below
+            // -350 only below -20.
+            if x < -20.0
+                && let Some((y, _)) = crate::ops::gaussian::gelu_tanh_far(x)
+            {
+                return y;
+            }
             x * crate::ops::gaussian::tanh_cdf(x)
         })
     } else {
@@ -842,6 +849,10 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
             // At `-inf` the product is `-inf * 0`; the limit is 0.
             if x == f64::NEG_INFINITY {
                 return -0.0;
+            }
+            // Where `Phi(x)` leaves float64's normal range.
+            if x < crate::ops::gaussian::GELU_ERF_FAR {
+                return crate::ops::gaussian::gelu_erf_far(x).0;
             }
             x * crate::ops::gaussian::standard_normal_cdf(x)
         })
