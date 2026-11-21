@@ -1,11 +1,11 @@
 # Where the work goes, and why
 
 `engine::ops::provider` sends dense matrix products to the BLAS that NumPy
-brought, and the float64 transcendentals to NumPy's ufuncs; the Python layer
-sends float `unique`, the set operations, `partition` and small or integer
-`isin` to NumPy as well. Every other kernel stays on the engine's own. That
-split is a measurement, not a preference, and `dispatch_bench.py` is how it is
-re-taken:
+brought, and those float64 transcendentals NumPy computes at least as
+accurately to its ufuncs; the Python layer sends float `unique`, the set
+operations, `partition` and small or integer `isin` to NumPy as well. Every
+other kernel stays on the engine's own. That split is a measurement, not a
+preference, and `dispatch_bench.py` is how it is re-taken:
 
 ```
 python benchmarks/dispatch_bench.py                      # everything
@@ -126,26 +126,24 @@ native, and the code carries no special case.
 
 ### Float64 transcendentals
 
-The engine's float64 arms of `tanh`, `exp`, `log`, the hyperbolic and inverse
-trigonometric functions, `cbrt`, `atan2` and `pow` were scalar `libm` calls, one
-element at a time; NumPy's are vectorized loops, and for `tanh` the more
-accurate of the two (1 ulp against glibc's 2). Above 512 elements they go to
-NumPy on views of the engine's buffers, a large input split across the same
-number of threads the engine's own loop would have used, each releasing the
-interpreter lock while its chunk runs. `_core.dispatch.delegated_ufuncs()`
-lists them. Engine time over delegated time:
+The engine's float64 arms of the transcendentals are scalar calls, one
+element at a time; NumPy's are vectorized loops. Above 512 elements those of
+NumPy's that are at least as accurate -- `tanh`, `sinh`, `cosh`, their
+inverses, `expm1`, `log1p`, `log2` and `log10` -- take over, on views of the
+engine's buffers, a large input split across the same number of threads the
+engine's own loop would have used, each releasing the interpreter lock while
+its chunk runs. `_core.dispatch.delegated_ufuncs()` lists them, and
+`bindings/src/provider.rs` has the accuracy of each against values formed at
+forty digits. Engine time over delegated time at a million elements is
+1.4–6.2× for these, and about 1× for `remainder` and `fmod`, which cross
+too and are exact.
 
-| op | 1e4 | 1e6 |
-|---|---|---|
-| `arcsin` | 2.42× | 5.38× |
-| `arccos` | 2.64× | 5.01× |
-| `arctan` | 1.70× | 4.48× |
-| `arccosh` | 1.22× | 2.65× |
-| `arctan2` | 7.25× | 4.37× |
-| `power` | 5.68× | 4.72× |
-
-and 2.5–14× at a million elements for the fourteen that crossed first. Nothing
-in float32 crosses: every float32 kernel in `ops::simd::transcendental`
+`exp`, `exp2`, `log`, `cbrt`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2`
+and `power` crossed too, and were 1.8–7.9× faster for it at a million
+elements, and do not now: NumPy's loops for them on an AVX-512 machine
+missed the nearest float at up to a tenth of inputs and by up to 0.78 ulps,
+where the engine's miss at under 0.2% and by at most 0.54. Nothing in
+float32 crosses: every float32 kernel in `ops::simd::transcendental`
 computes in float64 and rounds once, which makes it correctly rounded except
 where the true value lies closer to a float32 midpoint than float64 can tell
 -- a handful of the 2³² inputs, for the few functions that have any -- and
@@ -595,8 +593,9 @@ Five groups. Two are delegated now and the fourth is empty, so what is left
 is float32 `cbrt` at small sizes and two rows that are answers rather than
 problems:
 
-- **A transcendental NumPy computes faster per core.** `cbrt` in float32; its
-  float64 goes to NumPy.
+- **A transcendental NumPy computes faster per core.** `cbrt` in float32, and
+  in float64, where NumPy's misses the nearest float at one input in 150 and
+  the engine's at none tried.
 
   `pow` was the other name here at 0.53–0.79 and is no longer behind in
   float32. Built out of the `exp` and `log` kernels rather than left on
@@ -641,9 +640,9 @@ problems:
   took 7.8ms where the same pair laid out at full shape took 0.58. Each task
   now gathers its stretch of the operands into blocks for the same kernel,
   and the row reads 0.63.
-- **Transcendentals in float64** and **sorting and selection** are
-  delegated now -- see *What is delegated* -- and read as NumPy plus the
-  crossing.
+- **Transcendentals in float64** -- those NumPy computes at least as
+  accurately -- and **sorting and selection** are delegated now -- see *What
+  is delegated* -- and read as NumPy plus the crossing.
 
   Three plausible engine-side changes to the sort were measured first and did
   not pay, and are worth keeping so nobody spends the afternoon again. Sorting

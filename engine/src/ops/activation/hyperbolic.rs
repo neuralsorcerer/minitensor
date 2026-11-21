@@ -390,7 +390,7 @@ macro_rules! vector_f32 {
 // has nothing wider to promote to, so its routines stay scalar, each written
 // against the ranges where the textbook identity loses digits.
 
-float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp, offer Exp);
+float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);
 
 vector_f32!(
     /// Vectorized; bit-identical to `(x as f64).exp() as f32` on all 2^32 inputs.
@@ -405,7 +405,7 @@ vector_f32!(
     log
 );
 
-float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln, offer Log);
+float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln);
 
 vector_f32!(
     /// Vectorized. The kernel handles `x <= -1` itself: `1 + x` is zero or
@@ -509,7 +509,7 @@ vector_f32!(
     tan
 );
 
-float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan, offer Tan);
+float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan);
 
 vector_f32!(
     /// Vectorized, sharing its reduction with `acos_f32`.
@@ -517,7 +517,7 @@ vector_f32!(
     asin
 );
 
-float_unary_kernel!(asin_f64, as_f64_slice, f64, Float64, "f64", f64::asin, offer Asin);
+float_unary_kernel!(asin_f64, as_f64_slice, f64, Float64, "f64", f64::asin);
 
 vector_f32!(
     /// Vectorized. Taken from `asin`'s reduction rather than as `pi/2 - asin(x)`,
@@ -526,7 +526,7 @@ vector_f32!(
     acos
 );
 
-float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos, offer Acos);
+float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos);
 
 vector_f32!(
     /// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
@@ -535,7 +535,7 @@ vector_f32!(
     atan
 );
 
-float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan, offer Atan);
+float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan);
 
 #[cfg(test)]
 mod atanh_tests {

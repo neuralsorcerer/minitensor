@@ -836,10 +836,8 @@ where
 /// `atan2f` changes that. Those need the vectorized kernel, which works on
 /// slices rather than elements, so this takes one -- used whenever the operands
 /// are float32, broadcast or not (see
-/// [`crate::ops::kernels::broadcast_binary_blocks`]). Float64 is offered whole
-/// to the installed provider as `wide_op` (see `ops::provider`), if the op
-/// names one, when neither operand needs repeating beyond a single element,
-/// and otherwise runs `wide` element-wise.
+/// [`crate::ops::kernels::broadcast_binary_blocks`]). Float64 runs `wide`
+/// element-wise.
 ///
 /// # Safety
 ///
@@ -849,7 +847,6 @@ unsafe fn float_binary_blocked<W, B>(
     lhs: &Tensor,
     rhs: &Tensor,
     wide: W,
-    wide_op: Option<crate::ops::provider::Ufunc>,
     blocks: B,
     partials: [FloatBinaryKernel; 2],
 ) -> Result<Tensor>
@@ -892,17 +889,14 @@ where
         TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device())
     } else {
         // Promotion by `/` leaves float64 as the only other dtype.
-        match wide_op.and_then(|op| offer_wide(&lhs_tensor, &rhs_tensor, &output_shape, op)) {
-            Some(out) => TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()),
-            None => broadcast_binary_arm!(
-                &lhs_tensor,
-                &rhs_tensor,
-                &output_shape,
-                as_f64_slice,
-                "f64",
-                wide
-            ),
-        }
+        broadcast_binary_arm!(
+            &lhs_tensor,
+            &rhs_tensor,
+            &output_shape,
+            as_f64_slice,
+            "f64",
+            wide
+        )
     };
     attach_float_binary_grad(
         lhs,
@@ -914,25 +908,6 @@ where
         output_data,
         (partials, false),
     )
-}
-
-/// A float64 pair's answer from the installed provider, or `None` to compute it
-/// here. Offered only when each operand is the output's length -- its flat
-/// order is then the output's, whatever leading ones its shape has -- or a
-/// single element, which is the one broadcast a provider is asked to know.
-fn offer_wide(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_shape: &Shape,
-    op: crate::ops::provider::Ufunc,
-) -> Option<Vec<f64>> {
-    let len = output_shape.numel();
-    let spans = |values: &[f64]| values.len() == len || values.len() == 1;
-    let (left, right) = (lhs.data().as_f64_slice()?, rhs.data().as_f64_slice()?);
-    if !(spans(left) && spans(right)) {
-        return None;
-    }
-    crate::ops::provider::offer_binary_f64(op, left, right, len)
 }
 
 /// Wrap one of these kernels' output as a tensor and record its chain rule.
@@ -1071,7 +1046,6 @@ pub fn atan2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs,
             rhs,
             f64::atan2,
-            Some(crate::ops::provider::Ufunc::Atan2),
             move |y, x, out| kernel.atan2(y, x, out),
             [ATAN2_D_Y, ATAN2_D_X],
         )
@@ -1093,7 +1067,6 @@ pub fn logaddexp2(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs,
             rhs,
             logaddexp2_f64,
-            None,
             move |a, b, out| kernel.logaddexp2(a, b, out),
             [LOGADDEXP2_D_LHS, LOGADDEXP2_D_RHS],
         )

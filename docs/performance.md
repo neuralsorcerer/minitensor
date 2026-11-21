@@ -107,11 +107,15 @@ are noise. Read the 4K column as the cost of calling an op, not the cost of the
 op.
 
 The table is float32. In float64 the engine has no wider type to compute in
-and round from, so its transcendentals were scalar `libm` calls; above 512
-elements they now go to NumPy's vectorized ufuncs on views of the engine's
-buffers, split across the engine's thread count, which put them 2.5-14x ahead
-of the old loop at a million elements. `minitensor._core.dispatch.delegated_ufuncs()`
-lists them, and `benchmarks/README.md` has the measurements.
+and round from, so its transcendentals are scalar calls; above 512 elements
+those NumPy computes at least as accurately -- the hyperbolic functions and
+their inverses, `expm1`, `log1p`, `log2` and `log10` -- go to its vectorized
+ufuncs on views of the engine's buffers, split across the engine's thread
+count, which puts them 1.4-6.2x ahead of the engine's loop at a million
+elements. `exp`, `exp2`, `log`, `cbrt`, `tan`, the inverse circular
+functions, `atan2` and `pow` stay with the engine, whose own are the more
+accurate. `minitensor._core.dispatch.delegated_ufuncs()` lists those that
+go, and `benchmarks/README.md` has the measurements.
 
 Where a mid-size operation goes parallel is also measured rather than assumed.
 Waking the thread pool from Python averaged tens of microseconds on the

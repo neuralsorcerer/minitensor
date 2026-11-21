@@ -19,7 +19,6 @@
 //! `digamma` needs `trigamma` for its gradient, and nothing in the crate's
 //! dependencies has one.
 
-use crate::ops::provider::{Ufunc, offer_unary_f64};
 use crate::tensor::TensorData;
 use crate::{
     error::{MinitensorError, Result},
@@ -115,35 +114,21 @@ unit_grad_kernel!(
 /// which costs the same as one logarithm and is accurate to 3e-15 against the
 /// 6e-8 a float32 can see.
 ///
-/// Float64 has no wider type to borrow that trick from, and above a few
-/// hundred elements goes to the installed provider through `ops::provider`,
-/// whose vectorized `cbrt` measured 3-12x faster than the scalar `f64::cbrt`
-/// kept for the rest.
+/// Float64 has no wider type to borrow that trick from and takes `f64::cbrt`,
+/// which was the float nearest the exact root at every input tried. NumPy's
+/// vectorized `cbrt`, which it went to above a few hundred elements, was 3-12x
+/// faster and missed at one input in 150.
 pub fn cbrt(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
     if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
         return crate::ops::util::narrowed(tensor, cbrt(&widened));
     }
-    if let Some(values) = offered(tensor, Ufunc::Cbrt) {
-        return unary_unit_from_data!(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
-    }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::cbrt_f32(tensor)?;
         return unary_unit_from_data!(tensor, "cbrt", values, CBRT_D, [0.0; 2]);
     }
     unary_unit!(tensor, "cbrt", CBRT, CBRT_D, [0.0; 2])
-}
-
-/// A float64 tensor's values under `op` from the installed provider, or
-/// `None` to compute them here; see `ops::provider`.
-fn offered(tensor: &Tensor, op: Ufunc) -> Option<TensorData> {
-    let values = offer_unary_f64(op, tensor.data().as_f64_slice()?)?;
-    Some(TensorData::from_vec(
-        values,
-        DataType::Float64,
-        tensor.device(),
-    ))
 }
 
 // --- exp2 ------------------------------------------------------------------
@@ -203,9 +188,6 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::exp2_f32(tensor)?;
-        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [0.0; 2]);
-    }
-    if let Some(values) = offered(tensor, Ufunc::Exp2) {
         return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [0.0; 2]);
     }
     unary_unit!(tensor, "exp2", EXP2, EXP2_D, [0.0; 2])

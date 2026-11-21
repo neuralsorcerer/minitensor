@@ -23,7 +23,6 @@ use crate::ops::arithmetic::exact_product::{
     float32_powers, integer_power_of, is_whole, whole_exponent,
 };
 use crate::ops::binary::BinaryOpKind;
-use crate::ops::provider::{Ufunc, offer_binary_f64};
 use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
@@ -302,16 +301,12 @@ impl PowKernels for f32 {
 
 impl PowKernels for f64 {
     fn general(base: &[f64], exponent: &[f64]) -> Vec<f64> {
-        offer_binary_f64(Ufunc::Pow, base, exponent, base.len()).unwrap_or_else(|| {
-            crate::ops::map::binary_map(base, exponent, |x: f64, y: f64| x.powf(y))
-        })
+        crate::ops::map::binary_map(base, exponent, |x: f64, y: f64| x.powf(y))
     }
 
     fn general_of_base(base: f64, exponent: &[f64]) -> Vec<f64> {
-        offer_binary_f64(Ufunc::Pow, &[base], exponent, exponent.len()).unwrap_or_else(|| {
-            unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f64| {
-                base.powf(y)
-            })
+        unary_map_threshold(exponent, EXPENSIVE_PAR_THRESHOLD, move |y: f64| {
+            base.powf(y)
         })
     }
 
@@ -339,10 +334,8 @@ impl PowKernels for f64 {
         if exponent == 0.5 {
             return unary_map(base, square_root_power::<f64>);
         }
-        offer_binary_f64(Ufunc::Pow, base, &[exponent], base.len()).unwrap_or_else(|| {
-            unary_map_threshold(base, EXPENSIVE_PAR_THRESHOLD, move |x: f64| {
-                x.powf(exponent)
-            })
+        unary_map_threshold(base, EXPENSIVE_PAR_THRESHOLD, move |x: f64| {
+            x.powf(exponent)
         })
     }
 

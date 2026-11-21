@@ -580,10 +580,10 @@ fn a_binary_function_hands_a_single_element_over_as_one() {
 
     // Each form is answered by the provider rather than repeated to length.
     for out in [
-        engine::ops::activation::pow(&values, &fractions).unwrap(),
-        engine::ops::activation::pow(&values, &one).unwrap(),
-        engine::ops::activation::pow(&one, &fractions).unwrap(),
-        engine::ops::binary_math::atan2(&values, &one).unwrap(),
+        engine::ops::arithmetic::remainder(&values, &fractions).unwrap(),
+        engine::ops::arithmetic::remainder(&values, &one).unwrap(),
+        engine::ops::arithmetic::remainder(&one, &fractions).unwrap(),
+        engine::ops::arithmetic::fmod(&values, &one).unwrap(),
     ] {
         assert_eq!(out.shape().dims(), &[HANDLED_LEN]);
         assert!(
@@ -594,13 +594,18 @@ fn a_binary_function_hands_a_single_element_over_as_one() {
                 .all(|&v| v == f64::from(SENTINEL))
         );
     }
-    // `x ** 2` never reaches it: a small integer exponent is a multiply.
+
+    // `pow` and `atan2` are never offered: the engine's own are the more
+    // accurate. Nor is `x ** 2`, a multiply, or any whole exponent, whose
+    // power is the value nearest the exact one.
+    let quotient = engine::ops::binary_math::atan2(&values, &one).unwrap();
+    let want: Vec<f64> = ramp_f64(HANDLED_LEN).iter().map(|v| v.atan2(2.5)).collect();
+    assert_eq!(quotient.data().as_f64_slice().unwrap(), &want[..]);
+    engine::ops::activation::pow(&values, &fractions).unwrap();
+    engine::ops::activation::pow(&one, &fractions).unwrap();
     let squared = engine::ops::activation::pow(&values, &tensor_f64(vec![2.0], vec![1])).unwrap();
     let want: Vec<f64> = ramp_f64(HANDLED_LEN).iter().map(|v| v * v).collect();
     assert_eq!(squared.data().as_f64_slice().unwrap(), &want[..]);
-    // Nor does any whole exponent, whose power is the value nearest the exact
-    // one: here, small whole numbers to small whole powers, each a product
-    // or a quotient rounded once.
     let whole = engine::ops::activation::pow(&values, &values).unwrap();
     let want: Vec<f64> = ramp_f64(HANDLED_LEN)
         .iter()
@@ -611,17 +616,17 @@ fn a_binary_function_hands_a_single_element_over_as_one() {
     // A broadcast beyond a single element is computed here, never offered.
     let rows = tensor_f64(ramp_f64(HANDLED_LEN), vec![HANDLED_LEN, 1]);
     let cols = tensor_f64(ramp_f64(3), vec![1, 3]);
-    let wide = engine::ops::binary_math::atan2(&rows, &cols).unwrap();
+    let wide = engine::ops::arithmetic::remainder(&rows, &cols).unwrap();
     assert_eq!(wide.shape().dims(), &[HANDLED_LEN, 3]);
 
     let n = HANDLED_LEN;
     assert_eq!(
         *binary_offers().lock().unwrap(),
         vec![
-            (Ufunc::Pow, n, n, n),
-            (Ufunc::Pow, n, 1, n),
-            (Ufunc::Pow, 1, n, n),
-            (Ufunc::Atan2, n, 1, n),
+            (Ufunc::Remainder, n, n, n),
+            (Ufunc::Remainder, n, 1, n),
+            (Ufunc::Remainder, 1, n, n),
+            (Ufunc::Fmod, n, 1, n),
         ]
     );
 }

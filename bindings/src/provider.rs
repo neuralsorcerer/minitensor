@@ -325,10 +325,49 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 
 /// Every [`Ufunc`], each with its slot in the ufunc cache; all of them cross.
 ///
-/// Measured as NumPy's time over the engine's own float64 kernel (below 1
-/// means NumPy is faster), over 1e3, 1e5 and 1e6 elements on a 4-core x86-64
-/// container -- NumPy called directly, single-threaded, against the engine's
-/// parallel loop:
+/// A function crosses where NumPy's loop is faster and at least as accurate
+/// as the engine's own. Against values formed at forty digits -- the share
+/// of inputs not given the nearest float, and the worst error in ulps -- on a
+/// 4-core AVX-512 x86-64 container with NumPy 2.4, the engine's loop and then
+/// NumPy's:
+///
+/// ```text
+///   float64    engine         NumPy
+///   tanh        16%  1.59      17%  1.04
+///   sinh        10%  1.42     0.8%  0.67
+///   cosh       0.7%  0.95     0.6%  0.63
+///   asinh       13%  1.27     0.4%  0.63
+///   atanh       19%  1.27     0.0%  0.50
+///   acosh       16%  1.97     1.0%  0.73
+///   expm1      4.7%  0.72     0.1%  0.51
+///   log1p      4.6%  0.73     0.3%  0.57
+///   log2       0.2%  0.52     0.0%  0.51
+///   log10       14%  1.58     0.2%  0.56
+/// ```
+///
+/// `tanh` crosses on its worst error, a third smaller, beside a share of
+/// misses a point larger. These stay, where delegated they ran 1.8-7.9x
+/// faster at a million elements but less accurately:
+///
+/// ```text
+///   float64    engine         NumPy
+///   exp        0.1%  0.50     4.9%  0.64
+///   exp2       0.1%  0.50     5.3%  0.63
+///   log        0.0%  0.50     0.2%  0.57
+///   cbrt       0.0%  0.50     0.7%  0.53
+///   tan        0.1%  0.54     0.2%  0.54
+///   arcsin     0.1%  0.50     8.8%  0.76
+///   arccos     0.0%  0.51     9.9%  0.78
+///   arctan     0.1%  0.51     0.1%  0.55
+///   arctan2    0.0%  0.50     1.7%  0.68
+///   power      0.1%  0.50     5.3%  0.65
+/// ```
+///
+/// Where NumPy has no vectorized loop of its own for a function it calls the
+/// same `libm` the engine does, and the two agree; the tables are where they
+/// differ. Speed, as NumPy's time over the engine's (below 1 means NumPy is
+/// faster), over 1e3, 1e5 and 1e6 elements -- NumPy called directly,
+/// single-threaded, against the engine's parallel loop:
 ///
 /// ```text
 ///   float64     1e3   1e5   1e6
@@ -339,27 +378,15 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 ///   atanh      0.30  0.50  0.51
 ///   log1p      0.23  0.53  0.56
 ///   log10      0.21  0.52  0.53
-///   tan        0.28  0.77  0.74
 ///   expm1      0.38  0.76  0.80
 ///   log2       0.36  0.88  0.94
-///   exp        0.32  0.78  0.92
-///   log        0.35  0.89  0.92
-///   exp2       0.35  0.24  0.93
-///   cbrt       0.12  0.08  0.29
 /// ```
 ///
-/// and over 1e4 and 1e6, for the inverse trigonometric functions and the
-/// binary ones (`power` with a whole array of exponents; with one exponent it
-/// read 0.77 and 1.02):
+/// and over 1e4 and 1e6:
 ///
 /// ```text
 ///   float64     1e4   1e6
-///   arcsin     0.38  0.42
-///   arccos     0.41  0.60
-///   arctan     0.55  0.67
 ///   arccosh    0.80  1.28
-///   arctan2    0.13  0.53
-///   power      0.18  0.74
 ///   remainder  0.59  2.43
 ///   fmod       0.58  2.30
 /// ```
@@ -370,38 +397,28 @@ static UFUNCS: [PyOnceLock<Py<PyAny>>; UFUNC_ORDER.len()] =
 ///
 /// Float64 has no wider type to compute in and round from, which is the trick
 /// every float32 kernel in `ops::simd::transcendental` is built on, so the
-/// engine's float64 arms are scalar `libm` calls, one element at a time;
-/// NumPy's are vectorized loops, and for `tanh` the more accurate of the two
-/// as well (1 ulp against glibc's 2). Where a column reads above 1 the
-/// engine's four threads were beating one NumPy thread, which [`apply_ufunc`]
-/// answers by giving NumPy the same four.
+/// engine's float64 arms are scalar calls, one element at a time; NumPy's are
+/// vectorized loops. Where a column reads above 1 the engine's four threads
+/// were beating one NumPy thread, which [`apply_ufunc`] answers by giving
+/// NumPy the same four.
 ///
-/// Delegated, a million elements take 2.5-14x less time than the engine's
-/// loop did, and 2.3-4.5x less than calling NumPy directly; at 512 elements,
-/// the threshold, the slowest to gain still ran 1.45x faster than the engine.
+/// Delegated, a million elements of the ten transcendentals take 1.4-6.2x
+/// less time than the engine's loop, and `remainder` and `fmod` about the
+/// same; when all twenty-two crossed, the slowest to gain at 512 elements,
+/// the threshold, still ran 1.45x faster than the engine.
 ///
 /// No float32 function crosses: see [`Ufunc`] for why.
-const UFUNC_ORDER: [Ufunc; 22] = [
+const UFUNC_ORDER: [Ufunc; 12] = [
     Ufunc::Tanh,
     Ufunc::Sinh,
     Ufunc::Cosh,
-    Ufunc::Tan,
     Ufunc::Asinh,
     Ufunc::Atanh,
     Ufunc::Expm1,
     Ufunc::Log1p,
     Ufunc::Log2,
     Ufunc::Log10,
-    Ufunc::Exp,
-    Ufunc::Exp2,
-    Ufunc::Log,
-    Ufunc::Cbrt,
-    Ufunc::Asin,
-    Ufunc::Acos,
-    Ufunc::Atan,
     Ufunc::Acosh,
-    Ufunc::Atan2,
-    Ufunc::Pow,
     Ufunc::Remainder,
     Ufunc::Fmod,
 ];
@@ -414,8 +431,8 @@ const UFUNC_ORDER: [Ufunc; 22] = [
 /// each chunk's call runs on its own thread. A ufunc releases the interpreter
 /// lock inside its loop, so the chunks run at once: NumPy's vectorized loop
 /// and the engine's parallelism together, where a single call is one core.
-/// On a million float64 that took `exp`, `log` and `exp2` from 0.86-0.91x of
-/// the engine's own four-core scalar loop to ahead of it.
+/// On a million float64 that puts each of the transcendentals ahead of the
+/// engine's own four-core scalar loop.
 ///
 /// The threads are scoped ones of their own, not the engine's pool. A pool
 /// worker waiting for the interpreter lock stalls every task queued behind

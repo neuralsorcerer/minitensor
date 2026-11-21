@@ -5151,7 +5151,8 @@ the same moment -- with two exceptions, both work handed to NumPy. A large
 `float32` product goes to `numpy.matmul`, as the float64 product of its
 operands widened, and the element-wise
 functions listed by `minitensor._core.dispatch.delegated_ufuncs()` (the
-float64 transcendentals, `pow` and `atan2` among them; nothing in float32) go
+float64 hyperbolic functions and their inverses, `expm1`, `log1p`, `log2`,
+`log10`, `remainder` and `fmod`; nothing in float32) go
 to NumPy's ufuncs above a few hundred elements; both release the GIL while their loops run.
 During that window another thread can run, and if it updates a tensor the
 operation is reading -- an optimizer `step()`, `copy_`, `fill_` or an item

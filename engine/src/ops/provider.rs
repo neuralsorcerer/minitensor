@@ -10,8 +10,11 @@
 //! exceptions are specific and measured: the single large float64 product a
 //! `float32` product is carried in -- that of its operands widened, from
 //! which each entry is rounded once -- where a tuned BLAS wins by 1.6-2.3x,
-//! and the float64 transcendentals, where the engine calls scalar `libm` and
-//! NumPy runs vectorized loops that are both faster and at least as accurate.
+//! and those float64 transcendentals where the engine calls scalar `libm` and
+//! NumPy runs vectorized loops that are both faster and, measured against
+//! exact values, at least as accurate. Where NumPy's are faster but less
+//! accurate, they are not offered: speed that costs the answer is not what
+//! this is for.
 //! A `float64` product is not among them: each of its entries is rounded once
 //! from the products of its operands' pieces, which the engine's kernel takes
 //! a cache-sized band at a time inside its own pool.
@@ -93,10 +96,16 @@ impl<T> Gemm<'_, T> {
 /// Only those a provider might do better are named: offering is a call and a
 /// match, and there is no point paying either for a function the engine
 /// always keeps. What *is* worth sending, and from which size, is the
-/// provider's decision. `Atan2`, `Pow`, `Remainder` and `Fmod` take two
-/// operands and are offered through [`Provider::binary_f64`]; the rest take
-/// one. The last two are exact, so a provider's answer is the engine's to the
-/// bit; they are offered because the engine's is a scalar `libm` call.
+/// provider's decision. `Remainder` and `Fmod` take two operands and are
+/// offered through [`Provider::binary_f64`]; the rest take one. Those two are
+/// exact, so a provider's answer is the engine's to the bit; they are offered
+/// because the engine's is a scalar `libm` call.
+///
+/// `exp`, `exp2`, `log`, `cbrt`, `tan`, the inverse circular functions,
+/// `atan2` and `pow` were offered too, and are not now: against values
+/// formed at forty digits, NumPy's vectorized loops for them on an AVX-512
+/// machine missed the nearest float at up to 10% of inputs, and by up to
+/// 0.78 ulps, where the engine's own miss at under 0.2%, by at most 0.54.
 ///
 /// Float64 only. Every float32 kernel in `ops::simd::transcendental` computes
 /// in float64 and rounds once, which makes it correctly rounded on every
@@ -106,23 +115,13 @@ pub enum Ufunc {
     Tanh,
     Sinh,
     Cosh,
-    Tan,
     Asinh,
     Atanh,
     Expm1,
     Log1p,
     Log2,
     Log10,
-    Exp,
-    Exp2,
-    Log,
-    Cbrt,
-    Asin,
-    Acos,
-    Atan,
     Acosh,
-    Atan2,
-    Pow,
     Remainder,
     Fmod,
 }
@@ -134,23 +133,13 @@ impl Ufunc {
             Ufunc::Tanh => "tanh",
             Ufunc::Sinh => "sinh",
             Ufunc::Cosh => "cosh",
-            Ufunc::Tan => "tan",
             Ufunc::Asinh => "arcsinh",
             Ufunc::Atanh => "arctanh",
             Ufunc::Expm1 => "expm1",
             Ufunc::Log1p => "log1p",
             Ufunc::Log2 => "log2",
             Ufunc::Log10 => "log10",
-            Ufunc::Exp => "exp",
-            Ufunc::Exp2 => "exp2",
-            Ufunc::Log => "log",
-            Ufunc::Cbrt => "cbrt",
-            Ufunc::Asin => "arcsin",
-            Ufunc::Acos => "arccos",
-            Ufunc::Atan => "arctan",
             Ufunc::Acosh => "arccosh",
-            Ufunc::Atan2 => "arctan2",
-            Ufunc::Pow => "power",
             Ufunc::Remainder => "remainder",
             Ufunc::Fmod => "fmod",
         }
@@ -184,7 +173,7 @@ pub trait Provider: Send + Sync {
 
     /// `out[i] = op(lhs[i], rhs[i])` for every `i`, or `false` having promised
     /// nothing about `out`. An operand is either `out`'s length or a single
-    /// element that stands for every position, as `x ** 2.5` has one.
+    /// element that stands for every position, as `x % 2.5` has one.
     fn binary_f64(
         &self,
         _op: Ufunc,
