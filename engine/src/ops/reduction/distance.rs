@@ -312,7 +312,7 @@ pub fn cosine_slices(a: &Tensor, b: &Tensor, dim: usize, eps: f64) -> Result<Ten
 /// cancels nothing, as `1 - cos` of the rounded cosine did -- all of it, in
 /// float32, once the cosine was within `2^-25` of one: where the cosine `c`
 /// is positive it is `|r|^2 / (|b|^2 (1 + c))` for `r` the part of `b` at
-/// right angles to `a`, which [`orthogonal_part`] forms whole; where it is
+/// right angles to `a`, which [`across`] forms whole; where it is
 /// not, there is nothing to cancel. Where a floor holds a norm up, the cosine
 /// is `s c` for `s` the floors' share, and its complement `(1 - s) + s (1 -
 /// c)`. `cos - margin` is the cosine of the pair's sums less the margin. In
@@ -386,7 +386,7 @@ pub(crate) fn cosine_embedding_slices(
 /// `grad`, one value a pair, laid out as the cosines are: for `a` it is
 /// `g (b - (a . b / |a|^2) a) / (A B)`, `A` and `B` the norms floored at
 /// `eps`, and `b` alone where `a`'s norm is under its floor and so does not
-/// move the cosine's denominator. The difference is [`orthogonal_part`]'s,
+/// move the cosine's denominator. The difference is [`across`]'s,
 /// formed whole, where as `b / (A B) - c a / A^2` it was two terms that all
 /// but cancel for slices that lie almost along each other. In float64 and
 /// rounded once; the result has `a`'s shape.
@@ -424,6 +424,273 @@ pub(crate) fn cosine_gradient_slices(
         a.device(),
         false,
     ))
+}
+
+/// The gradient of [`normalized_slices`]' quotients in their input `x` at an
+/// incoming `grad` of its shape, each slice along `dim` taken by its flag in
+/// `over`, laid out as the forward returned them: a slice taken over its
+/// `p`-norm moves by `scale (g - d (x . g) / |x|) / |x|`, for `d` its
+/// direction for the 2-norm, `x / |x|`, and its signs for the 1-norm, and any
+/// other by `g / under` -- `scale` one and `under` the floor for `normalize`,
+/// and the cap and one for `renorm`, each as the dtype holds it. A zero
+/// slice taken over its norm, with no floor, moves by NaN, as its quotients
+/// are NaN.
+///
+/// The difference is formed whole: for the 2-norm it is `g`'s part at right
+/// angles to `x`, by `across`, and for the 1-norm `g` less the
+/// signs times `x . g / |x|_1`, a pair. As `g - d (x . g) / |x|` in the dtype
+/// it was two terms that all but cancel for an incoming gradient almost
+/// along `d`. In float64, each slice scaled into range by a power of two,
+/// and rounded once; an infinite incoming gradient is taken as
+/// `unbounded_slope` says.
+pub fn normalized_gradient_slices(
+    x: &Tensor,
+    grad: &Tensor,
+    over: &Tensor,
+    p: f64,
+    dim: usize,
+    (scale, under): (f64, f64),
+) -> Result<Tensor> {
+    let taxicab = match p {
+        1.0 => true,
+        2.0 => false,
+        _ => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "normalized_gradient_slices takes p = 1 or p = 2, got {p}"
+            )));
+        }
+    };
+    let (x, grad, len, inner, kept) = cosine_operands(x, grad, dim, "normalized_gradient_slices")?;
+    let over = over.contiguous()?;
+    let flags = over.data().as_bool_slice();
+    let missing =
+        || MinitensorError::internal_error("normalized_gradient_slices: one flag a slice");
+    let flags = flags
+        .filter(|f| f.len() == kept.iter().product::<usize>())
+        .ok_or_else(missing)?;
+    let mut data = TensorData::uninitialized_on_device(x.numel(), x.dtype(), x.device());
+    let setting = (len, inner, taxicab, scale, under);
+    if x.dtype() == DataType::Float32 {
+        let (values, g) = (x.data().as_f32_slice(), grad.data().as_f32_slice());
+        let out = data.as_f32_slice_mut().ok_or_else(missing)?;
+        normalized_gradient_pairs(
+            values.ok_or_else(missing)?,
+            g.ok_or_else(missing)?,
+            flags,
+            out,
+            setting,
+        );
+    } else {
+        let (values, g) = (x.data().as_f64_slice(), grad.data().as_f64_slice());
+        let out = data.as_f64_slice_mut().ok_or_else(missing)?;
+        normalized_gradient_pairs(
+            values.ok_or_else(missing)?,
+            g.ok_or_else(missing)?,
+            flags,
+            out,
+            setting,
+        );
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        x.shape().clone(),
+        x.dtype(),
+        x.device(),
+        false,
+    ))
+}
+
+/// [`normalized_gradient_slices`] of `x` and `grad` laid out
+/// `[outer, len, inner]` into `out`, laid out as they are, `over` laid out
+/// `[outer, inner]`.
+fn normalized_gradient_pairs<T: Element + Output>(
+    x: &[T],
+    grad: &[T],
+    over: &[bool],
+    out: &mut [T],
+    (len, inner, taxicab, scale, under): (usize, usize, bool, f64, f64),
+) {
+    let (scale, under) = (T::narrow(scale).widen(), T::narrow(under).widen());
+    let block = len * inner;
+    if block == 0 {
+        return;
+    }
+    // Whole `[len, inner]` blocks to a task, enough of them to be worth one.
+    let batch = (TASK / block).max(1);
+    par_out_chunks_gated(out, batch * block, PAR_THRESHOLD / 8, &|start, o| {
+        let mut room = vec![0.0f64; 3 * len];
+        let (xs, rest) = room.split_at_mut(len);
+        let (gs, slope) = rest.split_at_mut(len);
+        for (j, o) in o.chunks_mut(block).enumerate() {
+            let outer = start / block + j;
+            let at = outer * block;
+            for i in 0..inner {
+                for k in 0..len {
+                    xs[k] = x[at + i + k * inner].wide();
+                    gs[k] = grad[at + i + k * inner].wide();
+                }
+                let over = over[outer * inner + i];
+                normalized_slope(xs, gs, over, (taxicab, scale, under), slope);
+                for (k, &value) in slope.iter().enumerate() {
+                    o[i + k * inner] = T::narrow(value);
+                }
+            }
+        }
+    });
+}
+
+/// One slice of [`normalized_gradient_slices`], `x` and `g` widened to
+/// float64 and scaled in place, into `out`.
+#[inline(never)]
+fn normalized_slope(
+    x: &mut [f64],
+    g: &mut [f64],
+    over: bool,
+    (taxicab, scale, under): (bool, f64, f64),
+    out: &mut [f64],
+) {
+    if !over {
+        for (slot, &value) in out.iter_mut().zip(g.iter()) {
+            *slot = value / under;
+        }
+        return;
+    }
+    let Some(pair) = CosinePair::new(x, g, 0.0) else {
+        unbounded_slope(x, g, scale, out);
+        return;
+    };
+    let (x, g) = (&*x, &*g);
+    let length = if taxicab {
+        let dot = pair.dot;
+        fused!(taxicab_part(x: &[f64], g: &[f64], dot: (f64, f64), out: &mut [f64]) -> f64)
+    } else {
+        across(x, g, pair.squares[0], pair.dot, out);
+        pair.norms[0]
+    };
+    if length == 0.0 {
+        // A zero slice with no floor: its quotients are zero over zero.
+        out.fill(f64::NAN);
+        return;
+    }
+    // The scaled slices give the gradient times `2^(shift_g - shift_x)`, and
+    // the cap is taken as `m 2^e`, `m` in `[1, 2)`, so that no product on the
+    // way to an entry leaves the range where the entry does not.
+    let e = if scale.is_finite() && scale > 0.0 {
+        binary_exponent(scale)
+    } else {
+        0
+    };
+    let factor = libm::scalbn(scale, -e) / length;
+    times_scaled(out, factor, pair.shifts[0] - pair.shifts[1] + e);
+}
+
+/// Each of `out` times `factor 2^shift`, rounded once: by their product
+/// where that is a normal float, and otherwise by `factor` and then the
+/// power, so that nothing on the way leaves the range where the entry does
+/// not.
+fn times_scaled(out: &mut [f64], factor: f64, shift: i32) {
+    let fold = libm::scalbn(factor, shift);
+    if fold.is_normal() {
+        out.iter_mut().for_each(|slot| *slot *= fold);
+    } else {
+        for slot in out.iter_mut() {
+            *slot = libm::scalbn(*slot * factor, shift);
+        }
+    }
+}
+
+/// [`normalized_slope`] of a slice taken over its norm where `x` or `g` is
+/// not finite: NaN where either holds a NaN, `x` an infinity or the cap is
+/// zero, and otherwise -- `g` holding infinities -- each entry the sum of its
+/// row of the slope times `g` as float sums take it: an infinity where the
+/// infinite entries' terms share a sign, NaN where they do not or one meets
+/// a zero of the slope. For either norm the slope is `-sign(x_j) sign(x_k)`
+/// times a positive number off its diagonal, and positive on it while the
+/// slice holds an entry that is not zero beside `x_j`.
+#[inline(never)]
+fn unbounded_slope(x: &[f64], g: &[f64], scale: f64, out: &mut [f64]) {
+    let unknown = scale.is_nan() || scale <= 0.0;
+    if unknown || x.iter().any(|v| !v.is_finite()) || g.iter().any(|v| v.is_nan()) {
+        out.fill(f64::NAN);
+        return;
+    }
+    let sign = |v: f64| i32::from(v > 0.0) - i32::from(v < 0.0);
+    let nonzero = x.iter().filter(|&&v| v != 0.0).count();
+    // The infinite entries of `g` by the sign of `x` times theirs: against,
+    // beside a zero, along.
+    let mut infinite = [0usize; 3];
+    for (&v, &w) in x.iter().zip(g) {
+        if w.is_infinite() {
+            infinite[(sign(v) * sign(w) + 1) as usize] += 1;
+        }
+    }
+    for ((slot, &v), &w) in out.iter_mut().zip(x).zip(g) {
+        let s = sign(v);
+        let mut others = infinite;
+        if w.is_infinite() {
+            others[(s * sign(w) + 1) as usize] -= 1;
+        }
+        let [against, beside, along] = others;
+        // Each other infinite entry's term has the sign `-s` along `x` and
+        // `s` against it, and meets a zero beside a zero of `x`.
+        let mut nan = beside > 0 || (s == 0 && against + along > 0);
+        let (mut up, mut down) = (
+            (along > 0 && s < 0) || (against > 0 && s > 0),
+            (along > 0 && s > 0) || (against > 0 && s < 0),
+        );
+        if w.is_infinite() {
+            if nonzero > usize::from(v != 0.0) {
+                up |= w > 0.0;
+                down |= w < 0.0;
+            } else {
+                nan = true;
+            }
+        }
+        *slot = if nan || (up && down) {
+            f64::NAN
+        } else if up {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        };
+    }
+}
+
+/// `g - sign(x) (x . g) / |x|_1` into `out`, for `dot` the pair `x . g`, and
+/// the 1-norm `|x|_1`: the quotient a pair, so that where `g` lies almost
+/// along the signs each entry is formed whole.
+#[inline(always)]
+fn taxicab_part<const FMA: bool>(
+    x: &[f64],
+    g: &[f64],
+    (dot, dot_lo): (f64, f64),
+    out: &mut [f64],
+) -> f64 {
+    let (mut sum, mut sum_lo) = (0.0f64, 0.0f64);
+    for &value in x {
+        let (total, error) = two_sum(sum, value.abs());
+        (sum, sum_lo) = (total, sum_lo + error);
+    }
+    let (sum, sum_lo) = two_sum(sum, sum_lo);
+    let (multiple, multiple_lo) = if sum > 0.0 {
+        let q = dot / sum;
+        let p = q * sum;
+        let remainder = (dot - p) - error_of::<FMA>(q, sum, p);
+        (q, (remainder + dot_lo - q * sum_lo) / sum)
+    } else {
+        (0.0, 0.0)
+    };
+    for ((slot, &value), &w) in out.iter_mut().zip(x).zip(g) {
+        let sign = if value > 0.0 {
+            1.0
+        } else if value < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        *slot = (w - sign * multiple) - sign * multiple_lo;
+    }
+    sum
 }
 
 /// Two tensors of one shape and float dtype made contiguous, and the
@@ -608,16 +875,7 @@ impl CosinePair {
         if cosine <= 0.0 {
             return 1.0 - share * cosine;
         }
-        let (squares, dot) = (self.squares[0], self.dot);
-        let across = fused!(
-            orthogonal_part(
-                a: &[f64],
-                b: &[f64],
-                squares: (f64, f64),
-                dot: (f64, f64),
-                scratch: &mut [f64],
-            ) -> f64
-        );
+        let across = across(a, b, self.squares[0], self.dot, scratch);
         let rest = across / (self.squares[1].0 * (1.0 + cosine));
         if share == 1.0 {
             rest
@@ -629,29 +887,24 @@ impl CosinePair {
     /// `g` times the cosine's gradient in slice `which` of `(a, b)`, into
     /// `out`; see [`cosine_gradient_slices`]. The scaled slices give it as
     /// the other's part at right angles to this one over the scaled
-    /// lengths, times the power of two this one was scaled by.
+    /// lengths, times the power of two this one was scaled by. `g` is taken
+    /// as `m 2^e`, `m` in `[1, 2)`, so that no product on the way to an
+    /// entry leaves the range where the entry does not.
     #[inline(never)]
     fn slope(&self, which: usize, a: &[f64], b: &[f64], g: f64, out: &mut [f64]) {
         let (this, other) = if which == 0 { (a, b) } else { (b, a) };
         if self.moving[which] {
-            let (squares, dot) = (self.squares[which], self.dot);
-            fused!(
-                orthogonal_part(
-                    this: &[f64],
-                    other: &[f64],
-                    squares: (f64, f64),
-                    dot: (f64, f64),
-                    out: &mut [f64],
-                ) -> f64
-            );
+            across(this, other, self.squares[which], self.dot, out);
         } else {
             out.copy_from_slice(other);
         }
-        let factor = g / (self.lengths[0] * self.lengths[1]);
-        let [low, high] = powers_of_two(self.shifts[which]);
-        for slot in out.iter_mut() {
-            *slot = *slot * factor * low * high;
-        }
+        let e = if g.is_finite() && g != 0.0 {
+            binary_exponent(g.abs())
+        } else {
+            0
+        };
+        let factor = libm::scalbn(g, -e) / (self.lengths[0] * self.lengths[1]);
+        times_scaled(out, factor, self.shifts[which] + e);
     }
 }
 
@@ -666,6 +919,26 @@ impl CosinePair {
 /// of `other` leave of it. What the multiple's error leaves along `this` is
 /// some `2^-104` of `other`, and moves the sum of squares, at right angles to
 /// it, by the square of that.
+#[inline(never)]
+fn across(
+    this: &[f64],
+    other: &[f64],
+    squares: (f64, f64),
+    dot: (f64, f64),
+    out: &mut [f64],
+) -> f64 {
+    fused!(
+        orthogonal_part(
+            this: &[f64],
+            other: &[f64],
+            squares: (f64, f64),
+            dot: (f64, f64),
+            out: &mut [f64],
+        ) -> f64
+    )
+}
+
+/// [`across`], the products' errors by a fused multiply-add where `FMA`.
 #[inline(always)]
 fn orthogonal_part<const FMA: bool>(
     this: &[f64],

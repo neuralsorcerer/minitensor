@@ -44,7 +44,9 @@ pub use self::boolean_impl::*;
 pub use self::core_impl::*;
 pub use self::covariance_impl::covariance_matrix;
 pub(crate) use self::distance_impl::{cosine_embedding_slices, cosine_gradient_slices};
-pub use self::distance_impl::{cosine_slices, cross_distances, normalized_slices, row_distances};
+pub use self::distance_impl::{
+    cosine_slices, cross_distances, normalized_gradient_slices, normalized_slices, row_distances,
+};
 pub use self::integral_impl::trapezoid_integral;
 pub use self::logsumexp_impl::*;
 pub(crate) use self::minmax_indices_impl::*;

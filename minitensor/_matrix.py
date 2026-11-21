@@ -399,28 +399,42 @@ class _Renormed(_Function):
             )
             result = _F.movedim(result.reshape(list(moved.shape)), 0, axis)
         ctx.save_for_backward(tensor)
-        ctx.p, ctx.axis, ctx.maxnorm = p, axis, maxnorm
-        ctx.scaled = scaled.reshape([-1 if i == axis else 1 for i in range(len(shape))])
+        ctx.p, ctx.axis, ctx.maxnorm, ctx.scaled = p, axis, maxnorm, scaled
         return result.contiguous()
 
     @staticmethod
     def backward(ctx, grad_output):
         (tensor,) = ctx.saved_tensors
-        others = [i for i in range(tensor.ndim()) if i != ctx.axis]
-        if others:
-            norm = _F.norm(tensor, ctx.p, others, True)
-        else:
-            norm = _F.abs(tensor)
+        grad_output = grad_output.astype(str(tensor.dtype))
+        shape, length, axis = list(tensor.shape), int(tensor.shape[ctx.axis]), ctx.axis
         # A scaled sub-tensor is `x · maxnorm / |x|`, and its length moves
         # with it: along its own direction for the 2-norm, and along the
-        # signs for the 1-norm. One left as it is passes the gradient on.
-        unit = tensor / norm
-        direction = unit if ctx.p == 2 else _F.sign(tensor)
-        along = unit * grad_output
-        if others:
-            along = _F.sum(along, others, True)
-        moving = (grad_output - direction * along) * (ctx.maxnorm / norm)
-        return _F.where(ctx.scaled, moving, grad_output), None, None, None
+        # signs for the 1-norm. One left as it is passes the gradient on. The
+        # incoming gradient less its part along that direction is formed
+        # whole, over the same slices the forward took.
+        if axis == len(shape) - 1 and axis > 0:
+            grad = _F._normalized_backward(
+                tensor.reshape([-1, length]),
+                grad_output.reshape([-1, length]),
+                ctx.scaled,
+                ctx.p,
+                0,
+                ctx.maxnorm,
+                1.0,
+            )
+            return grad.reshape(shape), None, None, None
+        moved = _F.movedim(tensor, axis, 0)
+        grad = _F._normalized_backward(
+            moved.reshape([length, -1]),
+            _F.movedim(grad_output, axis, 0).reshape([length, -1]),
+            ctx.scaled,
+            ctx.p,
+            1,
+            ctx.maxnorm,
+            1.0,
+        )
+        grad = _F.movedim(grad.reshape(list(moved.shape)), 0, axis)
+        return grad, None, None, None
 
 
 def renorm(input: object, p: float, dim: int, maxnorm: float) -> Tensor:
@@ -434,7 +448,8 @@ def renorm(input: object, p: float, dim: int, maxnorm: float) -> Tensor:
 
     For `p` 1 and 2 the comparison is with the exact norm, and each scaled
     element is the float nearest its exact value, `maxnorm` as the dtype
-    holds it; an integer input widens as `normalize`'s does. Any other `p`
+    holds it; an integer input widens as `normalize`'s does, and the gradient
+    of a scaled sub-tensor is formed as `normalize`'s is. Any other `p`
     compares and divides by the norm as computed. A NaN in a sub-tensor
     makes NaN of all of it.
     """

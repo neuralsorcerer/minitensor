@@ -870,6 +870,39 @@ pub fn normalized_rounded(
         .map_err(_convert_error)
 }
 
+/// The gradient of `_normalized`'s quotients in their input at `grad`, each
+/// slice along `dim` taken by its flag in `over` as the forward returned it:
+/// `scale` times `g` less its part along the slice's direction, over its
+/// norm, where the flag is set, and `g / under` where it is not -- formed in
+/// float64 without cancelling, and rounded once.
+#[pyfunction]
+#[pyo3(name = "_normalized_backward", signature = (input, grad, over, p, dim, scale, under))]
+pub fn normalized_backward_rounded(
+    input: &Bound<PyAny>,
+    grad: &Bound<PyAny>,
+    over: &Bound<PyAny>,
+    p: f64,
+    dim: usize,
+    scale: f64,
+    under: f64,
+) -> PyResult<PyTensor> {
+    let (input, grad, over) = (
+        borrow_tensor(input)?,
+        borrow_tensor(grad)?,
+        borrow_tensor(over)?,
+    );
+    engine::ops::reduction::normalized_gradient_slices(
+        input.tensor(),
+        grad.tensor(),
+        over.tensor(),
+        p,
+        dim,
+        (scale, under),
+    )
+    .map(PyTensor::from_tensor)
+    .map_err(_convert_error)
+}
+
 /// The sampling grid of a batch of affine maps over an output of the
 /// spatial sizes `size`, each entry the float nearest its exact value.
 /// Behind `affine_grid`, which differentiates.
@@ -2528,6 +2561,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(row_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(normalized_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(covariance_rounded, parent)?)?;

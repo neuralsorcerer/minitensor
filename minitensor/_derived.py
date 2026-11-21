@@ -212,20 +212,28 @@ class _Normalized(_Function):
     def forward(ctx, tensor, p, axis, eps):
         result, over = _F._normalized(tensor, p, axis, eps, False)
         ctx.save_for_backward(tensor)
-        ctx.p, ctx.axis, ctx.eps, ctx.result, ctx.over = p, axis, eps, result, over
+        ctx.p, ctx.axis, ctx.eps, ctx.over = p, axis, eps, over
         return result
 
     @staticmethod
     def backward(ctx, grad_output):
         (tensor,) = ctx.saved_tensors
-        norm = _F.norm(tensor, ctx.p, [ctx.axis], True)
         # Over its norm, which the forward decided exactly, the length moves
         # with the slice: along its own direction for the 2-norm, and along
-        # the signs for the 1-norm. Over the floor it does not.
-        direction = ctx.result if ctx.p == 2 else _F.sign(tensor)
-        along = _F.sum(ctx.result * grad_output, [ctx.axis], True)
-        moving = (grad_output - direction * along) / norm
-        return _F.where(ctx.over, moving, grad_output / ctx.eps), None, None, None
+        # the signs for the 1-norm. Over the floor it does not. The incoming
+        # gradient less its part along that direction is formed whole, where
+        # as tensor operations it was two terms that all but cancel for a
+        # gradient almost along it.
+        grad = _F._normalized_backward(
+            tensor,
+            grad_output.astype(str(tensor.dtype)),
+            ctx.over,
+            ctx.p,
+            ctx.axis,
+            1.0,
+            ctx.eps,
+        )
+        return grad, None, None, None
 
 
 def normalize(
@@ -240,7 +248,10 @@ def normalize(
 
     For `p` 1 and 2 each element is the float nearest the exact quotient of
     the element by the exact norm, or by `eps` as the dtype holds it where
-    the norm is smaller; any other `p` divides by the norm as computed.
+    the norm is smaller; any other `p` divides by the norm as computed. The
+    gradient there is the incoming one less its part along the slice's
+    direction -- its signs for the 1-norm -- over the norm, that difference
+    formed whole rather than as two terms that all but cancel.
     """
 
     tensor = _require_float(_atleast_tensor(input), "normalize")

@@ -165,6 +165,29 @@ def test_magnitudes_at_the_ends_of_float64():
                         assert _close(grad[k], sign * s, "float64"), (r, k)
 
 
+@pytest.mark.parametrize(
+    "size, upstream", [(1e-120, 1e100), (1.0, 1e300), (1e120, 1e-200)]
+)
+def test_incoming_gradients_at_the_ends_of_float64(size, upstream):
+    # The incoming gradient over the norms' product left the range for
+    # these, where the gradient itself does not -- the last a subnormal one.
+    rng = np.random.default_rng(83)
+    a, b = _pairs(0.3, "float64", rng, rows=3, width=6)
+    x, y = a * size, b * size
+    x1 = mt.Tensor(x, dtype="float64", requires_grad=True)
+    x2 = mt.Tensor(y, dtype="float64", requires_grad=True)
+    out = F.cosine_similarity(x1, x2, 1, 1e-300)
+    out.backward(mt.Tensor(np.full(3, upstream), dtype="float64"))
+    g1, g2 = x1.grad.numpy(), x2.grad.numpy()
+    with decimal.localcontext(prec=80, Emin=-(10**6), Emax=10**6):
+        for r in range(3):
+            _, da, db = _exact(x[r], y[r])
+            for grad, slope in ((g1[r], da), (g2[r], db)):
+                for k, s in enumerate(slope):
+                    want = Decimal(upstream) * s
+                    assert _close(grad[k], want, "float64"), (r, k, grad[k])
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_floors_and_opposites(dtype):
     # A zero row's cosine is zero, over its floored norm, and its loss one;
