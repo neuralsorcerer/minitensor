@@ -146,10 +146,28 @@ fn configured_threads() -> usize {
 const SPIN_WINDOW: std::time::Duration = std::time::Duration::from_micros(100);
 
 thread_local! {
-    /// Whether this thread is running a task of the task pool. A loop started
-    /// from inside one runs where it is: the enclosing loop already has every
-    /// thread, and a task waiting on a loop of its own would wait on itself.
+    /// Whether this thread is running a task of a loop, on the task pool or
+    /// on rayon. A loop started from inside one runs where it is: the
+    /// enclosing loop already has every thread; on the task pool a task
+    /// waiting on a loop of its own would wait on itself; and on rayon a
+    /// thread waiting for a part of its loop runs whatever other work it
+    /// finds, the enclosing loop's other tasks among them, which may wait on
+    /// a lock or a cell the waiting task holds.
     static IN_TASK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `task(index)` run as a task of a loop, so that a loop it starts runs in
+/// place; see [`IN_TASK`].
+fn as_task(task: &(dyn Fn(usize) + Sync), index: usize) {
+    /// Puts the thread's mark back as it was, past a panic too.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IN_TASK.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(IN_TASK.with(|flag| flag.replace(true)));
+    task(index);
 }
 
 /// One submitted loop.
@@ -408,9 +426,9 @@ pub fn quiesce() {
 /// is up to the pool, so a task's effect may depend on its index and nothing
 /// else. A panic in one is raised here once every task has finished.
 ///
-/// From inside a task the loop runs in place, in index order. On a rayon
-/// worker it runs on that worker's pool, so a caller that installed its own
-/// pool to choose a thread count keeps it.
+/// From inside a task the loop runs in place, in index order, wherever the
+/// task runs. On a rayon worker it runs on that worker's pool, so a caller
+/// that installed its own pool to choose a thread count keeps it.
 pub(crate) fn for_each_task(count: usize, task: &(dyn Fn(usize) + Sync)) {
     if count == 0 {
         return;
@@ -423,7 +441,9 @@ pub(crate) fn for_each_task(count: usize, task: &(dyn Fn(usize) + Sync)) {
     }
     if rayon::current_thread_index().is_some() {
         use rayon::prelude::*;
-        (0..count).into_par_iter().for_each(task);
+        (0..count)
+            .into_par_iter()
+            .for_each(|index| as_task(task, index));
         return;
     }
     let pool = task_pool();
@@ -437,7 +457,11 @@ pub(crate) fn for_each_task(count: usize, task: &(dyn Fn(usize) + Sync)) {
         // Another thread's loop is in flight. Rayon runs this one rather than
         // having it wait for that one to finish.
         use rayon::prelude::*;
-        install(|| (0..count).into_par_iter().for_each(task));
+        install(|| {
+            (0..count)
+                .into_par_iter()
+                .for_each(|index| as_task(task, index))
+        });
         return;
     }
     pool.run(count, task);
@@ -666,6 +690,64 @@ mod tests {
             .collect();
         for thread in threads {
             thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_task_waiting_on_a_loop_of_its_own_takes_none_of_its_siblings() {
+        // On rayon a loop inside a task was a parallel iterator of its own,
+        // and its thread, waiting for the part another had taken, ran other
+        // work it found: here the enclosing loop's third task, which waits on
+        // the cell the first is filling on that same thread, and so never
+        // returned. Staged on a pool of three: the first fills the cell, its
+        // loop's second half taken by one thread while the enclosing loop's
+        // last task waits behind another's middle one. On a pool of its own,
+        // so that a deadlock fails this test rather than every one after it.
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::time::{Duration, Instant};
+        let spin = |until: Instant, done: &dyn Fn() -> bool| {
+            while !done() && Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        };
+        let (rounds, wait) = (20, 5);
+        let pool = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let (finished, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..rounds {
+                let (taken, cell) = (AtomicBool::new(false), std::sync::OnceLock::new());
+                pool.install(|| {
+                    for_each_task(3, &|outer| {
+                        let until = Instant::now() + Duration::from_millis(wait);
+                        match outer {
+                            0 => {
+                                cell.get_or_init(|| {
+                                    for_each_task(2, &|inner| {
+                                        let until = Instant::now() + Duration::from_millis(wait);
+                                        if inner == 1 {
+                                            taken.store(true, SeqCst);
+                                        }
+                                        spin(until, &|| inner == 0 && taken.load(SeqCst));
+                                    });
+                                    1
+                                });
+                            }
+                            1 => spin(until, &|| false),
+                            _ => {
+                                cell.get_or_init(|| 2);
+                            }
+                        }
+                    });
+                });
+            }
+            let _ = finished.send(());
+        });
+        match done.recv_timeout(Duration::from_secs(60)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("a task took a sibling waiting on the cell it was filling")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the loop panicked"),
         }
     }
 

@@ -131,6 +131,14 @@ fresh pool the first time it needs one. A fork copies only the thread that
 called it, and on the global pool the child's first large operation waited
 forever on workers the fork had not copied.
 
+A loop that another thread's loop finds the task pool busy for runs on
+rayon instead, and a loop started inside a task runs on the task's own
+thread wherever the enclosing loop runs. On rayon such a loop was a
+parallel iterator of its own, and a thread waiting for a part of it that
+another had taken ran other tasks of the enclosing loop in the meantime --
+one of which, in the float32 convolution's weight gradient, waited on the
+value the waiting task was computing, and the operation never returned.
+
 That pool shares the cores with the BLAS NumPy loads, which the dense
 products go to, and after each product OpenBLAS keeps its threads
 busy-waiting for the next one -- by default for 2^28 cycles, about 130ms,
