@@ -607,11 +607,12 @@ impl GradientFunction for BCEWithLogitsLossBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        let scale = if self.reduction == "mean" {
-            1.0 / self.logits.numel() as f64
+        let divisor = if self.reduction == "mean" {
+            self.logits.numel() as f64
         } else {
             1.0
         };
+        let scale = 1.0 / divisor;
 
         if self.input_requires_grad[1] {
             let target_grad =
@@ -623,8 +624,12 @@ impl GradientFunction for BCEWithLogitsLossBackward {
             return Ok(gradients);
         }
 
-        let base_grad =
-            bce_with_logits_grad(&self.logits, &self.targets, self.pos_weight.as_ref(), scale)?;
+        let base_grad = bce_with_logits_grad(
+            &self.logits,
+            &self.targets,
+            self.pos_weight.as_ref(),
+            divisor,
+        )?;
         let logit_grad = arithmetic::mul(&base_grad, grad_output)?;
         accumulate_grad(&mut gradients, self.input_ids[0], logit_grad)?;
 
@@ -635,16 +640,22 @@ impl GradientFunction for BCEWithLogitsLossBackward {
         &self.input_ids
     }
 }
-/// `scale * [(1 - t) + (1 + (w - 1) * t) * (sigmoid(x) - 1)]`, elementwise.
+/// `[(1 - t) s(x) - w t s(-x)] / divisor`, elementwise: the gradient
+/// `(1 - t) + (1 + (w - 1) t) (s(x) - 1)` rearranged, in float64 for either
+/// dtype and rounded once into the logits'.
 ///
-/// `sigmoid` is evaluated in the numerically safe direction — `exp` of a
-/// negative argument only — so the factor is exact across the whole logit
-/// range instead of overflowing for large negative `x`.
+/// Each sigmoid is taken of its own sign from `e = exp(-|x|)` -- `1 / (1 + e)`
+/// and `e / (1 + e)` -- so for a hard label, one term or the other, nothing
+/// cancels. `s(x) - 1` formed from a rounded `s(x)` was all rounding once
+/// `s(x)` was near one, and a confident, correct logit's gradient zero where it
+/// is `-e^-x` or `e^x`: 1.7e7 ulps out in float32, 9e15 in float64. A soft
+/// label's two terms meet where the logit is the label's own; within a
+/// quarter of each other they are taken as pairs.
 fn bce_with_logits_grad(
     logits: &Tensor,
     targets: &Tensor,
     pos_weight: Option<&Tensor>,
-    scale: f64,
+    divisor: f64,
 ) -> Result<Tensor> {
     macro_rules! grad_for {
         ($ty:ty, $slice:ident, $dtype:expr) => {{
@@ -654,15 +665,8 @@ fn bce_with_logits_grad(
             let t = targets.data().$slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get slice from targets")
             })?;
-            let scale = scale as $ty;
-            let compute = |x: $ty, t: $ty, w: $ty| {
-                let s: $ty = if x >= 0.0 {
-                    1.0 / (1.0 + (-x).exp())
-                } else {
-                    let e = x.exp();
-                    e / (1.0 + e)
-                };
-                scale * ((1.0 - t) + (1.0 + (w - 1.0) * t) * (s - 1.0))
+            let compute = move |x: $ty, t: $ty, w: $ty| {
+                (bce_logit_slope(f64::from(x), f64::from(t), f64::from(w)) / divisor) as $ty
             };
             let values = match pos_weight {
                 Some(w) => {
@@ -671,7 +675,7 @@ fn bce_with_logits_grad(
                     })?;
                     ternary_map(x, t, w, compute)
                 }
-                None => binary_map(x, t, |x: $ty, t: $ty| compute(x, t, 1.0)),
+                None => binary_map(x, t, move |x: $ty, t: $ty| compute(x, t, 1.0)),
             };
             TensorData::from_vec::<$ty>(values, $dtype, logits.device())
         }};
@@ -694,6 +698,52 @@ fn bce_with_logits_grad(
         logits.device(),
         false,
     ))
+}
+
+/// One element of [`bce_with_logits_grad`], before the divisor.
+#[inline]
+fn bce_logit_slope(x: f64, t: f64, w: f64) -> f64 {
+    let e = (-x.abs()).exp();
+    let (large, small) = (1.0 / (1.0 + e), e / (1.0 + e));
+    let (of_x, of_minus_x) = if x >= 0.0 {
+        (large, small)
+    } else {
+        (small, large)
+    };
+    let down = (1.0 - t) * of_x;
+    let up = w * t * of_minus_x;
+    let slope = down - up;
+    // Past 700 the smaller sigmoid is below 1e-304, and no label a float can
+    // hold brings the terms near each other.
+    if slope.abs() >= 0.75 * down.abs().max(up.abs()) || !slope.is_finite() || x.abs() > 700.0 {
+        return slope;
+    }
+    cancelled_bce_logit_slope(x, t, w)
+}
+
+/// [`bce_logit_slope`] where its two terms come within a quarter of each
+/// other: `e`, both sigmoids, `1 - t` and `w t` as pairs, rounded once.
+#[cold]
+fn cancelled_bce_logit_slope(x: f64, t: f64, w: f64) -> f64 {
+    use crate::ops::arithmetic::extended::{self, Pair};
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    #[inline(always)]
+    fn body<const FMA: bool>(x: f64, t: f64, w: f64) -> f64 {
+        let e = extended::exp_pair::<FMA>(Pair(-x.abs(), 0.0));
+        let large = Pair(1.0, 0.0).div::<FMA>(Pair(1.0, 0.0).add(e));
+        let small = e.mul::<FMA>(large);
+        let (of_x, of_minus_x) = if x >= 0.0 {
+            (large, small)
+        } else {
+            (small, large)
+        };
+        let (rest, rest_low) = two_sum(1.0, -t);
+        let down = Pair(rest, rest_low).mul::<FMA>(of_x);
+        let up = Pair(w, 0.0).mul::<FMA>(Pair(t, 0.0)).mul::<FMA>(of_minus_x);
+        let slope = down.add(up.neg());
+        slope.0 + slope.1
+    }
+    extended::fused!(body(x: f64, t: f64, w: f64) -> f64)
 }
 
 /// `scale * d/dt` of the loss from logits, `-x + (w - 1) * softplus(-x)`: the
