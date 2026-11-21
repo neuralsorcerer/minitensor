@@ -1561,14 +1561,30 @@ const SQRT_PI_LOW: f64 = -7.666586499825799e-17;
 
 /// `d/dx erfcx(x) = 2 x erfcx(x) - 2/sqrt(pi)`.
 ///
-/// Past the crossover the two terms agree to `2 x^2` parts in one, so the
-/// difference is taken from the series instead: `2 x erfcx(x)` is
-/// `2/sqrt(pi)` times one plus the tail, and the difference is the tail
-/// alone, with nothing cancelling. Subtracted, it lost seven digits at
+/// For a positive `x` the two terms agree to `2 x^2` parts in one, so the
+/// difference is taken where nothing cancels. Past the crossover it is the
+/// series: `2 x erfcx(x)` is `2/sqrt(pi)` times one plus the tail, and the
+/// difference is the tail alone. Subtracted, it lost seven digits at
 /// `x = 1e4` and had the wrong sign by `1e12`; at `+inf` it is 0, the limit.
+///
+/// From one to the crossover it is Laplace's continued fraction for `erfc`,
+/// `erfcx(x) = 1 / (sqrt(pi) (x + K))` with `K = (1/2) / (x + 1 / (x + (3/2) /
+/// (x + 2 / ...)))`, by which the slope is `-(2/sqrt(pi)) K / (x + K)`: every
+/// step of `K` a quotient of positive numbers, `260 / x^2 + 14` of them, a
+/// few more than leave `K` within 2^-56 of itself. Subtracted there, the
+/// slope was up to 250 ulps out by the crossover and 37 by `x = 2`; below one
+/// the terms agree to at most seven parts, and it is still within five.
 fn erfcx_derivative(x: f64) -> f64 {
     if x >= ERFCX_CROSSOVER {
         return FRAC_2_SQRT_PI * erfcx_asymptotic_tail(x);
+    }
+    if x >= 1.0 {
+        let terms = (260.0 / (x * x)) as usize + 14;
+        let mut fraction = 0.0;
+        for n in (1..=terms).rev() {
+            fraction = (0.5 * n as f64) / (x + fraction);
+        }
+        return -FRAC_2_SQRT_PI * (fraction / (x + fraction));
     }
     2.0 * x * erfcx_scalar(x) - FRAC_2_SQRT_PI
 }

@@ -2660,6 +2660,11 @@ assert row_std.shape == (2, 3)
   dedicated routine rather than computing `1 - erf(x)`: past about `x = 6` in
   float64 `erf(x)` rounds to 1 and that subtraction returns exactly zero, which
   is precisely the tail `erfc` exists to give you (`erfc(20) ≈ 5.4e-176`).
+  Their slope, `+-2/sqrt(pi) exp(-x**2)`, has the rounding of `x**2` put back
+  -- the exponential made it `x**2` ulps of the slope, some 500 by `x = 23` --
+  and is rounded once with the incoming gradient, so it keeps its digits past
+  `x = 26.6`, where it falls below float64's normal range, for as long as
+  their product is a float.
 - `erfinv(input)` — the inverse of `erf` on `[-1, 1]`, infinite at the
   endpoints. Anything outside that interval gives NaN: `erf` never reaches
   there, so nothing inverts to it. Its slope is `sqrt(pi)/2 exp(y**2)` for
@@ -2749,7 +2754,11 @@ assert row_std.shape == (2, 3)
   Its derivative is `2 x erfcx(x) - 2/sqrt(pi)`, where the constant is constant
   because `erfc`'s own derivative cancels the scaling exactly. From eight on it
   is an asymptotic series with every rounding carried, correctly rounded to the
-  top of the float range, where the answer is subnormal.
+  top of the float range, where the answer is subnormal. Its two terms agree
+  to `2 x**2` parts in one, so from one to eight the derivative is taken from
+  Laplace's continued fraction instead, where nothing cancels, and past eight
+  from the series' tail; from one on it is within three and a half ulps, where
+  subtracted it was up to 250 out by eight.
 - `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
   With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
   answer for a probability that has rounded to 0 or 1 and flattens the gradient

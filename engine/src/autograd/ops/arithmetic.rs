@@ -723,12 +723,13 @@ impl GradientFunction for LogBaseBackward {
 /// Gradient function for `erf` and `erfc`.
 ///
 /// `d/dx erf(x) = 2/sqrt(pi) * exp(-x^2)`, and `erfc = 1 - erf` so its
-/// derivative is the same thing negated — `scale` carries the sign.
+/// derivative is the same thing negated. Both are
+/// [`crate::ops::gaussian::erf_slope`], in float64 for either dtype.
 pub struct ErfBackward {
     pub input_id: TensorId,
     pub input: Tensor,
-    /// `+2/sqrt(pi)` for `erf`, `-2/sqrt(pi)` for `erfc`.
-    pub scale: f64,
+    /// Whether this is `erfc`'s.
+    pub complementary: bool,
 }
 
 impl GradientFunction for ErfBackward {
@@ -736,10 +737,15 @@ impl GradientFunction for ErfBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let scale = self.scale;
-        let grad = unary_chain_grad_f64(&self.input, grad_output, "erf", &move |x| {
-            scale * (-x * x).exp()
-        })?;
+        use crate::ops::gaussian::erf_slope;
+        let sign = if self.complementary { -1.0 } else { 1.0 };
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            "erf",
+            move |x: f32, g: f32| erf_slope(f64::from(x), sign * f64::from(g)) as f32,
+            move |x: f64, g: f64| erf_slope(x, sign * g),
+        )?;
         gradients.insert(self.input_id, grad);
 
         Ok(gradients)

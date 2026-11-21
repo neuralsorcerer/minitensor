@@ -264,12 +264,10 @@ fn erf_family(tensor: &Tensor, complementary: bool) -> Result<Tensor> {
     );
 
     if output.requires_grad() {
-        // 2/sqrt(pi), negated for the complementary form.
-        let magnitude = 2.0 / std::f64::consts::PI.sqrt();
         let grad_fn = Arc::new(ErfBackward {
             input_id: tensor.id(),
             input: tensor.clone().detach(),
-            scale: if complementary { -magnitude } else { magnitude },
+            complementary,
         });
         with_grad_fn(output, grad_fn)
     } else {

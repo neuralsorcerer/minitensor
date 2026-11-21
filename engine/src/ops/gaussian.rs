@@ -101,6 +101,33 @@ pub(crate) fn standard_normal_pdf(z: f64) -> f64 {
     density * (1.0 - 0.5 * product_error::<false>(z, z, square))
 }
 
+/// `g` times `erf`'s slope `2/sqrt(pi) e^(-x^2)`, with the rounding of `x^2`
+/// put back as in [`standard_normal_pdf`], and rounded once with `g`.
+///
+/// `e^(-x^2)` turns the square's rounding, 2^-53 of it, into up to `x^2`
+/// ulps of the slope: some 500 by `x = 23.5`, where the slope is still an
+/// ordinary float.
+/// Past `|x| = 26.6` the slope falls below float64's normal range, where it
+/// kept only its last few bits, though times a large `g` it need not; there
+/// the exponential is a [`Scaled`] and `g` goes in before the one rounding.
+/// From `|x| = 38.2` the slope times the largest float is below the
+/// smallest, and the answer is a zero.
+pub(crate) fn erf_slope(x: f64, g: f64) -> f64 {
+    let square = x * x;
+    if square < 708.0 {
+        let rounding = product_error::<false>(x, x, square);
+        let slope = (-square).exp() * FRAC_2_SQRT_PI;
+        return g * (slope - slope * rounding);
+    }
+    if square < 1460.0 {
+        let rounding = product_error::<false>(x, x, square);
+        let factor = Scaled::of((FRAC_2_SQRT_PI - FRAC_2_SQRT_PI * rounding) * g);
+        return Scaled::exp_parts(exp_split(-square)).times(factor).value();
+    }
+    // A NaN stays one; an infinity's slope is zero.
+    if x.is_nan() { x } else { 0.0 * g }
+}
+
 /// `1 / (1 + e^(-2u))` for `u = sqrt(2/pi) (x + 0.044715 x^3)`, the tanh
 /// form's stand-in for `Phi(x)`.
 ///
