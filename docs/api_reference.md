@@ -3974,12 +3974,22 @@ Resident memory at `T=256` falls from 82 MB to 68 MB for the LSTM and from
 The forward is bit-for-bit what the composed form produced — the same
 vectorized `sigmoid` and `tanh` kernels, in the same operand order, including
 the `(1 - z) * n + z * h` form that lets a saturated GRU update gate pass the
-previous state through exactly. The gradients differ from the composed form
-only by re-association, 1e-14 relative at float64, and every parameter of eight
-configurations of these layers is value-checked against central differences.
-The matmuls that produce the gates are still ordinary operations, so the
-gradients to the weights and to the previous hidden state still come from the
-graph.
+previous state through exactly. The gradients are not: their slopes are taken
+of each step's logits and cell state, formed again in float64, rather than of
+the activations the forward rounded. Those were `i (1 - i)`, `1 - tanh(c)^2`
+and the like, differences of numbers near one that lost their digits as a gate
+saturated and were zero from a logit of 17 in float32, leaving gradients up to
+a million ulps out for ordinary logits. Each gradient is now the float32 nearest
+the exact one, and a float64 one within a dozen ulps or so -- where the cell
+state cancels to within 2^-50 of its two terms, or a GRU's state before matches
+its candidate as closely, within 2^-95 of those terms. The slopes cost some
+exponentials an element: at `hidden=128` the backward takes about a quarter
+longer than it did with the rounded activations. For them the LSTM keeps each
+step's logits, and the GRU both its projections, two more rows of `hidden` a
+step than its activations took. Every parameter of eight configurations of
+these layers is still value-checked against central differences. The matmuls
+that produce the gates are still ordinary operations, so the gradients to the
+weights and to the previous hidden state still come from the graph.
 
 Packed (variable-length) sequences are not implemented.
 

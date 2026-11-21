@@ -51,19 +51,33 @@
 //! `hidden` that is not a multiple of the SIMD width, and a bidirectional
 //! two-layer stack -- and one float64 shape.
 //!
-//! The **backward is not**, and cannot be: it is one expression per gate where
-//! the composed form was a chain of separate products, so the roundings fall in
-//! different places. Measured over those same shapes the gradients agree to
-//! 4e-6 absolute at float32 and 1e-14 relative at float64, which is
-//! re-association and nothing else. What holds them to the true derivative
-//! rather than to each other is `tests/nn/test_recurrent_parameter_gradients.py`,
-//! which value-checks every parameter of eight configurations of these layers,
-//! four of them LSTM, against central differences at float64.
+//! The **backward is not**. Its slopes are taken of the cell's inputs -- the
+//! gate logits and the cell state before -- where the composed form took them
+//! of the activations it had rounded: `i (1 - i)`, `1 - g^2`, `1 - tanh(c)^2`.
+//! Each of those is a difference of numbers near one once its gate saturates,
+//! losing digits on the way there and zero from a logit of 17 in float32 (of
+//! 9 for a `tanh`) while the slope is still a float; with ordinary logits the
+//! gradients were up to a million ulps out. Every value and slope is now
+//! formed again in float64 from `e^-|x|` or `e^-2|x|` (see
+//! [`crate::nn::cell::logistic`]), `c` from them, and each gradient is their
+//! product rounded once: for float32 the float nearest the exact one, for
+//! float64 within a few ulps -- more where the cell state is large, since
+//! `tanh'(c)` moves by `2|c|` times whatever `c` is out by. Each of the two
+//! outputs' nodes rounds its own part, and the graph adds the two.
+//! `tests/nn/test_recurrent_cell_slopes.py` holds them to exact values, and
+//! `tests/nn/test_recurrent_parameter_gradients.py` checks every parameter of
+//! eight configurations of these layers against central differences.
 
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     error::{MinitensorError, Result},
-    nn::cell::{band_width, sigmoid_block_f64, tanh_block_f64},
+    nn::cell::{
+        Scaled, band_width, finite_or_zero, logistic, logistic_pair, logistic_scaled,
+        par_row_bands, product_pair, sigmoid_block_f64, tanh_and_slope, tanh_and_slope_near,
+        tanh_block_f64, tanh_pair, tanh_scaled,
+    },
+    ops::arithmetic::exact_sum::Output,
+    ops::arithmetic::extended::Pair,
     ops::map::{
         EXPENSIVE_PAR_THRESHOLD, SIMD_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, build_vec,
         par_out_chunks, unary_map_blocks_threshold,
@@ -87,13 +101,13 @@ const OUTPUT: usize = 3;
 // elements unwritten rather than fail. Checked at compile time instead.
 const _: () = assert!(FORGET == INPUT + 1 && CANDIDATE == FORGET + 1 && OUTPUT == 3);
 
-/// What the backward needs, kept as one buffer rather than four tensors.
+/// What the backward needs: the cell's two inputs as they were given.
 ///
-/// `activations` holds the *activated* gates in the same `(batch, 4 * hidden)`
-/// layout as the input, so the backward reads them with the same indexing.
+/// The slopes are taken of the gate logits and the cell state before, not of
+/// the activations the forward rounded, so those are not kept: the backward
+/// forms every value again, in float64.
 struct Saved {
-    activations: Tensor,
-    tanh_c: Tensor,
+    gates: Tensor,
     cell_before: Tensor,
 }
 
@@ -125,7 +139,6 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
     }
 
     let requires_grad = gates.requires_grad() || cell_before.requires_grad();
-    let wide = Shape::new(vec![batch, 4 * hidden]);
     let narrow_shape = Shape::new(vec![batch, hidden]);
     let device = gates.device();
     let dtype = gates.dtype();
@@ -223,15 +236,13 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
             };
 
             (
-                TensorData::from_vec::<$ty>(activations, dtype, device),
                 TensorData::from_vec::<$ty>(cell_after, dtype, device),
-                TensorData::from_vec::<$ty>(tanh_cell, dtype, device),
                 TensorData::from_vec::<$ty>(hidden_after, dtype, device),
             )
         }};
     }
 
-    let (activations, cell_after, tanh_cell, hidden_after) = match dtype {
+    let (cell_after, hidden_after) = match dtype {
         DataType::Float32 => {
             // Resolved once per step rather than per block, as the elementwise
             // kernels do. These are the same kernels the composed path called.
@@ -267,7 +278,7 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
     );
     let new_c = Tensor::new(
         Arc::new(cell_after),
-        narrow_shape.clone(),
+        narrow_shape,
         dtype,
         device,
         requires_grad,
@@ -278,8 +289,7 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
     }
 
     let saved = Arc::new(Saved {
-        activations: Tensor::new(Arc::new(activations), wide, dtype, device, false),
-        tanh_c: Tensor::new(Arc::new(tanh_cell), narrow_shape, dtype, device, false),
+        gates: gates.detach(),
         cell_before: cell_before.detach(),
     });
 
@@ -295,8 +305,8 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
     };
 
     // One node per output, the way `qr` does it. Everything below `dc` is
-    // linear in `dc`, so the two nodes' contributions sum to the same
-    // gradient a single combined node would have produced.
+    // linear in `dc`, so the two nodes' contributions sum to the gradient a
+    // single combined node would produce, each part rounded on its own.
     let new_h = with_grad_fn(new_h, make(true))?;
     let new_c = with_grad_fn(new_c, make(false))?;
     Ok((new_h, new_c))
@@ -316,124 +326,29 @@ struct LstmCellBackward {
 impl GradientFunction for LstmCellBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let hidden = self.hidden;
-        let dims = self.saved.tanh_c.shape().dims();
-        let batch = dims[0];
+        let batch = self.saved.cell_before.shape().dims()[0];
         let dtype = grad_output.dtype();
         let device = grad_output.device();
-        let from_hidden = self.from_hidden;
-        let wanted = self.wanted;
 
         macro_rules! run {
             ($ty:ty, $slice:ident) => {{
                 let incoming = grad_output.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("lstm_cell backward: gradient dtype")
                 })?;
-                let activations = self.saved.activations.data().$slice().ok_or_else(|| {
+                let gates = self.saved.gates.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("lstm_cell backward: saved gates")
-                })?;
-                let tanh_c = self.saved.tanh_c.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("lstm_cell backward: saved tanh")
                 })?;
                 let cell_before = self.saved.cell_before.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("lstm_cell backward: saved cell state")
                 })?;
-                let wide_row = 4 * hidden;
-
-                // `h = o * tanh(c)` sends gradient to `o` and to `c`; `c`
-                // receives it directly. Each node carries only its own output's
-                // term, and `from_hidden` is the same for every element, so the
-                // branch is outside the inner loops.
-                //
-                // Both passes recompute it. They have different row widths and
-                // so cannot be partitioned together, and four operations per
-                // element is cheaper than the buffer that would carry them.
-                let grad_c_at = |o: $ty, tc: $ty, incoming: $ty| -> $ty {
-                    if from_hidden {
-                        incoming * o * (1.0 - tc * tc)
-                    } else {
-                        incoming
-                    }
-                };
-
-                // dL/d(c_prev): `c = f * c_prev + i * g`. Skipped outright when
-                // the previous cell state is a constant, which is every
-                // sequence's first step.
-                // SAFETY: every element of every row is written, rows tile.
-                let d_cell: Vec<$ty> = if wanted[1] {
-                    unsafe {
-                        build_vec(batch * hidden, |spare| {
-                            if hidden == 0 {
-                                return;
-                            }
-                            let width = band_width(spare.len(), hidden, SIMD_PAR_THRESHOLD);
-                            par_out_chunks(spare, width, &|start, band| {
-                                for (r, out_row) in band.chunks_exact_mut(hidden).enumerate() {
-                                    let narrow = start + r * hidden;
-                                    let act = &activations[narrow * 4..][..wide_row];
-                                    let f = &act[FORGET * hidden..(FORGET + 1) * hidden];
-                                    let o = &act[OUTPUT * hidden..];
-                                    let tc = &tanh_c[narrow..][..hidden];
-                                    let inc = &incoming[narrow..][..hidden];
-                                    for j in 0..hidden {
-                                        out_row[j] =
-                                            MaybeUninit::new(grad_c_at(o[j], tc[j], inc[j]) * f[j]);
-                                    }
-                                }
-                            });
-                        })
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                // dL/d(gates), back through each gate's own activation.
-                // SAFETY: the four blocks tile each row and every element of
-                // each is written; the rows tile the output.
-                let d_gates: Vec<$ty> = if wanted[0] {
-                    unsafe {
-                        build_vec(batch * wide_row, |spare| {
-                            if hidden == 0 {
-                                return;
-                            }
-                            let width = band_width(spare.len(), wide_row, SIMD_PAR_THRESHOLD);
-                            par_out_chunks(spare, width, &|start, band| {
-                                for (r, row_out) in band.chunks_exact_mut(wide_row).enumerate() {
-                                    let wide = start + r * wide_row;
-                                    let narrow = wide / 4;
-                                    let act = &activations[wide..][..wide_row];
-                                    let i = &act[INPUT * hidden..(INPUT + 1) * hidden];
-                                    let f = &act[FORGET * hidden..(FORGET + 1) * hidden];
-                                    let g = &act[CANDIDATE * hidden..(CANDIDATE + 1) * hidden];
-                                    let o = &act[OUTPUT * hidden..];
-                                    let tc = &tanh_c[narrow..][..hidden];
-                                    let before = &cell_before[narrow..][..hidden];
-                                    let inc = &incoming[narrow..][..hidden];
-
-                                    let (d_i, rest) = row_out.split_at_mut(hidden);
-                                    let (d_f, rest) = rest.split_at_mut(hidden);
-                                    let (d_g, d_o) = rest.split_at_mut(hidden);
-
-                                    for j in 0..hidden {
-                                        let grad_c = grad_c_at(o[j], tc[j], inc[j]);
-                                        let grad_o = if from_hidden { inc[j] * tc[j] } else { 0.0 };
-
-                                        d_i[j] =
-                                            MaybeUninit::new(grad_c * g[j] * i[j] * (1.0 - i[j]));
-                                        d_f[j] = MaybeUninit::new(
-                                            grad_c * before[j] * f[j] * (1.0 - f[j]),
-                                        );
-                                        d_g[j] =
-                                            MaybeUninit::new(grad_c * i[j] * (1.0 - g[j] * g[j]));
-                                        d_o[j] = MaybeUninit::new(grad_o * o[j] * (1.0 - o[j]));
-                                    }
-                                }
-                            });
-                        })
-                    }
-                } else {
-                    Vec::new()
-                };
-
+                let (d_gates, d_cell) = backward_rows::<$ty>(
+                    gates,
+                    cell_before,
+                    incoming,
+                    hidden,
+                    self.from_hidden,
+                    self.wanted,
+                );
                 (
                     TensorData::from_vec::<$ty>(d_gates, dtype, device),
                     TensorData::from_vec::<$ty>(d_cell, dtype, device),
@@ -452,7 +367,7 @@ impl GradientFunction for LstmCellBackward {
         };
 
         let mut gradients = FxHashMap::default();
-        if wanted[0] {
+        if self.wanted[0] {
             gradients.insert(
                 self.ids[0],
                 Tensor::new(
@@ -464,7 +379,7 @@ impl GradientFunction for LstmCellBackward {
                 ),
             );
         }
-        if wanted[1] {
+        if self.wanted[1] {
             gradients.insert(
                 self.ids[1],
                 Tensor::new(
@@ -482,6 +397,201 @@ impl GradientFunction for LstmCellBackward {
     fn input_ids(&self) -> &[TensorId] {
         &self.ids
     }
+}
+
+/// How far past one an ulp of a float64 term may be magnified before a
+/// gradient in `T` shows it, and so before a term is carried as a pair
+/// instead: not at all for float64 (`wide`), and sixteen-fold for float32,
+/// whose gradients round 29 bits above float64's last place -- which a term
+/// out by sixteen of those still leaves on the same side of every halfway
+/// point but for one case in some millions. For the same reason a float32
+/// gradient's products and sums need not carry their own roundings beside
+/// them.
+pub(crate) fn slack(wide: bool) -> f64 {
+    if wide { 1.0 } else { 16.0 }
+}
+
+/// `x * y`, with its rounding beside it where `wide` says the gradient's
+/// precision would show it.
+#[inline(always)]
+pub(crate) fn product(x: f64, y: f64, wide: bool) -> Pair {
+    if wide {
+        product_pair(x, y)
+    } else {
+        Pair(x * y, 0.0)
+    }
+}
+
+/// The gradients of one output of [`lstm_cell`] -- of the gate logits and of
+/// the cell state before, each empty unless `wanted` -- for the incoming
+/// gradient `incoming` of the hidden state (`from_hidden`) or the cell state.
+///
+/// One pass writes both, a row of each at a time: every element of them
+/// needs the same values and slopes, which cost a few exponentials each, so
+/// they are formed once per element rather than once per output.
+fn backward_rows<T: Output>(
+    gates: &[T],
+    cell_before: &[T],
+    incoming: &[T],
+    hidden: usize,
+    from_hidden: bool,
+    wanted: [bool; 2],
+) -> (Vec<T>, Vec<T>) {
+    let batch = cell_before.len() / hidden.max(1);
+    let wide_row = 4 * hidden;
+    let wide = T::DIGITS > 24;
+    let widths = [
+        if wanted[0] { wide_row } else { 0 },
+        if wanted[1] { hidden } else { 0 },
+    ];
+    let mut d_gates = Vec::with_capacity(batch * widths[0]);
+    let mut d_cell = Vec::with_capacity(batch * widths[1]);
+    par_row_bands(
+        [
+            &mut d_gates.spare_capacity_mut()[..batch * widths[0]],
+            &mut d_cell.spare_capacity_mut()[..batch * widths[1]],
+        ],
+        widths,
+        batch,
+        EXPENSIVE_PAR_THRESHOLD,
+        &|first, count, [gate_rows, cell_rows]| {
+            for row in 0..count {
+                let at = first + row;
+                let logits = &gates[at * wide_row..][..wide_row];
+                let before = &cell_before[at * hidden..][..hidden];
+                let grad = &incoming[at * hidden..][..hidden];
+                for j in 0..hidden {
+                    let x =
+                        [INPUT, FORGET, CANDIDATE, OUTPUT].map(|g| logits[g * hidden + j].widen());
+                    let (d_x, d_before) =
+                        unit_backward(x, before[j].widen(), grad[j].widen(), from_hidden, wide);
+                    if wanted[0] {
+                        for (g, d) in [INPUT, FORGET, CANDIDATE, OUTPUT].into_iter().zip(d_x) {
+                            gate_rows[row * wide_row + g * hidden + j].write(T::narrow(d));
+                        }
+                    }
+                    if wanted[1] {
+                        cell_rows[row * hidden + j].write(T::narrow(d_before));
+                    }
+                }
+            }
+        },
+    );
+    // SAFETY: every row of a wanted output was written whole above, and an
+    // output nobody wants is empty.
+    unsafe {
+        d_gates.set_len(batch * widths[0]);
+        d_cell.set_len(batch * widths[1]);
+    }
+    (d_gates, d_cell)
+}
+
+/// One hidden unit's backward, in float64: from its gate logits `x`, its cell
+/// state before and the incoming gradient, the gradients of the four logits
+/// and of the cell state before.
+///
+/// `c = f c_before + i g` and `h = o tanh(c)`, so `dc` is the incoming
+/// gradient for the cell state's node and `grad o tanh'(c)` for the hidden
+/// state's; then `di = dc g i'`, `df = dc c_before f'`, `dg = dc i g'`,
+/// `do = grad tanh(c) o'` for the hidden state alone, and `dc_before = dc f`.
+/// The bounded factors are multiplied first, so that a product leaves the
+/// range only where the gradient itself does.
+///
+/// `tanh'(c)` moves by `2|c|` times whatever `c` is out by, so `c` is taken
+/// as a pair: both products' roundings beside it, and -- where `f c_before`
+/// is beyond [`slack`] in size, so that an ulp of a float64 `f` is many of
+/// `c`'s last places -- `f` carried as a pair too. Without it a float64 cell
+/// state of 30 left the slope some 50 ulps out. Where the two products
+/// cancel, `c` is small beside what float64 values of `f`, `i` and `g` are out
+/// by, and so is `tanh(c)`: there all three are carried as pairs.
+#[inline(always)]
+fn unit_backward(
+    x: [f64; 4],
+    before: f64,
+    grad: f64,
+    from_hidden: bool,
+    wide: bool,
+) -> ([f64; 4], f64) {
+    let slack = slack(wide);
+    let (i, _, di) = logistic(x[INPUT]);
+    let (f, _, df) = logistic(x[FORGET]);
+    let (g, dg) = tanh_and_slope(x[CANDIDATE]);
+    let mut c = Pair(0.0, 0.0);
+    let (dc, d_o) = if from_hidden {
+        let (o, _, slope_o) = logistic(x[OUTPUT]);
+        let kept = product(f, before, wide);
+        let fresh = product(i, g, wide);
+        c = kept.add(fresh);
+        let large = kept.0.abs() > slack;
+        let cancels = c.0.abs() < (kept.0.abs() + fresh.0.abs()) / (2.0 * slack);
+        if large || cancels {
+            let fc = logistic_pair(Pair(x[FORGET], 0.0)).mul::<false>(Pair(before, 0.0));
+            c = if cancels {
+                let i = logistic_pair(Pair(x[INPUT], 0.0));
+                fc.add(i.mul::<false>(tanh_pair(Pair(x[CANDIDATE], 0.0))))
+            } else {
+                fc.add(fresh)
+            };
+        }
+        c.1 = finite_or_zero(c.1);
+        let (tanh_c, slope_c) = tanh_and_slope_near(c.0, c.1);
+        (grad * (o * slope_c), grad * (tanh_c * slope_o))
+    } else {
+        // The cell state does not depend on the output gate at all.
+        (grad, 0.0)
+    };
+    let far = |v: f64, limit: f64| v.abs() > limit;
+    if wide
+        && (far(x[INPUT], 708.0)
+            || far(x[FORGET], 708.0)
+            || far(x[CANDIDATE], 354.0)
+            || (from_hidden && (far(x[OUTPUT], 708.0) || far(c.0, 354.0))))
+    {
+        return far_unit_backward(x, before, grad, from_hidden, c);
+    }
+    (
+        [dc * (g * di), dc * (before * df), dc * (i * dg), d_o],
+        dc * f,
+    )
+}
+
+/// [`unit_backward`] where a value or slope lies below float64's normal range
+/// -- a logit past 708, or a cell state or candidate logit past 354 -- and
+/// float64 holds it only to its last few bits, while the other factors may
+/// bring a gradient back up where every bit shows: each factor kept as a
+/// [`Scaled`], and each gradient rounded once.
+#[cold]
+#[inline(never)]
+fn far_unit_backward(
+    x: [f64; 4],
+    before: f64,
+    grad: f64,
+    from_hidden: bool,
+    c: Pair,
+) -> ([f64; 4], f64) {
+    let [i, _, di] = logistic_scaled(x[INPUT], 0.0);
+    let [f, _, df] = logistic_scaled(x[FORGET], 0.0);
+    let [g, dg] = tanh_scaled(x[CANDIDATE], 0.0);
+    let grad = Scaled::of(grad);
+    let (dc, d_o) = if from_hidden {
+        let [o, _, slope_o] = logistic_scaled(x[OUTPUT], 0.0);
+        let [tanh_c, slope_c] = tanh_scaled(c.0, c.1);
+        (
+            grad.times(o.times(slope_c)),
+            grad.times(tanh_c.times(slope_o)).value(),
+        )
+    } else {
+        (grad, 0.0)
+    };
+    (
+        [
+            dc.times(g.times(di)).value(),
+            dc.times(Scaled::of(before).times(df)).value(),
+            dc.times(i.times(dg)).value(),
+            d_o,
+        ],
+        dc.times(f).value(),
+    )
 }
 
 #[cfg(test)]

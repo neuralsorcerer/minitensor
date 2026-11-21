@@ -310,40 +310,6 @@ fn rounded_prefixes<T: Output>(
     });
 }
 
-/// `exp` of a pair at most 708 in size, as a pair: one copy for each build
-/// of the callers below, rather than one at each of their call sites, the
-/// fused one compiled with the fused multiply-add as theirs are.
-#[inline(always)]
-fn exp_pair<const FMA: bool>(x: Pair) -> Pair {
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[target_feature(enable = "fma")]
-        #[inline(never)]
-        fn fused(x: Pair) -> Pair {
-            extended::exp::<true>(x)
-        }
-        #[inline(never)]
-        fn plain(x: Pair) -> Pair {
-            extended::exp::<false>(x)
-        }
-        if FMA {
-            // SAFETY: a build with `FMA` runs only where the CPU has the fused
-            // multiply-add; see `extended::fused`.
-            unsafe { fused(x) }
-        } else {
-            plain(x)
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        #[inline(never)]
-        fn any<const FMA: bool>(x: Pair) -> Pair {
-            extended::exp::<FMA>(x)
-        }
-        any::<FMA>(x)
-    }
-}
-
 /// A number far below the pairs it sits beside, `mantissa · 2^exponent` with
 /// `|mantissa|` in `[1, 2)` or zero and the exponent kept apart however far
 /// down it goes: the parts of a sum only a tie of it can show, kept to say
@@ -461,7 +427,7 @@ impl Prefix {
                     self.faint.plus(far)
                 };
             } else {
-                let term = exp_pair::<FMA>(Pair(d, e));
+                let term = extended::exp_pair::<FMA>(Pair(d, e));
                 if larger {
                     self.excess = self.excess.add(Pair(1.0, 0.0)).mul::<FMA>(term);
                     self.faint = self.faint.times(term.0, 0);
@@ -717,7 +683,7 @@ impl Scaled {
             (d.0 * extended::LOG2_E.0).round()
         };
         let r = d.add(Pair(m, 0.0).mul::<FMA>(extended::LN_2).neg());
-        Self::of(exp_pair::<FMA>(r), m as i64)
+        Self::of(extended::exp_pair::<FMA>(r), m as i64)
     }
 
     #[inline(always)]

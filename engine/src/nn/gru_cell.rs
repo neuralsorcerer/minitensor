@@ -43,16 +43,29 @@
 //! path that is supposed to be lossless. Fusing removes the `ones` allocation
 //! without touching the arithmetic that made it necessary.
 //!
-//! The backward is not bit-identical, for the same reason as the LSTM's: it is
-//! one expression per gate where the composed form was a chain of separate
-//! products. `tests/nn/test_recurrent_parameter_gradients.py` value-checks
-//! every parameter of four GRU configurations against central differences at
-//! float64.
+//! The backward is not, for the same reason as the LSTM's: its slopes are
+//! taken of the cell's inputs, where the composed form took `r (1 - r)`,
+//! `z (1 - z)` and `1 - n^2` of the activations it had rounded and lost them
+//! as the gates saturated -- `1 - z`, the share the candidate gets, along with
+//! them. Every value and slope is formed again in float64 from the two
+//! projections, their sums taken there too, and each gradient rounded once:
+//! for float32 the float nearest the exact one, for float64 within a few
+//! ulps, more where a logit is large. `tests/nn/test_recurrent_cell_slopes.py`
+//! holds them to exact values, and
+//! `tests/nn/test_recurrent_parameter_gradients.py` checks every parameter of
+//! four GRU configurations against central differences.
 
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     error::{MinitensorError, Result},
-    nn::cell::{band_width, sigmoid_block_f64, tanh_block_f64},
+    nn::cell::{
+        Scaled, band_width, finite_or_zero, logistic_near, logistic_pair, logistic_scaled,
+        par_row_bands, sigmoid_block_f64, tanh_and_slope_near, tanh_block_f64, tanh_pair,
+        tanh_scaled,
+    },
+    nn::lstm_cell::{product, slack},
+    ops::arithmetic::exact_sum::Output,
+    ops::arithmetic::{extended::Pair, rounded_once::two_sum},
     ops::map::{
         EXPENSIVE_PAR_THRESHOLD, SIMD_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, build_vec,
         par_out_chunks, unary_map_blocks_threshold,
@@ -71,16 +84,16 @@ const RESET: usize = 0;
 const UPDATE: usize = 1;
 const CANDIDATE: usize = 2;
 
-/// What the backward needs.
+/// What the backward needs: the cell's three inputs as they were given.
 ///
-/// `gates` holds the activated `r` and `z` in a `(batch, 2 * hidden)` layout,
-/// `candidate` holds `n`, and `candidate_hidden` holds the projected hidden
-/// contribution to the candidate *before* the reset gate scaled it -- which
-/// `n` cannot be run backwards to recover.
+/// The slopes are taken of the two projections, whose sums the gates' logits
+/// are -- formed in float64, rather than rounded to the dtype first -- and not
+/// of the activations the forward rounded, so those are not kept. The hidden projection's
+/// candidate block is among them, which `n` cannot be run backwards to
+/// recover.
 struct Saved {
-    gates: Tensor,
-    candidate: Tensor,
-    candidate_hidden: Tensor,
+    from_input: Tensor,
+    from_hidden: Tensor,
     hidden_before: Tensor,
 }
 
@@ -169,30 +182,9 @@ pub fn gru_cell(
                 unsafe { unary_map_blocks_threshold(&pre_gates, $par, sigmoid_block) };
             drop(pre_gates);
 
-            // The reset gate scales the hidden projection's candidate block and
-            // nothing else. That block is kept, because `n` cannot be run
-            // backwards to recover it.
-            // SAFETY: the rows tile the output and each is written whole.
-            let candidate_hidden: Vec<$ty> = unsafe {
-                build_vec(batch * hidden, |spare| {
-                    if hidden == 0 {
-                        return;
-                    }
-                    let width = band_width(spare.len(), hidden, SIMD_PAR_THRESHOLD);
-                    par_out_chunks(spare, width, &|start, band| {
-                        for (r, out_row) in band.chunks_exact_mut(hidden).enumerate() {
-                            let narrow = start + r * hidden;
-                            let block = &hidden_gates[narrow * 3 + CANDIDATE * hidden..][..hidden];
-                            for j in 0..hidden {
-                                out_row[j] = MaybeUninit::new(block[j]);
-                            }
-                        }
-                    });
-                })
-            };
-
-            // n = tanh(from_input_n + r * candidate_hidden), gathered contiguous
-            // so the `tanh` is one call for the batch.
+            // n = tanh(from_input_n + r * from_hidden_n), gathered contiguous so
+            // the `tanh` is one call for the batch. The reset gate scales the
+            // hidden projection's candidate block and nothing else.
             // SAFETY: as above.
             let pre_candidate: Vec<$ty> = unsafe {
                 build_vec(batch * hidden, |spare| {
@@ -205,7 +197,8 @@ pub fn gru_cell(
                             let narrow = start + r * hidden;
                             let from_x = &input_gates[narrow * 3 + CANDIDATE * hidden..][..hidden];
                             let reset = &gates[narrow * 2 + RESET * hidden..][..hidden];
-                            let projected = &candidate_hidden[narrow..][..hidden];
+                            let projected =
+                                &hidden_gates[narrow * 3 + CANDIDATE * hidden..][..hidden];
                             for j in 0..hidden {
                                 out_row[j] = MaybeUninit::new(from_x[j] + reset[j] * projected[j]);
                             }
@@ -243,16 +236,11 @@ pub fn gru_cell(
                 })
             };
 
-            (
-                TensorData::from_vec::<$ty>(gates, dtype, device),
-                TensorData::from_vec::<$ty>(candidate, dtype, device),
-                TensorData::from_vec::<$ty>(candidate_hidden, dtype, device),
-                TensorData::from_vec::<$ty>(hidden_after, dtype, device),
-            )
+            TensorData::from_vec::<$ty>(hidden_after, dtype, device)
         }};
     }
 
-    let (gates, candidate, candidate_hidden, hidden_after) = match dtype {
+    let hidden_after = match dtype {
         DataType::Float32 => {
             let kernel = crate::ops::simd::F32Kernel::select();
             run!(
@@ -279,7 +267,7 @@ pub fn gru_cell(
 
     let new_h = Tensor::new(
         Arc::new(hidden_after),
-        narrow_shape.clone(),
+        narrow_shape,
         dtype,
         device,
         requires_grad,
@@ -290,27 +278,8 @@ pub fn gru_cell(
     }
 
     let saved = Saved {
-        gates: Tensor::new(
-            Arc::new(gates),
-            Shape::new(vec![batch, 2 * hidden]),
-            dtype,
-            device,
-            false,
-        ),
-        candidate: Tensor::new(
-            Arc::new(candidate),
-            narrow_shape.clone(),
-            dtype,
-            device,
-            false,
-        ),
-        candidate_hidden: Tensor::new(
-            Arc::new(candidate_hidden),
-            narrow_shape,
-            dtype,
-            device,
-            false,
-        ),
+        from_input: from_input.detach(),
+        from_hidden: from_hidden.detach(),
         hidden_before: hidden_before.detach(),
     };
 
@@ -341,155 +310,32 @@ struct GruCellBackward {
 impl GradientFunction for GruCellBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let hidden = self.hidden;
-        let batch = self.saved.candidate.shape().dims()[0];
+        let batch = self.saved.hidden_before.shape().dims()[0];
         let dtype = grad_output.dtype();
         let device = grad_output.device();
-        let wanted = self.wanted;
 
         macro_rules! run {
             ($ty:ty, $slice:ident) => {{
                 let incoming = grad_output.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("gru_cell backward: gradient dtype")
                 })?;
-                let gates = self.saved.gates.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("gru_cell backward: saved gates")
+                let from_input = self.saved.from_input.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("gru_cell backward: saved input projection")
                 })?;
-                let candidate = self.saved.candidate.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("gru_cell backward: saved candidate")
-                })?;
-                let projected = self.saved.candidate_hidden.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("gru_cell backward: saved projection")
+                let from_hidden = self.saved.from_hidden.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("gru_cell backward: saved hidden projection")
                 })?;
                 let previous = self.saved.hidden_before.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("gru_cell backward: saved hidden state")
                 })?;
-
-                // Both projections receive *the same* gradient through `r`
-                // and through `z`, whose pre-activations are plain sums of the
-                // two. They part company in one block of the three: the
-                // candidate's, where the input's term is `dq` and the hidden's
-                // is `dq * r`. So the hidden's buffer is built *from* the
-                // input's -- two thirds of it a copy -- rather than by
-                // deriving both sigmoids a second time.
-                //
-                // Row slices rather than indexing, for the reason the first
-                // version of this file is worth remembering: written as a
-                // closure taking `(row, column)` and indexing five buffers per
-                // element, nothing vectorized, and the backward was 59% slower
-                // than the composed form at T=16 while still winning at T=256.
-                // Cache traffic is what fusing buys back; it does not also pay
-                // for scalar arithmetic.
-                // SAFETY: the three blocks tile each row and every element of
-                // each is written; the rows tile the output.
-                let build_input = || -> Vec<$ty> {
-                    unsafe {
-                        build_vec(batch * 3 * hidden, |spare| {
-                            if hidden == 0 {
-                                return;
-                            }
-                            let width = band_width(spare.len(), 3 * hidden, SIMD_PAR_THRESHOLD);
-                            par_out_chunks(spare, width, &|start, band| {
-                                for (row, row_out) in band.chunks_exact_mut(3 * hidden).enumerate()
-                                {
-                                    let narrow = (start + row * 3 * hidden) / 3;
-                                    let r = &gates[narrow * 2 + RESET * hidden..][..hidden];
-                                    let z = &gates[narrow * 2 + UPDATE * hidden..][..hidden];
-                                    let n = &candidate[narrow..][..hidden];
-                                    let g = &incoming[narrow..][..hidden];
-                                    let prev = &previous[narrow..][..hidden];
-                                    let projected_row = &projected[narrow..][..hidden];
-                                    let (d_reset, rest) = row_out.split_at_mut(hidden);
-                                    let (d_update, d_candidate) = rest.split_at_mut(hidden);
-
-                                    for j in 0..hidden {
-                                        // h' = (1 - z) * n + z * h, then back
-                                        // through n = tanh(ni + r * nh).
-                                        let d_pre_n = g[j] * (1.0 - z[j]) * (1.0 - n[j] * n[j]);
-                                        d_reset[j] = MaybeUninit::new(
-                                            d_pre_n * projected_row[j] * r[j] * (1.0 - r[j]),
-                                        );
-                                        d_update[j] = MaybeUninit::new(
-                                            g[j] * (prev[j] - n[j]) * z[j] * (1.0 - z[j]),
-                                        );
-                                        d_candidate[j] = MaybeUninit::new(d_pre_n);
-                                    }
-                                }
-                            });
-                        })
-                    }
-                };
-
-                // SAFETY: as above.
-                let build_hidden = |input: &[$ty]| -> Vec<$ty> {
-                    unsafe {
-                        build_vec(batch * 3 * hidden, |spare| {
-                            if hidden == 0 {
-                                return;
-                            }
-                            let width = band_width(spare.len(), 3 * hidden, SIMD_PAR_THRESHOLD);
-                            par_out_chunks(spare, width, &|start, band| {
-                                for (row, row_out) in band.chunks_exact_mut(3 * hidden).enumerate()
-                                {
-                                    let wide = start + row * 3 * hidden;
-                                    let source = &input[wide..][..3 * hidden];
-                                    let r = &gates[wide / 3 * 2 + RESET * hidden..][..hidden];
-                                    let (shared, d_candidate) = row_out.split_at_mut(2 * hidden);
-                                    for j in 0..2 * hidden {
-                                        shared[j] = MaybeUninit::new(source[j]);
-                                    }
-                                    for j in 0..hidden {
-                                        d_candidate[j] =
-                                            MaybeUninit::new(source[2 * hidden + j] * r[j]);
-                                    }
-                                }
-                            });
-                        })
-                    }
-                };
-
-                // When only the hidden projection wants a gradient the input's
-                // is still built, as the source of the two thirds they share.
-                // That case does not arise in a trained layer, where both come
-                // from the same weights.
-                let d_input = if wanted[0] || wanted[1] {
-                    build_input()
-                } else {
-                    Vec::new()
-                };
-                let d_hidden = if wanted[1] {
-                    build_hidden(&d_input)
-                } else {
-                    Vec::new()
-                };
-                let d_input = if wanted[0] { d_input } else { Vec::new() };
-
-                // dL/dh comes back through the blend alone: `z * g`. The rest
-                // of the previous state's influence is through the projection,
-                // which is the matmul's business and not this node's.
-                // SAFETY: the rows tile the output and each is written whole.
-                let d_previous: Vec<$ty> = if wanted[2] {
-                    unsafe {
-                        build_vec(batch * hidden, |spare| {
-                            if hidden == 0 {
-                                return;
-                            }
-                            let width = band_width(spare.len(), hidden, SIMD_PAR_THRESHOLD);
-                            par_out_chunks(spare, width, &|start, band| {
-                                for (r, out_row) in band.chunks_exact_mut(hidden).enumerate() {
-                                    let narrow = start + r * hidden;
-                                    let update = &gates[narrow * 2 + UPDATE * hidden..][..hidden];
-                                    let g = &incoming[narrow..][..hidden];
-                                    for j in 0..hidden {
-                                        out_row[j] = MaybeUninit::new(g[j] * update[j]);
-                                    }
-                                }
-                            });
-                        })
-                    }
-                } else {
-                    Vec::new()
-                };
-
+                let [d_input, d_hidden, d_previous] = backward_rows::<$ty>(
+                    from_input,
+                    from_hidden,
+                    previous,
+                    incoming,
+                    hidden,
+                    self.wanted,
+                );
                 (
                     TensorData::from_vec::<$ty>(d_input, dtype, device),
                     TensorData::from_vec::<$ty>(d_hidden, dtype, device),
@@ -510,19 +356,19 @@ impl GradientFunction for GruCellBackward {
 
         let wide = Shape::new(vec![batch, 3 * hidden]);
         let mut gradients = FxHashMap::default();
-        if wanted[0] {
+        if self.wanted[0] {
             gradients.insert(
                 self.ids[0],
                 Tensor::new(Arc::new(d_input), wide.clone(), dtype, device, false),
             );
         }
-        if wanted[1] {
+        if self.wanted[1] {
             gradients.insert(
                 self.ids[1],
                 Tensor::new(Arc::new(d_hidden), wide, dtype, device, false),
             );
         }
-        if wanted[2] {
+        if self.wanted[2] {
             gradients.insert(
                 self.ids[2],
                 Tensor::new(
@@ -540,6 +386,188 @@ impl GradientFunction for GruCellBackward {
     fn input_ids(&self) -> &[TensorId] {
         &self.ids
     }
+}
+
+/// The gradients of [`gru_cell`] -- of the input projection, of the hidden
+/// projection and of the hidden state before, each empty unless `wanted` --
+/// for the incoming gradient `incoming` of the new hidden state.
+///
+/// Both projections receive the same gradient through `r` and `z`, whose
+/// logits are plain sums of the two; they part in the candidate's block,
+/// where the input's is `dn` and the hidden's `dn * r`. One pass writes all
+/// three, a row of each at a time, so that every element's values and slopes
+/// -- a few exponentials -- are formed once.
+fn backward_rows<T: Output>(
+    from_input: &[T],
+    from_hidden: &[T],
+    previous: &[T],
+    incoming: &[T],
+    hidden: usize,
+    wanted: [bool; 3],
+) -> [Vec<T>; 3] {
+    let batch = previous.len() / hidden.max(1);
+    let wide_row = 3 * hidden;
+    let wide = T::DIGITS > 24;
+    let widths = [
+        if wanted[0] { wide_row } else { 0 },
+        if wanted[1] { wide_row } else { 0 },
+        if wanted[2] { hidden } else { 0 },
+    ];
+    let mut outs = widths.map(|width| Vec::with_capacity(batch * width));
+    {
+        let [d_input, d_hidden, d_previous] = &mut outs;
+        par_row_bands(
+            [
+                &mut d_input.spare_capacity_mut()[..batch * widths[0]],
+                &mut d_hidden.spare_capacity_mut()[..batch * widths[1]],
+                &mut d_previous.spare_capacity_mut()[..batch * widths[2]],
+            ],
+            widths,
+            batch,
+            EXPENSIVE_PAR_THRESHOLD,
+            &|first, count, [input_rows, hidden_rows, previous_rows]| {
+                for row in 0..count {
+                    let at = first + row;
+                    let a = &from_input[at * wide_row..][..wide_row];
+                    let b = &from_hidden[at * wide_row..][..wide_row];
+                    let before = &previous[at * hidden..][..hidden];
+                    let grad = &incoming[at * hidden..][..hidden];
+                    for j in 0..hidden {
+                        let pick =
+                            |p: &[T]| [RESET, UPDATE, CANDIDATE].map(|g| p[g * hidden + j].widen());
+                        let (d, d_from_hidden_n, d_before) = unit_backward(
+                            pick(a),
+                            pick(b),
+                            before[j].widen(),
+                            grad[j].widen(),
+                            wide,
+                        );
+                        let out = row * wide_row + j;
+                        if wanted[0] {
+                            for (g, d) in [RESET, UPDATE, CANDIDATE].into_iter().zip(d) {
+                                input_rows[out + g * hidden].write(T::narrow(d));
+                            }
+                        }
+                        if wanted[1] {
+                            hidden_rows[out + RESET * hidden].write(T::narrow(d[RESET]));
+                            hidden_rows[out + UPDATE * hidden].write(T::narrow(d[UPDATE]));
+                            hidden_rows[out + CANDIDATE * hidden].write(T::narrow(d_from_hidden_n));
+                        }
+                        if wanted[2] {
+                            previous_rows[row * hidden + j].write(T::narrow(d_before));
+                        }
+                    }
+                }
+            },
+        );
+    }
+    for (out, width) in outs.iter_mut().zip(widths) {
+        // SAFETY: every row of a wanted output was written whole above, and an
+        // output nobody wants is empty.
+        unsafe { out.set_len(batch * width) };
+    }
+    outs
+}
+
+/// One hidden unit's backward, in float64: from its two projections `a` and
+/// `b` (input and hidden, each `[r, z, n]`), its hidden state before and the
+/// incoming gradient, the gradients of the input projection's three logits,
+/// of the hidden projection's candidate logit, and of the state before.
+///
+/// `h' = (1 - z) n + z h` with `n = tanh(a_n + r b_n)`, so `dn` is
+/// `grad (1 - z) tanh'`, `dr = dn b_n r'`, `dz = grad (h - n) z'`, the hidden
+/// projection's candidate logit gets `dn r`, and the state before `grad z`
+/// through the blend alone -- the rest of its influence is through the
+/// projection, which is the matmul's business and not this node's. `1 - z` is
+/// `sigmoid(-x_z)` itself, not a difference.
+///
+/// The logits are taken as pairs, as their slopes move by up to the logit's
+/// size times whatever it is out by: `a + b` with its rounding beside it, and
+/// `a_n + r b_n` with the product's -- and where `r b_n` is beyond `slack` in
+/// size (see [`slack`]), so that an ulp of a float64
+/// `r` is many of the logit's last places, `r` carried as a pair too. Without
+/// them float64 logits of some fifty left the gradients nearly a hundred ulps
+/// out. Where the state before is near `n`, `h - n` is small beside what a
+/// float64 `n` is out by; there `n` is carried as a pair, and `r` with it.
+#[inline(always)]
+fn unit_backward(
+    a: [f64; 3],
+    b: [f64; 3],
+    before: f64,
+    grad: f64,
+    wide: bool,
+) -> ([f64; 3], f64, f64) {
+    let slack = slack(wide);
+    // A float32 pair's sum is exact in float64 but where their exponents lie
+    // 29 apart, and then off by less than a float32 gradient shows.
+    let sum = |x: f64, y: f64| {
+        if wide {
+            let (s, e) = two_sum(x, y);
+            (s, finite_or_zero(e))
+        } else {
+            (x + y, 0.0)
+        }
+    };
+    let (x_r, e_r) = sum(a[RESET], b[RESET]);
+    let (x_z, e_z) = sum(a[UPDATE], b[UPDATE]);
+    let (r, _, dr) = logistic_near(x_r, e_r);
+    let (z, not_z, dz) = logistic_near(x_z, e_z);
+    let scaled = product(r, b[CANDIDATE], wide);
+    let mut x_n = Pair(a[CANDIDATE], 0.0).add(scaled);
+    x_n.1 = finite_or_zero(x_n.1);
+    let (mut n, mut dn_slope) = tanh_and_slope_near(x_n.0, x_n.1);
+    let mut gap = before - n;
+    let cancels = gap.abs() < n.abs() / (2.0 * slack);
+    if cancels || scaled.0.abs() > slack {
+        let scaled = logistic_pair(Pair(x_r, e_r)).mul::<false>(Pair(b[CANDIDATE], 0.0));
+        x_n = Pair(a[CANDIDATE], 0.0).add(scaled);
+        x_n.1 = finite_or_zero(x_n.1);
+        (n, dn_slope) = tanh_and_slope_near(x_n.0, x_n.1);
+        gap = before - n;
+    }
+    if cancels {
+        gap = Pair(before, 0.0).add(tanh_pair(x_n).neg()).0;
+    }
+    if wide && (x_r.abs() > 708.0 || x_z.abs() > 708.0 || x_n.0.abs() > 354.0) {
+        return far_unit_backward(Pair(x_r, e_r), Pair(x_z, e_z), x_n, b[CANDIDATE], gap, grad);
+    }
+    let dn = grad * (not_z * dn_slope);
+    (
+        [dn * (b[CANDIDATE] * dr), grad * (gap * dz), dn],
+        dn * r,
+        grad * z,
+    )
+}
+
+/// [`unit_backward`] where a value or slope lies below float64's normal range
+/// -- a logit past 708, or a candidate logit past 354 -- and float64 holds it
+/// only to its last few bits, while the other factors may bring a gradient
+/// back up where every bit shows: each factor kept as a [`Scaled`], and each
+/// gradient rounded once.
+#[cold]
+#[inline(never)]
+fn far_unit_backward(
+    x_r: Pair,
+    x_z: Pair,
+    x_n: Pair,
+    b_n: f64,
+    gap: f64,
+    grad: f64,
+) -> ([f64; 3], f64, f64) {
+    let [r, _, dr] = logistic_scaled(x_r.0, x_r.1);
+    let [z, not_z, dz] = logistic_scaled(x_z.0, x_z.1);
+    let [_, dn_slope] = tanh_scaled(x_n.0, x_n.1);
+    let grad = Scaled::of(grad);
+    let dn = grad.times(not_z.times(dn_slope));
+    (
+        [
+            dn.times(Scaled::of(b_n).times(dr)).value(),
+            grad.times(Scaled::of(gap).times(dz)).value(),
+            dn.value(),
+        ],
+        dn.times(r).value(),
+        grad.times(z).value(),
+    )
 }
 
 #[cfg(test)]

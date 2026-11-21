@@ -1449,6 +1449,42 @@ fn tail_exp<const FMA: bool>(scaled: f64) -> f64 {
     two_pow_n * (1.0 + expm1_poly::<FMA>(r))
 }
 
+/// `(e^v, e^v - 1)` for `v <= 0`, each to a few float64 ulps, from one
+/// reduction: neither is formed from the other, which would cancel -- the
+/// second from the first near `v = 0`, the first from the second far below
+/// it. Unlike [`tail_exp`], whose slopes are rounded to float32, nothing is
+/// clamped short of where float64 itself runs out: below -708, where `2^n`
+/// would leave the normal range, `e^v` is `e^(v/2)` squared, zero from -1416
+/// on, where `e^v - 1` is -1. A NaN passes through both.
+#[inline(always)]
+pub(crate) fn exp_below_zero(v: f64) -> (f64, f64) {
+    let far = v < -708.0;
+    let w = if far { (0.5 * v).max(-708.0) } else { v };
+    let (two_pow_n, r) = reduce_exp::<false>(w);
+    let p = expm1_poly::<false>(r);
+    let e = fma_or::<false>(two_pow_n, p, two_pow_n);
+    if far {
+        (e * e, -1.0)
+    } else {
+        (e, fma_or::<false>(two_pow_n, p, two_pow_n - 1.0))
+    }
+}
+
+/// `e^v` for `v <= 0` as `(m, n)`, `e^v = m 2^n` with `m` within a factor of
+/// two of one, however far below float64's range `e^v` lies: the reduction
+/// of [`exp_below_zero`] without the power of two it builds, which leaves the
+/// normal range below -708. It is for a factor whose product with others
+/// comes back into the range, to be rounded once there. Below `-10^5`, where
+/// no product of floats does, it is `(0, 0)`; a NaN's is `(NaN, 0)`.
+pub(crate) fn exp_split(v: f64) -> (f64, i32) {
+    if v.is_nan() || v < -1e5 {
+        return (if v.is_nan() { v } else { 0.0 }, 0);
+    }
+    let n = fma_or::<false>(v, LOG2E, MAGIC) - MAGIC;
+    let r = fma_or::<false>(-n, LN2_LO, fma_or::<false>(-n, LN2_HI, v));
+    (1.0 + expm1_poly::<false>(r), n as i32)
+}
+
 /// `d/dx tanh(x) = 4t / (1 + t)^2` for `t = exp(-2|x|)`, times the incoming
 /// gradient: of the input, with no difference of numbers near one in it.
 #[inline(always)]

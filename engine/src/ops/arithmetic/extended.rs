@@ -159,6 +159,15 @@ impl Pair {
         Pair::normal(p, e)
     }
 
+    /// `self / other` to about 2^-100 of it: the float64 quotient, and then
+    /// the quotient of what is left of `self`, formed as pairs.
+    #[inline(always)]
+    pub(crate) fn div<const FMA: bool>(self, other: Pair) -> Pair {
+        let q = self.0 / other.0;
+        let rest = self.add(other.mul::<FMA>(Pair(-q, 0.0)));
+        Pair::normal(q, rest.0 / other.0)
+    }
+
     /// Times a power of two, exactly while both parts stay normal.
     fn scaled(self, power: f64) -> Pair {
         Pair(self.0 * power, self.1 * power)
@@ -205,6 +214,57 @@ pub(crate) fn exp<const FMA: bool>(x: Pair) -> Pair {
     let (n, j, e) = exp_parts::<FMA>(x);
     let power = POWERS[j];
     power.add(power.mul::<FMA>(e)).scaled(2f64.powi(n as i32))
+}
+
+/// `exp` of a pair at most 708 in size, as a pair: one copy for each build of
+/// its callers, the fused one compiled with the fused multiply-add as theirs
+/// are, rather than one at each of their call sites.
+#[inline(always)]
+pub(crate) fn exp_pair<const FMA: bool>(x: Pair) -> Pair {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "fma")]
+        #[inline(never)]
+        fn fused(x: Pair) -> Pair {
+            exp::<true>(x)
+        }
+        #[inline(never)]
+        fn plain(x: Pair) -> Pair {
+            exp::<false>(x)
+        }
+        if FMA {
+            // SAFETY: a build with `FMA` runs only where the CPU has the fused
+            // multiply-add; see [`fused`].
+            unsafe { fused(x) }
+        } else {
+            plain(x)
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        #[inline(never)]
+        fn any<const FMA: bool>(x: Pair) -> Pair {
+            exp::<FMA>(x)
+        }
+        any::<FMA>(x)
+    }
+}
+
+/// [`exp_pair`] for a caller built for neither CPU in particular: the fused
+/// copy where this one has the fused multiply-add.
+pub(crate) fn exp_pair_any_cpu(x: Pair) -> Pair {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::simd::simd_capabilities().avx2_fma {
+            exp_pair::<true>(x)
+        } else {
+            exp_pair::<false>(x)
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        exp_pair::<{ cfg!(target_arch = "aarch64") }>(x)
+    }
 }
 
 /// `exp(x) - 1` as a pair, for `x` from -708 to 708: the reduced `e` itself
