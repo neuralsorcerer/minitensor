@@ -812,18 +812,18 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
         gradients.reserve(1);
 
         let mut grad_data = TensorData::zeros_on_device(
-            self.output.numel(),
-            self.output.dtype(),
-            self.output.device(),
+            self.input.numel(),
+            self.input.dtype(),
+            self.input.device(),
         );
 
-        let output_dims = self.output.shape().dims();
+        let output_dims = self.input.shape().dims();
         let mask_dims = self.mask.shape().dims();
         let same_shape = output_dims == mask_dims;
         let output_strides = if same_shape {
             None
         } else {
-            Some(Strides::from_shape(self.output.shape()))
+            Some(Strides::from_shape(self.input.shape()))
         };
         let mask_strides = if same_shape {
             None
@@ -836,9 +836,9 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                 let go = grad_output.data().as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f32 slice from grad_output")
                 })?;
-                let log_y = self.output.data().as_f32_slice().ok_or_else(|| {
+                let input = self.input.data().as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error(
-                        "Failed to get f32 slice from masked log_softmax output",
+                        "Failed to get f32 slice from masked log_softmax input",
                     )
                 })?;
                 let mask_data = self.mask.data().as_bool_slice().ok_or_else(|| {
@@ -851,7 +851,7 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                 })?;
                 masked_log_softmax_backward(
                     go,
-                    log_y,
+                    input,
                     mask_data,
                     grad_slice,
                     output_dims,
@@ -865,9 +865,9 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f64 slice from grad_output")
                 })?;
-                let log_y = self.output.data().as_f64_slice().ok_or_else(|| {
+                let input = self.input.data().as_f64_slice().ok_or_else(|| {
                     MinitensorError::internal_error(
-                        "Failed to get f64 slice from masked log_softmax output",
+                        "Failed to get f64 slice from masked log_softmax input",
                     )
                 })?;
                 let mask_data = self.mask.data().as_bool_slice().ok_or_else(|| {
@@ -880,7 +880,7 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                 })?;
                 masked_log_softmax_backward(
                     go,
-                    log_y,
+                    input,
                     mask_data,
                     grad_slice,
                     output_dims,
@@ -899,9 +899,9 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
 
         let grad_input = Tensor::new(
             Arc::new(grad_data),
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
             grad_output.requires_grad(),
         );
 
@@ -1061,14 +1061,9 @@ pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send 
         grad_input,
         group,
         |_, go_block, z_block, out_block| {
-            let mut stack = [0.0f64; 64];
+            let mut stack = [0.0f64; 3 * SLICE_ON_STACK];
             let mut heap = Vec::new();
-            let terms: &mut [f64] = if dim_size <= stack.len() {
-                &mut stack[..dim_size]
-            } else {
-                heap.resize(dim_size, 0.0);
-                &mut heap
-            };
+            let (terms, g, out) = slice_scratch(dim_size, &mut stack, &mut heap);
             let mut gathered: Vec<T> = Vec::new();
             for base in 0..after {
                 let at = |k: usize| base + k * after;
@@ -1079,64 +1074,139 @@ pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send 
                     gathered.extend((0..dim_size).map(|k| z_block[at(k)]));
                     &gathered
                 };
-                let top = (1..dim_size).fold(0, |m, k| if z[k] > z[m] { k } else { m });
-                let g = |k: usize| go_block[at(k)].wide();
-                let sum = accurate_indexed_sum(dim_size, 0.0f64, g);
-                if z[top].is_infinite() {
-                    // The forward's limits there: the `+inf`s share all of
-                    // the mass evenly, a slice of `-inf` has none, and a NaN
-                    // makes the whole slice NaN.
-                    let (infinities, nan) = infinite_slice_parts(z.iter().copied());
-                    let share = if nan {
-                        f64::NAN
-                    } else {
-                        (infinities as f64).recip()
-                    };
-                    for k in 0..dim_size {
-                        let p = if nan || z[k] == T::infinity() {
-                            share
-                        } else {
-                            0.0
-                        };
-                        out_block[at(k)] = T::narrow(g(k) - p * sum);
-                    }
-                    continue;
+                for (k, g) in g.iter_mut().enumerate() {
+                    *g = go_block[at(k)].wide();
                 }
-                T::exp_shifted_into(z, z[top], terms);
-                let rest_terms =
-                    accurate_indexed_sum(
-                        dim_size,
-                        0.0f64,
-                        |k| if k == top { 0.0 } else { terms[k] },
-                    );
-                let total = terms[top] + rest_terms;
-                let big = (1..dim_size).fold(0, |m, k| if g(k).abs() > g(m).abs() { k } else { m });
-                let rest_g =
-                    accurate_indexed_sum(dim_size, 0.0f64, |k| if k == big { 0.0 } else { g(k) });
-                for k in 0..dim_size {
-                    let p = terms[k] / total;
-                    let not_p = if k == top {
-                        rest_terms / total
-                    } else {
-                        1.0 - p
-                    };
-                    let not_g = if k == big { rest_g } else { sum - g(k) };
-                    out_block[at(k)] = T::narrow(g(k) * not_p - p * not_g);
+                log_softmax_slice(z, g, terms, out);
+                for (k, &v) in out.iter().enumerate() {
+                    out_block[at(k)] = T::narrow(v);
                 }
             }
         },
     );
 }
-/// `log_softmax` backward restricted to the unmasked positions.
+
+/// Slices of up to this many entries take their scratch from the stack.
+const SLICE_ON_STACK: usize = 64;
+
+/// Three float64 buffers of `len` for one slice of a softmax-family
+/// backward, from `stack` where they fit and `heap` where they do not.
+fn slice_scratch<'a>(
+    len: usize,
+    stack: &'a mut [f64; 3 * SLICE_ON_STACK],
+    heap: &'a mut Vec<f64>,
+) -> (&'a mut [f64], &'a mut [f64], &'a mut [f64]) {
+    let room: &mut [f64] = if len <= SLICE_ON_STACK {
+        &mut stack[..3 * len]
+    } else {
+        heap.resize(3 * len, 0.0);
+        heap
+    };
+    let (first, rest) = room.split_at_mut(len);
+    let (second, third) = rest.split_at_mut(len);
+    (first, second, third)
+}
+
+/// One slice of `log_softmax`'s backward, from its input `z` and incoming
+/// gradient `g`: `g_c (1 - p_c) - p_c (S - g_c)` into `out`, in float64; see
+/// [`log_softmax_backward`]. `terms` holds the slice's exponentials; all four
+/// are the slice's length. A slice whose maximum is infinite takes the
+/// forward's limits there: the `+inf`s share all of the mass evenly, a slice
+/// of `-inf` has none, and a NaN makes the whole slice NaN.
+fn log_softmax_slice<T: crate::ops::activation::ShiftedExp>(
+    z: &[T],
+    g: &[f64],
+    terms: &mut [f64],
+    out: &mut [f64],
+) {
+    let n = z.len();
+    // The likeliest entry and the largest gradient, in one pass.
+    let (mut top, mut big) = (0, 0);
+    for k in 1..n {
+        if z[k] > z[top] {
+            top = k;
+        }
+        if g[k].abs() > g[big].abs() {
+            big = k;
+        }
+    }
+    if z[top].is_infinite() {
+        let sum = accurate_indexed_sum(n, 0.0f64, |k| g[k]);
+        let (infinities, nan) = infinite_slice_parts(z.iter().copied());
+        let share = if nan {
+            f64::NAN
+        } else {
+            (infinities as f64).recip()
+        };
+        for ((o, &v), &g) in out.iter_mut().zip(z).zip(g) {
+            let p = if nan || v == T::infinity() {
+                share
+            } else {
+                0.0
+            };
+            *o = g - p * sum;
+        }
+        return;
+    }
+    T::exp_shifted_into(z, z[top], terms);
+    // The slice's sums, in one pass: of `g`, of `g` but the largest, and of
+    // the terms but the likeliest's, which is one.
+    let SliceSums([sum, rest_g, rest_terms]) = accurate_indexed_sum(n, SliceSums([0.0; 3]), |k| {
+        SliceSums([
+            g[k],
+            if k == big { 0.0 } else { g[k] },
+            if k == top { 0.0 } else { terms[k] },
+        ])
+    });
+    let total = 1.0 + rest_terms;
+    // `g (1 - p) - p (S - g)` is `g - p S`, and only at the likeliest entry,
+    // where `1 - p` can be all but cancelled, and the largest gradient, where
+    // `S - g` can, does the sum of the rest decide it; elsewhere it is one
+    // product of the term with the slice's `S / total`.
+    let share = sum / total;
+    for ((o, &g), &term) in out.iter_mut().zip(g).zip(terms.iter()) {
+        *o = g - term * share;
+    }
+    for k in [top, big] {
+        let p = terms[k] / total;
+        let not_p = if k == top {
+            rest_terms / total
+        } else {
+            1.0 - p
+        };
+        let not_g = if k == big { rest_g } else { sum - g[k] };
+        out[k] = g[k] * not_p - p * not_g;
+    }
+}
+
+/// Three sums of a slice taken side by side in one pass.
+#[derive(Clone, Copy)]
+struct SliceSums([f64; 3]);
+
+impl std::ops::Add for SliceSums {
+    type Output = Self;
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        let ([a, b, c], [x, y, z]) = (self.0, other.0);
+        Self([a + x, b + y, c + z])
+    }
+}
+/// `log_softmax` backward restricted to the unmasked positions, from the
+/// input: each slice's unmasked entries as [`log_softmax_backward`] takes a
+/// whole slice, and zero at the masked ones.
 ///
-/// Masked entries contribute nothing to their slice's sum and receive a zero
-/// gradient. `mask` may be a broadcast of the output shape, in which case
-/// `output_strides`/`mask_strides` describe how to map an output position onto
-/// it; when the shapes already agree both are `None` and the index is used
+/// It took its probabilities as `exp` of the rounded output and formed
+/// `g - p S` in the tensor's dtype, and a confident, correct slice's gradient
+/// at its likeliest entry was all rounding, as `log_softmax`'s was.
+///
+/// `mask` may be a broadcast of the input shape, in which case
+/// `output_strides`/`mask_strides` describe how to map a position onto it;
+/// when the shapes already agree both are `None` and the index is used
 /// directly.
-fn masked_log_softmax_backward<T: Float + Send + Sync>(
+fn masked_log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send + Sync>(
     grad_output: &[T],
-    log_y: &[T],
+    input: &[T],
     mask: &[bool],
     grad_input: &mut [T],
     dims: &[usize],
@@ -1149,8 +1219,8 @@ fn masked_log_softmax_backward<T: Float + Send + Sync>(
         return;
     };
 
-    // Resolving a mask position once, here, is what lets the two passes below
-    // read the same whether or not the mask is broadcast.
+    // Resolving a mask position once, here, is what lets the pass below read
+    // the same whether or not the mask is broadcast.
     let is_masked = |linear_idx: usize| match (output_strides, mask_strides) {
         (Some(out_strides), Some(m_strides)) => {
             mask[broadcast_mask_index(linear_idx, dims, out_strides, mask_dims, m_strides)]
@@ -1160,35 +1230,57 @@ fn masked_log_softmax_backward<T: Float + Send + Sync>(
 
     zip_blocks_maybe_par(
         grad_output,
-        log_y,
+        input,
         grad_input,
         group,
-        |block_idx, go_block, log_block, out_block| {
+        |block_idx, go_block, z_block, out_block| {
             let block_offset = block_idx * group;
+            // A slice's float64 scratch and its unmasked positions and
+            // logits, on the stack for a slice of up to 64, as most are.
+            let mut stack = [0.0f64; 3 * SLICE_ON_STACK];
+            let mut heap = Vec::new();
+            let (terms, g, out) = slice_scratch(dim_size, &mut stack, &mut heap);
+            let (mut stack_kept, mut stack_z) =
+                ([0usize; SLICE_ON_STACK], [T::zero(); SLICE_ON_STACK]);
+            let (mut heap_kept, mut heap_z) = (Vec::new(), Vec::new());
+            let (kept, z): (&mut [usize], &mut [T]) = if dim_size <= SLICE_ON_STACK {
+                (&mut stack_kept[..dim_size], &mut stack_z[..dim_size])
+            } else {
+                heap_kept.resize(dim_size, 0);
+                heap_z.resize(dim_size, T::zero());
+                (&mut heap_kept, &mut heap_z)
+            };
             for base in 0..after {
-                let mut sum = T::zero();
+                let mut n = 0;
                 for k in 0..dim_size {
                     let idx = base + k * after;
+                    out_block[idx] = T::zero();
                     if !is_masked(block_offset + idx) {
-                        sum = sum + go_block[idx];
+                        kept[n] = idx;
+                        z[n] = z_block[idx];
+                        n += 1;
                     }
                 }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] = if is_masked(block_offset + idx) {
-                        T::zero()
-                    } else {
-                        go_block[idx] - log_block[idx].exp() * sum
-                    };
+                if n == 0 {
+                    continue;
+                }
+                let kept = &kept[..n];
+                for (g, &idx) in g.iter_mut().zip(kept) {
+                    *g = go_block[idx].wide();
+                }
+                log_softmax_slice(&z[..n], &g[..n], &mut terms[..n], &mut out[..n]);
+                for (&idx, &v) in kept.iter().zip(out.iter()) {
+                    out_block[idx] = T::narrow(v);
                 }
             }
         },
     );
 }
-/// Gradient function for masked log-softmax
+/// Gradient function for masked log-softmax. It keeps the input rather than
+/// the output, as [`LogSoftmaxBackward`] does.
 pub struct MaskedLogSoftmaxBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
     pub mask: Tensor,
     pub dim: usize,
 }

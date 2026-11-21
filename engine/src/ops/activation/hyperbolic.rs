@@ -220,7 +220,7 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
         if output.requires_grad() {
             let grad_fn = Arc::new(MaskedLogSoftmaxBackward {
                 input_id: tensor.id(),
-                output: output.detach(),
+                input: tensor.detach(),
                 mask: mask.detach(),
                 dim: 0,
             });
@@ -259,7 +259,7 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
     if output.requires_grad() {
         let grad_fn = Arc::new(MaskedLogSoftmaxBackward {
             input_id: tensor.id(),
-            output: output.detach(),
+            input: tensor.detach(),
             mask: mask.detach(),
             dim,
         });

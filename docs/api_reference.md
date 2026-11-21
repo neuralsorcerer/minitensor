@@ -2511,7 +2511,9 @@ assert row_std.shape == (2, 3)
   gradient's `S - g` each the sum of the rest of the slice: as `g - p S` the
   class `nll_loss` puts its gradient on took a probability near one from
   one, and a confident, correct row's gradient there was all rounding.
-  `softmax`'s is `y (g (1 - y) - sum_{k != c} g_k y_k)` the same way.
+  `softmax`'s is `y (g (1 - y) - sum_{k != c} g_k y_k)` the same way, and
+  `masked_log_softmax`'s is `log_softmax`'s over each slice's unmasked
+  entries, zero at the masked ones.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors
