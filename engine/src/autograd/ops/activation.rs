@@ -11,7 +11,7 @@ use super::shape::{mask_select_into, zip_mask_into};
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::activation::{slope_zeros, units::UnitParams},
+    ops::activation::{infinite_slice_parts, slope_zeros, units::UnitParams},
     ops::map::par_out_chunks_gated,
     ops::util::{accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
@@ -670,10 +670,12 @@ impl GradientFunction for SoftmaxBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
-/// Gradient function for log-softmax
+/// Gradient function for log-softmax. It keeps the input rather than the
+/// output: the probabilities its gradient needs are formed again from the
+/// input, which `exp` of the rounded output could not give to the last bits.
 pub struct LogSoftmaxBackward {
     pub input_id: TensorId,
-    pub output: Tensor,
+    pub input: Tensor,
     pub dim: usize,
 }
 impl GradientFunction for LogSoftmaxBackward {
@@ -682,9 +684,9 @@ impl GradientFunction for LogSoftmaxBackward {
         gradients.reserve(1);
 
         let mut grad_data = TensorData::zeros_on_device(
-            self.output.numel(),
-            self.output.dtype(),
-            self.output.device(),
+            self.input.numel(),
+            self.input.dtype(),
+            self.input.device(),
         );
 
         match grad_output.dtype() {
@@ -692,9 +694,9 @@ impl GradientFunction for LogSoftmaxBackward {
                 let go = grad_output.data().as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f32 slice from grad_output")
                 })?;
-                let log_y = self.output.data().as_f32_slice().ok_or_else(|| {
+                let input = self.input.data().as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error(
-                        "Failed to get f32 slice from log_softmax output",
+                        "Failed to get f32 slice from log_softmax input",
                     )
                 })?;
                 let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
@@ -702,15 +704,15 @@ impl GradientFunction for LogSoftmaxBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
+                log_softmax_backward(go, input, grad_slice, self.input.shape().dims(), self.dim);
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f64 slice from grad_output")
                 })?;
-                let log_y = self.output.data().as_f64_slice().ok_or_else(|| {
+                let input = self.input.data().as_f64_slice().ok_or_else(|| {
                     MinitensorError::internal_error(
-                        "Failed to get f64 slice from log_softmax output",
+                        "Failed to get f64 slice from log_softmax input",
                     )
                 })?;
                 let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
@@ -718,7 +720,7 @@ impl GradientFunction for LogSoftmaxBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
+                log_softmax_backward(go, input, grad_slice, self.input.shape().dims(), self.dim);
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -729,9 +731,9 @@ impl GradientFunction for LogSoftmaxBackward {
 
         let grad_input = Tensor::new(
             Arc::new(grad_data),
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
             grad_output.requires_grad(),
         );
 
@@ -974,8 +976,16 @@ fn softmax_geometry<T: Float>(
     };
     Some((dim_size, after, dim_size * after))
 }
-/// `softmax` backward: `dx = y * (dy - sum_k(dy_k * y_k))` along `dim`.
-pub(crate) fn softmax_backward<T: Float + Send + Sync>(
+/// `softmax` backward: `dx = y * (dy - sum_k(dy_k * y_k))` along `dim`, in
+/// float64 for either dtype and rounded once.
+///
+/// Taken as `y_c (g_c (1 - y_c) - sum_{k != c} g_k y_k)`, with the likeliest
+/// class's `1 - y` and the largest term's rest of the dot product each the sum
+/// of the rest of its slice: `dy - dot` for a gradient concentrated on a
+/// probability near one -- `log` after `softmax`, say -- took one from a
+/// rounded near-one, and the dot product was summed in the tensor's own
+/// dtype.
+pub(crate) fn softmax_backward<T: crate::ops::activation::ShiftedExp + Send + Sync>(
     grad_output: &[T],
     y: &[T],
     grad_input: &mut [T],
@@ -985,7 +995,6 @@ pub(crate) fn softmax_backward<T: Float + Send + Sync>(
     let Some((dim_size, after, group)) = softmax_geometry(grad_input, dims, dim) else {
         return;
     };
-
     zip_blocks_maybe_par(
         grad_output,
         y,
@@ -993,23 +1002,52 @@ pub(crate) fn softmax_backward<T: Float + Send + Sync>(
         group,
         |_, go_block, y_block, out_block| {
             for base in 0..after {
-                let mut dot = T::zero();
+                let at = |k: usize| base + k * after;
+                let p = |k: usize| y_block[at(k)].wide();
+                let g = |k: usize| go_block[at(k)].wide();
+                let top = (1..dim_size).fold(0, |m, k| if p(k) > p(m) { k } else { m });
+                let rest_p =
+                    accurate_indexed_sum(dim_size, 0.0f64, |k| if k == top { 0.0 } else { p(k) });
+                let dot = accurate_indexed_sum(dim_size, 0.0f64, |k| g(k) * p(k));
+                let big = (1..dim_size).fold(0, |m, k| {
+                    if (g(k) * p(k)).abs() > (g(m) * p(m)).abs() {
+                        k
+                    } else {
+                        m
+                    }
+                });
+                let rest_dot = accurate_indexed_sum(dim_size, 0.0f64, |k| {
+                    if k == big { 0.0 } else { g(k) * p(k) }
+                });
                 for k in 0..dim_size {
-                    let idx = base + k * after;
-                    dot = dot + go_block[idx] * y_block[idx];
-                }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                    let not_p = if k == top { rest_p } else { 1.0 - p(k) };
+                    let others = if k == big {
+                        rest_dot
+                    } else {
+                        dot - g(k) * p(k)
+                    };
+                    out_block[at(k)] = T::narrow(p(k) * (g(k) * not_p - others));
                 }
             }
         },
     );
 }
-/// `log_softmax` backward: `dx = dy - exp(log_y) * sum_k(dy_k)` along `dim`.
+/// `g_c - p_c S` along `dim` for `p = softmax(z)` and `S` its slice's sum of
+/// `g`: `log_softmax`'s backward, from its input.
+///
+/// The probabilities are formed again from the input, `exp(z - top)` with the
+/// difference taken exactly over their total, where `exp` of the rounded
+/// output turned its rounding into `|log p|` ulps of `p`: thirty at
+/// `p = e^-40`. And the gradient is `g_c (1 - p_c) - p_c (S - g_c)`, with the
+/// likeliest class's `1 - p` and the largest gradient's `S - g` each the sum
+/// of the rest of the slice: as `g_c - p_c S` the class `nll_loss` puts its
+/// gradient on took a probability near one from one, and a confident,
+/// correct row's gradient there was all rounding -- 1.7e7 ulps out in
+/// float32 and 9e15 in float64. In float64 for either dtype, each rounded
+/// once.
 pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send + Sync>(
     grad_output: &[T],
-    log_y: &[T],
+    input: &[T],
     grad_input: &mut [T],
     dims: &[usize],
     dim: usize,
@@ -1017,43 +1055,73 @@ pub(crate) fn log_softmax_backward<T: crate::ops::activation::ShiftedExp + Send 
     let Some((dim_size, after, group)) = softmax_geometry(grad_input, dims, dim) else {
         return;
     };
-
     zip_blocks_maybe_par(
         grad_output,
-        log_y,
+        input,
         grad_input,
         group,
-        |_, go_block, log_block, out_block| {
-            // Each gradient in float64 and rounded once, against the sum of
-            // the slice's in float64.
-            if after == 1 {
-                // Along the last axis a block is one contiguous row, so its
-                // probabilities come from the forward's `exp` kernel -- the
-                // vectorised one for float32 -- a piece at a time, where the
-                // loop below takes a scalar `exp` per element.
-                const PIECE: usize = 256;
-                let sum = accurate_indexed_sum(go_block.len(), 0.0f64, |k| go_block[k].wide());
-                let mut probabilities = [0.0f64; PIECE];
-                for ((go, logs), out) in go_block
-                    .chunks(PIECE)
-                    .zip(log_block.chunks(PIECE))
-                    .zip(out_block.chunks_mut(PIECE))
-                {
-                    let probabilities = &mut probabilities[..logs.len()];
-                    T::exp_shifted_into(logs, T::zero(), probabilities);
-                    for ((o, &g), &p) in out.iter_mut().zip(go).zip(probabilities.iter()) {
-                        *o = T::narrow(g.wide() - p * sum);
-                    }
-                }
-                return;
-            }
+        |_, go_block, z_block, out_block| {
+            let mut stack = [0.0f64; 64];
+            let mut heap = Vec::new();
+            let terms: &mut [f64] = if dim_size <= stack.len() {
+                &mut stack[..dim_size]
+            } else {
+                heap.resize(dim_size, 0.0);
+                &mut heap
+            };
+            let mut gathered: Vec<T> = Vec::new();
             for base in 0..after {
-                let sum =
-                    accurate_indexed_sum(dim_size, 0.0f64, |k| go_block[base + k * after].wide());
+                let at = |k: usize| base + k * after;
+                let z: &[T] = if after == 1 {
+                    z_block
+                } else {
+                    gathered.clear();
+                    gathered.extend((0..dim_size).map(|k| z_block[at(k)]));
+                    &gathered
+                };
+                let top = (1..dim_size).fold(0, |m, k| if z[k] > z[m] { k } else { m });
+                let g = |k: usize| go_block[at(k)].wide();
+                let sum = accurate_indexed_sum(dim_size, 0.0f64, g);
+                if z[top].is_infinite() {
+                    // The forward's limits there: the `+inf`s share all of
+                    // the mass evenly, a slice of `-inf` has none, and a NaN
+                    // makes the whole slice NaN.
+                    let (infinities, nan) = infinite_slice_parts(z.iter().copied());
+                    let share = if nan {
+                        f64::NAN
+                    } else {
+                        (infinities as f64).recip()
+                    };
+                    for k in 0..dim_size {
+                        let p = if nan || z[k] == T::infinity() {
+                            share
+                        } else {
+                            0.0
+                        };
+                        out_block[at(k)] = T::narrow(g(k) - p * sum);
+                    }
+                    continue;
+                }
+                T::exp_shifted_into(z, z[top], terms);
+                let rest_terms =
+                    accurate_indexed_sum(
+                        dim_size,
+                        0.0f64,
+                        |k| if k == top { 0.0 } else { terms[k] },
+                    );
+                let total = terms[top] + rest_terms;
+                let big = (1..dim_size).fold(0, |m, k| if g(k).abs() > g(m).abs() { k } else { m });
+                let rest_g =
+                    accurate_indexed_sum(dim_size, 0.0f64, |k| if k == big { 0.0 } else { g(k) });
                 for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let p = log_block[idx].wide().exp();
-                    out_block[idx] = T::narrow(go_block[idx].wide() - p * sum);
+                    let p = terms[k] / total;
+                    let not_p = if k == top {
+                        rest_terms / total
+                    } else {
+                        1.0 - p
+                    };
+                    let not_g = if k == big { rest_g } else { sum - g(k) };
+                    out_block[at(k)] = T::narrow(g(k) * not_p - p * not_g);
                 }
             }
         },

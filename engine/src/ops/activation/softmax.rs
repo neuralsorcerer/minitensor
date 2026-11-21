@@ -671,7 +671,7 @@ impl<'a> MaskWalk<'a> {
 /// finite: `inf - inf` is NaN, and the whole slice came back NaN. Its softmax
 /// is the limit instead -- see [`infinite_slice_value`].
 #[inline]
-fn infinite_slice_parts<T: Float>(values: impl Iterator<Item = T>) -> (usize, bool) {
+pub(crate) fn infinite_slice_parts<T: Float>(values: impl Iterator<Item = T>) -> (usize, bool) {
     let mut infinities = 0;
     let mut nan = false;
     for v in values {

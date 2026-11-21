@@ -2503,8 +2503,15 @@ assert row_std.shape == (2, 3)
   value over one axis or several, with a gradient wanted or not -- composed
   from `sub`, `exp` and `sum` in the input's dtype, the tracked one was
   1e16 ulps out on normalised log-probabilities -- and its gradient is the
-  softmax over the reduced axes. The gradient of a float32 `log_softmax` is
-  taken in float64 and rounded once.
+  softmax over the reduced axes. Both gradients are taken in float64 and
+  rounded once. `log_softmax`'s forms its probabilities again from the input
+  -- `exp` of the rounded output turned its rounding into `|log p|` ulps of
+  `p`, some thirty at `p = e^-40` -- and is `g (1 - p) - p (S - g)` for `S`
+  the slice's sum of `g`, with the likeliest class's `1 - p` and the largest
+  gradient's `S - g` each the sum of the rest of the slice: as `g - p S` the
+  class `nll_loss` puts its gradient on took a probability near one from
+  one, and a confident, correct row's gradient there was all rounding.
+  `softmax`'s is `y (g (1 - y) - sum_{k != c} g_k y_k)` the same way.
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors

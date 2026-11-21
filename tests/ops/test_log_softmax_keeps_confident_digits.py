@@ -126,9 +126,10 @@ def test_the_gradient_is_softmax_less_the_one_hot():
     values = np.array([20.0, 0.0, 0.0], dtype=np.float64)
     x = mt.Tensor(values, dtype="float64", requires_grad=True)
     F.log_softmax(x, dim=0)[0].backward()
-    probabilities = np.exp(_reference(values))
-    want = -probabilities
-    want[0] += 1.0
+    # The dominant entry's `1 - p` is the others' shares together; one less
+    # its rounded `p` keeps about seven of the digits.
+    share = math.exp(-20.0) / (1 + 2 * math.exp(-20.0))
+    want = np.array([2 * share, -share, -share])
     np.testing.assert_allclose(x.grad.numpy(), want, rtol=1e-12, atol=1e-18)
 
 

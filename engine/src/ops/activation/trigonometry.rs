@@ -1296,7 +1296,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
         if output.requires_grad() {
             let grad_fn = Arc::new(LogSoftmaxBackward {
                 input_id: tensor.id(),
-                output: output.detach(),
+                input: tensor.detach(),
                 dim: 0,
             });
 
@@ -1334,7 +1334,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(LogSoftmaxBackward {
             input_id: tensor.id(),
-            output: output.detach(),
+            input: tensor.detach(),
             dim,
         });
 

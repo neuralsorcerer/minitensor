@@ -210,16 +210,14 @@ def test_float32_log_softmax_gradient_rounds_once(dim):
     a = mt.Tensor(x, dtype="float32", requires_grad=True)
     F.log_softmax(a, dim).backward(mt.Tensor(upstream, dtype="float32"))
     got = _slices(a.grad.numpy(), dim)
-    logs = _slices(F.log_softmax(mt.Tensor(x, dtype="float32"), dim).numpy(), dim)
     with localcontext() as context:
         context.prec = 60
-        for g_row, l_row, u_row in zip(got, logs, _slices(upstream, dim)):
+        for g_row, x_row, u_row in zip(got, _slices(x, dim), _slices(upstream, dim)):
+            shares, _, _ = _exact(x_row)
             total = sum(Decimal(float(u)) for u in u_row)
-            # The gradient of the log-probabilities the forward returned.
-            want = [
-                Decimal(float(u)) - Decimal(float(lp)).exp() * total
-                for u, lp in zip(u_row, l_row)
-            ]
+            # The gradient of the exact log-probabilities of the input, not
+            # of the exponentials of the rounded ones the forward returned.
+            want = [Decimal(float(u)) - p * total for u, p in zip(u_row, shares)]
             _check(g_row, want, "float32", 0)
 
 
