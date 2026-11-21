@@ -155,7 +155,7 @@ pub fn cosine_similarity(x1: &Tensor, x2: &Tensor, dim: isize, eps: f64) -> Resu
     let grad_fn = Arc::new(CosineSimilarityBackward {
         a: a.detach(),
         b: b.detach(),
-        cosine: cosine.clone(),
+        weights: None,
         axis,
         floor: eps,
         shapes: [x1.shape().clone(), x2.shape().clone()],
@@ -223,7 +223,9 @@ pub fn hinge_embedding_loss(
 }
 
 /// `1 - cos(x1, x2)` where `target` is `+1`, `max(0, cos(x1, x2) - margin)`
-/// where it is `-1`.
+/// where it is `-1`. The first is formed from the part of one input at right
+/// angles to the other, and cancels nothing where they lie almost along each
+/// other.
 pub fn cosine_embedding_loss(
     x1: &Tensor,
     x2: &Tensor,
@@ -263,12 +265,33 @@ pub fn cosine_embedding_loss(
             target.shape().dims()
         )));
     }
-    let cosine = cosine_similarity(x1, x2, dim as isize, 1e-8)?;
-
-    let similar = target_is_positive(target)?;
-    let pull = sub(&scalar(1.0, &cosine)?, &cosine)?;
-    let push = relu(&sub(&cosine, &scalar(margin, &cosine)?)?)?;
-    reduce_loss(where_op(&similar, &pull, &push)?, reduction)
+    // Each pair's term and the factor its cosine's gradient takes in it, from
+    // the cosine and its complement, with one gradient for them all.
+    let floor = 1e-8;
+    let needs_grad = manual_backward_needed(&[x1, x2]);
+    let (a, b, terms, weights) = {
+        let _guard = NoGradGuard::new();
+        let (a, b, _) = align(x1, x2)?;
+        let (terms, weights) =
+            crate::ops::reduction::cosine_embedding_slices(&a, &b, target, dim, (floor, margin))?;
+        (a, b, terms, weights)
+    };
+    let terms = if needs_grad {
+        let grad_fn = Arc::new(CosineSimilarityBackward {
+            a: a.detach(),
+            b: b.detach(),
+            weights: Some(weights),
+            axis: dim,
+            floor,
+            shapes: [x1.shape().clone(), x2.shape().clone()],
+            input_ids: [x1.id(), x2.id()],
+            input_requires_grad: [x1.requires_grad(), x2.requires_grad()],
+        });
+        with_grad_fn(terms.requires_grad_(true), grad_fn)?
+    } else {
+        terms
+    };
+    reduce_loss(terms, reduction)
 }
 
 /// `max(0, d(anchor, positive) - d(anchor, negative) + margin)`.

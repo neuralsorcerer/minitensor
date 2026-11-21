@@ -188,7 +188,7 @@ const POWERS: [Pair; 64] = [
 /// multiply-add where `FMA` says the code runs where there is one, and
 /// otherwise both operands split into halves whose products are exact.
 #[inline(always)]
-fn error_of<const FMA: bool>(x: f64, y: f64, p: f64) -> f64 {
+pub(crate) fn error_of<const FMA: bool>(x: f64, y: f64, p: f64) -> f64 {
     if FMA {
         x.mul_add(y, -p)
     } else {

@@ -2827,7 +2827,14 @@ assert row_std.shape == (2, 3)
   the exact dot over the exact norms so floored, `eps` as the dtype holds it:
   a vector with itself is exactly one, two at right angles exactly zero, and
   vectors whose squares or products pass either end of the float range are
-  taken like any other. A NaN or an infinity in either vector makes NaN.
+  taken like any other. A NaN or an infinity in either vector makes NaN. Its
+  gradient in `input` is `(other - (input . other / |input|^2) input) / (A B)`,
+  `A` and `B` the floored norms, the difference formed whole -- the part of
+  `other` at right angles to `input`, with the multiple carried as a pair of
+  floats -- and in `other` the same way round: as `other / (A B) - c input /
+  A^2` it was two terms that all but cancel for vectors almost along each
+  other, up to 1e9 ulps out. A float32 gradient is the float nearest the exact
+  one at every input tried, and a float64 one within four ulps of each entry.
 - `softplus(input, beta=1.0, threshold=None)` is `log1p(exp(beta * x)) / beta`,
   evaluated as `max(beta * x, 0) + log1p(exp(-|beta * x|))` so that it cannot
   overflow and returns `x` itself where that is the answer. A `threshold` takes
@@ -3491,7 +3498,7 @@ constructor, rather than turning every loss into NaN or infinity. A norm order
 | `ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=False)` | Connectionist temporal classification. See below -- it takes more explaining than a table row allows. |
 | `margin_ranking_loss(input1, input2, target, margin=0.0, reduction="mean")` | `max(0, -target * (input1 - input2) + margin)`. `target` is `+1` where `input1` should rank higher and `-1` where `input2` should, so the loss is zero exactly when the ranking is right by at least `margin`. |
 | `hinge_embedding_loss(input, target, margin=1.0, reduction="mean")` | The distance itself where `target` is `+1`, `max(0, margin - distance)` where it is `-1`. |
-| `cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean")` | `1 - cos` for a similar pair, `max(0, cos - margin)` for a dissimilar one. |
+| `cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean")` | `1 - cos` for a similar pair, `max(0, cos - margin)` for a dissimilar one. A similar pair's `1 - cos` is `|r|^2 / (|input2|^2 (1 + cos))` for `r` the part of `input2` at right angles to `input1`, formed whole, where the cosine is positive: as one less the rounded cosine it was all rounding for a pair almost along each other -- zero in float32 once the cosine was within `2^-25` of one, and 3e12 ulps out in float64. A float32 loss is the float nearest the exact one at every input tried, and a float64 one within three ulps. |
 | `triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0, eps=1e-6, swap=False, reduction="mean")` | `max(0, d(a, p) - d(a, n) + margin)`. With `swap`, the negative distance is the smaller of `d(a, n)` and `d(p, n)`, so a triplet whose positive sits closest to the negative still counts as a violation. `eps` is added inside the norm, which is what keeps the gradient of two identical points from being NaN. |
 | `soft_margin_loss(input, target, reduction="mean")` | `log(1 + exp(-target * input))`, the smooth hinge, for a `target` of `+1` or `-1`. Taken as `softplus` with no threshold, so the loss past a margin of 20 keeps its `log1p(exp(-z))` and the slope is the sigmoid rather than one. |
 | `poisson_nll_loss(input, target, log_input=True, full=False, eps=1e-8, reduction="mean")` | Negative log-likelihood of a Poisson observation. `log_input` says whether `input` is the log of the rate (the numerically kind form) or the rate itself; `full` adds the Stirling term, which changes no gradient since it depends only on `target`. A negative `target` is refused: it is not a count. |

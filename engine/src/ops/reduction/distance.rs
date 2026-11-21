@@ -17,7 +17,11 @@ use std::sync::Arc;
 
 use crate::{
     error::{MinitensorError, Result},
+    ops::activation::CarriedSum,
     ops::arithmetic::exact_sum::{Element, Output, cosine, distance, normalized},
+    ops::arithmetic::extended::{error_of, fused},
+    ops::arithmetic::rounded_once::two_sum,
+    ops::map::{PAR_THRESHOLD, par_out_chunks_gated},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 
@@ -262,20 +266,7 @@ fn over_norms<T: Element + Output>(
 /// shape and a float dtype; the result drops `dim`. No gradient:
 /// `cosine_similarity` gives it.
 pub fn cosine_slices(a: &Tensor, b: &Tensor, dim: usize, eps: f64) -> Result<Tensor> {
-    check(a, b, 2.0, "cosine_slices")?;
-    if a.shape() != b.shape() || dim >= a.ndim() {
-        return Err(MinitensorError::invalid_operation(format!(
-            "cosine_slices takes two tensors of one shape and an axis of it, got {:?}, {:?} \
-             and axis {dim}",
-            a.shape().dims(),
-            b.shape().dims()
-        )));
-    }
-    let (a, b) = (a.contiguous()?, b.contiguous()?);
-    let dims = a.shape().dims();
-    let (len, inner) = (dims[dim], dims[dim + 1..].iter().product::<usize>());
-    let mut kept = dims.to_vec();
-    kept.remove(dim);
+    let (a, b, len, inner, kept) = cosine_operands(a, b, dim, "cosine_slices")?;
     let count = kept.iter().product::<usize>();
     let missing = || MinitensorError::internal_error("cosine_slices: a float slice");
     let mut data = TensorData::uninitialized_on_device(count, a.dtype(), a.device());
@@ -309,6 +300,458 @@ pub fn cosine_slices(a: &Tensor, b: &Tensor, dim: usize, eps: f64) -> Result<Ten
         a.device(),
         false,
     ))
+}
+
+/// Each pair's term of `cosine_embedding_loss` along `dim`, and the factor
+/// its cosine's gradient takes in it: where its target is one, `1 - cos` and
+/// -1; elsewhere `max(0, cos - margin)`, and 1 where that is not flat --
+/// zero where it is, NaN where the cosine is. Each norm is floored at `eps`
+/// as the dtype holds it, as [`cosine_slices`] floors it.
+///
+/// `1 - cos` is formed so that where the two lie almost along each other it
+/// cancels nothing, as `1 - cos` of the rounded cosine did -- all of it, in
+/// float32, once the cosine was within `2^-25` of one: where the cosine `c`
+/// is positive it is `|r|^2 / (|b|^2 (1 + c))` for `r` the part of `b` at
+/// right angles to `a`, which [`orthogonal_part`] forms whole; where it is
+/// not, there is nothing to cancel. Where a floor holds a norm up, the cosine
+/// is `s c` for `s` the floors' share, and its complement `(1 - s) + s (1 -
+/// c)`. `cos - margin` is the cosine of the pair's sums less the margin. In
+/// float64 and rounded once. `a` and `b` share a shape and a float dtype,
+/// and `target` has the result's, which drops `dim`.
+pub(crate) fn cosine_embedding_slices(
+    a: &Tensor,
+    b: &Tensor,
+    target: &Tensor,
+    dim: usize,
+    (eps, margin): (f64, f64),
+) -> Result<(Tensor, Vec<f64>)> {
+    let (a, b, len, inner, kept) = cosine_operands(a, b, dim, "cosine_embedding_slices")?;
+    let count = kept.iter().product::<usize>();
+    let missing = || MinitensorError::internal_error("cosine_embedding_slices: a float slice");
+    let target = target.contiguous()?;
+    let target: Vec<f64> = match target.dtype() {
+        DataType::Float32 => target
+            .data()
+            .as_f32_slice()
+            .map(|t| t.iter().map(|&v| f64::from(v)).collect()),
+        _ => target.data().as_f64_slice().map(<[f64]>::to_vec),
+    }
+    .ok_or_else(missing)?;
+    if target.len() != count {
+        return Err(missing());
+    }
+    let mut terms = vec![0.0f64; count];
+    if a.dtype() == DataType::Float32 {
+        let (x, y) = (a.data().as_f32_slice(), b.data().as_f32_slice());
+        let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+        embedding_pairs(x, y, &target, &mut terms, (len, inner), (eps, margin));
+    } else {
+        let (x, y) = (a.data().as_f64_slice(), b.data().as_f64_slice());
+        let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+        embedding_pairs(x, y, &target, &mut terms, (len, inner), (eps, margin));
+    }
+    let weights = terms
+        .iter()
+        .zip(&target)
+        .map(|(&term, &t)| {
+            if t == 1.0 {
+                -1.0
+            } else if term > 0.0 {
+                1.0
+            } else if term.is_nan() {
+                f64::NAN
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let data = if a.dtype() == DataType::Float32 {
+        let narrow = terms.iter().map(|&v| v as f32).collect();
+        TensorData::from_vec::<f32>(narrow, a.dtype(), a.device())
+    } else {
+        TensorData::from_vec::<f64>(terms, a.dtype(), a.device())
+    };
+    let terms = Tensor::new(
+        Arc::new(data),
+        Shape::new(kept),
+        a.dtype(),
+        a.device(),
+        false,
+    );
+    Ok((terms, weights))
+}
+
+/// The gradient of the cosine of each pair of slices of `a` and `b` along
+/// `dim` -- in `a` where `which` is 0 and in `b` where it is 1 -- times
+/// `grad`, one value a pair, laid out as the cosines are: for `a` it is
+/// `g (b - (a . b / |a|^2) a) / (A B)`, `A` and `B` the norms floored at
+/// `eps`, and `b` alone where `a`'s norm is under its floor and so does not
+/// move the cosine's denominator. The difference is [`orthogonal_part`]'s,
+/// formed whole, where as `b / (A B) - c a / A^2` it was two terms that all
+/// but cancel for slices that lie almost along each other. In float64 and
+/// rounded once; the result has `a`'s shape.
+pub(crate) fn cosine_gradient_slices(
+    a: &Tensor,
+    b: &Tensor,
+    grad: &[f64],
+    dim: usize,
+    eps: f64,
+    which: usize,
+) -> Result<Tensor> {
+    let (a, b, len, inner, kept) = cosine_operands(a, b, dim, "cosine_gradient_slices")?;
+    if grad.len() != kept.iter().product::<usize>() {
+        return Err(MinitensorError::internal_error(
+            "cosine_gradient_slices: one incoming gradient a pair of slices",
+        ));
+    }
+    let missing = || MinitensorError::internal_error("cosine_gradient_slices: a float slice");
+    let mut data = TensorData::uninitialized_on_device(a.numel(), a.dtype(), a.device());
+    if a.dtype() == DataType::Float32 {
+        let (x, y) = (a.data().as_f32_slice(), b.data().as_f32_slice());
+        let out = data.as_f32_slice_mut().ok_or_else(missing)?;
+        let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+        gradient_pairs(x, y, grad, out, (len, inner), eps, which);
+    } else {
+        let (x, y) = (a.data().as_f64_slice(), b.data().as_f64_slice());
+        let out = data.as_f64_slice_mut().ok_or_else(missing)?;
+        let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+        gradient_pairs(x, y, grad, out, (len, inner), eps, which);
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        a.shape().clone(),
+        a.dtype(),
+        a.device(),
+        false,
+    ))
+}
+
+/// Two tensors of one shape and float dtype made contiguous, and the
+/// length of `dim`, the extent after it and the shape without it.
+fn cosine_operands(
+    a: &Tensor,
+    b: &Tensor,
+    dim: usize,
+    name: &str,
+) -> Result<(Tensor, Tensor, usize, usize, Vec<usize>)> {
+    check(a, b, 2.0, name)?;
+    if a.shape() != b.shape() || dim >= a.ndim() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{name} takes two tensors of one shape and an axis of it, got {:?}, {:?} and \
+             axis {dim}",
+            a.shape().dims(),
+            b.shape().dims()
+        )));
+    }
+    let (a, b) = (a.contiguous()?, b.contiguous()?);
+    let dims = a.shape().dims();
+    let (len, inner) = (dims[dim], dims[dim + 1..].iter().product::<usize>());
+    let mut kept = dims.to_vec();
+    kept.remove(dim);
+    Ok((a, b, len, inner, kept))
+}
+
+/// [`cosine_embedding_slices`]' terms of `a` and `b` laid out
+/// `[outer, len, inner]`, against `target`, into `out`, both laid out
+/// `[outer, inner]`.
+fn embedding_pairs<T: Element + Output>(
+    a: &[T],
+    b: &[T],
+    target: &[f64],
+    out: &mut [f64],
+    (len, inner): (usize, usize),
+    (eps, margin): (f64, f64),
+) {
+    let floor = T::narrow(eps).widen();
+    let per_task = (TASK / len.max(1)).max(1);
+    // Gated on the entries each pair reads, not the one value it writes.
+    let gate = (PAR_THRESHOLD / 8).div_ceil(len.max(1));
+    par_out_chunks_gated(out, per_task, gate, &|start, o| {
+        let mut room = vec![0.0f64; 3 * len];
+        let (x, rest) = room.split_at_mut(len);
+        let (y, scratch) = rest.split_at_mut(len);
+        for (i, slot) in o.iter_mut().enumerate() {
+            let slice = start + i;
+            let base = slice / inner * len * inner + slice % inner;
+            for k in 0..len {
+                x[k] = a[base + k * inner].wide();
+                y[k] = b[base + k * inner].wide();
+            }
+            *slot = match CosinePair::new(x, y, floor) {
+                Some(pair) if target[slice] == 1.0 => pair.complement(x, y, scratch),
+                Some(pair) => {
+                    let over = pair.cosine() - margin;
+                    if over > 0.0 || over.is_nan() {
+                        over
+                    } else {
+                        0.0
+                    }
+                }
+                None => f64::NAN,
+            };
+        }
+    });
+}
+
+/// [`cosine_gradient_slices`] of `a` and `b` laid out `[outer, len, inner]`
+/// into `out`, laid out as they are, `grad` laid out `[outer, inner]`.
+fn gradient_pairs<T: Element + Output>(
+    a: &[T],
+    b: &[T],
+    grad: &[f64],
+    out: &mut [T],
+    (len, inner): (usize, usize),
+    eps: f64,
+    which: usize,
+) {
+    let floor = T::narrow(eps).widen();
+    let block = len * inner;
+    if block == 0 {
+        return;
+    }
+    // Whole `[len, inner]` blocks to a task, enough of them to be worth one.
+    let batch = (TASK / block).max(1);
+    par_out_chunks_gated(out, batch * block, PAR_THRESHOLD / 8, &|start, o| {
+        let mut room = vec![0.0f64; 3 * len];
+        let (x, rest) = room.split_at_mut(len);
+        let (y, slope) = rest.split_at_mut(len);
+        for (j, o) in o.chunks_mut(block).enumerate() {
+            let outer = start / block + j;
+            let at = outer * block;
+            for i in 0..inner {
+                let g = grad[outer * inner + i];
+                if g == 0.0 {
+                    // Nothing comes back through this pair: a flat term's.
+                    for k in 0..len {
+                        o[i + k * inner] = T::narrow(0.0);
+                    }
+                    continue;
+                }
+                for k in 0..len {
+                    x[k] = a[at + i + k * inner].wide();
+                    y[k] = b[at + i + k * inner].wide();
+                }
+                match CosinePair::new(x, y, floor) {
+                    Some(pair) => pair.slope(which, x, y, g, slope),
+                    None => slope.fill(f64::NAN),
+                }
+                for (k, &value) in slope.iter().enumerate() {
+                    o[i + k * inner] = T::narrow(value);
+                }
+            }
+        }
+    });
+}
+
+/// A pair of slices' sums for their cosine, in float64, each slice scaled
+/// by a power of two that keeps its sum of squares inside the range: each
+/// norm, and each floored at the floor as it is scaled, the dot and the
+/// sums of squares. Their cosine, complement and gradients are formed from
+/// the scaled slices and these.
+struct CosinePair {
+    shifts: [i32; 2],
+    /// The sums of squares and the dot, each as a pair `hi + lo`.
+    squares: [(f64, f64); 2],
+    dot: (f64, f64),
+    norms: [f64; 2],
+    lengths: [f64; 2],
+    /// Whether each norm is above its floor, and so moves the cosine's
+    /// denominator.
+    moving: [bool; 2],
+}
+
+impl CosinePair {
+    /// The pair's sums, `a` and `b` scaled in place; `None` where either
+    /// holds a NaN or an infinity, whose cosine is NaN.
+    #[inline(never)]
+    fn new(a: &mut [f64], b: &mut [f64], floor: f64) -> Option<Self> {
+        let shifts = [into_range(a)?, into_range(b)?];
+        let (a, b) = (&*a, &*b);
+        let [squares_a, squares_b, dot] =
+            fused!(pair_sums(a: &[f64], b: &[f64]) -> [(f64, f64); 3]);
+        let squares = [squares_a, squares_b];
+        let norms = [squares[0].0.sqrt(), squares[1].0.sqrt()];
+        let floors = [
+            times_power_of_two(floor, shifts[0]),
+            times_power_of_two(floor, shifts[1]),
+        ];
+        Some(Self {
+            shifts,
+            squares,
+            dot,
+            norms,
+            lengths: [norms[0].max(floors[0]), norms[1].max(floors[1])],
+            moving: [norms[0] > floors[0], norms[1] > floors[1]],
+        })
+    }
+
+    /// The cosine, of the pair's sums: within an ulp or two of float64.
+    fn cosine(&self) -> f64 {
+        let ([na, nb], [la, lb]) = (self.norms, self.lengths);
+        if na == 0.0 || nb == 0.0 {
+            return if la > 0.0 && lb > 0.0 { 0.0 } else { f64::NAN };
+        }
+        (self.dot.0 + self.dot.1) / (la * lb)
+    }
+
+    /// `1 - cos`; see [`cosine_embedding_slices`].
+    #[inline(never)]
+    fn complement(&self, a: &[f64], b: &[f64], scratch: &mut [f64]) -> f64 {
+        let ([na, nb], [la, lb]) = (self.norms, self.lengths);
+        if na == 0.0 || nb == 0.0 {
+            // A zero dot: the cosine is zero over a floored norm, and NaN
+            // over none.
+            return if la > 0.0 && lb > 0.0 { 1.0 } else { f64::NAN };
+        }
+        let cosine = self.dot.0 / (na * nb);
+        let share = (na / la) * (nb / lb);
+        if cosine <= 0.0 {
+            return 1.0 - share * cosine;
+        }
+        let (squares, dot) = (self.squares[0], self.dot);
+        let across = fused!(
+            orthogonal_part(
+                a: &[f64],
+                b: &[f64],
+                squares: (f64, f64),
+                dot: (f64, f64),
+                scratch: &mut [f64],
+            ) -> f64
+        );
+        let rest = across / (self.squares[1].0 * (1.0 + cosine));
+        if share == 1.0 {
+            rest
+        } else {
+            (1.0 - share) + share * rest
+        }
+    }
+
+    /// `g` times the cosine's gradient in slice `which` of `(a, b)`, into
+    /// `out`; see [`cosine_gradient_slices`]. The scaled slices give it as
+    /// the other's part at right angles to this one over the scaled
+    /// lengths, times the power of two this one was scaled by.
+    #[inline(never)]
+    fn slope(&self, which: usize, a: &[f64], b: &[f64], g: f64, out: &mut [f64]) {
+        let (this, other) = if which == 0 { (a, b) } else { (b, a) };
+        if self.moving[which] {
+            let (squares, dot) = (self.squares[which], self.dot);
+            fused!(
+                orthogonal_part(
+                    this: &[f64],
+                    other: &[f64],
+                    squares: (f64, f64),
+                    dot: (f64, f64),
+                    out: &mut [f64],
+                ) -> f64
+            );
+        } else {
+            out.copy_from_slice(other);
+        }
+        let factor = g / (self.lengths[0] * self.lengths[1]);
+        let [low, high] = powers_of_two(self.shifts[which]);
+        for slot in out.iter_mut() {
+            *slot = *slot * factor * low * high;
+        }
+    }
+}
+
+/// `other - (dot / squares) this`, the part of `other` at right angles to
+/// `this` for `dot` their dot and `squares` `this`'s sum of squares, each a
+/// pair `hi + lo`, into `out`, and the sum of its squares.
+///
+/// The multiple is a pair too, and each entry is the difference with the
+/// product's rounding and the multiple's low part put back, so that where
+/// `other` lies almost along `this` its small difference is formed whole --
+/// a rounding of its own size -- rather than as what two roundings the size
+/// of `other` leave of it. What the multiple's error leaves along `this` is
+/// some `2^-104` of `other`, and moves the sum of squares, at right angles to
+/// it, by the square of that.
+#[inline(always)]
+fn orthogonal_part<const FMA: bool>(
+    this: &[f64],
+    other: &[f64],
+    (squares, squares_lo): (f64, f64),
+    (dot, dot_lo): (f64, f64),
+    out: &mut [f64],
+) -> f64 {
+    let (multiple, multiple_lo) = if squares > 0.0 {
+        // The quotient's float, and what it leaves of the whole over the
+        // squares: the remainder of a float division is a float.
+        let q = dot / squares;
+        let p = q * squares;
+        let remainder = (dot - p) - error_of::<FMA>(q, squares, p);
+        (q, (remainder + dot_lo - q * squares_lo) / squares)
+    } else {
+        (0.0, 0.0)
+    };
+    let mut total = CarriedSum::default();
+    for ((slot, &x), &y) in out.iter_mut().zip(this).zip(other) {
+        let p = multiple * x;
+        *slot = (y - p) - (error_of::<FMA>(multiple, x, p) + multiple_lo * x);
+        total.add(*slot * *slot);
+    }
+    total.value()
+}
+
+/// The sums of `a`'s squares, `b`'s and their products, in one pass and each
+/// as a pair `hi + lo`: every addition's rounding and every product's carried
+/// beside it.
+#[inline(always)]
+fn pair_sums<const FMA: bool>(a: &[f64], b: &[f64]) -> [(f64, f64); 3] {
+    let mut sums = [(0.0f64, 0.0f64); 3];
+    for (&x, &y) in a.iter().zip(b) {
+        for (sum, (p, q)) in sums.iter_mut().zip([(x, x), (y, y), (x, y)]) {
+            let product = p * q;
+            let (hi, error) = two_sum(sum.0, product);
+            *sum = (hi, sum.1 + (error + error_of::<FMA>(p, q, product)));
+        }
+    }
+    sums.map(|(hi, lo)| two_sum(hi, lo))
+}
+
+/// Scales `values` in place by the power of two that brings its largest
+/// magnitude into `[1, 2)` where that lies outside `[2^-400, 2^400]` -- where
+/// its sum of squares could overflow or fall below the normal range -- and
+/// returns the power; `None` where it holds a NaN or an infinity.
+fn into_range(values: &mut [f64]) -> Option<i32> {
+    let mut largest = 0.0f64;
+    for &value in values.iter() {
+        if !value.is_finite() {
+            return None;
+        }
+        largest = largest.max(value.abs());
+    }
+    if largest == 0.0 || (2f64.powi(-400)..=2f64.powi(400)).contains(&largest) {
+        return Some(0);
+    }
+    let shift = -binary_exponent(largest);
+    let [low, high] = powers_of_two(shift);
+    for value in values.iter_mut() {
+        *value = *value * low * high;
+    }
+    Some(shift)
+}
+
+/// The exponent `e` of a positive, finite `x`, `2^e <= x < 2^(e + 1)`.
+fn binary_exponent(x: f64) -> i32 {
+    if x < f64::MIN_POSITIVE {
+        return binary_exponent(x * 2f64.powi(64)) - 64;
+    }
+    ((x.to_bits() >> 52) & 0x7ff) as i32 - 1023
+}
+
+/// Two powers of two whose product is `2^k`, each a float for any `k` a
+/// scaling here asks for: multiplying by both is exact wherever the result
+/// is a normal float.
+fn powers_of_two(k: i32) -> [f64; 2] {
+    let half = k / 2;
+    [2f64.powi(half), 2f64.powi(k - half)]
+}
+
+/// `x 2^k`; see [`powers_of_two`].
+fn times_power_of_two(x: f64, k: i32) -> f64 {
+    let [low, high] = powers_of_two(k);
+    x * low * high
 }
 
 /// [`cosine_slices`] of `a` and `b` laid out `[outer, len, inner]`, along

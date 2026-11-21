@@ -1044,16 +1044,23 @@ impl GradientFunction for CtcLossBackward {
     }
 }
 
-/// Gradient function for `cosine_similarity`: of the cosine
-/// `c = a · b / (A B)`, `A` and `B` the operands' norms each floored at
-/// `floor`, which moves with `a` by `b / (A B)` and, where its norm is above
-/// the floor, by `-c a / A²` -- and with `b` the same way round.
+/// Gradient function for `cosine_similarity`, and for each pair's term of
+/// `cosine_embedding_loss` with `weights`: of the cosine `c = a . b / (A B)`, `A` and `B`
+/// the operands' norms each floored at `floor`, which moves with `a` by
+/// `(b - (a . b / |a|^2) a) / (A B)` where `a`'s norm is above the floor and
+/// by `b / (A B)` where it is not -- and with `b` the same way round. Taken
+/// in `reduction::cosine_gradient_slices`, the difference whole: as
+/// `b / (A B) - c a / A^2` in the operands' dtype it was two terms that all
+/// but cancel for operands that lie almost along each other.
 pub struct CosineSimilarityBackward {
     /// The operands broadcast to one shape.
     pub a: Tensor,
     pub b: Tensor,
-    /// The cosines: the broadcast shape without `axis`.
-    pub cosine: Tensor,
+    /// What each pair's cosine gradient is taken times besides the incoming
+    /// gradient: none for the cosine itself, and for `cosine_embedding_loss`
+    /// -1 where a pair is similar, 1 where a dissimilar pair's cosine is
+    /// above the margin and 0 where its term is flat.
+    pub weights: Option<Vec<f64>>,
     pub axis: usize,
     pub floor: f64,
     /// The operands' own shapes, which their gradients are summed back to.
@@ -1066,39 +1073,37 @@ impl GradientFunction for CosineSimilarityBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
-        let (dtype, device) = (self.a.dtype(), self.a.device());
-        let mut kept = self.a.shape().dims().to_vec();
-        kept[self.axis] = 1;
-        let kept = Shape::new(kept);
-        let grad = grad_output.reshape(kept.clone())?;
-        let cosine = self.cosine.reshape(kept)?;
-        let axes = Some(vec![self.axis as isize]);
-        let floor = create_scalar_tensor(self.floor, dtype, device)?;
-        let zero = create_scalar_tensor(0.0, dtype, device)?;
-        let norm_a = reduction::norm(&self.a, 2.0, axes.clone(), true)?;
-        let norm_b = reduction::norm(&self.b, 2.0, axes, true)?;
-        let length_a = crate::ops::minmax::maximum(&norm_a, &floor)?;
-        let length_b = crate::ops::minmax::maximum(&norm_b, &floor)?;
-        let lengths = arithmetic::mul(&length_a, &length_b)?;
-        let share = |this: &Tensor, other: &Tensor, norm: &Tensor, length: &Tensor| {
-            let across = arithmetic::div(other, &lengths)?;
-            let along = arithmetic::div(
-                &arithmetic::mul(&cosine, this)?,
-                &arithmetic::mul(length, length)?,
-            )?;
-            let moving = crate::ops::comparison::gt(norm, &floor)?;
-            let along = crate::ops::selection::where_op(&moving, &along, &zero)?;
-            arithmetic::mul(&grad, &arithmetic::sub(&across, &along)?)
+        let grad_output = grad_output.contiguous()?;
+        let mut up: Vec<f64> = match grad_output.dtype() {
+            DataType::Float32 => grad_output
+                .data()
+                .as_f32_slice()
+                .map(|g| g.iter().map(|&v| f64::from(v)).collect())
+                .unwrap_or_default(),
+            _ => grad_output
+                .data()
+                .as_f64_slice()
+                .map(<[f64]>::to_vec)
+                .unwrap_or_default(),
         };
-        if self.input_requires_grad[0] {
-            let full = share(&self.a, &self.b, &norm_a, &length_a)?;
-            let grad = reduce_gradient_for_broadcasting(&full, &self.shapes[0])?;
-            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+        let pairs = self.a.numel() / self.a.size(self.axis)?.max(1);
+        if up.len() == 1 && pairs != 1 {
+            up = vec![up[0]; pairs];
         }
-        if self.input_requires_grad[1] {
-            let full = share(&self.b, &self.a, &norm_b, &length_b)?;
-            let grad = reduce_gradient_for_broadcasting(&full, &self.shapes[1])?;
-            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
+        if let Some(weights) = &self.weights {
+            for (g, &w) in up.iter_mut().zip(weights) {
+                *g *= w;
+            }
+        }
+        for which in 0..2 {
+            if !self.input_requires_grad[which] {
+                continue;
+            }
+            let full = reduction::cosine_gradient_slices(
+                &self.a, &self.b, &up, self.axis, self.floor, which,
+            )?;
+            let grad = reduce_gradient_for_broadcasting(&full, &self.shapes[which])?;
+            accumulate_grad(&mut gradients, self.input_ids[which], grad)?;
         }
         Ok(gradients)
     }
