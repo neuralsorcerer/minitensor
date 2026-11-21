@@ -10,6 +10,8 @@ mod elementwise_impl;
 mod hyperbolic_impl;
 #[path = "activation/power.rs"]
 mod power_impl;
+#[path = "activation/slope_zeros.rs"]
+pub(crate) mod slope_zeros;
 #[path = "activation/softmax.rs"]
 mod softmax_impl;
 #[path = "activation/trigonometry.rs"]

@@ -423,23 +423,24 @@ def test_gelu_negative_tail_does_not_bottom_out():
 # forward pass). float64 still goes through the scalar path, so both dtypes are
 # checked here -- the two must agree.
 def _gelu_erf_grad_reference(sample):
+    """The slope's two terms, `Phi(x)` and `x phi(x)`."""
+
     from math import erfc, exp, pi, sqrt
 
-    return np.array(
-        [
-            0.5 * erfc(-v / sqrt(2.0)) + v * exp(-0.5 * v * v) / sqrt(2.0 * pi)
-            for v in sample.astype(np.float64)
-        ]
-    )
+    x = sample.astype(np.float64)
+    cdf = np.array([0.5 * erfc(-v / sqrt(2.0)) for v in x])
+    return cdf, x * np.array([exp(-0.5 * v * v) / sqrt(2.0 * pi) for v in x])
 
 
 def _gelu_tanh_grad_reference(sample):
+    """The slope's two terms, `(1 + tanh v) / 2` and `x sech^2(v) v' / 2`."""
+
     x = sample.astype(np.float64)
     v = 0.7978845608028654 * (x + 0.044715 * x**3)
     with np.errstate(over="ignore"):
         s = 1.0 / (1.0 + np.exp(-2.0 * v))  # 0.5*(1 + tanh(v))
     sech2 = 4.0 * s * (1.0 - s)
-    return s + 0.5 * x * sech2 * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x**2)
+    return s, 0.5 * x * sech2 * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x**2)
 
 
 _GELU_GRADS = [
@@ -470,16 +471,22 @@ def test_gelu_gradient_matches_the_analytic_derivative(
     got = tensor.grad.numpy()
     mt.clear_autograd_graph()
 
-    expected = reference(sample)
+    first, second = reference(sample)
+    expected = first + second
     # The float64 bound is not tight to an ulp on purpose. The erf reference
     # goes through libm's `erfc`, which differs between platforms by an ulp or
     # so, and the two terms of the derivative very nearly cancel on the left
     # tail -- around x = -3.9 the sum lands near 7e-5 while the terms are each
     # ~1e-4. One libm ulp there is ~1e-12 in relative terms, which is what
     # macOS's `erfc` costs against glibc's, so a 1e-12 bound fails there while
-    # passing on Linux.
+    # passing on Linux. They cancel altogether at the slope's zero, near
+    # -0.752, where this reference, a sum of two float64 terms, is out by an ulp
+    # or so of the terms rather than of the slope: so much is allowed beside.
     tolerance = 2e-7 if dtype == "float32" else 5e-12
-    np.testing.assert_allclose(got, expected.astype(dtype), rtol=tolerance, atol=1e-45)
+    terms = np.abs(first) + np.abs(second)
+    bound = tolerance * np.abs(expected) + 4 * np.finfo(np.float64).eps * terms
+    excess = np.abs(got.astype(np.float64) - expected.astype(dtype)) - bound
+    assert np.all(excess <= 1e-45), sample[np.argmax(excess)]
 
 
 @pytest.mark.parametrize(

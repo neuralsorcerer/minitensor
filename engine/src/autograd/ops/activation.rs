@@ -11,7 +11,7 @@ use super::shape::{mask_select_into, zip_mask_into};
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::activation::units::UnitParams,
+    ops::activation::{slope_zeros, units::UnitParams},
     ops::map::par_out_chunks_gated,
     ops::util::{accurate_indexed_sum, broadcast_mask_index, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
@@ -144,6 +144,16 @@ impl GradientFunction for GeluBackward {
             // The limits, where either formula would form `inf * 0`.
             if x.is_infinite() {
                 return if x > 0.0 { 1.0 } else { 0.0 };
+            }
+            // About the slope's zero its two terms cancel; there it is its
+            // series instead (see `ops::activation::slope_zeros`).
+            let near = if approximate {
+                slope_zeros::GELU_TANH.near(x)
+            } else {
+                slope_zeros::GELU_ERF.near(x)
+            };
+            if let Some(slope) = near {
+                return slope;
             }
             // Each factor with the rounding of its argument taken back, as in
             // the forward pass; see `ops::gaussian`.
@@ -279,8 +289,14 @@ impl GradientFunction for SiluBackward {
             if x.is_infinite() {
                 return if x > 0.0 { 1.0 } else { 0.0 };
             }
-            let s = stable_sigmoid_f64(x);
-            s * (1.0 + x * (1.0 - s))
+            // About its zero, near -1.2785, `1 + x s(-x)` cancels; there the
+            // slope is its series (see `ops::activation::slope_zeros`). Else
+            // `s(-x)` is formed itself: `1 - s` would keep only the bits of
+            // `s` past one's, none of them past x = 37.
+            if let Some(slope) = slope_zeros::SILU.near(x) {
+                return slope;
+            }
+            stable_sigmoid_f64(x) * (1.0 + x * stable_sigmoid_f64(-x))
         })?;
         Ok(single(self.input_id, grad))
     }

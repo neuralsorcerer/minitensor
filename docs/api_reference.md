@@ -2820,6 +2820,16 @@ assert row_std.shape == (2, 3)
   these, `softplus`'s, `softsign`'s and every unit's below -- is the float32
   nearest its exact value, the incoming gradient's product rounded once with
   it; a float64 one is within a couple of ulps.
+- `silu`'s, `gelu`'s (both forms) and `mish`'s slopes each cross zero a little
+  below the origin, as a sum of two terms that cancel there: `s (1 + x s(-x))`
+  near -1.2785 for `silu`, `Phi(x) + x phi(x)` near -0.7518 for `gelu`. Formed
+  as float64 there a slope was its terms' roundings -- at the inputs nearest
+  the zero it had no correct digit, and a few hundredths away it was still
+  twenty ulps out -- and a float32 one was now and then an ulp out. Out to
+  where the terms make an ulp of themselves more than three of the slope, each
+  is now its Taylor series in `x - x0`, with the zero `x0` held to twice
+  float64's precision: a float32 slope is the float32 nearest the exact one,
+  and a float64 one within two ulps about its zero and a few further out.
 - `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
   leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
   band but subtracts `lambd` from the rest, so it stays continuous

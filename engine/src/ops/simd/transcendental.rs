@@ -344,6 +344,7 @@
 //! `erfc` is untouched: it needs relative accuracy out where `erf` has
 //! saturated, so it wants the high branch extended rather than reused.
 
+use crate::ops::activation::slope_zeros;
 use std::mem::MaybeUninit;
 
 const LOG2E: f64 = std::f64::consts::LOG2_E;
@@ -742,7 +743,9 @@ fn gelu_erf_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     } else {
         fma_or::<FMA>(xd, pdf, cdf)
     };
-    (local * gout as f64) as f32
+    // About the slope's zero its two terms cancel: there it is its series.
+    let (near, series) = slope_zeros::GELU_ERF.near_f32::<FMA>(xd);
+    ((if near { series } else { local }) * gout as f64) as f32
 }
 
 /// Derivative of the tanh-approximation GELU, times the incoming gradient.
@@ -780,7 +783,9 @@ fn gelu_tanh_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     } else {
         fma_or::<FMA>(0.5 * xd * sech2, d_inner, half_one_plus_tanh)
     };
-    (local * gout as f64) as f32
+    // About the slope's zero its two terms cancel: there it is its series.
+    let (near, series) = slope_zeros::GELU_TANH.near_f32::<FMA>(xd);
+    ((if near { series } else { local }) * gout as f64) as f32
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,7 +1437,9 @@ fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     } else {
         s * fma_or::<FMA>(xd, one_minus_s, 1.0)
     };
-    (local * gout as f64) as f32
+    // About the slope's zero `1 + x (1 - s)` cancels: there it is its series.
+    let (near, series) = slope_zeros::SILU.near_f32::<FMA>(xd);
+    ((if near { series } else { local }) * gout as f64) as f32
 }
 
 /// `t = exp(-k|x|)` for the logistic-shaped slopes below, by the reduction
@@ -1556,7 +1563,9 @@ fn mish_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     } else {
         n / d + xd * (4.0 * (n + 1.0) / (d * d)) * (e / (e + 1.0))
     };
-    (local * gout as f64) as f32
+    // About the slope's zero its two terms cancel: there it is its series.
+    let (near, series) = slope_zeros::MISH.near_f32::<FMA>(xd);
+    ((if near { series } else { local }) * gout as f64) as f32
 }
 
 /// [`mish_backward_one`] for one element, for a caller whose loop is not one of

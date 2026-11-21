@@ -423,6 +423,9 @@ const MISH_D: UnitGradKernel = {
         } else if x.is_infinite() {
             // The limit at the bottom, 0, where the formula would form `inf * 0`.
             0.0 * g
+        } else if let Some(slope) = super::slope_zeros::MISH.near(x) {
+            // About its zero, near -1.1924, the slope's two terms cancel.
+            g * slope
         } else {
             let e = x.exp();
             let n = e * (e + 2.0);
