@@ -330,11 +330,13 @@ pub fn soft_margin_loss(input: &Tensor, target: &Tensor, reduction: &str) -> Res
     let [input, target] = float_operands("soft_margin_loss", 1, [input, target])?;
     let (input, target) = (&input, &target);
     check_same_shape("soft_margin_loss", &[("input", input), ("target", target)])?;
-    // `softplus` rather than `log1p(exp(...))`: it takes the linear tail above
-    // its threshold, where the exponential would overflow to infinity and the
-    // logarithm would hand back that infinity instead of the value it converges
-    // on.
-    let values = softplus(&neg(&mul(target, input)?)?, 1.0, 20.0)?;
+    // `softplus` rather than `log1p(exp(...))`, whose exponential overflows to
+    // infinity where the loss is an ordinary number: softplus takes it as
+    // `max(z, 0) + log1p(exp(-|z|))`, which cannot. With no threshold, which
+    // would take the loss past it as `z` and its slope as one: past 20 that
+    // left `log1p(e^-z)` out, 5.7e5 float64 ulps of the loss there and 1.8e7
+    // of the slope.
+    let values = softplus(&neg(&mul(target, input)?)?, 1.0, f64::INFINITY)?;
     reduce_loss(values, reduction)
 }
 
