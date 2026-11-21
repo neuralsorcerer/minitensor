@@ -952,161 +952,62 @@ pub struct FocalLossBackward {
     pub alpha: f64,
     pub gamma: f64,
     pub reduction: String,
-    pub softmax_predictions: Tensor,
-    /// `log_softmax(logits)`, kept when the targets need a gradient: the loss
-    /// is linear in them, with slope `-alpha (1 - p)^gamma ln p`.
-    pub log_predictions: Option<Tensor>,
+    /// The logits, from which the backward forms each row's probabilities
+    /// again in float64; see [`crate::ops::loss::focal_pass`].
+    pub logits: Tensor,
     pub targets: Tensor,
 }
 impl GradientFunction for FocalLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::loss::{Focal, focal_values};
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
         // Per sample, FL = alpha * sum_j t_j f(p_j) with f(p) = -(1 - p)^gamma
-        // ln p, summed over the class axis, for targets that are one-hot or
-        // any distribution over the classes. `p` is the softmax of the logits
-        // `z`, and dp_j/dz_k = p_j (delta_jk - p_k), so
-        //
-        //   dFL/dz_k = alpha * (u_k - p_k * sum_j u_j),   u_j = t_j p_j f'(p_j).
-        //
-        // This used to be the one-hot special case, `(p - t)` times a factor
-        // of the true class's probability, which is a different function for
-        // soft targets: their gradient came back wrong while their loss was
-        // right.
-        let p = self.softmax_predictions.detach();
-        let dtype = p.dtype();
-        let device = p.device();
-
-        // The upstream gradient is a scalar after `"mean"` or `"sum"` and one
-        // value per sample after `"none"`, which spreads over that sample's
-        // classes.
-        let upstream = match self.reduction.as_str() {
-            "none" => grad_output.unsqueeze(-1)?,
-            "mean" => {
-                let num_classes = *self.predictions_shape.last().unwrap_or(&1);
-                let num_samples =
-                    (self.predictions_shape.iter().product::<usize>() / num_classes.max(1)) as f64;
-                arithmetic::mul(
-                    grad_output,
-                    &create_scalar_tensor(1.0 / num_samples, dtype, device)?,
-                )?
+        // ln p over the class axis, for targets that are one-hot or any
+        // distribution over the classes, `p` the softmax of the logits. Its
+        // incoming gradient is one value per sample after `"none"`, and one
+        // for them all after `"sum"`, or after `"mean"` divided by their
+        // count.
+        let classes = self.predictions_shape.last().copied().unwrap_or(1).max(1);
+        let samples = self.predictions_shape.iter().product::<usize>() / classes;
+        let mut up: Vec<f64> = match grad_output.dtype() {
+            DataType::Float32 => grad_output
+                .contiguous()?
+                .data()
+                .as_f32_slice()
+                .map(|g| g.iter().map(|&v| f64::from(v)).collect())
+                .unwrap_or_default(),
+            DataType::Float64 => grad_output
+                .contiguous()?
+                .data()
+                .as_f64_slice()
+                .map(<[f64]>::to_vec)
+                .unwrap_or_default(),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "focal_loss requires floating point tensors",
+                ));
             }
-            _ => grad_output.clone(),
         };
-
-        if let (true, Some(log_p)) = (self.input_requires_grad[1], &self.log_predictions) {
-            let slope = focal_target_slope(&log_p.detach(), &p, self.alpha, self.gamma)?;
-            let target_grad = arithmetic::mul(&slope, &upstream)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if self.reduction == "mean" && up.len() == 1 {
+            up[0] /= samples.max(1) as f64;
         }
-        if !self.input_requires_grad[0] {
-            return Ok(gradients);
+        let params = (self.alpha, self.gamma);
+        if self.input_requires_grad[1] {
+            let grad = focal_values(&self.logits, &self.targets, params, &up, Focal::Targets)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
         }
-
-        let t = self.targets.detach();
-        let u = focal_weighted_derivative(&t, &p, self.gamma)?;
-        let class_dim = (p.ndim() - 1) as isize;
-        let total = reduction::sum(&u, Some(vec![class_dim]), true)?;
-        let alpha = create_scalar_tensor(self.alpha, dtype, device)?;
-        let base_grad =
-            arithmetic::mul(&arithmetic::sub(&u, &arithmetic::mul(&p, &total)?)?, &alpha)?;
-
-        let pred_grad = arithmetic::mul(&base_grad, &upstream)?;
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-
+        if self.input_requires_grad[0] {
+            let grad = focal_values(&self.logits, &self.targets, params, &up, Focal::Logits)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+        }
         Ok(gradients)
     }
 
     fn input_ids(&self) -> &[TensorId] {
         &self.input_ids
     }
-}
-
-/// `-alpha (1 - p)^gamma ln p`, the focal loss's slope in each target entry.
-fn focal_target_slope(log_p: &Tensor, p: &Tensor, alpha: f64, gamma: f64) -> Result<Tensor> {
-    macro_rules! slope_for {
-        ($ty:ty, $slice:ident) => {{
-            let lp = log_p.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from focal log-probabilities")
-            })?;
-            let pr = p.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from focal probabilities")
-            })?;
-            let (alpha, gamma) = (alpha as $ty, gamma as $ty);
-            let values = binary_map(lp, pr, move |lp: $ty, p: $ty| {
-                -(lp * (1.0 - p).powf(gamma) * alpha)
-            });
-            TensorData::from_vec::<$ty>(values, p.dtype(), p.device())
-        }};
-    }
-    let data = match p.dtype() {
-        DataType::Float32 => slope_for!(f32, as_f32_slice),
-        DataType::Float64 => slope_for!(f64, as_f64_slice),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "focal_loss requires floating point tensors",
-            ));
-        }
-    };
-    Ok(Tensor::new(
-        Arc::new(data),
-        p.shape().clone(),
-        p.dtype(),
-        p.device(),
-        false,
-    ))
-}
-
-/// `t * p * f'(p)` for the focal term `f(p) = -(1 - p)^gamma ln p`:
-///
-///   p f'(p) = -(1 - p)^gamma + gamma * p ln p * (1 - p)^(gamma - 1).
-///
-/// The second term tends to 0 as `p` tends to 1 (for `gamma > 0`) and to 0,
-/// and is taken as 0 at those ends rather than as the `0 * inf` a direct
-/// evaluation gives there. A class with no target mass contributes nothing.
-fn focal_weighted_derivative(targets: &Tensor, probs: &Tensor, gamma: f64) -> Result<Tensor> {
-    macro_rules! derivative_for {
-        ($ty:ty, $slice:ident, $dtype:expr) => {{
-            let t = targets.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from focal targets")
-            })?;
-            let p = probs.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from focal probabilities")
-            })?;
-            let gamma = gamma as $ty;
-            let values = binary_map(t, p, |t: $ty, p: $ty| {
-                if t == 0.0 {
-                    return 0.0;
-                }
-                let rest = 1.0 - p;
-                let bent = if gamma == 0.0 || p <= 0.0 || rest <= 0.0 {
-                    0.0
-                } else {
-                    gamma * p * p.ln() * rest.powf(gamma - 1.0)
-                };
-                t * (bent - rest.powf(gamma))
-            });
-            TensorData::from_vec::<$ty>(values, $dtype, probs.device())
-        }};
-    }
-
-    let data = match probs.dtype() {
-        DataType::Float32 => derivative_for!(f32, as_f32_slice, DataType::Float32),
-        DataType::Float64 => derivative_for!(f64, as_f64_slice, DataType::Float64),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "focal_loss requires floating point tensors",
-            ));
-        }
-    };
-    Ok(Tensor::new(
-        Arc::new(data),
-        probs.shape().clone(),
-        probs.dtype(),
-        probs.device(),
-        false,
-    ))
 }
 
 /// Gradient function for the CTC loss.

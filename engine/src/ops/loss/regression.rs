@@ -8,6 +8,8 @@ use super::*;
 use crate::autograd::with_grad_fn;
 use std::borrow::Cow;
 
+use crate::ops::map::par_out_chunks_gated;
+use crate::ops::util::accurate_indexed_sum;
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
@@ -16,7 +18,10 @@ use crate::{
     },
     error::{MinitensorError, Result},
     ops::{
-        activation::{abs as activation_abs, exp, log_softmax, softmax},
+        activation::{
+            ShiftedExp, abs as activation_abs, infinite_slice_parts, less_offset, log_softmax,
+            log1p_of_rest, softmax,
+        },
         arithmetic::sub,
         reduction::{mean, sum},
     },
@@ -591,61 +596,6 @@ pub fn binary_cross_entropy_loss(
     }
 }
 
-/// A tensor of `$body` over three tensors of one float dtype and shape, in one
-/// pass -- the elementwise tail of a loss, once its logarithms are taken.
-///
-/// Spelled as tensor ops, binary cross entropy's tail -- two clamps,
-/// `1 - targets`, two products, a sum and a negation against a tensor of
-/// zeros -- was nine passes and as many buffers: 204us for 32,768 float32
-/// values, of which the two logarithms are 36. Each body below is the same
-/// operations in the same order as the ops it replaces, so every value is
-/// bit-for-bit what it was.
-macro_rules! float_ternary {
-    ($a:expr, $b:expr, $c:expr, |$x:ident, $y:ident, $z:ident| $body:expr) => {
-        float_ternary!($a, $b, $c, [], |$x, $y, $z| $body)
-    };
-    // `[name = value, ...]` are `f64` constants the body reads at the
-    // tensor's own width, converted the way `create_scalar_tensor` converts.
-    ($a:expr, $b:expr, $c:expr, [$($k:ident = $v:expr),*], |$x:ident, $y:ident, $z:ident| $body:expr) => {{
-        let (a, b, c): (&Tensor, &Tensor, &Tensor) = ($a, $b, $c);
-        macro_rules! arm {
-            ($accessor:ident, $ty:ty) => {{
-                let (Some(xs), Some(ys), Some(zs)) = (
-                    a.data().$accessor(),
-                    b.data().$accessor(),
-                    c.data().$accessor(),
-                ) else {
-                    return Err(MinitensorError::internal_error(
-                        "loss operands are not the loss's dtype",
-                    ));
-                };
-                $(let $k = $v as $ty;)*
-                crate::ops::map::ternary_map(xs, ys, zs, move |$x: $ty, $y: $ty, $z: $ty| $body)
-            }};
-        }
-        let data = match a.dtype() {
-            DataType::Float32 => {
-                TensorData::from_vec(arm!(as_f32_slice, f32), DataType::Float32, a.device())
-            }
-            DataType::Float64 => {
-                TensorData::from_vec(arm!(as_f64_slice, f64), DataType::Float64, a.device())
-            }
-            other => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "this loss needs floating-point inputs, got {other:?}"
-                )));
-            }
-        };
-        Tensor::new(
-            Arc::new(data),
-            a.shape().clone(),
-            a.dtype(),
-            a.device(),
-            false,
-        )
-    }};
-}
-
 /// A loss's elementwise terms: `term(a, b)` of each pair of `a` and `b`, one
 /// float dtype and shape, taken in float64 and narrowed once to that dtype.
 fn wide_terms(
@@ -883,8 +833,10 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
 /// Focal loss function for handling class imbalance
 ///
 /// Computes the focal loss, which is a modified cross entropy loss:
-/// FL = -α * (1 - p_t)^γ * log_tensor(p_t)
-/// where p_t is the predicted probability for the true class
+/// FL = -α * (1 - p_t)^γ * log(p_t)
+/// where p_t is the predicted probability for the true class, summed over the
+/// classes against a distribution target. Taken from the logits in float64 and
+/// rounded once per sample; see [`focal_pass`].
 ///
 /// # Arguments
 /// * `predictions` - Model predictions (logits) tensor
@@ -921,59 +873,22 @@ pub fn focal_loss(
 
     // Analytical backward below, so the primitive graph is not recorded as
     // well -- see [`manual_backward_needed`].
-    let (loss, softmax_for_grad, log_for_grad) = {
+    let loss = {
         let _guard = NoGradGuard::new();
-
-        // Apply log-softmax to predictions for numerical stability
-        let log_predictions = log_softmax(predictions, None)?;
-        let softmax_predictions = exp(&log_predictions)?;
-        let softmax_for_grad = softmax_predictions.clone().detach();
-        let log_for_grad = tracked_targets.as_ref().map(|_| log_predictions.detach());
-
-        // alpha * (1 - p)^gamma * -(t * log p), in one pass. Spelled as tensor
-        // ops it was eight passes, and the power -- a `powf` per element --
-        // ran over every class, though a class without target mass contributes
-        // nothing: 861us for 32 rows of 1,024 classes. There the old ops gave
-        // `-0.0 * (1 - p)^gamma * alpha`, which is -0.0 for every `p` a
-        // softmax produces, so the power is taken only for a NaN -- where it
-        // decides between NaN and, at `gamma == 0`, -0.0. The rest is the
-        // same operations in the same order.
-        let focal_values = float_ternary!(
-            &targets_one_hot,
-            &log_predictions,
-            &softmax_predictions,
-            [gamma = gamma, alpha = alpha],
-            |t, lp, p| {
-                if t == 0.0 {
-                    let weight = if p.is_nan() {
-                        (1.0 - p).powf(gamma)
-                    } else {
-                        1.0
-                    };
-                    -0.0 * weight * alpha
-                } else {
-                    -(lp * t) * (1.0 - p).powf(gamma) * alpha
-                }
-            }
-        );
-
-        // Apply reduction
-        // Averaged over samples, matching cross_entropy: only the true-class
-        // term per sample is non-zero, so the denominator is the number of
-        // samples (numel / num_classes), not the total element count.
-        let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
-        let n = (focal_values.numel() / num_classes) as f64;
-        // `"none"` is one loss per sample, as for cross_entropy: the sum over
-        // classes. Returning the per-class terms instead made
+        // One value per sample, the sum over its classes, as for
+        // cross_entropy: `"none"` returns them, and `"mean"` averages over
+        // samples. Returning the per-class terms instead made
         // `focal_loss(.., "none").mean()` a `1 / num_classes` of
         // `focal_loss(.., "mean")`.
-        let loss = if reduction == "none" {
-            let class_axis = (focal_values.ndim() - 1) as isize;
-            crate::ops::reduction::sum(&focal_values, Some(vec![class_axis]), false)?
-        } else {
-            reduce_detached(focal_values, reduction, n, None)?
-        };
-        (loss, softmax_for_grad, log_for_grad)
+        let per_sample = focal_values(
+            predictions,
+            &targets_one_hot,
+            (alpha, gamma),
+            &[1.0],
+            Focal::Loss,
+        )?;
+        let n = per_sample.numel() as f64;
+        reduce_detached(per_sample, reduction, n, None)?
     };
 
     // Set up gradient function if needed
@@ -989,8 +904,7 @@ pub fn focal_loss(
             alpha,
             gamma,
             reduction: reduction.to_string(),
-            softmax_predictions: softmax_for_grad,
-            log_predictions: log_for_grad,
+            logits: predictions.detach(),
             targets: targets_one_hot.clone().detach(),
         });
 
@@ -1496,6 +1410,271 @@ pub fn check_smooth_l1_beta(beta: f64) -> Result<()> {
     Err(MinitensorError::invalid_argument(format!(
         "smooth_l1_loss requires a finite, non-negative beta, got {beta}"
     )))
+}
+
+/// What [`focal_pass`] gives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Focal {
+    /// Each sample's loss.
+    Loss,
+    /// The loss's gradient in each logit.
+    Logits,
+    /// Its gradient in each target.
+    Targets,
+}
+
+/// [`focal_pass`] over tensors: `logits` and `targets` of one shape and dtype,
+/// the classes along the last axis, and `up` one value for every sample or one
+/// for each.
+pub(crate) fn focal_values(
+    logits: &Tensor,
+    targets: &Tensor,
+    params: (f64, f64),
+    up: &[f64],
+    what: Focal,
+) -> Result<Tensor> {
+    let (logits, targets) = (logits.contiguous()?, targets.contiguous()?);
+    let dims = logits.shape().dims();
+    let classes = dims.last().copied().unwrap_or(1);
+    let samples = dims[..dims.len().saturating_sub(1)]
+        .iter()
+        .product::<usize>();
+    if up.len() != 1 && up.len() != samples {
+        return Err(MinitensorError::internal_error(format!(
+            "focal_loss: {} incoming gradients for {samples} samples",
+            up.len()
+        )));
+    }
+    let shape = match what {
+        Focal::Loss => Shape::new(dims[..dims.len().saturating_sub(1)].to_vec()),
+        _ => logits.shape().clone(),
+    };
+    macro_rules! run {
+        ($ty:ty, $slice:ident) => {{
+            let missing =
+                || MinitensorError::internal_error("focal_loss operands are not one dtype");
+            let z = logits.data().$slice().ok_or_else(missing)?;
+            let t = targets.data().$slice().ok_or_else(missing)?;
+            let out = focal_pass(z, t, (samples, classes), params, up, what);
+            TensorData::from_vec::<$ty>(out, logits.dtype(), logits.device())
+        }};
+    }
+    let data = match logits.dtype() {
+        DataType::Float32 => run!(f32, as_f32_slice),
+        DataType::Float64 => run!(f64, as_f64_slice),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "focal_loss requires floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        logits.dtype(),
+        logits.device(),
+        false,
+    ))
+}
+
+/// Focal loss over rows of `classes` logits `z` against targets `t` of the
+/// same shape, in float64 from the logits and rounded once into their dtype:
+/// each row's loss `alpha sum_c t_c (1 - p_c)^gamma (-ln p_c)`, or its
+/// gradient in each logit or each target, times the row's incoming gradient.
+///
+/// A row's `p`, `1 - p` and `ln p` come from [`FocalRow`], and none of them
+/// is a probability near one taken from one, as `1 - exp(log_softmax(z))` was:
+/// in a confident row it was all rounding -- zero in float32 once `1 - p` was
+/// under `2^-25` -- and the loss and its gradient with it, 1.7e7 ulps out in
+/// float32 and 3e13 in float64. The gradient in the logits is
+/// `alpha (u_c (1 - p_c) - p_c sum_{k != c} u_k)` for
+/// `u_k = t_k p_k f'(p_k) = -t_k (1 - p_k)^gamma (1 + gamma p_k (-ln p_k) / (1 - p_k))`,
+/// whose parts have one sign, with the largest `u`'s rest of the sum the sum
+/// of the rest: for a one-hot target a product at every class, and for a soft
+/// one two terms that cancel only where they meet. As `u - p sum u` the
+/// target's own class took `p u` from `u`, and as tensor ops in the logits'
+/// dtype each step rounded.
+pub(crate) fn focal_pass<T: ShiftedExp + Send + Sync>(
+    z: &[T],
+    t: &[T],
+    (rows, classes): (usize, usize),
+    (alpha, gamma): (f64, f64),
+    up: &[f64],
+    what: Focal,
+) -> Vec<T> {
+    let width = if what == Focal::Loss { 1 } else { classes };
+    let mut out = vec![T::zero(); rows * width];
+    if classes == 0 {
+        // No classes: each row's loss is an empty sum, and there is nothing
+        // to differentiate.
+        return out;
+    }
+    // Enough rows to a task that one is worth handing out, and the split
+    // gated on the exponentials every row takes, whatever it writes.
+    let batch = 512usize.div_ceil(classes);
+    let gate = T::SPLIT_THRESHOLD.div_ceil(classes / width);
+    par_out_chunks_gated(&mut out, batch * width, gate, &|start, o| {
+        let mut terms = vec![0.0f64; classes];
+        let mut mass: Vec<(usize, f64)> = Vec::new();
+        for (i, o) in o.chunks_mut(width).enumerate() {
+            let row = start / width + i;
+            let span = row * classes..(row + 1) * classes;
+            let (z, t) = (&z[span.clone()], &t[span]);
+            let s = FocalRow::new(z, &mut terms);
+            let terms = &terms;
+            let up = up[if up.len() == 1 { 0 } else { row }];
+            let ln_p = |k: usize| s.ln_p(terms, z[k], k);
+            match what {
+                Focal::Loss => {
+                    // A class without target mass adds nothing, though its
+                    // `-ln p` may be infinite, and is not formed.
+                    let sum = accurate_indexed_sum(classes, 0.0f64, |k| {
+                        let tk = t[k].wide();
+                        if tk == 0.0 {
+                            0.0
+                        } else {
+                            tk * s.q(terms, k).powf(gamma) * -ln_p(k)
+                        }
+                    });
+                    // A NaN row is NaN, whatever its targets.
+                    let loss = if s.top_q.is_nan() { f64::NAN } else { sum };
+                    o[0] = T::narrow(alpha * loss * up);
+                }
+                Focal::Targets => {
+                    for (k, o) in o.iter_mut().enumerate() {
+                        let slope = s.q(terms, k).powf(gamma) * -ln_p(k);
+                        *o = T::narrow(alpha * slope * up);
+                    }
+                }
+                Focal::Logits => {
+                    // The classes with target mass and their `u`; every other
+                    // class's `u` is zero.
+                    mass.clear();
+                    mass.extend((0..classes).filter(|&k| t[k].wide() != 0.0).map(|k| {
+                        let (p, q) = (s.p(terms, k), s.q(terms, k));
+                        // `gamma p (-ln p) / (1 - p)`, zero at the ends, where
+                        // it tends to zero or the direct form is `0 * inf`.
+                        let bent = if gamma == 0.0 || !(p > 0.0 && q > 0.0) {
+                            0.0
+                        } else {
+                            gamma * p * (-ln_p(k) / q)
+                        };
+                        (k, -t[k].wide() * q.powf(gamma) * (1.0 + bent))
+                    }));
+                    let total = accurate_indexed_sum(mass.len(), 0.0f64, |i| mass[i].1);
+                    let big = (1..mass.len()).fold(0, |m, i| {
+                        if mass[i].1.abs() > mass[m].1.abs() {
+                            i
+                        } else {
+                            m
+                        }
+                    });
+                    let rest = accurate_indexed_sum(mass.len(), 0.0f64, |i| {
+                        if i == big { 0.0 } else { mass[i].1 }
+                    });
+                    // A class without target mass: `-alpha p sum(u)`, its term
+                    // times one factor for the row.
+                    let scale = -(alpha * total * up) / s.total;
+                    for (o, &term) in o.iter_mut().zip(terms) {
+                        *o = T::narrow(scale * term);
+                    }
+                    for (i, &(k, u)) in mass.iter().enumerate() {
+                        let others = if i == big { rest } else { total - u };
+                        let slope = u * s.q(terms, k) - s.p(terms, k) * others;
+                        o[k] = T::narrow(alpha * slope * up);
+                    }
+                }
+            }
+        }
+    });
+    out
+}
+
+/// One row of focal loss's softmax, in float64 from its logits: its terms
+/// `exp(z - top)` of the exact differences, and what makes each class's
+/// probability `p`, its complement `1 - p` and its logarithm of them, a class
+/// at a time -- the likeliest class's `1 - p` as the sum of the others' terms
+/// over the total, and `ln p = (z - top) - log1p(rest)` as `log_softmax` takes
+/// it.
+struct FocalRow {
+    top: usize,
+    peak: f64,
+    total: f64,
+    /// The likeliest class's `1 - p`, and NaN for a NaN row.
+    top_q: f64,
+    /// `log1p` of the others' terms, which comes off each `z - top`.
+    offset: f64,
+    /// Whether the row's maximum is infinite, where the terms are `softmax`'s
+    /// limits themselves.
+    limit: bool,
+}
+
+impl FocalRow {
+    fn new<T: ShiftedExp>(z: &[T], terms: &mut [f64]) -> Self {
+        let top = (1..z.len()).fold(0, |m, k| if z[k] > z[m] { k } else { m });
+        let peak = z[top];
+        if peak.is_infinite() {
+            // The `+inf`s share all of the mass, a row of `-inf` has none,
+            // and a NaN makes the row NaN.
+            let (infinities, nan) = infinite_slice_parts(z.iter().copied());
+            let share = if nan {
+                f64::NAN
+            } else {
+                (infinities as f64).recip()
+            };
+            for (term, &v) in terms.iter_mut().zip(z) {
+                *term = if nan || v == T::infinity() {
+                    share
+                } else {
+                    0.0
+                };
+            }
+            return Self {
+                top,
+                peak: peak.wide(),
+                total: 1.0,
+                top_q: 1.0 - terms[top],
+                offset: 0.0,
+                limit: true,
+            };
+        }
+        T::exp_shifted_into(z, peak, terms);
+        terms[top] = 0.0;
+        let rest = T::total(terms);
+        terms[top] = 1.0;
+        let total = 1.0 + rest;
+        Self {
+            top,
+            peak: peak.wide(),
+            total,
+            top_q: rest / total,
+            offset: log1p_of_rest(rest),
+            limit: false,
+        }
+    }
+
+    #[inline(always)]
+    fn p(&self, terms: &[f64], k: usize) -> f64 {
+        terms[k] / self.total
+    }
+
+    #[inline(always)]
+    fn q(&self, terms: &[f64], k: usize) -> f64 {
+        if k == self.top {
+            self.top_q
+        } else {
+            1.0 - self.p(terms, k)
+        }
+    }
+
+    #[inline(always)]
+    fn ln_p<T: ShiftedExp>(&self, terms: &[f64], z: T, k: usize) -> f64 {
+        if self.limit {
+            self.p(terms, k).ln()
+        } else {
+            less_offset(z.wide(), self.peak, self.offset)
+        }
+    }
 }
 
 /// Refuse focal loss settings outside their range: `alpha` in `(0, 1]` and
