@@ -3389,7 +3389,10 @@ A slice whose largest entry is `+inf` takes the limit, in every softmax form:
 the infinite entries take all the mass and the rest none, so
 `softmax([inf, 1, 2])` is `[1, 0, 0]` and its `log_softmax` is
 `[0, -inf, -inf]`. Several equal infinities share the mass evenly, `1/k` each;
-a NaN anywhere in the slice still makes all of it NaN.
+a NaN anywhere in the slice still makes all of it NaN. So does a NaN beside
+nothing but `-inf`: `softmax([-inf, nan])` is `[nan, nan]`, as its `logsumexp`
+is NaN, where it was once taken for a slice of `-inf` and given zeros. A masked
+entry takes no part in any of this and stays `0`, or `-inf` in the log form.
 
 ```python
 import minitensor as mt

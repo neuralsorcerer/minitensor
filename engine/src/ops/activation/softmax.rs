@@ -658,18 +658,12 @@ impl<'a> MaskWalk<'a> {
     }
 }
 
-/// Column maxima of a `[dim_size, after]` row-major block.
-///
-/// Reading it a contiguous row at a time with `after`-sized accumulators makes
-/// every access sequential, where the naive per-column loop strides by `after`
-/// on every element. The result is the strided version's exactly: a maximum
-/// does not care what order it sees its values in, NaNs included -- they fail
-/// every comparison either way and so take no part.
 /// How many entries of a slice are `+inf`, and whether it holds a NaN.
 ///
 /// A slice whose maximum is `+inf` has no shift that makes its exponentials
 /// finite: `inf - inf` is NaN, and the whole slice came back NaN. Its softmax
-/// is the limit instead -- see [`infinite_slice_value`].
+/// is the limit instead -- see [`infinite_slice_value`]. A slice whose maximum
+/// is `-inf` has no total, and is settled the same way.
 #[inline]
 pub(crate) fn infinite_slice_parts<T: Float>(values: impl Iterator<Item = T>) -> (usize, bool) {
     let mut infinities = 0;
@@ -685,13 +679,15 @@ pub(crate) fn infinite_slice_parts<T: Float>(values: impl Iterator<Item = T>) ->
 }
 
 /// One entry of the softmax (or, with `LOG`, the `log_softmax`) of a slice
-/// whose maximum is `+inf`, from [`infinite_slice_parts`].
+/// whose maximum is infinite, from [`infinite_slice_parts`].
 ///
-/// As those entries grow without bound they take all of the mass, and every
+/// As `+inf` entries grow without bound they take all of the mass, and every
 /// other entry none: `softmax([inf, 1, 2])` is `[1, 0, 0]`. Several equal
 /// infinities share it evenly, as entries that compare equal do everywhere
-/// else, so each of `k` gets `1/k` -- `-log k` in the log form. A NaN in the
-/// slice still makes all of it NaN.
+/// else, so each of `k` gets `1/k` -- `-log k` in the log form. A slice of
+/// `-inf` has no mass anywhere, zeros or `-inf`. A NaN in the slice still
+/// makes all of it NaN: the maximum passes over a NaN, and beside nothing
+/// but `-inf` one was taken for a slice of them, its softmax zeros.
 #[inline]
 fn infinite_slice_value<T: Float, const LOG: bool>(v: T, infinities: usize, nan: bool) -> T {
     if nan {
@@ -712,9 +708,11 @@ fn infinite_slice_value<T: Float, const LOG: bool>(v: T, infinities: usize, nan:
     }
 }
 
-/// Rewrite every column of a `[rows, after]` block whose maximum is `+inf`
-/// with its limit; see [`infinite_slice_value`]. Nothing to do, and one pass
-/// over `col_max` to find that out, when no column has one.
+/// Rewrite every column of a `[rows, after]` block whose maximum is `+inf`,
+/// or `-inf` beside a NaN, with its limit; see [`infinite_slice_value`]. A
+/// column of `-inf` alone already holds its limit. Nothing to do, and one
+/// pass over `col_max` to find that out, when no column has an infinite
+/// maximum.
 fn settle_infinite_columns<T: Float, const LOG: bool>(
     in_block: &[T],
     out_block: &mut [T],
@@ -722,11 +720,14 @@ fn settle_infinite_columns<T: Float, const LOG: bool>(
     after: usize,
 ) {
     for (a, &max) in col_max.iter().enumerate() {
-        if max != T::infinity() {
+        if max.is_finite() {
             continue;
         }
         let (infinities, nan) =
             infinite_slice_parts(in_block.iter().skip(a).step_by(after).copied());
+        if max == T::neg_infinity() && !nan {
+            continue;
+        }
         for (o, &v) in out_block
             .iter_mut()
             .skip(a)
@@ -825,6 +826,13 @@ impl<T: Float> std::ops::Add for ExpTotal<T> {
     }
 }
 
+/// Column maxima of a `[dim_size, after]` row-major block.
+///
+/// Reading it a contiguous row at a time with `after`-sized accumulators makes
+/// every access sequential, where the naive per-column loop strides by `after`
+/// on every element. The result is the strided version's exactly: a maximum
+/// does not care what order it sees its values in, NaNs included -- they fail
+/// every comparison either way and so take no part.
 fn block_col_max<T: Float>(in_block: &[T], after: usize) -> Vec<T> {
     let mut col_max = vec![T::neg_infinity(); after];
     for row in in_block.chunks_exact(after) {
@@ -1335,11 +1343,7 @@ fn last_axis_rows<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], le
         let mut terms = vec![0.0f64; len];
         for (in_row, out_row) in input.chunks_exact(len).zip(out.chunks_exact_mut(len)) {
             let max_val = slice_max(in_row);
-            if max_val == T::neg_infinity() {
-                out_row.fill(if LOG { T::neg_infinity() } else { T::zero() });
-                continue;
-            }
-            if max_val == T::infinity() {
+            if max_val.is_infinite() {
                 let (infinities, nan) = infinite_slice_parts(in_row.iter().copied());
                 for (o, &v) in out_row.iter_mut().zip(in_row) {
                     *o = infinite_slice_value::<T, LOG>(v, infinities, nan);
@@ -1398,7 +1402,8 @@ fn last_axis_rows<T: ShiftedExp, const LOG: bool>(input: &[T], out: &mut [T], le
 ///
 /// Masked entries take no part in the max or the sum and come out as 0. A slice
 /// with no unmasked entry -- or whose unmasked entries are all `-inf` -- is all
-/// zeros rather than NaN.
+/// zeros rather than NaN, and one with an unmasked NaN is NaN at every unmasked
+/// entry.
 fn masked_softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
@@ -1439,13 +1444,13 @@ fn masked_softmax_core<T: ShiftedExp + Send + Sync>(
                         }
                     }
                 }
-                if !has_unmasked || max_val == neg_inf {
+                if !has_unmasked {
                     for k in 0..dim_size {
                         out_block[base + k * after] = T::zero();
                     }
                     continue;
                 }
-                if max_val == T::infinity() {
+                if max_val.is_infinite() {
                     let (infinities, nan) = infinite_slice_parts(
                         (0..dim_size)
                             .filter(|&k| !walk.masked(row, k))
@@ -1466,6 +1471,19 @@ fn masked_softmax_core<T: ShiftedExp + Send + Sync>(
                 });
                 // Totalled and divided in float64, rounded once.
                 let sum = T::total(&terms);
+                if sum.is_nan() {
+                    // An unmasked NaN: the masked entries still take no part,
+                    // and are zero as they are on every other path, where
+                    // divided by the NaN total they came out NaN themselves.
+                    for k in 0..dim_size {
+                        out_block[base + k * after] = if walk.masked(row, k) {
+                            T::zero()
+                        } else {
+                            T::nan()
+                        };
+                    }
+                    continue;
+                }
                 let recip = sum.recip();
                 for (k, &term) in terms.iter().enumerate() {
                     out_block[base + k * after] = if sum != 0.0 {
@@ -1654,7 +1672,8 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
 ///
 /// Masked entries take no part in the max or the log-sum and come out as
 /// `-inf`, as does every entry of a slice with no unmasked value (or whose
-/// unmasked values are all `-inf`).
+/// unmasked values are all `-inf`). An unmasked NaN makes every unmasked entry
+/// of its slice NaN.
 fn masked_log_softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
@@ -1695,13 +1714,13 @@ fn masked_log_softmax_core<T: ShiftedExp + Send + Sync>(
                         }
                     }
                 }
-                if !has_unmasked || max_val == neg_inf {
+                if !has_unmasked {
                     for k in 0..dim_size {
                         out_block[base + k * after] = neg_inf;
                     }
                     continue;
                 }
-                if max_val == T::infinity() {
+                if max_val.is_infinite() {
                     let (infinities, nan) = infinite_slice_parts(
                         (0..dim_size)
                             .filter(|&k| !walk.masked(row, k))
