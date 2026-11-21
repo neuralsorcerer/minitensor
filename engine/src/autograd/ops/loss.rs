@@ -280,6 +280,12 @@ pub struct CrossEntropyLossBackward {
 }
 
 /// `grad[i, c] = scale_i * (softmax[i, c] - [c == index_i])`, in one pass.
+///
+/// The target's `softmax - 1` is taken, where the target is the likelier half,
+/// as minus the sum of the row's other probabilities: from a rounded
+/// probability near one it was all rounding, and a confident, correct row's
+/// gradient there zero where it is `-(1 - p)` -- 1.7e7 ulps out in float32 and
+/// 9e15 in float64.
 macro_rules! cross_entropy_index_grad {
     ($name:ident, $ty:ty, $idx:ty) => {
         fn $name(probs: &[$ty], idx: &[$idx], classes: usize, scale: &[f64], out: &mut [$ty]) {
@@ -297,7 +303,17 @@ macro_rules! cross_entropy_index_grad {
                     }
                     let target = idx[row] as usize;
                     if target < classes {
-                        o[target] = ((p[target] as f64 - 1.0) * s) as $ty;
+                        let own = p[target] as f64;
+                        let rest = if own >= 0.5 {
+                            -p.iter()
+                                .enumerate()
+                                .filter(|&(c, _)| c != target)
+                                .map(|(_, &v)| v as f64)
+                                .sum::<f64>()
+                        } else {
+                            own - 1.0
+                        };
+                        o[target] = (rest * s) as $ty;
                     }
                 }
             });
@@ -465,10 +481,7 @@ impl GradientFunction for CrossEntropyLossBackward {
                     MinitensorError::internal_error("cross_entropy backward: no targets saved")
                 })?
                 .detach();
-            let class_dim = (targets.ndim() - 1) as isize;
-            let target_mass = reduction::sum(&targets, Some(vec![class_dim]), true)?;
-            let weighted_probabilities = arithmetic::mul(&probabilities, &target_mass)?;
-            let base_grad = arithmetic::sub(&weighted_probabilities, &targets)?;
+            let base_grad = dense_cross_entropy_slope(&probabilities, &targets)?;
             let pred_grad = arithmetic::mul(&base_grad, &grad_output)?;
             accumulate_grad(&mut gradients, predictions_id, pred_grad)?;
         }
@@ -480,6 +493,73 @@ impl GradientFunction for CrossEntropyLossBackward {
         &self.input_ids
     }
 }
+/// `p_c T - t_c` for each row of probabilities `p` against targets `t` summing
+/// to `T`: cross-entropy's slope in its logits, before the incoming gradient.
+///
+/// Taken as `p_c (T - t_c) - t_c (1 - p_c)`, two terms that meet only where
+/// a soft target is met, with `1 - p_c` for the row's likeliest class and
+/// `T - t_c` for its largest target each the sum of the rest of its row. As
+/// `p_c T - t_c` a one-hot target's own class subtracted one from a rounded
+/// probability near it, and a confident, correct row's gradient there was all
+/// rounding. In float64 for either dtype, rounded once into the
+/// probabilities'.
+fn dense_cross_entropy_slope(probabilities: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    let classes = *probabilities.shape().dims().last().unwrap_or(&1);
+    macro_rules! run {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let p = probabilities.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("cross_entropy backward: bad probabilities")
+            })?;
+            let t = targets.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("cross_entropy backward: bad targets")
+            })?;
+            let mut out = vec![<$ty>::default(); p.len()];
+            if classes > 0 {
+                par_out_chunks_gated(&mut out, classes, PAR_THRESHOLD, &|start, o| {
+                    let end = start + o.len();
+                    let (p, t) = (&p[start..end], &t[start..end]);
+                    let largest = |v: &[$ty]| {
+                        (0..v.len()).fold(0, |top, c| if v[c] > v[top] { c } else { top })
+                    };
+                    let rest = |v: &[$ty], skip: usize| {
+                        v.iter()
+                            .enumerate()
+                            .filter(|&(c, _)| c != skip)
+                            .map(|(_, &x)| f64::from(x))
+                            .sum::<f64>()
+                    };
+                    let (top_p, top_t) = (largest(p), largest(t));
+                    let (rest_p, rest_t) = (rest(p, top_p), rest(t, top_t));
+                    let total: f64 = t.iter().map(|&x| f64::from(x)).sum();
+                    for (c, slot) in o.iter_mut().enumerate() {
+                        let (pc, tc) = (f64::from(p[c]), f64::from(t[c]));
+                        let not_p = if c == top_p { rest_p } else { 1.0 - pc };
+                        let not_t = if c == top_t { rest_t } else { total - tc };
+                        *slot = (pc * not_t - tc * not_p) as $ty;
+                    }
+                });
+            }
+            TensorData::from_vec::<$ty>(out, $dtype, probabilities.device())
+        }};
+    }
+    let data = match probabilities.dtype() {
+        DataType::Float32 => run!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => run!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "CrossEntropy backward only supports floating point tensors",
+            ));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        probabilities.shape().clone(),
+        probabilities.dtype(),
+        probabilities.device(),
+        false,
+    ))
+}
+
 /// Gradient function for Binary Cross Entropy loss
 pub struct BCELossBackward {
     pub predictions_shape: Vec<usize>,

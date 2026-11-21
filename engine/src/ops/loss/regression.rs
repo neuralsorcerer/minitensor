@@ -16,7 +16,7 @@ use crate::{
     },
     error::{MinitensorError, Result},
     ops::{
-        activation::{abs as activation_abs, exp, log_softmax},
+        activation::{abs as activation_abs, exp, log_softmax, softmax},
         arithmetic::sub,
         reduction::{mean, sum},
     },
@@ -287,8 +287,11 @@ pub fn cross_entropy_loss(
         // when there is one to take. The loss itself remains in log-space so
         // finite log-probabilities cannot be turned into infinity by
         // exponentiation underflow.
+        // From `softmax` itself rather than as `exp` of `log_softmax`, which
+        // turned the latter's rounding into `|log p|` ulps of `p`: some thirty
+        // at `p = e^-40`.
         let softmax_predictions = if predictions_need_grad {
-            Some(exp(&log_predictions.detach())?)
+            Some(softmax(predictions, None)?)
         } else {
             None
         };
