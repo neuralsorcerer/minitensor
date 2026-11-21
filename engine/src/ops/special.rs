@@ -34,6 +34,7 @@ use libm::erfc;
 // why the inverse error function is spelled through the normal quantile's
 // lower tail. It replaced `statrs`, whose only other use was the
 // truncated-normal sampler.
+use crate::ops::arithmetic::extended::{PI as PI_PAIR, Pair, sin_cos_pi};
 use crate::ops::gaussian::{erf_inverse as erf_inv, erf_inverse_estimate};
 use std::f64::consts::{FRAC_2_SQRT_PI, LN_2, PI};
 
@@ -148,17 +149,29 @@ fn offered(tensor: &Tensor, op: Ufunc) -> Option<TensorData> {
 // --- exp2 ------------------------------------------------------------------
 
 unit_kernel!(
-    /// `2^x`. Float64 takes the hardware's own base-2 exponential; float32
-    /// goes through the vectorized `exp` kernel scaled by `ln 2` and never
-    /// reaches this arm. See [`exp2`].
+    /// `2^x`. Float64 takes `libm`'s base-2 exponential; float32 goes
+    /// through the vectorized `exp` kernel scaled by `ln 2` and never reaches
+    /// this arm. See [`exp2`].
     EXP2,
     |x, _p| x.exp2()
 );
 unit_grad_kernel!(
-    /// `d/dx 2^x = 2^x ln 2`, with `ln 2` arriving as a parameter so it is
-    /// converted to the working width once per call, not once per element.
+    /// `d/dx 2^x = 2^x ln 2`, with `ln 2` the float64 constant whatever the
+    /// tensor's dtype: as a parameter it arrived rounded to a float32 tensor's
+    /// width, which put a float32 slope an ulp out for one input in ten.
+    ///
+    /// The slope is below the top of float64 for `x` up to 1024.53, where
+    /// `2^x` overflows from 1024: past 1023 it is taken as `2^(x - 1)` times
+    /// `2 ln 2`, which `x - 1` exact keeps in range.
     EXP2_D,
-    |x, g, p| g * x.exp2() * p[0]
+    |x, g, _p| {
+        let slope = if x > 1023.0 {
+            (x - 1.0).exp2() * (2.0 * LN_2)
+        } else {
+            x.exp2() * LN_2
+        };
+        g * slope
+    }
 );
 
 /// `2^x`, element-wise.
@@ -180,8 +193,8 @@ unit_grad_kernel!(
 ///
 /// It is also about 3x faster.
 ///
-/// Float64 keeps the hardware base-2 exponential, which has no such kernel to
-/// borrow and is already correctly rounded.
+/// Float64 has no wider type to borrow such a kernel from and takes `libm`'s
+/// base-2 exponential, within an ulp.
 pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     // An integer argument widens rather than being refused: none of these has
     // an integer answer, and refusing one would only make every caller cast first.
@@ -190,12 +203,12 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
     }
     if tensor.dtype() == DataType::Float32 {
         let values = crate::ops::activation::exp2_f32(tensor)?;
-        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
+        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [0.0; 2]);
     }
     if let Some(values) = offered(tensor, Ufunc::Exp2) {
-        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [LN_2, 0.0]);
+        return unary_unit_from_data!(tensor, "exp2", values, EXP2_D, [0.0; 2]);
     }
-    unary_unit!(tensor, "exp2", EXP2, EXP2_D, [LN_2, 0.0])
+    unary_unit!(tensor, "exp2", EXP2, EXP2_D, [0.0; 2])
 }
 
 // --- logit -----------------------------------------------------------------
@@ -399,37 +412,66 @@ fn sinc_values(tensor: &Tensor) -> Result<TensorData> {
     ))
 }
 
+/// `g` times `sinc`'s slope, `(cos(pi x) - sinc(x)) / x`, as pairs and
+/// rounded once: within half an ulp but where the exact value lies within
+/// 2^-100 of it of a midpoint, or the input within a hundredth of an ulp of
+/// one of the slope's zeros.
+///
+/// The two terms agree near the origin, where their difference is `-u^2 / 3`
+/// for `u = pi x`, and again near the zeros away from it, where `tan(pi x)`
+/// is `pi x`: at 1.4303, 2.4590, ... and then just short of each half-integer.
+/// As float64 the difference there was what the terms' roundings left of it:
+/// up to 7e14 ulps out at the inputs nearest the zeros, and a few ulps for
+/// some distance either side. Here the slope is `(u cos(pi x) - sin(pi x)) /
+/// (u x)` in pairs: the sine and cosine of `pi r` for the exact `r = x mod 2`,
+/// from [`sin_cos_pi`], and `u` the pair `pi x`.
+///
+/// Below `|u| = 0.1`, where the pairs' own 2^-104 would show beside `u^2`,
+/// the series `-(pi^2 x / 3) (1 - u^2/10 + u^4/280 - u^6/15120 + u^8/1330560
+/// - u^10/172972800)` takes over, the leading product a pair and the rest, at
+/// most a thousandth of it, float64. Its first dropped term is `42 u^12 / 15!`
+/// of the whole, 3e-23 at the cutoff; the four-term series this was dropped
+/// `u^8 / 1330560`, 7.5e-15 there, which was some sixty ulps.
+#[inline(always)]
+fn sinc_slope<const FMA: bool>(x: f64, g: f64) -> f64 {
+    let u = PI * x;
+    let slope = if u.abs() < 0.1 {
+        let s = u * u;
+        let w = s
+            * (-0.1
+                + s * (1.0 / 280.0
+                    + s * (-1.0 / 15120.0 + s * (1.0 / 1_330_560.0 - s / 172_972_800.0))));
+        let lead = PI_SQUARED_THIRD.mul::<FMA>(Pair(-x, 0.0));
+        lead.add(Pair(lead.0 * w, 0.0))
+    } else {
+        let r = reduced_mod_two(x);
+        let f = folded_for_sin(r);
+        if f == 0.0 {
+            // A whole number -- as every float past 2^52 is -- or infinite:
+            // `sin(pi x)` is 0 and `cos(pi x)` is 1 or -1, so the slope is
+            // that over `x`.
+            let cosine = if r == 0.0 { 1.0 } else { -1.0 };
+            return (cosine * g) / x;
+        }
+        let (sine, cosine) = sin_cos_pi::<FMA>(f);
+        let cosine = if r.abs() > 0.5 { cosine.neg() } else { cosine };
+        let u = PI_PAIR.mul::<FMA>(Pair(x, 0.0));
+        let numerator = u.mul::<FMA>(cosine).add(sine.neg());
+        numerator.div::<FMA>(u.mul::<FMA>(Pair(x, 0.0)))
+    };
+    slope.times_rounded::<FMA>(g)
+}
+
+/// `pi^2 / 3` as a pair: the leading coefficient of [`sinc_slope`]'s series.
+const PI_SQUARED_THIRD: Pair = Pair(3.289_868_133_696_453, 6.081_344_700_796_952e-17);
+
 unit_grad_kernel!(
-    /// `d/dx sinc(x) = pi (u cos u - sin u) / u^2`, with `u = pi x`.
-    ///
-    /// The numerator is the difference of two quantities that agree to their
-    /// first several digits near zero: at `u = 0.01` both are within 1e-6 of
-    /// each other and their difference is 3e-7, so subtracting them throws
-    /// away most of the mantissa. Below `|u| = 0.1` the series
-    /// `pi u (-1/3 + u^2/30 - u^4/840 + u^6/45360)` computes the same value
-    /// with no cancellation at all; its first dropped term is `u^8 / 1330560`
-    /// relative to the leading one, under 1e-14 at the cutoff.
+    /// `d/dx sinc(x)`, by [`sinc_slope`], with the fused multiply-add where the
+    /// CPU has it. The constants are float64 whatever the tensor's dtype: as
+    /// parameters they arrived rounded to a float32 tensor's width, 3e-8 of
+    /// them, and near the slope's zeros that was all of a float32 slope.
     SINC_D,
-    |x, g, p| {
-        let pi = p[0];
-        let u = pi * x;
-        let derivative = if u.abs() < 0.1 {
-            let square = u * u;
-            pi * u
-                * (-1.0 / 3.0 + square * (1.0 / 30.0 + square * (-1.0 / 840.0 + square / 45360.0)))
-        } else if x.is_infinite() {
-            0.0
-        } else {
-            // `(cos(pi x) - sinc(x)) / x`, both reduced as in `SINC`; the
-            // cosine as `sin(pi (1/2 - |r|))`, which is exactly 0 where it
-            // should be.
-            let r = reduced_mod_two(x);
-            let cosine = (pi * (0.5 - r.abs())).sin();
-            let value = (pi * folded_for_sin(r)).sin() / u;
-            (cosine - value) / x
-        };
-        g * derivative
-    }
+    |x, g, _p| crate::ops::arithmetic::extended::fused!(sinc_slope(x: f64, g: f64) -> f64)
 );
 
 /// `sin(pi * input) / (pi * input)`, taken as `1` at zero.
@@ -440,7 +482,7 @@ pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
         return crate::ops::util::narrowed(tensor, sinc(&widened));
     }
     let values = sinc_values(tensor)?;
-    unary_unit_from_data!(tensor, "sinc", values, SINC_D, [PI, 0.0])
+    unary_unit_from_data!(tensor, "sinc", values, SINC_D, [0.0; 2])
 }
 
 // --- lgamma and digamma ----------------------------------------------------

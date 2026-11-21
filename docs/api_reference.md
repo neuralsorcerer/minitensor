@@ -2666,12 +2666,21 @@ assert row_std.shape == (2, 3)
   `y = erfinv(x)`, taken from `|x| = 1/2` on as `sqrt(pi)/2 erfcx(y) / (1 - |x|)`,
   the same value: the exponential multiplies the relative error of `y` by
   `2 y**2`, and `erfcx` does not.
-- `exp2(input)` — `2 ** x` from the hardware's own base-2 exponential.
-  `exp(x * log(2))` rounds the exponent before using it, which costs the last
-  few bits of every answer and all of them for a large `x`.
+- `exp2(input)` — `2 ** x` from a base-2 exponential, not as
+  `exp(x * log(2))`: in the input's own width that rounds the exponent before
+  using it, which costs the last few bits of every answer and all of them for
+  a large `x`. Its slope `2^x ln 2` takes `ln 2` in float64 whatever the
+  dtype, and stays finite up to `x = 1024.53`, where it reaches the top of
+  float64 though `2^x` passed it at 1024.
 - `sinc(input)` — `sin(pi x) / (pi x)`, taken as `1` at zero. The normalized
   convention, so the zeros sit on the non-zero integers. A float32 input is
-  taken in float64 and narrowed once.
+  taken in float64 and narrowed once. Its slope, `(cos(pi x) - sinc(x)) / x`,
+  is formed as pairs of float64s from `x` reduced mod 2 exactly, and rounded
+  once with the incoming gradient: the float nearest the exact slope at every
+  input tried, in both dtypes. Its two terms agree by the origin, to `u^2/3`
+  of themselves for `u = pi x`, and again near the slope's zeros away from it,
+  where `tan(pi x) = pi x`; formed as float64 there the slope was up to 7e14
+  ulps out.
 - `lgamma(input)`, `digamma(input)` — `log |gamma(x)|` and its derivative.
   `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
   float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,

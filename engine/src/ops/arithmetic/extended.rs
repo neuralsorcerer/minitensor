@@ -20,6 +20,7 @@
 //! caller's body on the faster form where the CPU has it.
 
 use super::rounded_once::{product_error, two_sum};
+use std::f64::consts::FRAC_1_SQRT_2;
 
 /// A value as an unevaluated sum of two floats, the second at most half an
 /// ulp of the first.
@@ -29,6 +30,77 @@ pub(crate) struct Pair(pub(crate) f64, pub(crate) f64);
 /// `log 2` and `log2(e)` as pairs.
 pub(crate) const LN_2: Pair = Pair(std::f64::consts::LN_2, 2.319_046_813_846_299_6e-17);
 pub(crate) const LOG2_E: Pair = Pair(std::f64::consts::LOG2_E, 2.035_527_374_093_103_3e-17);
+
+/// `pi` as a pair.
+pub(crate) const PI: Pair = Pair(std::f64::consts::PI, 1.224_646_799_147_353_2e-16);
+
+/// `sin(pi j / 16)` and `cos(pi j / 16)` for `j` from 0 to 8, as pairs.
+#[rustfmt::skip]
+const SIXTEENTHS_OF_PI: [(Pair, Pair); 9] = [
+    (Pair(0.0, 0.0), Pair(1.0, 0.0)),
+    (Pair(0.19509032201612828, -7.991079068461731e-18), Pair(0.9807852804032304, 1.8546939997825006e-17)),
+    (Pair(0.3826834323650898, -1.0050772696461588e-17), Pair(0.9238795325112867, 1.7645047084336677e-17)),
+    (Pair(0.5555702330196022, 4.709410940561677e-17), Pair(0.8314696123025452, 1.4073856984728024e-18)),
+    (Pair(FRAC_1_SQRT_2, -4.833646656726457e-17), Pair(FRAC_1_SQRT_2, -4.833646656726457e-17)),
+    (Pair(0.8314696123025452, 1.4073856984728024e-18), Pair(0.5555702330196022, 4.709410940561677e-17)),
+    (Pair(0.9238795325112867, 1.7645047084336677e-17), Pair(0.3826834323650898, -1.0050772696461588e-17)),
+    (Pair(0.9807852804032304, 1.8546939997825006e-17), Pair(0.19509032201612828, -7.991079068461731e-18)),
+    (Pair(1.0, 0.0), Pair(0.0, 0.0)),
+];
+
+/// `(-1)^k / (2k + 1)!` and `(-1)^k / (2k)!` for `k` from 0 to 4, as pairs:
+/// the terms of `sin(t) / t` and `cos(t)` in `t^2` whose float64 rounding
+/// would show at `|t| = pi / 32`.
+#[rustfmt::skip]
+const SIN_HEAD: [Pair; 5] = [
+    Pair(1.0, 0.0),
+    Pair(-0.16666666666666666, -9.25185853854297e-18),
+    Pair(0.008333333333333333, 1.1564823173178714e-19),
+    Pair(-0.0001984126984126984, -1.7209558293420705e-22),
+    Pair(2.7557319223985893e-06, -1.858393274046472e-22),
+];
+#[rustfmt::skip]
+const COS_HEAD: [Pair; 5] = [
+    Pair(1.0, 0.0),
+    Pair(-0.5, 0.0),
+    Pair(0.041666666666666664, 2.3129646346357427e-18),
+    Pair(-0.001388888888888889, 5.300543954373577e-20),
+    Pair(2.48015873015873e-05, 2.1511947866775882e-23),
+];
+
+/// `sin(pi f)` and `cos(pi f)` as pairs, for `f` at most 1/2 in size, to
+/// about 2^-104 of the larger.
+///
+/// `f` less the nearest sixteenth is exact, and `pi` times it is a pair `t`
+/// at most `pi / 32` in size, whose sine and cosine are their series -- pairs
+/// to the fifth term and float64 past it, to the ninth, where the next is
+/// below 2^-110 of the whole -- carried to `pi f` by the angle-sum formulas
+/// with the sixteenth's from [`SIXTEENTHS_OF_PI`]. At `f = 1/2` the cosine is
+/// exactly 0, and near it the whole of the sine of `t`.
+#[inline(always)]
+pub(crate) fn sin_cos_pi<const FMA: bool>(f: f64) -> (Pair, Pair) {
+    let a = f.abs();
+    let j = (a * 16.0).round();
+    let t = PI.mul::<FMA>(Pair(a - j / 16.0, 0.0));
+    let z = t.mul::<FMA>(t);
+    let w = z.0;
+    let sin_tail = -2.505210838544172e-08
+        + w * (1.6059043836821613e-10 + w * (-7.647163731819816e-13 + w * 2.8114572543455206e-15));
+    let cos_tail = -2.755731922398589e-07
+        + w * (2.08767569878681e-09 + w * (-1.1470745597729725e-11 + w * 4.779477332387385e-14));
+    let (mut sin_t, mut cos_t) = (Pair(sin_tail, 0.0), Pair(cos_tail, 0.0));
+    for k in (0..5).rev() {
+        sin_t = sin_t.mul::<FMA>(z).add(SIN_HEAD[k]);
+        cos_t = cos_t.mul::<FMA>(z).add(COS_HEAD[k]);
+    }
+    let sin_t = sin_t.mul::<FMA>(t);
+    // `j` is a whole number from 0 to 8, or NaN with `f`, which indexes the
+    // first entry and stays NaN through `t`.
+    let (sin_j, cos_j) = SIXTEENTHS_OF_PI[j as usize];
+    let sine = sin_j.mul::<FMA>(cos_t).add(cos_j.mul::<FMA>(sin_t));
+    let cosine = cos_j.mul::<FMA>(cos_t).add(sin_j.mul::<FMA>(sin_t).neg());
+    (if f < 0.0 { sine.neg() } else { sine }, cosine)
+}
 
 /// `log 2 / 64` as a pair: the step of [`exp_parts`]' reduction.
 const LN_2_64: Pair = Pair(0.010_830_424_696_249_145, 3.623_510_646_634_843e-19);
@@ -166,6 +238,17 @@ impl Pair {
         let q = self.0 / other.0;
         let rest = self.add(other.mul::<FMA>(Pair(-q, 0.0)));
         Pair::normal(q, rest.0 / other.0)
+    }
+
+    /// `self * g` rounded once, for a finite `self`: the product of the
+    /// leading part beside its exact error and the trailing part's product.
+    #[inline(always)]
+    pub(crate) fn times_rounded<const FMA: bool>(self, g: f64) -> f64 {
+        let p = self.0 * g;
+        if p == 0.0 || !p.is_finite() {
+            return p;
+        }
+        p + (error_of::<FMA>(self.0, g, p) + self.1 * g)
     }
 
     /// Times a power of two, exactly while both parts stay normal.
@@ -410,6 +493,45 @@ mod tests {
             let gap = back.add(Pair(-w, 0.0));
             assert!(value(gap).abs() <= w * 1e-29, "{w}: {back:?}");
         }
+    }
+
+    #[test]
+    fn sines_and_cosines_of_pi_f() {
+        // Exact values at sixths and quarters, the Pythagorean identity
+        // elsewhere, and both signs.
+        let (s, c) = sin_cos_pi::<false>(1.0 / 6.0);
+        assert!((value(s) - 0.5).abs() <= 1e-31, "{s:?}");
+        assert!((value(c.mul::<false>(c)) - 0.75).abs() <= 1e-31, "{c:?}");
+        let (s, c) = sin_cos_pi::<false>(-0.25);
+        assert!(
+            (value(s.mul::<false>(s)) - 0.5).abs() <= 1e-31 && s.0 < 0.0,
+            "{s:?}"
+        );
+        assert_eq!(s.neg(), c);
+        assert_eq!(sin_cos_pi::<false>(0.5), (Pair(1.0, 0.0), Pair(0.0, 0.0)));
+        for &f in &[
+            1e-300,
+            1e-9,
+            0.03,
+            0.0312,
+            0.1,
+            0.33,
+            0.4687,
+            0.49,
+            0.5 - 1e-12,
+        ] {
+            let (s, c) = sin_cos_pi::<false>(f);
+            let one = s.mul::<false>(s).add(c.mul::<false>(c));
+            assert!((value(one) - 1.0).abs() <= 1e-31, "{f}: {one:?}");
+        }
+        // Near 1/2 the cosine keeps its digits: `cos(pi (1/2 - d))` is
+        // `sin(pi d)`, which for this `d` is `pi d` to 2^-80 of it.
+        let d = 2f64.powi(-40);
+        let (_, c) = sin_cos_pi::<false>(0.5 - d);
+        assert!(
+            (value(c) / (std::f64::consts::PI * d) - 1.0).abs() <= 1e-15,
+            "{c:?}"
+        );
     }
 
     #[test]
