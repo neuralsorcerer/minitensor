@@ -29,67 +29,6 @@ where
     Ok(())
 }
 
-/// Compute the sign of each tensor element (-1.0, 0.0, or 1.0)
-pub(crate) fn sign_tensor(tensor: &Tensor) -> Result<Tensor> {
-    // Producer kernel (no memset + raw-pointer loop). NaN propagates, matching
-    // the public `sign` op and the L1 gradient.
-    let output_data = match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            TensorData::from_vec::<f32>(
-                unary_map(input_data, |v: f32| {
-                    if v.is_nan() {
-                        v
-                    } else if v > 0.0 {
-                        1.0
-                    } else if v < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                }),
-                DataType::Float32,
-                tensor.device(),
-            )
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            TensorData::from_vec::<f64>(
-                unary_map(input_data, |v: f64| {
-                    if v.is_nan() {
-                        v
-                    } else if v > 0.0 {
-                        1.0
-                    } else if v < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                }),
-                DataType::Float64,
-                tensor.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Sign operation only supported for floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        false,
-    ))
-}
-
 /// Sum all elements in a tensor to produce a scalar.
 ///
 /// Through the whole-tensor `sum`'s own kernels: vectorised, folded pairwise

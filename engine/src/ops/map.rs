@@ -1428,34 +1428,6 @@ where
     unary_map_threshold(input, PAR_THRESHOLD, op)
 }
 
-/// Write `op(input[i])` into an existing output slice, parallel above
-/// [`PAR_THRESHOLD`].
-///
-/// The in-place counterpart to [`unary_map`], for kernels that already own a
-/// destination buffer. Chunked rather than indexed, so the bounds stay visible
-/// to the optimizer and no pointer has to be laundered across the rayon
-/// closure boundary.
-pub(crate) fn unary_map_into<T, U, F>(out: &mut [U], input: &[T], op: F)
-where
-    T: Copy + Sync,
-    U: Copy + Send + Sync,
-    F: Fn(T) -> U + Send + Sync,
-{
-    debug_assert_eq!(out.len(), input.len());
-    let apply = |out: &mut [U], input: &[T]| {
-        for (o, &i) in out.iter_mut().zip(input.iter()) {
-            *o = op(i);
-        }
-    };
-    if out.len() < PAR_THRESHOLD {
-        apply(out, input);
-    } else {
-        crate::parallel::for_each_chunk_mut(out, PAR_CHUNK, &|start, o| {
-            apply(o, &input[start..start + o.len()])
-        });
-    }
-}
-
 /// Zip `op` over two equal-length slices into a fresh, exactly-sized `Vec`.
 /// Parallel above [`BINARY_PAR_THRESHOLD`]. The two inputs may have different
 /// element types (e.g. zipping values with a boolean mask).

@@ -10,7 +10,7 @@ use super::*;
 use crate::ops::map::{PAR_THRESHOLD, par_out_chunks_gated};
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::{binary_map, ternary_map, unary_map_into},
+    ops::map::{binary_map, ternary_map},
     ops::util::create_scalar_tensor,
     ops::{activation, arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -18,203 +18,53 @@ use crate::{
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-/// Gradient function for MSE loss
-pub struct MSELossBackward {
-    pub predictions_shape: Vec<usize>,
-    pub targets_shape: Vec<usize>,
+/// Gradient function for the regression losses of the difference alone --
+/// squared, absolute, Huber and smooth-L1 -- each gradient the float nearest
+/// `s(p - t) g / n` in the predictions and its negative in the targets, `s`
+/// the term's slope and `n` the count for a mean; see
+/// [`crate::ops::loss::regression_gradients`].
+pub(crate) struct RegressionLossBackward {
     pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Targets
-    /// almost never do, so their gradient chain is skipped entirely.
+    /// Which of [predictions, targets] need a gradient.
     pub input_requires_grad: [bool; 2],
-    pub reduction: String,
-    pub diff: Tensor,
+    pub slope: crate::ops::arithmetic::exact_sum::Slope,
+    /// Whether the loss is the terms' mean.
+    pub mean: bool,
+    pub predictions: Tensor,
+    pub targets: Tensor,
 }
-impl GradientFunction for MSELossBackward {
+
+impl GradientFunction for RegressionLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
-
-        // Base gradient: 2 * (predictions - targets)
-        let two = create_scalar_tensor(2.0, self.diff.dtype(), self.diff.device())?;
-        let mut base_grad = arithmetic::mul(&self.diff, &two)?;
-
-        // Apply reduction scaling
-        match self.reduction.as_str() {
-            "mean" => {
-                let n = self.diff.numel() as f64;
-                let scale = create_scalar_tensor(1.0 / n, base_grad.dtype(), base_grad.device())?;
-                base_grad = arithmetic::mul(&base_grad, &scale)?;
-            }
-            "sum" | "none" => {}
-            _ => {
-                return Err(MinitensorError::gradient_error(format!(
-                    "Unknown reduction mode: {}",
-                    self.reduction
-                )));
-            }
+        let [by_prediction, by_target] = crate::ops::loss::regression_gradients(
+            (&self.predictions, &self.targets),
+            grad_output,
+            self.slope,
+            self.mean,
+            self.input_requires_grad,
+        )?;
+        if let Some(grad) = by_target {
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
         }
-
-        // Multiply by upstream gradient
-        let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        if self.input_requires_grad[1] {
-            let target_grad = arithmetic::neg(&pred_grad)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if let Some(grad) = by_prediction {
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
         }
-        if self.input_requires_grad[0] {
-            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        }
-
         Ok(gradients)
     }
 
     fn input_ids(&self) -> &[TensorId] {
         &self.input_ids
     }
-}
-/// Gradient function for MAE loss
-pub struct MAELossBackward {
-    pub predictions_shape: Vec<usize>,
-    pub targets_shape: Vec<usize>,
-    pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Targets
-    /// almost never do, so their gradient chain is skipped entirely.
-    pub input_requires_grad: [bool; 2],
-    pub reduction: String,
-    pub sign: Tensor,
-}
-impl GradientFunction for MAELossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
 
-        let mut base_grad = self.sign.clone();
-        match self.reduction.as_str() {
-            "mean" => {
-                let n = self.sign.numel() as f64;
-                let scale = create_scalar_tensor(1.0 / n, base_grad.dtype(), base_grad.device())?;
-                base_grad = arithmetic::mul(&base_grad, &scale)?;
-            }
-            "sum" | "none" => {}
-            _ => {
-                return Err(MinitensorError::gradient_error(format!(
-                    "Unknown reduction mode: {}",
-                    self.reduction
-                )));
-            }
+    fn name(&self) -> &'static str {
+        use crate::ops::arithmetic::exact_sum::Slope;
+        match self.slope {
+            Slope::Squared => "MSELossBackward",
+            Slope::Absolute => "MAELossBackward",
+            Slope::Huber(_) => "HuberLossBackward",
+            Slope::Smooth(_) => "SmoothL1LossBackward",
         }
-
-        let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        if self.input_requires_grad[1] {
-            let target_grad = arithmetic::neg(&pred_grad)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
-        }
-        if self.input_requires_grad[0] {
-            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        }
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        &self.input_ids
-    }
-}
-/// Gradient function for Huber loss
-pub struct HuberLossBackward {
-    pub predictions_shape: Vec<usize>,
-    pub targets_shape: Vec<usize>,
-    pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Targets
-    /// almost never do, so their gradient chain is skipped entirely.
-    pub input_requires_grad: [bool; 2],
-    pub delta: f64,
-    /// What the loss's terms are over: one for Huber, and `beta` for
-    /// smooth-L1, whose gradient is Huber's over it.
-    pub divisor: f64,
-    pub reduction: String,
-    pub diff: Tensor,
-}
-impl GradientFunction for HuberLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
-
-        let numel = self.diff.numel();
-        let dtype = self.diff.dtype();
-        let device = self.diff.device();
-        let mut grad_data = TensorData::zeros_on_device(numel, dtype, device);
-
-        match dtype {
-            DataType::Float32 => {
-                let diff_slice = self.diff.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from diff")
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get mutable f32 slice from grad")
-                })?;
-                let delta = self.delta as f32;
-                unary_map_into(grad_slice, diff_slice, move |d: f32| {
-                    if d.abs() <= delta {
-                        d
-                    } else {
-                        delta * d.signum()
-                    }
-                });
-            }
-            DataType::Float64 => {
-                let diff_slice = self.diff.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from diff")
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get mutable f64 slice from grad")
-                })?;
-                let delta = self.delta;
-                unary_map_into(grad_slice, diff_slice, move |d: f64| {
-                    if d.abs() <= delta {
-                        d
-                    } else {
-                        delta * d.signum()
-                    }
-                });
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "Huber loss only supports floating point tensors",
-                ));
-            }
-        }
-
-        let mut base_grad = Tensor::new(
-            Arc::new(grad_data),
-            Shape::new(self.predictions_shape.clone()),
-            dtype,
-            device,
-            false,
-        );
-
-        if self.divisor != 1.0 {
-            let divisor = create_scalar_tensor(self.divisor, dtype, device)?;
-            base_grad = arithmetic::div(&base_grad, &divisor)?;
-        }
-        if self.reduction == "mean" {
-            let scale = create_scalar_tensor(1.0 / numel as f64, dtype, device)?;
-            base_grad = arithmetic::mul(&base_grad, &scale)?;
-        }
-
-        let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        if self.input_requires_grad[1] {
-            let target_grad = arithmetic::neg(&pred_grad)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
-        }
-        if self.input_requires_grad[0] {
-            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        }
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        &self.input_ids
     }
 }
 /// Gradient function for log-cosh loss: `tanh(p - t)` in the predictions

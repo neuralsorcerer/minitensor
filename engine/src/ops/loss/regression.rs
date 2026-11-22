@@ -8,12 +8,12 @@ use super::*;
 use crate::autograd::with_grad_fn;
 use std::borrow::Cow;
 
+use crate::ops::arithmetic::exact_sum::Slope;
 use crate::ops::map::par_out_chunks_gated;
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
-        HuberLossBackward, KLDivLossBackward, LogCoshLossBackward, MAELossBackward,
-        MSELossBackward, NoGradGuard,
+        KLDivLossBackward, LogCoshLossBackward, NoGradGuard, RegressionLossBackward,
     },
     error::{MinitensorError, Result},
     ops::{
@@ -68,43 +68,21 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
 
     // Analytical backward below, so the primitive subtract/multiply/reduce
     // graph is not recorded as well -- see [`manual_backward_needed`].
-    let (loss, diff_for_grad) = {
+    let loss = {
         let _guard = NoGradGuard::new();
 
         // The loss is the float nearest the exact value: each square of an
-        // exact difference, or their mean or sum, rounded once. The rounded
-        // difference is only the gradient's.
-        let loss = match reduction {
+        // exact difference, or their mean or sum, rounded once.
+        match reduction {
             "mean" | "sum" => exact_difference_loss(predictions, targets, false, reduction)?,
             "none" => squared_differences(predictions, targets)?,
             _ => return Err(invalid_reduction(reduction, false)),
-        };
-        let diff_for_grad = if needs_grad {
-            Some(sub(predictions, targets)?.detach())
-        } else {
-            None
-        };
-        (loss, diff_for_grad)
+        }
     };
-
-    // Set up gradient function if needed
-    if let Some(diff) = diff_for_grad {
-        let grad_fn = Arc::new(MSELossBackward {
-            predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets.shape().dims().to_vec(),
-            input_ids: [predictions.id(), targets.id()],
-            input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
-            reduction: reduction.to_string(),
-            diff,
-        });
-
-        let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
-
-        Ok(loss_with_grad)
-    } else {
-        Ok(loss)
+    if !needs_grad {
+        return Ok(loss);
     }
+    regression_backward(loss, (predictions, targets), Slope::Squared, reduction)
 }
 
 /// Mean Absolute Error (MAE) loss function
@@ -125,52 +103,26 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
-    // The forward is computed on detached data (the exact gradient is provided
-    // by MAELossBackward from the stored sign), so gate on the inputs and
+    // The forward is computed on detached data (the gradient is provided by
+    // the analytical backward from the operands), so gate on the inputs and
     // enable grad on the loss explicitly.
     let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    let (loss, sign_for_grad) = {
+    let loss = {
         let _guard = NoGradGuard::new();
 
         // The mean or sum is of the exact magnitudes, rounded once, and each
-        // unreduced magnitude that of a difference rounded once already. The
-        // difference's sign is only the gradient's.
-        let diff = if needs_grad || reduction == "none" {
-            Some(sub(predictions, targets)?.detach())
-        } else {
-            None
-        };
-        let loss = match (reduction, &diff) {
-            ("mean" | "sum", _) => exact_difference_loss(predictions, targets, true, reduction)?,
-            ("none", Some(diff)) => activation_abs(diff)?,
+        // unreduced magnitude that of a difference rounded once already.
+        match reduction {
+            "mean" | "sum" => exact_difference_loss(predictions, targets, true, reduction)?,
+            "none" => activation_abs(&sub(predictions, targets)?.detach())?,
             _ => return Err(invalid_reduction(reduction, false)),
-        };
-        let sign_for_grad = match diff {
-            Some(diff) if needs_grad => Some(sign_tensor(&diff)?.detach()),
-            _ => None,
-        };
-        (loss, sign_for_grad)
+        }
     };
-
-    // Set up gradient function if needed
-    if let Some(sign) = sign_for_grad {
-        let grad_fn = Arc::new(MAELossBackward {
-            predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets.shape().dims().to_vec(),
-            input_ids: [predictions.id(), targets.id()],
-            input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
-            reduction: reduction.to_string(),
-            sign,
-        });
-
-        let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
-
-        Ok(loss_with_grad)
-    } else {
-        Ok(loss)
+    if !needs_grad {
+        return Ok(loss);
     }
+    regression_backward(loss, (predictions, targets), Slope::Absolute, reduction)
 }
 /// The per-sample loss `-log_predictions[i, targets[i]]`, one gather per row.
 ///
@@ -979,7 +931,7 @@ pub fn smooth_l1_loss(
 
 /// A Huber-shaped loss: each term the Huber term with `delta`, over `delta`
 /// where `smooth`, the float nearest its exact value, as are their sum and
-/// mean. The gradient comes from the rounded difference, clamped to `delta`.
+/// mean, and so is each gradient.
 fn huber_shaped(
     predictions: &Tensor,
     targets: &Tensor,
@@ -990,34 +942,115 @@ fn huber_shaped(
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
 
     // The forward is computed on detached data, and the gradient provided by
-    // HuberLossBackward from the stored difference; see
-    // [`manual_backward_needed`].
+    // the analytical backward; see [`manual_backward_needed`].
     let needs_grad = manual_backward_needed(&[predictions, targets]);
-    let (loss, diff_for_grad) = {
+    let loss = {
         let _guard = NoGradGuard::new();
-        let loss = huber_values(predictions, targets, (delta, smooth), reduction)?;
-        let diff = if needs_grad {
-            Some(sub(predictions, targets)?.detach())
-        } else {
-            None
-        };
-        (loss, diff)
+        huber_values(predictions, targets, (delta, smooth), reduction)?
     };
-
-    let Some(diff) = diff_for_grad else {
+    if !needs_grad {
         return Ok(loss);
+    }
+    let slope = if smooth {
+        Slope::Smooth(delta)
+    } else {
+        Slope::Huber(delta)
     };
-    let grad_fn = Arc::new(HuberLossBackward {
-        predictions_shape: predictions.shape().dims().to_vec(),
-        targets_shape: targets.shape().dims().to_vec(),
+    regression_backward(loss, (predictions, targets), slope, reduction)
+}
+
+/// `loss` with the backward of a regression loss of `slope` attached, which
+/// keeps the operands rather than their rounded difference.
+fn regression_backward(
+    loss: Tensor,
+    (predictions, targets): (&Tensor, &Tensor),
+    slope: Slope,
+    reduction: &str,
+) -> Result<Tensor> {
+    let grad_fn = Arc::new(RegressionLossBackward {
         input_ids: [predictions.id(), targets.id()],
         input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
-        delta,
-        divisor: if smooth { delta } else { 1.0 },
-        reduction: reduction.to_string(),
-        diff,
+        slope,
+        mean: reduction == "mean",
+        predictions: predictions.detach(),
+        targets: targets.detach(),
     });
     with_grad_fn(loss.requires_grad_(true), grad_fn)
+}
+
+/// A regression loss's gradients, in its predictions where `wanted[0]` and in
+/// its targets where `wanted[1]`: each the float nearest `s(p - t) g / n` --
+/// `s` the term's slope, `g` the incoming gradient, one value or one a term,
+/// and `n` the count for a `mean` -- and its negative. A float32 loss reads
+/// its limit at float32, as its forward does.
+pub(crate) fn regression_gradients(
+    (predictions, targets): (&Tensor, &Tensor),
+    grad_output: &Tensor,
+    slope: Slope,
+    mean: bool,
+    wanted: [bool; 2],
+) -> Result<[Option<Tensor>; 2]> {
+    use crate::ops::arithmetic::exact_sum::regression_slopes;
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let upstream = grad_output.contiguous()?;
+    let (dtype, device, n) = (p.dtype(), p.device(), p.numel());
+    if upstream.numel() != 1 && upstream.numel() != n {
+        return Err(MinitensorError::shape_mismatch(
+            p.shape().dims().to_vec(),
+            upstream.shape().dims().to_vec(),
+        ));
+    }
+    let count = if mean { n as f64 } else { 1.0 };
+    // A float32 loss reads its limit at float32.
+    let slope = match (slope, dtype) {
+        (Slope::Huber(delta), DataType::Float32) => Slope::Huber(f64::from(delta as f32)),
+        (Slope::Smooth(beta), DataType::Float32) => Slope::Smooth(f64::from(beta as f32)),
+        (other, _) => other,
+    };
+    let missing = || MinitensorError::internal_error("loss backward: a float slice");
+    let floats = |tensor: &Tensor| tensor.dtype() == dtype;
+    let data = match dtype {
+        // The operands as they are, where they share the predictions' dtype.
+        DataType::Float32 if floats(&t) && floats(&upstream) => {
+            let (x, y) = (p.data().as_f32_slice(), t.data().as_f32_slice());
+            let g = upstream.data().as_f32_slice().ok_or_else(missing)?;
+            let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+            let out: Vec<f32> = regression_slopes(x, (y, None), g, slope, count);
+            TensorData::from_vec(out, dtype, device)
+        }
+        DataType::Float64 if floats(&t) && floats(&upstream) => {
+            let (x, y) = (p.data().as_f64_slice(), t.data().as_f64_slice());
+            let g = upstream.data().as_f64_slice().ok_or_else(missing)?;
+            let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+            let out: Vec<f64> = regression_slopes(x, (y, None), g, slope, count);
+            TensorData::from_vec(out, dtype, device)
+        }
+        // Otherwise in float64: an integer target as its parts, and an
+        // incoming gradient of another dtype as its values.
+        _ => {
+            let x = widened(&p)?;
+            let (highs, lows) = match t.dtype() {
+                DataType::Int32 | DataType::Int64 => integer_parts(&t)?,
+                _ => (widened(&t)?, None),
+            };
+            let g = widened(&upstream.astype(DataType::Float64)?)?;
+            let targets = (&highs[..], lows.as_deref());
+            if dtype == DataType::Float32 {
+                let out: Vec<f32> = regression_slopes(&x, targets, &g, slope, count);
+                TensorData::from_vec(out, dtype, device)
+            } else {
+                let out: Vec<f64> = regression_slopes(&x, targets, &g, slope, count);
+                TensorData::from_vec(out, dtype, device)
+            }
+        }
+    };
+    let grad = Tensor::new(Arc::new(data), p.shape().clone(), dtype, device, false);
+    let by_target = if wanted[1] {
+        Some(crate::ops::arithmetic::neg(&grad)?)
+    } else {
+        None
+    };
+    Ok([wanted[0].then_some(grad), by_target])
 }
 
 /// Log-cosh loss for robust regression: `log(cosh(p - t))`, each term the

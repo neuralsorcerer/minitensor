@@ -49,6 +49,10 @@ pub(crate) use self::huber::{Huber, huber_terms, huber_total};
 mod pool;
 pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotient};
 
+#[path = "exact_regression.rs"]
+mod regression;
+pub(crate) use self::regression::{Slope, regression_slopes};
+
 #[path = "exact_scatter.rs"]
 mod scatter;
 pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows, multiply_scattered};
@@ -335,17 +339,10 @@ impl Output for f32 {
             };
             return Some(odd as f32);
         }
-        if !narrow.is_finite() || narrow.abs() == f32::MAX {
-            return None;
-        }
-        // The halfway points either side of `narrow`, which are float64s, and
-        // the room the total has before each: exact differences of nearby
-        // float64s, kept a hair short to stay clear of their own rounding.
-        let back = f64::from(narrow);
-        let above = (back + f64::from(narrow.next_up())) / 2.0;
-        let below = (back + f64::from(narrow.next_down())) / 2.0;
-        let room = |gap: f64| gap * (1.0 - 2f64.powi(-40));
-        (rest + bound < room(above - value) && bound - rest < room(value - below)).then_some(narrow)
+        // The same test as the lanes take, without a branch on the sign that
+        // data of both signs mispredicts.
+        let (narrow, clear) = Self::settle_lanes(value, rest, bound);
+        clear.then_some(narrow)
     }
 
     #[inline(always)]
