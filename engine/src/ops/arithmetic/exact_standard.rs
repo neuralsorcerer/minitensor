@@ -31,7 +31,9 @@ use super::{Carried, Element, Output, Total, at_least, shifted, subtract, two_su
 
 #[path = "exact_standard_slope.rs"]
 mod slope;
-pub(crate) use self::slope::{round_pair, standardized_slice_slopes, standardized_slopes};
+pub(crate) use self::slope::{
+    given_weight_slope, round_pair, standardized_slice_slopes, standardized_slopes,
+};
 
 /// A slice's statistics as pairs of float64s, with bounds.
 pub(crate) struct Standard {
@@ -138,19 +140,7 @@ impl Standard {
         let (high, carry) = two_sum(mean, eps);
         let low = carry + mean_rest;
         let bound = generous(mean_bound + low.abs() * 2f64.powi(-52));
-        if !(2f64.powi(-600)..=2f64.powi(600)).contains(&high) || bound >= high * 2f64.powi(-60) {
-            return None;
-        }
-        // The inverse root by one Newton step from the float64 one: the
-        // step's own error is below 2^-100 of it, the pair's error and the
-        // bound on the variance move it by half their part of it.
-        let first = 1.0 / high.sqrt();
-        let (square, square_error) = split::<FMA>(first, first);
-        let (product, product_error) = split::<FMA>(high, square);
-        let residual = (product - 1.0) + (product_error + high * square_error + low * square);
-        let correction = -0.5 * first * residual;
-        let (scale, scale_rest) = two_sum(first, correction);
-        let scale_relative = generous(2f64.powi(-96) + (bound / high) * 0.5);
+        let (scale, scale_rest, scale_relative) = inverse_root::<FMA>(high, low, bound)?;
         Some(Self {
             centre,
             centre_rest,
@@ -241,6 +231,29 @@ impl Standard {
             }
         }
     }
+}
+
+/// The inverse root of `high + low`, which is within `bound` of the
+/// variance plus the floor, as a pair and its bound relative to it, by one
+/// Newton step from the float64 one: the step's own error is below 2^-100 of
+/// it, and the pair's error and `bound` move it by half their part of it.
+/// None where the root lies too far out for the pairs.
+#[inline(always)]
+fn inverse_root<const FMA: bool>(high: f64, low: f64, bound: f64) -> Option<(f64, f64, f64)> {
+    if !(2f64.powi(-600)..=2f64.powi(600)).contains(&high) || bound >= high * 2f64.powi(-60) {
+        return None;
+    }
+    let first = 1.0 / high.sqrt();
+    let (square, square_error) = split::<FMA>(first, first);
+    let (product, product_error) = split::<FMA>(high, square);
+    let residual = (product - 1.0) + (product_error + high * square_error + low * square);
+    let correction = -0.5 * first * residual;
+    let (scale, scale_rest) = two_sum(first, correction);
+    Some((
+        scale,
+        scale_rest,
+        generous(2f64.powi(-96) + (bound / high) * 0.5),
+    ))
 }
 
 /// `x` less the mean `centre + rest`, which is within `bound` of the exact
@@ -416,6 +429,17 @@ impl Exactly {
             centred,
             sum,
             divisor,
+        }
+    }
+
+    /// Statistics given rather than found: `x` less `mean`, over the root
+    /// of `var + eps`.
+    pub(crate) fn given(mean: f64, var: f64, eps: f64) -> Self {
+        Self {
+            count: 1.0,
+            centred: true,
+            sum: Whole::float(mean),
+            divisor: Whole::of(Total::of_terms(&[(var, 1.0, 1.0), (eps, 1.0, 1.0)])),
         }
     }
 
@@ -653,6 +677,238 @@ pub(crate) fn standardized_rows<I: Element, T: Output>(
             one_row(values, squares, &shape, index, cells);
         }
     });
+}
+
+/// A channel's statistics and parameters as an evaluation pass takes them,
+/// given rather than found from its values: each output
+/// `w (x - m) / sqrt(v + eps) + b`. See [`given_values`].
+pub(crate) struct Given {
+    mean: f64,
+    var: f64,
+    eps: f64,
+    weight: f64,
+    bias: f64,
+    /// `1 / sqrt(v + eps)` in float64, and the bound on `d r` it leaves
+    /// against `|d|`: the floor's sum, the root and the quotient each round
+    /// once, and so does the deviation.
+    root: f64,
+    spread: f64,
+    /// The inverse root as a pair and `w` times it, each within `relative`
+    /// of the exact value relative to it; the float64 root where the pairs
+    /// are not taken.
+    scale: (f64, f64),
+    gain: (f64, f64),
+    relative: f64,
+    pairs: bool,
+    /// Whether every value takes the formula: statistics or parameters that
+    /// are not finite, or a variance and floor that are not positive.
+    formula: bool,
+}
+
+impl Given {
+    pub(crate) fn new(mean: f64, var: f64, eps: f64, (weight, bias): (f64, f64)) -> Self {
+        let unit = 2f64.powi(-53);
+        let margin = 1.0 + 2f64.powi(-20);
+        let root = 1.0 / (var + eps).sqrt();
+        let relative = (0.5 * unit * (1.0 + 2.0 * unit) + 2.0 * unit) * margin;
+        let spread = root * (relative + unit * (1.0 + relative)) * margin;
+        let parameters = [mean, var, eps, weight, bias];
+        let formula = !(parameters.iter().all(|v| v.is_finite()) && var + eps > 0.0);
+        let (high, low) = two_sum(var, eps);
+        let pair = (!formula && parameters.iter().all(|&v| comfortable(v)))
+            .then(|| inverse_root::<false>(high, low, 0.0))
+            .flatten();
+        let (scale, gain, relative) = match pair {
+            Some((scale, scale_rest, relative)) => {
+                // `w` times the pair, but for the rounding of `w s'`, which
+                // is below 2^-104 of it.
+                let (gain, gain_error) = split::<false>(weight, scale);
+                let gain_rest = gain_error + weight * scale_rest;
+                (
+                    (scale, scale_rest),
+                    (gain, gain_rest),
+                    generous(relative + 2f64.powi(-104)),
+                )
+            }
+            None => ((root, 0.0), (weight * root, 0.0), 0.0),
+        };
+        Self {
+            mean,
+            var,
+            eps,
+            weight,
+            bias,
+            root,
+            spread,
+            scale,
+            gain,
+            relative,
+            pairs: pair.is_some(),
+            formula,
+        }
+    }
+
+    /// The plain float64 output for `x` and its bound, as [`plain_outputs`]
+    /// bounds it: `d r` within `spread |d| + |d r| 2^-53`, and the product
+    /// and sum each rounding once more.
+    #[inline(always)]
+    fn plain(&self, x: f64) -> (f64, f64) {
+        let unit = 2f64.powi(-53);
+        let margin = 1.0 + 2f64.powi(-20);
+        let d = x - self.mean;
+        let z = d * self.root;
+        let p = z * self.weight;
+        let y = p + self.bias;
+        let bound = (self.weight.abs() * (self.spread * d.abs() + unit * z.abs())
+            + unit * (p.abs() + y.abs()))
+            * margin
+            + 2f64.powi(-51) * y.abs();
+        (y, bound)
+    }
+
+    /// `A (d + d') + b` for `x`, with the exact deviation `d + d'` and `A`
+    /// the gain's pair, as the value of `T` nearest it and whether its bound
+    /// settles it: never for a value that is not finite or lies too far out
+    /// for the pairs. Without branches, for a pass over a run or row.
+    ///
+    /// The pair is the exact `(A + A') (d + d') + b` but for the roundings
+    /// of the cross terms `A d'` and `A' d`, of their sum and of the tail's
+    /// two additions, each within 2^-53 of itself, and the dropped `A' d'`;
+    /// and `A + A'` is within `relative` of the exact gain.
+    #[inline(always)]
+    fn pair<T: Output, const FMA: bool>(&self, x: f64) -> (T, bool) {
+        let (d, d_low) = two_sum(x, -self.mean);
+        let (a, a_low) = self.gain;
+        let (product, product_error) = split::<FMA>(a, d);
+        let cross = a * d_low + a_low * d;
+        let (head, head_error) = two_sum(product, self.bias);
+        let inner = product_error + cross;
+        let tail = head_error + inner;
+        let (value, rest) = two_sum(head, tail);
+        let bound = generous(
+            (a.abs() + a_low.abs()) * (d.abs() + d_low.abs()) * self.relative
+                + (a.abs() * d_low.abs()
+                    + a_low.abs() * d.abs()
+                    + cross.abs()
+                    + inner.abs()
+                    + tail.abs())
+                    * 2f64.powi(-53)
+                + a_low.abs() * d_low.abs(),
+        );
+        // Where the product is a zero, `head` is the formula's sum exactly
+        // and signed as it signs it, which adding the zero `tail` could turn.
+        let direct = (d == 0.0) | (a == 0.0);
+        let value = if direct { head } else { value };
+        let ordinary = comfortable(d) & comfortable(product) & comfortable(value);
+        let (settled, clear) = T::settle_lanes(value, rest, bound);
+        (settled, clear & ordinary & self.pairs)
+    }
+
+    /// The output for `x`: for a float32 first in plain float64 with a
+    /// bound, then from [`Given::pair`], and only where neither settles it,
+    /// in whole numbers.
+    #[inline(always)]
+    fn value<T: Output, const FMA: bool>(&self, x: f64) -> T {
+        if self.formula | !x.is_finite() {
+            return T::narrow((x - self.mean) * self.root * self.weight + self.bias);
+        }
+        if T::PLAIN {
+            let (y, bound) = self.plain(x);
+            let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
+            if low.widen().to_bits() == high.widen().to_bits() {
+                return high;
+            }
+        }
+        match self.pair::<T, FMA>(x) {
+            (settled, true) => settled,
+            _ => self.exact(x),
+        }
+    }
+
+    /// An output the bounds leave open, in whole numbers.
+    #[cold]
+    #[inline(never)]
+    fn exact<T: Output>(&self, x: f64) -> T {
+        let guess = (x - self.mean) * self.root * self.weight + self.bias;
+        Exactly::given(self.mean, self.var, self.eps).value_to::<T>(
+            x,
+            Some((self.weight, self.bias)),
+            guess,
+        )
+    }
+}
+
+/// Each of `values` under its channel's statistics into `out`, the channels
+/// taken in turn from `givens`: one for a run of a channel's values, or a
+/// row's worth for a row of one value a channel. Each output is the value of
+/// `T` nearest its exact one; a value that is not finite, and every value of
+/// a channel whose statistics or parameters are not finite or whose
+/// variance plus `eps` is not positive, takes the formula in float64.
+pub(crate) fn given_values<I: Element, T: Output>(values: &[I], givens: &[Given], out: &mut [T]) {
+    // A float32 output first in plain float64 over the whole run or row, a
+    // pass the compiler can lay out lane by lane; settled where both ends of
+    // each interval round alike, a zero's sign counted.
+    if T::PLAIN {
+        let mut clear = true;
+        let mut settle = |cell: &mut T, (y, bound): (f64, f64)| {
+            let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
+            *cell = high;
+            clear &= low.widen().to_bits() == high.widen().to_bits();
+        };
+        if let [given] = givens {
+            for (cell, &x) in out.iter_mut().zip(values) {
+                settle(cell, given.plain(x.wide()));
+            }
+        } else {
+            for ((cell, &x), given) in out.iter_mut().zip(values).zip(givens) {
+                settle(cell, given.plain(x.wide()));
+            }
+        }
+        if clear {
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        if unsafe { given_pairs_fma(values, givens, out) } {
+            return;
+        }
+    }
+    given_each(values, givens, out);
+}
+
+/// Each output from its pair where the bound settles it, in one pass,
+/// built with AVX2 and fused multiply-adds: whether every one did.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn given_pairs_fma<I: Element, T: Output>(values: &[I], givens: &[Given], out: &mut [T]) -> bool {
+    let mut clear = true;
+    if let [given] = givens {
+        for (cell, &x) in out.iter_mut().zip(values) {
+            let (value, settled) = given.pair::<T, true>(x.wide());
+            *cell = value;
+            clear &= settled;
+        }
+    } else {
+        for ((cell, &x), given) in out.iter_mut().zip(values).zip(givens) {
+            let (value, settled) = given.pair::<T, true>(x.wide());
+            *cell = value;
+            clear &= settled;
+        }
+    }
+    clear
+}
+
+/// Each output one value at a time, from its pair and in whole numbers
+/// where that does not settle it: a run or row the passes left open, or
+/// every one on a CPU without fused multiply-adds. Each product's error is
+/// exact either way, so the values are the same to the bit.
+#[inline(never)]
+fn given_each<I: Element, T: Output>(values: &[I], givens: &[Given], out: &mut [T]) {
+    for ((cell, &x), given) in out.iter_mut().zip(values).zip(givens.iter().cycle()) {
+        *cell = given.value::<T, false>(x.wide());
+    }
 }
 
 /// What every row of a [`standardized_rows`] call shares.

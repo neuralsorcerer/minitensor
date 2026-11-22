@@ -19,7 +19,7 @@
 //! float64 and in bands of images fixed by the shape alone, so they do not
 //! depend on the thread count.
 
-use crate::ops::arithmetic::exact_sum::Output;
+use crate::ops::arithmetic::exact_sum::{Element, Given, Output, given_values};
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     device::Device,
@@ -236,10 +236,36 @@ fn per_segment<T: NormFloat, F: Fn(usize, &mut [T], usize) + Sync>(
     });
 }
 
+/// Each value of `x` under its channel's given statistics into `out`, in
+/// place: a row of one value a channel at a time, or a run of one channel's
+/// values. See [`given_values`](crate::ops::arithmetic::exact_sum::given_values).
+fn given_layout<T: NormFloat + Element + Output>(
+    layout: Layout,
+    x: &[T],
+    givens: &[Given],
+    out: &mut [T],
+) {
+    if layout.spatial == 1 {
+        per_row(layout, out, &|row, at| {
+            given_values(&x[at..at + row.len()], givens, row);
+        });
+    } else {
+        per_segment(layout, out, &|c, run, at| {
+            given_values(
+                &x[at..at + run.len()],
+                std::slice::from_ref(&givens[c]),
+                run,
+            );
+        });
+    }
+}
+
 /// The statistics a normalization used, and where they came from.
 struct Stats {
+    /// The running mean and variance where the normalization took them;
+    /// empty for the batch's own, which the gradient finds again.
     mean: Vec<f64>,
-    inv_std: Vec<f64>,
+    var: Vec<f64>,
     /// Whether they are this batch's, so the gradient flows through them.
     from_batch: bool,
     eps: f64,
@@ -309,7 +335,7 @@ fn values<T: NormFloat>(tensor: &Tensor, what: &str) -> Result<Vec<f64>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn typed<T: NormFloat + Output>(
+fn typed<T: NormFloat + Element + Output>(
     input: &Tensor,
     running_mean: Option<&mut Tensor>,
     running_var: Option<&mut Tensor>,
@@ -332,35 +358,37 @@ fn typed<T: NormFloat + Output>(
     let count = layout.per_channel();
 
     let stats = if use_batch_stats {
-        let recip = 1.0 / count as f64;
-        // Two passes rather than `E[x^2] - E[x]^2`, which loses every digit
-        // when the mean dominates the spread.
-        let c = layout.channels;
-        let sums = if layout.spatial == 1 {
-            banded(layout, &|acc, at| {
-                for (a, &v) in acc.iter_mut().zip(&x[at..at + c]) {
-                    *a += v.to_f64();
-                }
-            })
-        } else {
-            channel_sums(layout, x, x, &|_, v, _| v.to_f64())
-        };
-        let mean: Vec<f64> = sums.into_iter().map(|s| s * recip).collect();
-        let squares = if layout.spatial == 1 {
-            banded(layout, &|acc, at| {
-                for ((a, &v), &m) in acc.iter_mut().zip(&x[at..at + c]).zip(&mean) {
-                    let d = v.to_f64() - m;
-                    *a += d * d;
-                }
-            })
-        } else {
-            channel_sums(layout, x, x, &|c, v, _| {
-                let d = v.to_f64() - mean[c];
-                d * d
-            })
-        };
-        let var: Vec<f64> = squares.into_iter().map(|s| s * recip).collect();
+        // The batch's mean and variance, in float64, for the running ones
+        // alone: each output and gradient finds them again from the input.
         if training && let (Some(rm), Some(rv)) = (running_mean, running_var) {
+            let recip = 1.0 / count as f64;
+            // Two passes rather than `E[x^2] - E[x]^2`, which loses every digit
+            // when the mean dominates the spread.
+            let c = layout.channels;
+            let sums = if layout.spatial == 1 {
+                banded(layout, &|acc, at| {
+                    for (a, &v) in acc.iter_mut().zip(&x[at..at + c]) {
+                        *a += v.to_f64();
+                    }
+                })
+            } else {
+                channel_sums(layout, x, x, &|_, v, _| v.to_f64())
+            };
+            let mean: Vec<f64> = sums.into_iter().map(|s| s * recip).collect();
+            let squares = if layout.spatial == 1 {
+                banded(layout, &|acc, at| {
+                    for ((a, &v), &m) in acc.iter_mut().zip(&x[at..at + c]).zip(&mean) {
+                        let d = v.to_f64() - m;
+                        *a += d * d;
+                    }
+                })
+            } else {
+                channel_sums(layout, x, x, &|c, v, _| {
+                    let d = v.to_f64() - mean[c];
+                    d * d
+                })
+            };
+            let var: Vec<f64> = squares.into_iter().map(|s| s * recip).collect();
             // The running variance is the unbiased one, `n / (n - 1)` times the
             // biased estimate the normalization itself uses; with one value
             // per channel there is no unbiased variance and it is left as is.
@@ -393,8 +421,8 @@ fn typed<T: NormFloat + Output>(
             );
         }
         Stats {
-            inv_std: var.iter().map(|&v| 1.0 / (v + eps).sqrt()).collect(),
-            mean,
+            mean: Vec::new(),
+            var: Vec::new(),
             from_batch: true,
             eps,
         }
@@ -406,10 +434,7 @@ fn typed<T: NormFloat + Output>(
         };
         Stats {
             mean: values::<T>(rm, "running_mean")?,
-            inv_std: values::<T>(rv, "running_var")?
-                .into_iter()
-                .map(|v| 1.0 / (v + eps).sqrt())
-                .collect(),
+            var: values::<T>(rv, "running_var")?,
             from_batch: false,
             eps,
         }
@@ -424,31 +449,10 @@ fn typed<T: NormFloat + Output>(
     let gain = w.clone().unwrap_or_else(|| vec![1.0; layout.channels]);
     let shift = b.unwrap_or_else(|| vec![-0.0; layout.channels]);
     let mut out = vec![T::from_f64(0.0); x.len()];
-    if layout.spatial == 1 {
-        per_row(layout, &mut out, &|out_row, at| {
-            let coefficients = stats.mean.iter().zip(&stats.inv_std).zip(&gain).zip(&shift);
-            for ((o, &v), (((&m, &scale), &g), &sh)) in
-                out_row.iter_mut().zip(&x[at..]).zip(coefficients)
-            {
-                *o = T::from_f64((v.to_f64() - m) * scale * g + sh);
-            }
-        });
-    } else {
-        per_segment(layout, &mut out, &|c, seg, offset| {
-            let (mean, scale, g, sh) = (stats.mean[c], stats.inv_std[c], gain[c], shift[c]);
-            let source = &x[offset..offset + seg.len()];
-            for (o, &v) in seg.iter_mut().zip(source) {
-                *o = T::from_f64((v.to_f64() - mean) * scale * g + sh);
-            }
-        });
-    }
-
     if stats.from_batch {
-        // Each output again as the value nearest its exact one, where each
-        // step above rounded in float64 and a float64 output came out an ulp
-        // or more off, and a bias that all but cancels the product took the
-        // float32 one's digits: each channel's values gathered, standardized
-        // over themselves with its weight and bias, and set back.
+        // Each output the value nearest its exact one: each channel's values
+        // gathered, standardized over themselves with its weight and bias,
+        // and set back.
         let channel = |c: usize| -> Vec<T> {
             let mut values = Vec::with_capacity(count);
             for image in 0..layout.images {
@@ -469,6 +473,15 @@ fn typed<T: NormFloat + Output>(
                 out[at..at + layout.spatial].copy_from_slice(from);
             }
         }
+    } else {
+        // Each output the value nearest its exact one, from the running
+        // statistics as given, in place. Formed in float64 as
+        // `(x - mean) * inv_std * w + b`, a float64 output was up to 16 ulps
+        // out, and where the bias all but cancels the product, 7.6e15.
+        let givens: Vec<Given> = (0..layout.channels)
+            .map(|c| Given::new(stats.mean[c], stats.var[c], eps, (gain[c], shift[c])))
+            .collect();
+        given_layout(layout, x, &givens, &mut out);
     }
 
     let requires_grad = crate::autograd::is_grad_enabled()
@@ -515,7 +528,7 @@ fn typed<T: NormFloat + Output>(
 /// `M` values: `db = Σ g`, `dw = Σ g x̂`, and for batch statistics
 /// `dx = w * inv_std * (g - Σg / M - x̂ * Σ(g x̂) / M)` -- the two sums are the
 /// paths through the mean and the variance. Running statistics are constants,
-/// so there `dx = w * inv_std * g`.
+/// so there `dx = w * inv_std * g`. See [`BatchNormBackward::channel_gradients`].
 struct BatchNormBackward {
     input_ids: SmallVec<[TensorId; 3]>,
     input_id: TensorId,
@@ -531,7 +544,7 @@ struct BatchNormBackward {
 }
 
 impl BatchNormBackward {
-    fn typed<T: NormFloat + Output>(
+    fn typed<T: NormFloat + Element + Output>(
         &self,
         grad_output: &Tensor,
         gradients: &mut FxHashMap<TensorId, Tensor>,
@@ -548,150 +561,20 @@ impl BatchNormBackward {
             channels: dims[1],
             spatial: dims[2..].iter().product(),
         };
-        let device = self.input.device();
-        let Stats {
-            mean,
-            inv_std,
-            from_batch,
-            eps,
-        } = &self.stats;
-        if *from_batch {
-            return self.batch_gradients(g, x, layout, *eps, gradients);
-        }
-
-        let need_sums = self.weight_requires_grad
-            || self.bias_requires_grad
-            || (self.input_requires_grad && *from_batch);
-        let channels = layout.channels;
-        let (sum_g, sum_gx) = if !need_sums {
-            (Vec::new(), Vec::new())
-        } else if layout.spatial == 1 {
-            (
-                banded(layout, &|acc, at| {
-                    for (a, &gv) in acc.iter_mut().zip(&g[at..at + channels]) {
-                        *a += gv.to_f64();
-                    }
-                }),
-                banded(layout, &|acc, at| {
-                    let coefficients = mean.iter().zip(inv_std.iter());
-                    for ((a, (&gv, &xv)), (&m, &inv)) in acc
-                        .iter_mut()
-                        .zip(g[at..at + channels].iter().zip(&x[at..at + channels]))
-                        .zip(coefficients)
-                    {
-                        *a += gv.to_f64() * ((xv.to_f64() - m) * inv);
-                    }
-                }),
-            )
-        } else {
-            (
-                channel_sums(layout, g, g, &|_, v, _| v.to_f64()),
-                channel_sums(layout, g, x, &|c, gv, xv| {
-                    gv.to_f64() * ((xv.to_f64() - mean[c]) * inv_std[c])
-                }),
-            )
-        };
-
-        let channel_tensor = |values: &[f64]| {
-            Tensor::new(
-                Arc::new(T::into_data(
-                    values.iter().map(|&v| T::from_f64(v)).collect(),
-                    device,
-                )),
-                Shape::new(vec![layout.channels]),
-                <T as NormFloat>::DTYPE,
-                device,
-                false,
-            )
-        };
-
-        if self.input_requires_grad {
-            let recip = 1.0 / layout.per_channel() as f64;
-            let scale: Vec<f64> = match self.weight.as_deref() {
-                Some(w) => inv_std.iter().zip(w).map(|(&i, &w)| i * w).collect(),
-                None => inv_std.clone(),
-            };
-            let mut dx = vec![T::from_f64(0.0); x.len()];
-            if !*from_batch {
-                // Running statistics are constants, so `dx = scale * g`, and
-                // with no `x` in it: a NaN input leaves the gradient finite.
-                if layout.spatial == 1 {
-                    per_row(layout, &mut dx, &|out_row, at| {
-                        for ((o, &gv), &sc) in out_row.iter_mut().zip(&g[at..]).zip(&scale) {
-                            *o = T::from_f64(sc * gv.to_f64());
-                        }
-                    });
-                } else {
-                    per_segment(layout, &mut dx, &|c, seg, offset| {
-                        let sc = scale[c];
-                        let g = &g[offset..offset + seg.len()];
-                        for (o, &gv) in seg.iter_mut().zip(g) {
-                            *o = T::from_f64(sc * gv.to_f64());
-                        }
-                    });
-                }
-            } else {
-                let mean_g: Vec<f64> = sum_g.iter().map(|&s| s * recip).collect();
-                let mean_gx: Vec<f64> = sum_gx.iter().map(|&s| s * recip).collect();
-                if layout.spatial == 1 {
-                    per_row(layout, &mut dx, &|out_row, at| {
-                        let coefficients = mean
-                            .iter()
-                            .zip(inv_std.iter())
-                            .zip(&scale)
-                            .zip(mean_g.iter().zip(&mean_gx));
-                        for ((o, (&gv, &xv)), (((&m, &inv), &sc), (&mg, &mgx))) in out_row
-                            .iter_mut()
-                            .zip(g[at..].iter().zip(&x[at..]))
-                            .zip(coefficients)
-                        {
-                            let xhat = (xv.to_f64() - m) * inv;
-                            *o = T::from_f64(sc * (gv.to_f64() - mg - xhat * mgx));
-                        }
-                    });
-                } else {
-                    per_segment(layout, &mut dx, &|c, seg, offset| {
-                        let (m, inv, sc) = (mean[c], inv_std[c], scale[c]);
-                        let (mg, mgx) = (mean_g[c], mean_gx[c]);
-                        let g = &g[offset..offset + seg.len()];
-                        let xs = &x[offset..offset + seg.len()];
-                        for ((o, &gv), &xv) in seg.iter_mut().zip(g).zip(xs) {
-                            let xhat = (xv.to_f64() - m) * inv;
-                            *o = T::from_f64(sc * (gv.to_f64() - mg - xhat * mgx));
-                        }
-                    });
-                }
-            }
-            let dx = Tensor::new(
-                Arc::new(T::into_data(dx, device)),
-                self.input.shape().clone(),
-                <T as NormFloat>::DTYPE,
-                device,
-                false,
-            );
-            crate::autograd::accumulate_grad(gradients, self.input_id, dx)?;
-        }
-        if self.weight_requires_grad
-            && let Some(id) = self.weight_id
-        {
-            crate::autograd::accumulate_grad(gradients, id, channel_tensor(&sum_gx))?;
-        }
-        if self.bias_requires_grad
-            && let Some(id) = self.bias_id
-        {
-            crate::autograd::accumulate_grad(gradients, id, channel_tensor(&sum_g))?;
-        }
-        Ok(())
+        self.channel_gradients(g, x, layout, gradients)
     }
 }
 
 impl BatchNormBackward {
-    /// The gradients under the batch's statistics, a channel at a time:
-    /// each input gradient the value nearest its exact one, from the
-    /// channel's statistics taken again (see
-    /// [`standardized_slice_slopes`](crate::ops::arithmetic::exact_sum::standardized_slice_slopes));
-    /// the weight's `Σ g y` from pairs, rounded once; and the bias's `Σ g`,
-    /// rounded once.
+    /// The gradients a channel at a time: each input gradient the value
+    /// nearest its exact one -- under the batch's statistics from the
+    /// channel's taken again (see
+    /// [`standardized_slice_slopes`](crate::ops::arithmetic::exact_sum::standardized_slice_slopes)),
+    /// and under running ones `w g / sqrt(v + eps)`, which no input value
+    /// moves; the weight's `Σ g y` from pairs, rounded once; and the bias's
+    /// `Σ g`, rounded once. Under running statistics they were formed in
+    /// float64 from the rounded inverse root, and the weight's and bias's
+    /// sums added plainly.
     ///
     /// Formed in float64 from the rounded mean and inverse root, as
     /// `w r (g - mean(g) - y mean(g y))`, the input's two terms all but
@@ -700,17 +583,25 @@ impl BatchNormBackward {
     /// data far from zero against its spread, and 1.2e6 near that span; and
     /// an upstream gradient the same everywhere, which moves no output,
     /// left a float32 input 1e-19.
-    fn batch_gradients<T: NormFloat + Output>(
+    fn channel_gradients<T: NormFloat + Element + Output>(
         &self,
         g: &[T],
         x: &[T],
         layout: Layout,
-        eps: f64,
         gradients: &mut FxHashMap<TensorId, Tensor>,
     ) -> Result<()> {
-        use crate::ops::arithmetic::exact_sum::{round_pair, standardized_slice_slopes, sum_to};
+        use crate::ops::arithmetic::exact_sum::{
+            given_weight_slope, round_pair, standardized_slice_slopes, sum_to,
+        };
+        let Stats {
+            mean,
+            var,
+            from_batch,
+            eps,
+        } = &self.stats;
+        let eps = *eps;
         let device = self.input.device();
-        let want_slopes = self.input_requires_grad || self.weight_requires_grad;
+        let want_slopes = *from_batch && (self.input_requires_grad || self.weight_requires_grad);
         let gather = |into: &mut Vec<f64>, values: &[T], c: usize| {
             into.clear();
             for image in 0..layout.images {
@@ -730,8 +621,8 @@ impl BatchNormBackward {
                     gather(&mut grad, g, c);
                     let (mut slopes, mut weight_grad) = (Vec::new(), zero);
                     if want_slopes {
-                        gather(&mut values, x, c);
                         let gain = self.weight.as_ref().map_or(1.0, |w| w[c]);
+                        gather(&mut values, x, c);
                         slopes = vec![zero; grad.len()];
                         let pair = standardized_slice_slopes(
                             &values,
@@ -741,6 +632,11 @@ impl BatchNormBackward {
                             (self.weight_requires_grad, &mut scratch),
                         );
                         weight_grad = round_pair::<T>(pair);
+                    } else if self.weight_requires_grad {
+                        // Running statistics are constants to the gradient.
+                        gather(&mut values, x, c);
+                        let given = Given::new(mean[c], var[c], eps, (1.0, -0.0));
+                        weight_grad = round_pair::<T>(given_weight_slope(&values, &grad, &given));
                     }
                     let bias_grad = if self.bias_requires_grad {
                         sum_to::<f64, T>(&grad)
@@ -751,11 +647,15 @@ impl BatchNormBackward {
                 })
                 .collect()
         };
-        let channels: Vec<(Vec<T>, T, T)> =
+        let wanted = want_slopes || self.weight_requires_grad || self.bias_requires_grad;
+        let channels: Vec<(Vec<T>, T, T)> = if wanted {
             crate::ops::map::par_map_indexed(layout.channels.div_ceil(band), &task)
                 .into_iter()
                 .flatten()
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
         let channel_tensor = |values: Vec<T>| {
             Tensor::new(
                 Arc::new(T::into_data(values, device)),
@@ -767,12 +667,24 @@ impl BatchNormBackward {
         };
         if self.input_requires_grad {
             let mut dx = vec![zero; x.len()];
-            for (c, (slopes, _, _)) in channels.iter().enumerate() {
-                for image in 0..layout.images {
-                    let at = (image * layout.channels + c) * layout.spatial;
-                    let from = &slopes[image * layout.spatial..][..layout.spatial];
-                    dx[at..at + layout.spatial].copy_from_slice(from);
+            if *from_batch {
+                for (c, (slopes, _, _)) in channels.iter().enumerate() {
+                    for image in 0..layout.images {
+                        let at = (image * layout.channels + c) * layout.spatial;
+                        let from = &slopes[image * layout.spatial..][..layout.spatial];
+                        dx[at..at + layout.spatial].copy_from_slice(from);
+                    }
                 }
+            } else {
+                // Running statistics are constants: each `w g / sqrt(v +
+                // eps)`, with no input value in it, in place.
+                let givens: Vec<Given> = (0..layout.channels)
+                    .map(|c| {
+                        let gain = self.weight.as_ref().map_or(1.0, |w| w[c]);
+                        Given::new(0.0, var[c], eps, (gain, -0.0))
+                    })
+                    .collect();
+                given_layout(layout, g, &givens, &mut dx);
             }
             let dx = Tensor::new(
                 Arc::new(T::into_data(dx, device)),

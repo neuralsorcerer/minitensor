@@ -42,7 +42,7 @@
 //! `g y`, rounded once.
 
 use super::super::{Carried, Element, Output, Total, two_sum};
-use super::{Exactly, Standard, Whole, comfortable, deviation, generous, split};
+use super::{Exactly, Given, Standard, Whole, comfortable, deviation, generous, split};
 use crate::ops::arithmetic::extended::Pair;
 
 /// One row's operands, in float64.
@@ -722,6 +722,30 @@ pub(crate) fn standardized_slice_slopes<T: Output>(
         round_row::<T>(&set, &parts, outcome, out, &mut Vec::new());
     }
     two_sum(total.0, total.1)
+}
+
+/// The weight's gradient of a channel under statistics given rather than
+/// found, `Σ g y` with `y = (x - m) / sqrt(v + eps)`, as a pair: the root is
+/// common to every term, so it is `Σ g (x - m)` -- each deviation exact as a
+/// pair and each product of it split -- times the inverse root's pair.
+pub(crate) fn given_weight_slope(values: &[f64], grad: &[f64], given: &Given) -> (f64, f64) {
+    use crate::ops::arithmetic::extended::fused;
+    fused!(given_weight_lanes(values: &[f64], grad: &[f64], given: &Given) -> (f64, f64))
+}
+
+#[inline(always)]
+fn given_weight_lanes<const FMA: bool>(values: &[f64], grad: &[f64], given: &Given) -> (f64, f64) {
+    let (mut sum, mut error) = (0.0f64, 0.0f64);
+    for (&x, &g) in values.iter().zip(grad) {
+        let (d, d_low) = two_sum(x, -given.mean);
+        let (product, product_error) = split::<FMA>(g, d);
+        let (total, carry) = two_sum(sum, product);
+        sum = total;
+        error += carry + (product_error + g * d_low);
+    }
+    let (scale, scale_rest) = given.scale;
+    let (head, head_error) = split::<FMA>(sum, scale);
+    two_sum(head, head_error + (sum * scale_rest + error * scale))
 }
 
 /// A pair `value + rest`, a two-sum's, rounded once to `T`.

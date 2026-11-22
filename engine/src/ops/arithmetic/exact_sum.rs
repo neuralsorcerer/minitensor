@@ -56,8 +56,8 @@ pub(crate) use self::scatter::{Scatter, add_scattered, add_scattered_rows, multi
 #[path = "exact_standard.rs"]
 mod standard;
 pub(crate) use self::standard::{
-    round_pair, standardized_rows, standardized_slice, standardized_slice_slopes,
-    standardized_slopes,
+    Given, given_values, given_weight_slope, round_pair, standardized_rows, standardized_slice,
+    standardized_slice_slopes, standardized_slopes,
 };
 
 #[path = "exact_small.rs"]

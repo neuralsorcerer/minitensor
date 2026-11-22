@@ -1327,11 +1327,26 @@ def instance_norm(
                 "instance_norm without input statistics needs both running_mean "
                 "and running_var"
             )
-        shape = _feature_shape(channels, tensor.ndim())
-        mean = _atleast_tensor(running_mean).reshape(shape)
-        variance = _atleast_tensor(running_var).reshape(shape)
-        normalized = (tensor - mean) / _F.sqrt(variance + float(eps))
-        return _affine(normalized, weight, bias, "instance_norm")
+
+        # Running statistics are per channel, as `batch_norm`'s are, and so is
+        # what it makes of them: each output the value nearest
+        # `w (x - mean) / sqrt(var + eps) + b`. Composed from a subtraction,
+        # a square root, a division and the affine part, an output was up to
+        # 15 ulps out, and where the bias all but cancels the product, 5e7 in
+        # float32 and 1.3e16 in float64.
+        def flat(value: object | None) -> Tensor | None:
+            return None if value is None else _atleast_tensor(value).reshape(-1)
+
+        return _C.nn.batch_norm(
+            tensor,
+            flat(running_mean),
+            flat(running_var),
+            flat(weight),
+            flat(bias),
+            False,
+            0.0,
+            float(eps),
+        )
 
     if running_var is not None and positions == 1:
         # One position has no spread, and its unbiased variance is `0 / 0`:
