@@ -29,6 +29,10 @@ use std::cmp::Ordering;
 
 use super::{Carried, Element, Output, Total, at_least, shifted, subtract, two_sum};
 
+#[path = "exact_standard_slope.rs"]
+mod slope;
+pub(crate) use self::slope::standardized_slopes;
+
 /// A slice's statistics as pairs of float64s, with bounds.
 pub(crate) struct Standard {
     /// The mean, within `centre_bound` of `centre + centre_rest`; zero when
@@ -73,6 +77,11 @@ fn generous(bound: f64) -> f64 {
 impl Standard {
     /// The statistics of `values`, all finite, or None where a value or a
     /// statistic lies too far out for the pairs to be bounded.
+    ///
+    /// Inlined, so that its products are fused where the caller is built
+    /// with fused multiply-adds: a call of its own is built without them,
+    /// and each of its `mul_add`s was a call into a software one.
+    #[inline(always)]
     pub(crate) fn of<const FMA: bool>(values: &[f64], eps: f64, centred: bool) -> Option<Self> {
         let count = values.len();
         if count == 0 || count >= 1 << 40 || !comfortable(eps) {

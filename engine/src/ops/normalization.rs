@@ -8,7 +8,7 @@ use crate::autograd::with_grad_fn;
 use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
-use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_row_outputs};
+use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_out_chunks};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -286,7 +286,7 @@ fn lane_sum<T: Copy>(row: &[T], term: impl Fn(T) -> f64) -> f64 {
 /// [`lane_sum`] of `term(a[i], b[i])`, for a sum whose terms come from two
 /// rows of the same length.
 #[inline(always)]
-pub(crate) fn lane_sum_zip<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> f64 {
+fn lane_sum_zip<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> f64 {
     let b = &b[..a.len()];
     let mut acc = [0.0f64; 8];
     let (a_blocks, a_rest) = a.as_chunks::<8>();
@@ -329,11 +329,8 @@ fn rows_per_task(rows: usize, norm: usize) -> usize {
 /// The normalized dimensions are trailing and contiguous, so the input is just
 /// `[rows, norm]` in memory and each row can be reduced and written while it is
 /// still in L1. The three passes over a row cost far less than one pass over
-/// the whole tensor.
-///
-/// `normalized` and `inv_std` are produced here rather than recovered later
-/// because [`crate::autograd::LayerNormBackward`] saves both, so fusing the
-/// forward must not cost the backward its inputs.
+/// the whole tensor. Nothing else is written: the backward takes each row's
+/// statistics again from the input.
 macro_rules! layer_norm_rows {
     ($name:ident, $ty:ty) => {
         fn $name(
@@ -343,8 +340,6 @@ macro_rules! layer_norm_rows {
             bias: Option<&[$ty]>,
             eps: f64,
             out: &mut [$ty],
-            normalized: Option<&mut [$ty]>,
-            inv_std: &mut [$ty],
         ) {
             // Normalizing over an empty axis: every buffer is empty and
             // `par_chunks_mut(0)` would panic. The shape still has to survive,
@@ -370,47 +365,18 @@ macro_rules! layer_norm_rows {
                 (mean, 1.0 / (sq * recip + eps).sqrt())
             }
 
-            // The normalized values are saved for the backward, so a forward
-            // that will not be differentiated should not pay to write them --
-            // a second full-size buffer, filled and then dropped. It is simply
-            // absent from the buffer set when it is not wanted, and the arity
-            // `work` unpacks says which case this is.
-            let rows = inv_std.len();
-            let mut buffers: SmallVec<[&mut [$ty]; 3]> = SmallVec::new();
-            let mut widths: SmallVec<[usize; 3]> = SmallVec::new();
-            buffers.push(out);
-            widths.push(norm);
-            buffers.push(inv_std);
-            widths.push(1);
-            if let Some(normalized) = normalized {
-                buffers.push(normalized);
-                widths.push(norm);
-            }
-
-            par_row_outputs(
-                rows,
-                rows_per_task(rows, norm),
-                &mut buffers,
-                &widths,
-                &|first_row, buffers| {
-                    let (out, rest) = buffers.split_first_mut().expect("out is buffer 0");
-                    let (inv_std, rest) = rest.split_first_mut().expect("inv_std is buffer 1");
-                    let normalized = rest.first_mut().map(|n| &mut **n);
-                    #[cfg(target_arch = "x86_64")]
-                    if crate::ops::simd::simd_capabilities().avx2_fma {
-                        // SAFETY: avx2 and fma were detected on this CPU.
-                        return unsafe {
-                            task_avx2(
-                                input, norm, recip, eps, weight, bias, first_row, out, inv_std,
-                                normalized,
-                            )
-                        };
-                    }
-                    task(
-                        input, norm, recip, eps, weight, bias, first_row, out, inv_std, normalized,
-                    )
-                },
-            );
+            let rows = out.len() / norm;
+            par_out_chunks(out, rows_per_task(rows, norm) * norm, &|start, out| {
+                let first_row = start / norm;
+                #[cfg(target_arch = "x86_64")]
+                if crate::ops::simd::simd_capabilities().avx2_fma {
+                    // SAFETY: avx2 and fma were detected on this CPU.
+                    return unsafe {
+                        task_avx2(input, norm, recip, eps, weight, bias, first_row, out)
+                    };
+                }
+                task(input, norm, recip, eps, weight, bias, first_row, out)
+            });
 
             /// [`task`] built with AVX2. The row works in float64, which the
             /// baseline holds two to a register; this holds four. Rust neither
@@ -428,12 +394,8 @@ macro_rules! layer_norm_rows {
                 bias: Option<&[$ty]>,
                 first_row: usize,
                 out: &mut [$ty],
-                inv_std: &mut [$ty],
-                normalized: Option<&mut [$ty]>,
             ) {
-                task(
-                    input, norm, recip, eps, weight, bias, first_row, out, inv_std, normalized,
-                )
+                task(input, norm, recip, eps, weight, bias, first_row, out)
             }
 
             /// The rows from `first_row` that one task of the split writes.
@@ -448,90 +410,50 @@ macro_rules! layer_norm_rows {
                 bias: Option<&[$ty]>,
                 first_row: usize,
                 out: &mut [$ty],
-                inv_std: &mut [$ty],
-                mut normalized: Option<&mut [$ty]>,
             ) {
-                for r in 0..inv_std.len() {
+                for (r, o) in out.chunks_mut(norm).enumerate() {
                     let row = &input[(first_row + r) * norm..][..norm];
                     let (mean, scale) = stats(row, recip, eps);
-                    inv_std[r] = scale as $ty;
-                    let o = &mut out[r * norm..][..norm];
-                    let n = normalized
-                        .as_deref_mut()
-                        .map(|n| &mut n[r * norm..][..norm]);
-                    // Every combination of parameters and saved values is its
-                    // own loop, so the body has nothing to test and nothing to
-                    // bounds-check. Indexing the parameters through options
-                    // inside one loop kept it scalar, at 4ns an element: a
-                    // `[4096, 1024]` float32 forward with trained parameters
-                    // took 19.8ms on one core and takes 11.8, and 8.2ms on four
-                    // and takes 5.8, with every output the same to the bit.
-                    match (weight, bias, n) {
-                        (Some(w), Some(b), Some(n)) => {
-                            affine_row::<true, true, true>(row, mean, scale, w, b, o, n)
-                        }
-                        (Some(w), Some(b), None) => {
-                            affine_row::<true, true, false>(row, mean, scale, w, b, o, &mut [])
-                        }
-                        (Some(w), None, Some(n)) => {
-                            affine_row::<true, false, true>(row, mean, scale, w, &[], o, n)
-                        }
-                        (Some(w), None, None) => {
-                            affine_row::<true, false, false>(row, mean, scale, w, &[], o, &mut [])
-                        }
-                        (None, Some(b), Some(n)) => {
-                            affine_row::<false, true, true>(row, mean, scale, &[], b, o, n)
-                        }
-                        (None, Some(b), None) => {
-                            affine_row::<false, true, false>(row, mean, scale, &[], b, o, &mut [])
-                        }
-                        (None, None, Some(n)) => {
-                            affine_row::<false, false, true>(row, mean, scale, &[], &[], o, n)
-                        }
-                        (None, None, None) => affine_row::<false, false, false>(
-                            row,
-                            mean,
-                            scale,
-                            &[],
-                            &[],
-                            o,
-                            &mut [],
-                        ),
+                    // Every combination of parameters is its own loop, so the
+                    // body has nothing to test and nothing to bounds-check.
+                    // Indexing the parameters through options inside one loop
+                    // kept it scalar, at 4ns an element: a `[4096, 1024]`
+                    // float32 forward with trained parameters took 19.8ms on
+                    // one core and takes 11.8, and 8.2ms on four and takes 5.8,
+                    // with every output the same to the bit.
+                    match (weight, bias) {
+                        (Some(w), Some(b)) => affine_row::<true, true>(row, mean, scale, w, b, o),
+                        (Some(w), None) => affine_row::<true, false>(row, mean, scale, w, &[], o),
+                        (None, Some(b)) => affine_row::<false, true>(row, mean, scale, &[], b, o),
+                        (None, None) => affine_row::<false, false>(row, mean, scale, &[], &[], o),
                     }
                 }
             }
 
             /// `out = (row - mean) * scale`, then times `weight` and plus
-            /// `bias` where they are present, and the normalized value saved
-            /// to `normalized` when that is wanted.
+            /// `bias` where they are present.
             ///
             /// The affine parameters are applied in f64 and rounded once,
             /// deliberately: rounding `z` to the element type first and scaling
             /// the rounded value costs a second rounding on every element, in
             /// the one layer whose whole job is numerical stability.
             #[inline(always)]
-            fn affine_row<const W: bool, const B: bool, const N: bool>(
+            fn affine_row<const W: bool, const B: bool>(
                 row: &[$ty],
                 mean: f64,
                 scale: f64,
                 weight: &[$ty],
                 bias: &[$ty],
                 out: &mut [$ty],
-                normalized: &mut [$ty],
             ) {
                 let len = row.len();
                 let (weight, bias) = (
                     &weight[..if W { len } else { 0 }],
                     &bias[..if B { len } else { 0 }],
                 );
-                let normalized = &mut normalized[..if N { len } else { 0 }];
                 let out = &mut out[..len];
                 for i in 0..len {
-                    let z = (row[i] as f64 - mean) * scale;
-                    if N {
-                        normalized[i] = z as $ty;
-                    }
-                    let mut y = z;
+                    let mut y = (row[i] as f64 - mean) * scale;
                     if W {
                         y *= weight[i] as f64;
                     }
@@ -634,26 +556,13 @@ pub fn layer_norm(
 
     let norm: usize = normalized_shape.iter().product();
     let total = input.numel();
-    // A zero-sized normalized axis divides by zero; there are no rows in that
-    // case, which is what `checked_div` reports as `None`.
-    let rows = total.checked_div(norm).unwrap_or(0);
 
-    // Statistics shape: the input's, with the normalized dims collapsed to 1.
-    let mut stat_dims = input.shape().dims().to_vec();
-    for d in stat_dims.iter_mut().skip(axis_start) {
-        *d = 1;
-    }
-    let stat_shape = Shape::new(stat_dims);
-
-    // Decided before the kernel runs, not after: the normalized values exist
-    // only to be saved for the backward, so an inference forward should not
-    // allocate and fill a second full-size buffer to drop it.
     let requires_grad = crate::autograd::is_grad_enabled()
         && (input.requires_grad()
             || weight.map(|w| w.requires_grad()).unwrap_or(false)
             || bias.map(|b| b.requires_grad()).unwrap_or(false));
 
-    let (output_data, normalized_data, inv_std_data) = match input.dtype() {
+    let output_data = match input.dtype() {
         DataType::Float32 => {
             let src = input.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from input tensor")
@@ -661,27 +570,8 @@ pub fn layer_norm(
             let w = weight.and_then(|t| t.data().as_f32_slice());
             let b = bias.and_then(|t| t.data().as_f32_slice());
             let mut o = vec![0f32; total];
-            let mut n = if requires_grad {
-                vec![0f32; total]
-            } else {
-                Vec::new()
-            };
-            let mut s = vec![0f32; rows];
-            layer_norm_rows_f32(
-                src,
-                norm,
-                w,
-                b,
-                eps,
-                &mut o,
-                requires_grad.then_some(n.as_mut_slice()),
-                &mut s,
-            );
-            (
-                TensorData::from_vec::<f32>(o, DataType::Float32, input.device()),
-                TensorData::from_vec::<f32>(n, DataType::Float32, input.device()),
-                TensorData::from_vec::<f32>(s, DataType::Float32, input.device()),
-            )
+            layer_norm_rows_f32(src, norm, w, b, eps, &mut o);
+            TensorData::from_vec::<f32>(o, DataType::Float32, input.device())
         }
         _ => {
             let src = input.data().as_f64_slice().ok_or_else(|| {
@@ -690,41 +580,14 @@ pub fn layer_norm(
             let w = weight.and_then(|t| t.data().as_f64_slice());
             let b = bias.and_then(|t| t.data().as_f64_slice());
             let mut o = vec![0f64; total];
-            let mut n = if requires_grad {
-                vec![0f64; total]
-            } else {
-                Vec::new()
-            };
-            let mut s = vec![0f64; rows];
-            layer_norm_rows_f64(
-                src,
-                norm,
-                w,
-                b,
-                eps,
-                &mut o,
-                requires_grad.then_some(n.as_mut_slice()),
-                &mut s,
-            );
-            // Each output again, and each normalized value saved, as the
-            // float64 nearest its exact value, where each step above rounded
-            // in float64 and most came out an ulp or more off; the
-            // statistics stay as they are for the backward.
+            layer_norm_rows_f64(src, norm, w, b, eps, &mut o);
+            // Each output again as the float64 nearest its exact value, where
+            // each step above rounded in float64 and most came out an ulp or
+            // more off.
             crate::ops::arithmetic::exact_sum::standardized_rows(
-                src,
-                norm,
-                w,
-                b,
-                eps,
-                true,
-                &mut o,
-                requires_grad.then_some(n.as_mut_slice()),
+                src, norm, w, b, eps, true, &mut o, None,
             );
-            (
-                TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
-                TensorData::from_vec::<f64>(n, DataType::Float64, input.device()),
-                TensorData::from_vec::<f64>(s, DataType::Float64, input.device()),
-            )
+            TensorData::from_vec::<f64>(o, DataType::Float64, input.device())
         }
     };
 
@@ -736,25 +599,8 @@ pub fn layer_norm(
         requires_grad,
     );
     if !requires_grad {
-        // `normalized_data` is empty here and `inv_std` unused; building
-        // tensors around them would claim a shape the buffers do not have.
         return Ok(output);
     }
-
-    let normalized = Tensor::new(
-        Arc::new(normalized_data),
-        input.shape().clone(),
-        input.dtype(),
-        input.device(),
-        false,
-    );
-    let inv_std = Tensor::new(
-        Arc::new(inv_std_data),
-        stat_shape,
-        input.dtype(),
-        input.device(),
-        false,
-    );
 
     let mut input_ids: SmallVec<[TensorId; 3]> = SmallVec::new();
     input_ids.push(input.id());
@@ -770,12 +616,12 @@ pub fn layer_norm(
         input_id: input.id(),
         weight_id: weight.map(|w| w.id()),
         bias_id: bias.map(|b| b.id()),
-        normalized: normalized.detach(),
-        inv_std: inv_std.detach(),
+        input: input.detach(),
         weight: weight.map(|w| w.detach()),
         normalized_shape: normalized_shape.to_vec(),
         axis_start,
         element_count: normalized_shape.iter().product(),
+        eps,
         input_requires_grad: input.requires_grad(),
         weight_requires_grad: weight.map(|w| w.requires_grad()).unwrap_or(false),
         bias_requires_grad: bias.map(|b| b.requires_grad()).unwrap_or(false),
@@ -812,54 +658,37 @@ pub fn layer_norm(
 /// accumulates in float64.
 macro_rules! rms_norm_rows {
     ($name:ident, $ty:ty) => {
-        fn $name(
-            input: &[$ty],
-            norm: usize,
-            weight: Option<&[$ty]>,
-            eps: f64,
-            out: &mut [$ty],
-            inv_rms: &mut [$ty],
-        ) {
+        fn $name(input: &[$ty], norm: usize, weight: Option<&[$ty]>, eps: f64, out: &mut [$ty]) {
             if norm == 0 {
                 return;
             }
             let recip = 1.0 / norm as f64;
-            let rows = inv_rms.len();
-            par_row_outputs(
-                rows,
-                rows_per_task(rows, norm),
-                &mut [out, inv_rms],
-                &[norm, 1],
-                &|first_row, buffers| {
-                    let [out, inv_rms] = buffers else {
-                        unreachable!("rms norm writes the output and the scale")
-                    };
-                    for r in 0..inv_rms.len() {
-                        let row = &input[(first_row + r) * norm..][..norm];
-                        let sq = lane_sum(row, |v| {
-                            let d = v as f64;
-                            d * d
-                        });
-                        let scale = 1.0 / (sq * recip + eps).sqrt();
-                        inv_rms[r] = scale as $ty;
-                        let o = &mut out[r * norm..][..norm];
-                        // A loop for each case, as in `layer_norm`: the weight
-                        // tested and indexed per element kept this scalar.
-                        match weight {
-                            Some(w) => {
-                                for ((o, &x), &w) in o.iter_mut().zip(row).zip(&w[..norm]) {
-                                    *o = (x as f64 * scale * w as f64) as $ty;
-                                }
+            let rows = out.len() / norm;
+            par_out_chunks(out, rows_per_task(rows, norm) * norm, &|start, out| {
+                let first_row = start / norm;
+                for (r, o) in out.chunks_mut(norm).enumerate() {
+                    let row = &input[(first_row + r) * norm..][..norm];
+                    let sq = lane_sum(row, |v| {
+                        let d = v as f64;
+                        d * d
+                    });
+                    let scale = 1.0 / (sq * recip + eps).sqrt();
+                    // A loop for each case, as in `layer_norm`: the weight
+                    // tested and indexed per element kept this scalar.
+                    match weight {
+                        Some(w) => {
+                            for ((o, &x), &w) in o.iter_mut().zip(row).zip(&w[..norm]) {
+                                *o = (x as f64 * scale * w as f64) as $ty;
                             }
-                            None => {
-                                for (o, &x) in o.iter_mut().zip(row) {
-                                    *o = (x as f64 * scale) as $ty;
-                                }
+                        }
+                        None => {
+                            for (o, &x) in o.iter_mut().zip(row) {
+                                *o = (x as f64 * scale) as $ty;
                             }
                         }
                     }
-                },
-            );
+                }
+            });
         }
     };
 }
@@ -927,29 +756,16 @@ pub fn rms_norm(
 
     let norm: usize = normalized_shape.iter().product();
     let total = input.numel();
-    // A zero-sized normalized axis divides by zero; there are no rows in that
-    // case, which is what `checked_div` reports as `None`.
-    let rows = total.checked_div(norm).unwrap_or(0);
 
-    let mut stat_dims = input.shape().dims().to_vec();
-    for d in stat_dims.iter_mut().skip(axis_start) {
-        *d = 1;
-    }
-    let stat_shape = Shape::new(stat_dims);
-
-    let (output_data, inv_rms_data) = match input.dtype() {
+    let output_data = match input.dtype() {
         DataType::Float32 => {
             let src = input.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from input tensor")
             })?;
             let w = weight.and_then(|t| t.data().as_f32_slice());
             let mut o = vec![0f32; total];
-            let mut r = vec![0f32; rows];
-            rms_norm_rows_f32(src, norm, w, eps, &mut o, &mut r);
-            (
-                TensorData::from_vec::<f32>(o, DataType::Float32, input.device()),
-                TensorData::from_vec::<f32>(r, DataType::Float32, input.device()),
-            )
+            rms_norm_rows_f32(src, norm, w, eps, &mut o);
+            TensorData::from_vec::<f32>(o, DataType::Float32, input.device())
         }
         _ => {
             let src = input.data().as_f64_slice().ok_or_else(|| {
@@ -957,17 +773,13 @@ pub fn rms_norm(
             })?;
             let w = weight.and_then(|t| t.data().as_f64_slice());
             let mut o = vec![0f64; total];
-            let mut r = vec![0f64; rows];
-            rms_norm_rows_f64(src, norm, w, eps, &mut o, &mut r);
+            rms_norm_rows_f64(src, norm, w, eps, &mut o);
             // Each output again as the float64 nearest its exact value; see
             // `layer_norm`.
             crate::ops::arithmetic::exact_sum::standardized_rows(
                 src, norm, w, None, eps, false, &mut o, None,
             );
-            (
-                TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
-                TensorData::from_vec::<f64>(r, DataType::Float64, input.device()),
-            )
+            TensorData::from_vec::<f64>(o, DataType::Float64, input.device())
         }
     };
 
@@ -984,14 +796,6 @@ pub fn rms_norm(
         return Ok(output);
     }
 
-    let inv_rms = Tensor::new(
-        Arc::new(inv_rms_data),
-        stat_shape,
-        input.dtype(),
-        input.device(),
-        false,
-    );
-
     let mut input_ids: SmallVec<[TensorId; 2]> = SmallVec::new();
     input_ids.push(input.id());
     if let Some(w) = weight {
@@ -1002,10 +806,10 @@ pub fn rms_norm(
         input_id: input.id(),
         weight_id: weight.map(|w| w.id()),
         input: input.detach(),
-        inv_rms,
         weight: weight.map(|w| w.detach()),
         normalized_shape: normalized_shape.to_vec(),
         element_count: norm,
+        eps,
         input_requires_grad: input.requires_grad(),
         weight_requires_grad: weight.map(|w| w.requires_grad()).unwrap_or(false),
     });
