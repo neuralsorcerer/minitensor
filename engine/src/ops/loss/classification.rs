@@ -477,12 +477,14 @@ mod tests {
 
     #[test]
     fn test_bce_with_logits_keeps_gradient_where_sigmoid_bce_loses_it() {
-        // A logit of -30 against a target of 1 is a confident and completely
-        // wrong prediction: the gradient should be -1, the strongest signal the
-        // loss can produce. Routing through sigmoid first lets it round to
-        // ~9.4e-14 in f32, and the BCE backward's clamped denominator then
-        // returns roughly -0.09 instead -- the example all but stops training.
-        for &x in &[-30.0f32, -50.0, -100.0] {
+        // A large negative logit against a target of 1 is a confident and
+        // completely wrong prediction: the gradient should be -1, the strongest
+        // signal the loss can produce. Through sigmoid first it is -1 while the
+        // probability is a float32 the forward takes the logarithm of; past a
+        // logit of about -104 the float32 sigmoid is zero, the loss's floor of
+        // -100 is all that is left of it, and the gradient is zero -- the
+        // example stops training. The fused loss gives -1 at any magnitude.
+        for &x in &[-30.0f32, -50.0, -110.0] {
             let targets = tensor_of::<f32>(vec![1.0], vec![1], false);
 
             let logits = tensor_of::<f32>(vec![x], vec![1], true);
@@ -505,11 +507,14 @@ mod tests {
                 .data()
                 .as_f32_slice()
                 .unwrap()[0];
-            assert!(
-                split_grad.abs() < 0.5,
-                "x={x}: sigmoid+BCE unexpectedly kept its gradient ({split_grad}); if that \
-                 path was fixed this test no longer demonstrates anything"
-            );
+            if x > -100.0 {
+                assert!(
+                    (split_grad + 1.0).abs() <= 1e-6,
+                    "x={x}: sigmoid+BCE grad {split_grad} should be -1"
+                );
+            } else {
+                assert_eq!(split_grad, 0.0, "x={x}: a sigmoid of zero leaves nothing");
+            }
         }
     }
 

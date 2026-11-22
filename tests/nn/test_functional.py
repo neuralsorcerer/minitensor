@@ -960,15 +960,16 @@ def test_bce_with_logits_matches_reference(logit, target):
     mt.clear_autograd_graph()
 
 
-@pytest.mark.parametrize("logit", [-30.0, -50.0, -100.0])
+@pytest.mark.parametrize("logit", [-30.0, -50.0, -110.0])
 def test_bce_with_logits_keeps_gradient_where_sigmoid_bce_loses_it(logit):
     """The reason this loss exists.
 
     A large negative logit against a target of 1 is a confident, completely
     wrong prediction, and should produce the strongest gradient the loss can
-    give: -1. Computing sigmoid first lets it round to 0 in f32, and the
-    gradient collapses -- at -30 the two-step path returns about -0.09, and
-    past -50 exactly 0, so the example stops contributing anything.
+    give: -1. Computing sigmoid first keeps it while the probability is a
+    float32 the forward takes the logarithm of, and past a logit of about
+    -104 the f32 sigmoid is 0: the loss's floor of -100 is all that is left,
+    and the gradient collapses to 0, so the example stops contributing.
     """
     fused = mt.Tensor([[logit]], requires_grad=True)
     F.binary_cross_entropy_with_logits(
@@ -981,10 +982,10 @@ def test_bce_with_logits_keeps_gradient_where_sigmoid_bce_loses_it(logit):
     F.binary_cross_entropy(
         F.sigmoid(split), mt.Tensor([[1.0]]), reduction="sum"
     ).backward()
-    assert abs(split.grad.numpy().ravel()[0]) < 0.5, (
-        "sigmoid+BCE unexpectedly kept its gradient; if that path was fixed, "
-        "this test no longer demonstrates anything and should be revisited"
-    )
+    if logit > -100.0:
+        np.testing.assert_allclose(split.grad.numpy().ravel()[0], -1.0, atol=1e-6)
+    else:
+        assert split.grad.numpy().ravel()[0] == 0.0
     mt.clear_autograd_graph()
 
 
