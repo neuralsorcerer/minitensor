@@ -2047,6 +2047,18 @@ float, float32 for int32 and float64 for int64, taken from each element less
 the first of its slice, exactly, so int64s past `2^53` keep the steps between
 them: `var([2^53, 2^53 + 1, 2^53 + 2])` is `1`.
 
+The gradient of a variance is `2 g (x - mean) / (N - ddof)`, each deviation
+the difference with the slice's exact mean, carried as a pair of floats, and
+rounded once; a standard deviation's is that over twice its root. Taken with
+the mean rounded to the dtype, `x - mean` was all rounding for data far from
+zero against its spread: float32 values about `3e7` two apart had gradients
+a third off, a thousand about `1e4` a part in a thousand, and float64 values
+about `1e12` a part in ten thousand. A float32 variance's gradient is now the
+float nearest the exact one, a float64 one within two ulps, and a standard
+deviation's an ulp more. A slice whose variance is NaN -- a NaN or an
+infinity in it, or no more values than `ddof` -- has NaN for its gradient,
+and a NaN that `nanvar` or `nanstd` skips takes zero.
+
 A float32 `mean` is carried in float64 and rounded once, so it is the float32
 nearest the exact mean: the mean of a constant tensor is the constant, where
 float32 arithmetic had put the mean of offset data tens of ulps out. A float

@@ -588,7 +588,7 @@ fn normalized_slope(
 /// where that is a normal float, and otherwise by `factor` and then the
 /// power, so that nothing on the way leaves the range where the entry does
 /// not.
-fn times_scaled(out: &mut [f64], factor: f64, shift: i32) {
+pub(super) fn times_scaled(out: &mut [f64], factor: f64, shift: i32) {
     let fold = libm::scalbn(factor, shift);
     if fold.is_normal() {
         out.iter_mut().for_each(|slot| *slot *= fold);
@@ -986,7 +986,7 @@ fn pair_sums<const FMA: bool>(a: &[f64], b: &[f64]) -> [(f64, f64); 3] {
 /// magnitude into `[1, 2)` where that lies outside `[2^-400, 2^400]` -- where
 /// its sum of squares could overflow or fall below the normal range -- and
 /// returns the power; `None` where it holds a NaN or an infinity.
-fn into_range(values: &mut [f64]) -> Option<i32> {
+pub(super) fn into_range(values: &mut [f64]) -> Option<i32> {
     let mut largest = 0.0f64;
     for &value in values.iter() {
         if !value.is_finite() {
@@ -1006,7 +1006,7 @@ fn into_range(values: &mut [f64]) -> Option<i32> {
 }
 
 /// The exponent `e` of a positive, finite `x`, `2^e <= x < 2^(e + 1)`.
-fn binary_exponent(x: f64) -> i32 {
+pub(super) fn binary_exponent(x: f64) -> i32 {
     if x < f64::MIN_POSITIVE {
         return binary_exponent(x * 2f64.powi(64)) - 64;
     }

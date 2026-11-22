@@ -804,7 +804,6 @@ pub(crate) fn spread(
     let grad_fn = Arc::new(VarianceBackward {
         input: tensor.detach(),
         dims: statistic_dims(tensor, &dim)?,
-        keepdim,
         ddof: usize::from(unbiased),
         skip_nan,
         input_ids: [tensor.id()],
@@ -1243,11 +1242,13 @@ fn keep_numbers<I: crate::ops::arithmetic::exact_sum::Element>(values: &[I], kep
 /// The gradient of a variance over `dims`: `2 (x - mean) / (N - ddof)` times
 /// the incoming gradient, spread back over the reduced axes; with `skip_nan`
 /// the mean and the count are of each slice's values that are not NaN, and a
-/// NaN it skipped takes zero.
+/// NaN it skipped takes zero. Each deviation is the difference with the
+/// slice's exact mean, carried as a pair of floats, rounded once: from a
+/// mean rounded to the dtype, `x - mean` was all rounding where the values
+/// sit far from zero against their spread.
 struct VarianceBackward {
     input: Tensor,
     dims: Vec<usize>,
-    keepdim: bool,
     ddof: usize,
     skip_nan: bool,
     input_ids: [crate::autograd::TensorId; 1],
@@ -1258,39 +1259,13 @@ impl crate::autograd::GradientFunction for VarianceBackward {
         &self,
         grad_output: &Tensor,
     ) -> Result<rustc_hash::FxHashMap<crate::autograd::TensorId, Tensor>> {
-        use crate::ops::arithmetic::{div, mul, sub};
-        use crate::ops::util::create_scalar_tensor;
-        let input = &self.input;
-        let scalar = |value: f64| create_scalar_tensor(value, input.dtype(), input.device());
-        let axes: Vec<isize> = self.dims.iter().map(|&axis| axis as isize).collect();
-        let (mean, divisor) = if self.skip_nan {
-            let count = super::nan_stats_impl::non_nan_count(input, Some(axes.clone()), true)?;
-            let mean = crate::ops::reduction::nanmean(input, Some(axes), true)?;
-            (mean, sub(&count, &scalar(self.ddof as f64)?)?)
-        } else {
-            let count: usize = self
-                .dims
-                .iter()
-                .map(|&axis| input.shape().dims()[axis])
-                .product();
-            let mean = crate::ops::reduction::mean(input, Some(axes), true)?;
-            (mean, scalar(count as f64 - self.ddof as f64)?)
-        };
-        let deviations = sub(input, &mean)?;
-        let grad = if self.keepdim {
-            grad_output.clone()
-        } else {
-            let mut kept_shape = input.shape().dims().to_vec();
-            for &axis in &self.dims {
-                kept_shape[axis] = 1;
-            }
-            shape_ops::reshape(grad_output, Shape::new(kept_shape))?
-        };
-        let scale = div(&scalar(2.0)?, &divisor)?;
-        let mut gradient = mul(&mul(&grad.astype(input.dtype())?, &deviations)?, &scale)?;
-        if self.skip_nan {
-            gradient = crate::ops::selection::where_op(&input.isnan()?, &scalar(0.0)?, &gradient)?;
-        }
+        let gradient = variance_gradient(
+            &self.input,
+            grad_output,
+            &self.dims,
+            self.ddof,
+            self.skip_nan,
+        )?;
         let mut gradients = rustc_hash::FxHashMap::default();
         gradients.insert(self.input_ids[0], gradient);
         Ok(gradients)
@@ -1299,6 +1274,136 @@ impl crate::autograd::GradientFunction for VarianceBackward {
     fn input_ids(&self) -> &[crate::autograd::TensorId] {
         &self.input_ids
     }
+}
+
+/// [`VarianceBackward`]'s gradient: each slice over `dims` moved last, as
+/// runs, widened to float64 and narrowed back once.
+#[inline(never)]
+fn variance_gradient(
+    input: &Tensor,
+    grad: &Tensor,
+    dims: &[usize],
+    ddof: usize,
+    skip_nan: bool,
+) -> Result<Tensor> {
+    let shape = input.shape().dims();
+    let order: Vec<usize> = (0..shape.len())
+        .filter(|axis| !dims.contains(axis))
+        .chain(dims.iter().copied())
+        .collect();
+    let moved = order.iter().enumerate().any(|(at, &axis)| at != axis);
+    let x = reordered(&input.astype(DataType::Float64)?, moved.then_some(&order))?;
+    let grad = grad.astype(DataType::Float64)?.contiguous()?;
+    let mismatched = || MinitensorError::internal_error("variance gradient of another dtype");
+    let (values, flowing) = (x.data().as_f64_slice(), grad.data().as_f64_slice());
+    let (values, flowing) = (
+        values.ok_or_else(mismatched)?,
+        flowing.ok_or_else(mismatched)?,
+    );
+    let run: usize = dims.iter().map(|&axis| shape[axis]).product();
+    let mut out = vec![0.0f64; values.len()];
+    deviation_rows(values, flowing, &mut out, (run, ddof, skip_nan));
+    let out = Tensor::new(
+        Arc::new(TensorData::from_vec_f64(out, x.device())),
+        x.shape().clone(),
+        DataType::Float64,
+        x.device(),
+        false,
+    );
+    let mut back = vec![0usize; order.len()];
+    for (at, &axis) in order.iter().enumerate() {
+        back[axis] = at;
+    }
+    reordered(&out, moved.then_some(&back))?.astype(input.dtype())
+}
+
+/// `tensor` with its axes in `order`, where one is given, and contiguous.
+#[inline(never)]
+fn reordered(tensor: &Tensor, order: Option<&Vec<usize>>) -> Result<Tensor> {
+    match order {
+        Some(order) => {
+            let axes = order.iter().map(|&axis| axis as isize).collect();
+            shape_ops::permute(tensor, axes)?.contiguous()
+        }
+        None => tensor.contiguous(),
+    }
+}
+
+/// [`variance_gradient`] of runs of `run` values, each with its incoming
+/// gradient in `grad`, into `out`.
+fn deviation_rows(
+    x: &[f64],
+    grad: &[f64],
+    out: &mut [f64],
+    (run, ddof, skip_nan): (usize, usize, bool),
+) {
+    if run == 0 {
+        return;
+    }
+    // Whole runs to a task, enough of them to be worth one.
+    let rows = ((1 << 14) / run).max(1);
+    crate::ops::map::par_out_chunks_gated(
+        out,
+        rows * run,
+        crate::ops::map::PAR_THRESHOLD / 8,
+        &|start, part| {
+            let mut taken = Vec::with_capacity(run);
+            for (offset, row) in part.chunks_mut(run).enumerate() {
+                let at = start + offset * run;
+                let values = &x[at..at + run];
+                taken.clear();
+                taken.extend(values.iter().filter(|value| !(skip_nan && value.is_nan())));
+                deviation_slope(&mut taken, grad[at / run], ddof);
+                let mut slopes = taken.iter();
+                for (slot, value) in row.iter_mut().zip(values) {
+                    *slot = if skip_nan && value.is_nan() {
+                        0.0
+                    } else {
+                        slopes.next().copied().unwrap_or(f64::NAN)
+                    };
+                }
+            }
+        },
+    );
+}
+
+/// `2 g (x - mean) / (N - ddof)` for each of the `N` values in `values`, in
+/// place: the values scaled into range by a power of two, their sum carried
+/// as a pair, and the mean the pair's quotient as a pair, the remainder of
+/// its leading part exact; each deviation the difference with that pair,
+/// rounded once, and times `2 g / (N - ddof)`, rounded once. NaN throughout
+/// where a value is a NaN or an infinity, whose variance is NaN.
+#[inline(never)]
+fn deviation_slope(values: &mut [f64], g: f64, ddof: usize) {
+    use super::distance_impl::{binary_exponent, into_range, times_scaled};
+    use crate::ops::arithmetic::rounded_once::{product_error, two_sum};
+    let Some(shift) = into_range(values) else {
+        values.fill(f64::NAN);
+        return;
+    };
+    let (mut sum, mut low) = (0.0f64, 0.0f64);
+    for &value in values.iter() {
+        let (total, error) = two_sum(sum, value);
+        (sum, low) = (total, low + error);
+    }
+    let (sum, low) = two_sum(sum, low);
+    let count = values.len() as f64;
+    let mean = sum / count;
+    let product = mean * count;
+    let mean_low = ((sum - product) - product_error(mean, count, product) + low) / count;
+    for value in values.iter_mut() {
+        let (difference, error) = two_sum(*value, -mean);
+        *value = difference + (error - mean_low);
+    }
+    // The factor as `m 2^e`, `m` in `[1, 2)`, so that no product on the way
+    // to a slope leaves the range where the slope does not.
+    let factor = 2.0 * g / (count - ddof as f64);
+    let e = if factor.is_finite() && factor != 0.0 {
+        binary_exponent(factor.abs())
+    } else {
+        0
+    };
+    times_scaled(values, libm::scalbn(factor, -e), e - shift);
 }
 
 // Helper functions for type-specific operations

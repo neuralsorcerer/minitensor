@@ -35,20 +35,9 @@ use crate::{
     tensor::{DataType, Shape, Tensor},
 };
 
-/// How many entries along `dim` are not NaN, as a float ready to divide by.
-///
-/// `count_nonzero` counts the mask, which is what `nanmean` divides by too;
-/// this is the same count in the dtype the division needs.
-pub(crate) fn non_nan_count(
-    tensor: &Tensor,
-    dim: Option<Vec<isize>>,
-    keepdim: bool,
-) -> Result<Tensor> {
-    non_nan_counts(tensor, dim, keepdim)?.astype(tensor.dtype())
-}
-
-/// [`non_nan_count`] as the int64 `count_nonzero` gives it, every count
-/// exact.
+/// How many entries along `dim` are not NaN, as the int64 `count_nonzero`
+/// gives it, every count exact: it counts the mask, which is what `nanmean`
+/// divides by too.
 pub(crate) fn non_nan_counts(
     tensor: &Tensor,
     dim: Option<Vec<isize>>,
