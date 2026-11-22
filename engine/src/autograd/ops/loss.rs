@@ -12,7 +12,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::map::{binary_map, ternary_map},
     ops::util::create_scalar_tensor,
-    ops::{activation, arithmetic, reduction},
+    ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rustc_hash::FxHashMap;
@@ -741,36 +741,19 @@ impl KLDivLossBackward {
 impl GradientFunction for KLDivLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
-
-        // Gradient w.r.t predictions: -(targets / predictions)
-        if self.input_requires_grad[0] {
-            let mut pred_grad = arithmetic::div(&self.targets, &self.predictions)?;
-            pred_grad = arithmetic::neg(&pred_grad)?;
-            if let Some(n) = self.reduction_divisor() {
-                let scale = create_scalar_tensor(1.0 / n, pred_grad.dtype(), pred_grad.device())?;
-                pred_grad = arithmetic::mul(&pred_grad, &scale)?;
-            }
-            let pred_grad = arithmetic::mul(&pred_grad, grad_output)?;
-            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        let divisor = self.reduction_divisor().unwrap_or(1.0);
+        let [by_prediction, by_target] = crate::ops::loss::kl_gradients(
+            (&self.predictions, &self.targets),
+            grad_output,
+            divisor,
+            self.input_requires_grad,
+        )?;
+        if let Some(grad) = by_prediction {
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
         }
-
-        // Gradient w.r.t targets: log(targets) - log(predictions) + 1
-        if self.input_requires_grad[1] {
-            let log_targets = activation::log(&self.targets)?;
-            let log_preds = activation::log(&self.predictions)?;
-            let diff = arithmetic::sub(&log_targets, &log_preds)?;
-            let one = create_scalar_tensor(1.0, self.targets.dtype(), self.targets.device())?;
-            let mut target_grad = arithmetic::add(&diff, &one)?;
-            if let Some(n) = self.reduction_divisor() {
-                let scale =
-                    create_scalar_tensor(1.0 / n, target_grad.dtype(), target_grad.device())?;
-                target_grad = arithmetic::mul(&target_grad, &scale)?;
-            }
-            let target_grad = arithmetic::mul(&target_grad, grad_output)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if let Some(grad) = by_target {
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
         }
-
         Ok(gradients)
     }
 
@@ -778,6 +761,7 @@ impl GradientFunction for KLDivLossBackward {
         &self.input_ids
     }
 }
+
 /// Gradient function for Focal loss
 pub struct FocalLossBackward {
     pub predictions_shape: Vec<usize>,

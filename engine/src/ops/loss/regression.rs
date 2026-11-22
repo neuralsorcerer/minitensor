@@ -717,6 +717,102 @@ fn kl_term(t: f64, p: f64) -> f64 {
     t * log_ratio
 }
 
+/// `kl_div`'s gradients, in its predictions where `wanted[0]` and in its
+/// targets where `wanted[1]`, the reduction having divided by `divisor`:
+/// `-t g / (p n)` and `(1 + log(t / p)) g / n`, `g` the incoming gradient,
+/// one value or one a term. The first is the float nearest its exact value
+/// where the incoming gradient shares the operands' dtype, and the second
+/// wherever a bound settles which that is; see
+/// `arithmetic::exact_sum::kl_target_slopes`. A zero target's term is zero
+/// whatever the prediction, and so is its gradient in the prediction, signed
+/// as `-t g` signs it: it was `-(0 / 0)` against a zero prediction, NaN.
+pub(crate) fn kl_gradients(
+    (predictions, targets): (&Tensor, &Tensor),
+    grad_output: &Tensor,
+    divisor: f64,
+    wanted: [bool; 2],
+) -> Result<[Option<Tensor>; 2]> {
+    use crate::ops::arithmetic::exact_sum::{Element, Output, divisor_slopes, kl_target_slopes};
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let upstream = grad_output.contiguous()?;
+    let (dtype, device, n) = (p.dtype(), p.device(), p.numel());
+    if upstream.numel() != 1 && upstream.numel() != n {
+        return Err(MinitensorError::shape_mismatch(
+            p.shape().dims().to_vec(),
+            upstream.shape().dims().to_vec(),
+        ));
+    }
+    let same = upstream.dtype() == dtype;
+    // The incoming gradient's values in float64, where the target's gradient
+    // or another dtype needs them.
+    let flows = if wanted[1] || !same {
+        widened(&upstream.astype(DataType::Float64)?)?
+    } else {
+        Vec::new()
+    };
+    /// The two gradients' values for operands of one float dtype.
+    fn slopes<T: Element + Output>(
+        (p, t): (&[T], &[T]),
+        same: Option<&[T]>,
+        (flows, divisor, wanted): (&[f64], f64, [bool; 2]),
+    ) -> [Option<Vec<T>>; 2] {
+        let flow = |i: usize| match same {
+            Some(g) => g[if g.len() == 1 { 0 } else { i }].wide(),
+            None => flows[if flows.len() == 1 { 0 } else { i }],
+        };
+        let by_prediction = wanted[0].then(|| {
+            let mut values = match same {
+                Some(g) => {
+                    let g: Cow<'_, [T]> = if g.len() == 1 {
+                        Cow::Owned(vec![g[0]; t.len()])
+                    } else {
+                        Cow::Borrowed(g)
+                    };
+                    divisor_slopes((t, &g), (p, Some(divisor)), 1)
+                }
+                // An incoming gradient of another dtype, as its values.
+                None => (0..t.len())
+                    .map(|i| T::narrow(-(t[i].wide() * flow(i)) / (p[i].wide() * divisor)))
+                    .collect(),
+            };
+            for (i, value) in values.iter_mut().enumerate() {
+                if t[i].wide() == 0.0 {
+                    *value = T::narrow(-(t[i].wide() * flow(i)));
+                }
+            }
+            values
+        });
+        let by_target = wanted[1].then(|| kl_target_slopes((t, p), flows, divisor));
+        [by_prediction, by_target]
+    }
+    let missing = || MinitensorError::internal_error("kl_div backward: a float slice");
+    let values = match dtype {
+        DataType::Float32 => {
+            let (x, y) = (p.data().as_f32_slice(), t.data().as_f32_slice());
+            let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+            let g = same.then(|| upstream.data().as_f32_slice()).flatten();
+            slopes((x, y), g, (&flows, divisor, wanted))
+                .map(|values| values.map(|values| TensorData::from_vec(values, dtype, device)))
+        }
+        DataType::Float64 => {
+            let (x, y) = (p.data().as_f64_slice(), t.data().as_f64_slice());
+            let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+            let g = same.then(|| upstream.data().as_f64_slice()).flatten();
+            slopes((x, y), g, (&flows, divisor, wanted))
+                .map(|values| values.map(|values| TensorData::from_vec(values, dtype, device)))
+        }
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "kl_div needs floating-point inputs, got {other:?}"
+            )));
+        }
+    };
+    let shape = p.shape().clone();
+    Ok(values.map(|data| {
+        data.map(|data| Tensor::new(Arc::new(data), shape.clone(), dtype, device, false))
+    }))
+}
+
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
     let (predictions, targets) = loss_operands(predictions, targets)?;

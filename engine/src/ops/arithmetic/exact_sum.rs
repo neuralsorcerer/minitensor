@@ -45,6 +45,10 @@ pub(crate) use self::broadcast::{divisor_slopes, group_dots};
 mod covariance;
 pub(crate) use self::covariance::{Refusal, Sample, covariances};
 
+#[path = "exact_divergence.rs"]
+mod divergence;
+pub(crate) use self::divergence::kl_target_slopes;
+
 #[path = "exact_huber.rs"]
 mod huber;
 pub(crate) use self::huber::{Huber, huber_terms, huber_total};

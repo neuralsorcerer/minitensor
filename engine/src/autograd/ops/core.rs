@@ -787,7 +787,7 @@ fn gathered_gradient(
                 b.data().$slice().ok_or_else(bad)?,
             );
             let values = match &y {
-                Some(y) => divisor_slopes((g, b), y.data().$slice().ok_or_else(bad)?, run),
+                Some(y) => divisor_slopes((g, b), (y.data().$slice().ok_or_else(bad)?, None), run),
                 None => group_dots((g, b), (run, shape.numel()), $dot),
             };
             TensorData::from_vec(values, dtype, device)

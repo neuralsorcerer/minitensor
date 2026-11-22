@@ -993,7 +993,7 @@ const R9: f64 = 1.0 / 21.0;
 
 /// `log(u) + c/u`. `c` carries the residual of a `1 + x` that rounded.
 #[inline(always)]
-fn log_core<const FMA: bool, const CORRECT: bool>(u: f64, c: f64) -> f64 {
+pub(crate) fn log_core<const FMA: bool, const CORRECT: bool>(u: f64, c: f64) -> f64 {
     // Branchless decompose u = 2^k * m with m in [0.6875, 1.375). Biasing by
     // OFF first makes the exponent field of the difference *be* k, so no
     // data-dependent branch is needed to fold the [sqrt2, 2) half down -- that

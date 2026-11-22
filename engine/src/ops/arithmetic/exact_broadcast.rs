@@ -14,6 +14,8 @@
 //! numerator over its square. Each was its terms rounded and then added.
 //! Here each is the dot carried -- over the divisor's square, an exact pair
 //! -- and rounded once, in whole numbers where the bound does not settle it.
+//! The divisor's gradient with a second factor in place of the square is
+//! `kl_div`'s in its prediction, `-t g / (p n)`.
 
 use super::{Carried, Element, Output, Total, ratio_settled, two_sum};
 use std::mem::MaybeUninit;
@@ -32,13 +34,14 @@ pub(crate) fn group_dots<T: Element + Output>(
 }
 
 /// For each of the runs of `run` positions, `g` and `x` laid out a run at a
-/// time, the gradient of `x / y` in its divisor: `-(Σ g x) / y[k]^2` over
-/// the run, the value of `T` nearest it. Where a value is not finite or the
+/// time, `-(Σ g x)` over the run over `y[k] z`, the value of `T` nearest it:
+/// with `z = y[k]`, where `scale` is none, the gradient of `x / y` in its
+/// divisor, and otherwise `z = scale`. Where a value is not finite or the
 /// divisor is zero, it is the formula's. A float64 run's products' errors
 /// are fused multiply-adds where the CPU has them, the same to the bit.
 pub(crate) fn divisor_slopes<T: Element + Output>(
     (g, x): (&[T], &[T]),
-    y: &[T],
+    (y, scale): (&[T], Option<f64>),
     run: usize,
 ) -> Vec<T> {
     let fma = !cfg!(target_arch = "x86_64") || super::fused();
@@ -51,9 +54,9 @@ pub(crate) fn divisor_slopes<T: Element + Output>(
                 // SAFETY: where `fma` the CPU has avx2 and fma, or the target a
                 // fused multiply-add of its own.
                 #[allow(unused_unsafe)]
-                return unsafe { ratios_fma(operands, run, part) };
+                return unsafe { ratios_fma(operands, (scale, run), part) };
             }
-            ratios::<T, false>(operands, run, part);
+            ratios::<T, false>(operands, (scale, run), part);
         });
     };
     // SAFETY: the chunks cover the output, and a run writes each element.
@@ -64,19 +67,20 @@ pub(crate) fn divisor_slopes<T: Element + Output>(
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx2,fma"))]
 fn ratios_fma<T: Element + Output>(
     operands: (&[T], &[T], &[T]),
-    run: usize,
+    how: (Option<f64>, usize),
     out: &mut [MaybeUninit<T>],
 ) {
-    ratios::<T, true>(operands, run, out);
+    ratios::<T, true>(operands, how, out);
 }
 
 /// A part of [`divisor_slopes`]. For float32 with a term a position, first
-/// the plain quotient of its two products, each exact, which rounds once:
-/// a pass without branches, and then the terms it does not settle.
+/// the plain quotient of its two products, rounded once where each is exact
+/// and twice where a large `scale` rounds the divisor's: a pass without
+/// branches, and then the terms it does not settle.
 #[inline(always)]
 fn ratios<T: Element + Output, const FMA: bool>(
     (g, x, y): (&[T], &[T], &[T]),
-    run: usize,
+    (scale, run): (Option<f64>, usize),
     out: &mut [MaybeUninit<T>],
 ) {
     if run == 0 {
@@ -85,10 +89,13 @@ fn ratios<T: Element + Output, const FMA: bool>(
         });
         return;
     }
+    // The divisor's second factor.
+    let factor = |c: f64| scale.unwrap_or(c);
     // The plain quotient and whether its bound settles it.
     let plain = |a: T, b: T, c: T| {
-        let value = -(a.wide() * b.wide()) / (c.wide() * c.wide());
-        let (narrow, clear) = T::settle_lanes(value, 0.0, value.abs() * 2f64.powi(-52));
+        let c = c.wide();
+        let value = -(a.wide() * b.wide()) / (c * factor(c));
+        let (narrow, clear) = T::settle_lanes(value, 0.0, value.abs() * 2f64.powi(-51));
         let size = value.abs();
         let ordinary = (size == 0.0) | ((size >= 2f64.powi(-900)) & (size <= 2f64.powi(900)));
         (narrow, clear & ordinary)
@@ -98,8 +105,9 @@ fn ratios<T: Element + Output, const FMA: bool>(
     // square, which the bound allows eight roundings for and takes four.
     let pair = |a: T, b: T, c: T| {
         let (a, b, c) = (a.wide(), b.wide(), c.wide());
-        let (p, s) = (a * b, c * c);
-        let (e, es) = (a.mul_add(b, -p), c.mul_add(c, -s));
+        let z = factor(c);
+        let (p, s) = (a * b, c * z);
+        let (e, es) = (a.mul_add(b, -p), c.mul_add(z, -s));
         let q = p / s;
         let r = (-q).mul_add(s, p);
         let t = ((r + e) - q * es) / s;
@@ -126,11 +134,9 @@ fn ratios<T: Element + Output, const FMA: bool>(
         if rest {
             for (k, cell) in out.iter_mut().enumerate() {
                 if !pass(g[k], x[k], y[k]).1 {
-                    cell.write(negated_ratio::<T, FMA>(
-                        &g[k..k + 1],
-                        &x[k..k + 1],
-                        y[k].wide(),
-                    ));
+                    let y = y[k].wide();
+                    let divisor = (y, factor(y));
+                    cell.write(negated_ratio::<T, FMA>(&g[k..k + 1], &x[k..k + 1], divisor));
                 }
             }
         }
@@ -138,11 +144,8 @@ fn ratios<T: Element + Output, const FMA: bool>(
     }
     for (k, cell) in out.iter_mut().enumerate() {
         let span = k * run..(k + 1) * run;
-        cell.write(negated_ratio::<T, FMA>(
-            &g[span.clone()],
-            &x[span],
-            y[k].wide(),
-        ));
+        let divisor = (y[k].wide(), factor(y[k].wide()));
+        cell.write(negated_ratio::<T, FMA>(&g[span.clone()], &x[span], divisor));
     }
 }
 
@@ -166,24 +169,27 @@ fn grouped<T: Output>(groups: usize, run: usize, each: impl Fn(usize) -> T + Syn
     unsafe { crate::ops::map::build_vec(groups, fill) }
 }
 
-/// `-(Σ g x) / y^2`: the dot carried, settled over the exact pair `y^2`, and
-/// in whole numbers where the bound cannot say -- or where a product is
+/// `-(Σ g x) / (y z)`: the dot carried, settled over the exact pair `y z`,
+/// and in whole numbers where the bound cannot say -- or where a product is
 /// small enough that its error might have been rounded.
 #[inline(always)]
-fn negated_ratio<T: Element + Output, const FMA: bool>(g: &[T], x: &[T], y: f64) -> T {
+fn negated_ratio<T: Element + Output, const FMA: bool>(g: &[T], x: &[T], (y, z): (f64, f64)) -> T {
     let error =
         |a: f64, b: f64, product: f64| crate::ops::simd::product_error::<FMA>(a, b, product);
     let pairs = || g.iter().zip(x).map(|(&a, &b)| (a.wide(), b.wide()));
-    let (mut finite, mut tiny) = (y.is_finite() && y != 0.0, false);
+    let (mut finite, mut tiny) = (
+        y.is_finite() && y != 0.0 && z.is_finite() && z != 0.0,
+        false,
+    );
     for (a, b) in pairs() {
         finite &= a.is_finite() & b.is_finite();
         tiny |= (a != 0.0) & (b != 0.0) & ((a * b).abs() < 2f64.powi(-968));
     }
     if !finite {
         let dot: f64 = pairs().map(|(a, b)| a * b).sum();
-        return T::narrow(-dot / (y * y));
+        return T::narrow(-dot / (y * z));
     }
-    let square = y * y;
+    let square = y * z;
     let numerator = if let ([a], [b]) = (g, x) {
         let (a, b) = (a.wide(), b.wide());
         let sum = a * b;
@@ -199,21 +205,21 @@ fn negated_ratio<T: Element + Output, const FMA: bool>(g: &[T], x: &[T], y: f64)
     } else {
         T::carried_dot(g, x)
     };
-    let divisor = (square, error(y, y, square));
+    let divisor = (square, error(y, z, square));
     match (!tiny).then(|| ratio_settled::<T, FMA>(numerator, divisor)) {
         Some(Some(value)) => T::narrow(-value.widen()),
-        _ => exact_negated_ratio(g, x, y),
+        _ => exact_negated_ratio(g, x, (y, z)),
     }
 }
 
 /// [`negated_ratio`] in whole numbers.
 #[cold]
 #[inline(never)]
-fn exact_negated_ratio<T: Element + Output>(g: &[T], x: &[T], y: f64) -> T {
+fn exact_negated_ratio<T: Element + Output>(g: &[T], x: &[T], (y, z): (f64, f64)) -> T {
     let terms: Vec<(f64, f64, f64)> = g
         .iter()
         .zip(x)
         .map(|(&a, &b)| (-a.wide(), b.wide(), 1.0))
         .collect();
-    Total::of_terms(&terms).quotient::<T>(Total::of_terms(&[(y, y, 1.0)]))
+    Total::of_terms(&terms).quotient::<T>(Total::of_terms(&[(y, z, 1.0)]))
 }
