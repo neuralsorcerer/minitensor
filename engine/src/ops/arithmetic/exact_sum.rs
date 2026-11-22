@@ -60,6 +60,10 @@ pub(crate) use self::huber::{Huber, huber_terms, huber_total};
 #[path = "exact_log_cosh.rs"]
 mod log_cosh;
 
+#[path = "exact_logits.rs"]
+mod logits;
+pub(crate) use self::logits::logit_slopes;
+
 #[path = "exact_pool.rs"]
 mod pool;
 pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotient};
@@ -7327,29 +7331,45 @@ impl Total {
     }
 
     /// The exact sum of the products of `terms`, four finite factors each.
+    fn of_quads(terms: &[[f64; 4]]) -> Self {
+        let terms: Vec<_> = terms.iter().map(|&factors| (factors, 0)).collect();
+        Self::of_scaled(&terms)
+    }
+
+    /// The exact sum of the products of `terms`, four finite factors each
+    /// and two to a whole power, in as many limbs as the products reach: a
+    /// power past float64's range, as a factor too small or too large for it
+    /// is taken apart into.
     #[cold]
     #[inline(never)]
-    fn of_quads(terms: &[[f64; 4]]) -> Self {
-        // Every product of four finite float64s is a whole multiple of
-        // `2^-4296` below `2^4096`, bit 8392 here; the carries take a limb.
-        let least = 4 * LEAST;
-        let mut total = Self::empty(least, (8392 + 64) / 64 + 2);
-        for factors in terms {
-            let exact = factors.map(|value| Exact::float(value).expect("finite"));
-            let first = u128::from(exact[0].magnitude) * u128::from(exact[1].magnitude);
-            let second = u128::from(exact[2].magnitude) * u128::from(exact[3].magnitude);
-            if first == 0 || second == 0 {
-                continue;
-            }
-            let negative = exact.iter().filter(|factor| factor.negative).count() % 2 == 1;
+    fn of_scaled(terms: &[([f64; 4], i32)]) -> Self {
+        // Each product as two halves of at most 106 bits, its sign, and the
+        // place of its least bit.
+        let placed: Vec<_> = terms
+            .iter()
+            .map(|(factors, power)| {
+                let exact = factors.map(|value| Exact::float(value).expect("finite"));
+                let half =
+                    |a: usize| u128::from(exact[a].magnitude) * u128::from(exact[a + 1].magnitude);
+                let negative = exact.iter().filter(|factor| factor.negative).count() % 2 == 1;
+                let place = exact.iter().map(|factor| factor.exponent).sum::<i32>() + power;
+                ((half(0), half(2)), negative, place)
+            })
+            .filter(|&((first, second), ..)| first != 0 && second != 0)
+            .collect();
+        let places = placed.iter().map(|&(.., place)| place);
+        let least = places.clone().min().unwrap_or(0);
+        let reach = places.max().unwrap_or(0) - least;
+        // A product takes 212 bits from its place, and the carries a limb.
+        let mut total = Self::empty(least, reach as usize / 64 + 6);
+        for ((first, second), negative, place) in placed {
             let limbs = if negative {
                 &mut total.negative
             } else {
                 &mut total.positive
             };
-            let shift = (exact.iter().map(|factor| factor.exponent).sum::<i32>() - least) as usize;
-            // Two products of at most 106 bits, each in two halves: the four
-            // products of halves at their places.
+            let shift = (place - least) as usize;
+            // The four products of halves at their places.
             let (a, b) = (
                 (first as u64, (first >> 64) as u64),
                 (second as u64, (second >> 64) as u64),

@@ -526,9 +526,10 @@ impl Pairs {
     }
 }
 
-/// [`expm1`] on each of [`WIDTH`] lanes, to the same bits.
+/// [`exp_parts`] on each of [`WIDTH`] lanes, and the exponential they make:
+/// `exp(x)`, the reduced `e`, and whether the reduction took nothing out.
 #[inline(always)]
-pub(crate) fn expm1_lanes<const FMA: bool>(x: Pairs) -> Pairs {
+fn exp_lanes_parts<const FMA: bool>(x: Pairs) -> (Pairs, Pairs, [bool; WIDTH]) {
     let steps = x.0.map(|lead| (lead * (64.0 * LOG2_E.0)).round());
     let lead = Pairs::of(|lane| {
         let lead = steps[lane] * LN_2_64.0;
@@ -546,15 +547,44 @@ pub(crate) fn expm1_lanes<const FMA: bool>(x: Pairs) -> Pairs {
     let j: [usize; WIDTH] = std::array::from_fn(|lane| (steps[lane] - 64.0 * n[lane]) as usize);
     let power = Pairs::of(|lane| POWERS[j[lane] % 64]);
     let grown = power.add(power.mul::<FMA>(e));
-    let whole = Pairs::of(|lane| grown.lane(lane).scaled(two_to(n[lane])))
-        .add(Pairs::of(|_| Pair(-1.0, 0.0)));
+    let whole = Pairs::of(|lane| grown.lane(lane).scaled(two_to(n[lane])));
+    let reduced = std::array::from_fn(|lane| (n[lane] == 0.0) & (j[lane] == 0));
+    (whole, e, reduced)
+}
+
+/// [`exp`] on each of [`WIDTH`] lanes, to the same bits.
+#[inline(always)]
+pub(crate) fn exp_lanes<const FMA: bool>(x: Pairs) -> Pairs {
+    exp_lanes_parts::<FMA>(x).0
+}
+
+/// [`expm1`] on each of [`WIDTH`] lanes, to the same bits.
+#[inline(always)]
+pub(crate) fn expm1_lanes<const FMA: bool>(x: Pairs) -> Pairs {
+    let (whole, e, reduced) = exp_lanes_parts::<FMA>(x);
+    let whole = whole.add(Pairs::of(|_| Pair(-1.0, 0.0)));
     Pairs::of(|lane| {
-        let reduced = (n[lane] == 0.0) & (j[lane] == 0);
         let (e, whole) = (e.lane(lane), whole.lane(lane));
         Pair(
-            if reduced { e.0 } else { whole.0 },
-            if reduced { e.1 } else { whole.1 },
+            if reduced[lane] { e.0 } else { whole.0 },
+            if reduced[lane] { e.1 } else { whole.1 },
         )
+    })
+}
+
+/// [`ln_1p`] on each of [`WIDTH`] lanes, to the same bits.
+#[inline(always)]
+pub(crate) fn ln_1p_lanes<const FMA: bool>(w: Pairs) -> Pairs {
+    let l = w.0.map(f64::ln_1p);
+    let m = expm1_lanes::<FMA>(Pairs(l, [0.0; WIDTH]));
+    let gap = w.add(m.neg());
+    Pairs::of(|lane| {
+        let l = l[lane];
+        if l == 0.0 || !l.is_finite() {
+            Pair(l + w.1[lane], 0.0)
+        } else {
+            Pair::normal(l, gap.0[lane] / (1.0 + m.0[lane]))
+        }
     })
 }
 

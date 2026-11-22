@@ -15,42 +15,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use num_traits::Float;
 use std::sync::Arc;
-
-/// `-log(sigmoid(x))` over a whole slice, which is `softplus(-x)`.
-///
-/// Binary cross-entropy is written in terms of this quantity and `logsigmoid`
-/// is its negation, so the two shared a formula but not an implementation:
-/// each spelled out its own stable rearrangement in scalar float, costing two
-/// `libm` calls per element -- an `exp` and a `ln_1p` -- where `softplus`
-/// already had a vectorized kernel. Over sixteen million float32 elements
-/// that was 114 ms against the kernel's 26 ms.
-///
-/// It is a trait for the same reason [`crate::ops::activation::ShiftedExp`]
-/// is: float32 has the vectorized kernel and float64 has only `libm`, so the
-/// choice belongs at the top of a block rather than inside the loop.
-pub(crate) trait NegLogSigmoid: Float {
-    /// `out[i] = -log(sigmoid(input[i]))`, for every element of `out`.
-    ///
-    /// `input` and `out` are the same length and are different buffers.
-    fn neg_log_sigmoid_into(input: &[Self], out: &mut [Self]);
-}
-
-impl NegLogSigmoid for f32 {
-    fn neg_log_sigmoid_into(input: &[f32], out: &mut [f32]) {
-        // The kernel writes through `MaybeUninit` because its other callers
-        // hand it a fresh allocation. This one is already initialized, and an
-        // initialized `T` is a valid `MaybeUninit<T>`; the kernel only writes.
-        let uninit = unsafe {
-            std::slice::from_raw_parts_mut(
-                out.as_mut_ptr() as *mut std::mem::MaybeUninit<f32>,
-                out.len(),
-            )
-        };
-        crate::ops::simd::F32Kernel::select().neg_log_sigmoid(input, uninit);
-    }
-}
 
 /// Where `softplus(z)` becomes `z` to within float64.
 ///
@@ -72,14 +37,6 @@ pub(crate) fn neg_log_sigmoid_f64(x: f64) -> f64 {
         z
     } else {
         z.exp().ln_1p()
-    }
-}
-
-impl NegLogSigmoid for f64 {
-    fn neg_log_sigmoid_into(input: &[f64], out: &mut [f64]) {
-        for (o, &x) in out.iter_mut().zip(input.iter()) {
-            *o = neg_log_sigmoid_f64(x);
-        }
     }
 }
 

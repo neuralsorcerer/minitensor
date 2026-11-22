@@ -10,7 +10,6 @@ use super::*;
 use crate::ops::map::{PAR_THRESHOLD, par_out_chunks_gated};
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::{binary_map, ternary_map},
     ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -482,18 +481,13 @@ fn bce_gradients(
 /// Gradient function for binary cross entropy computed from logits.
 ///
 /// The whole point of fusing the sigmoid into the loss is that this gradient
-/// has a closed form that never saturates: `d/dx = sigmoid(x) - target`, or
-/// with a positive-class weight `w`,
-///
-/// ```text
-/// d/dx = (1 - target) + (1 + (w - 1) * target) * (sigmoid(x) - 1)
-/// ```
-///
-/// Computing it directly is what keeps a confidently-wrong logit learning.
-/// Going through `sigmoid` and then `binary_cross_entropy` instead multiplies
-/// `1/(p * (1 - p))` by `p * (1 - p)`, and at |x| >= 30 in f32 both factors
-/// have already collapsed to inf/0 — the product is whatever the clamps leave
-/// behind rather than the -1 the maths calls for.
+/// has a closed form that never saturates: `(1 - t) s(x) - w t s(-x)` in the
+/// logit, `w` the positive class's weight and each sigmoid of its own sign,
+/// and `-x + (w - 1) softplus(-x)` in the target, each rounded once (see
+/// [`bce_logit_gradients`]). Going through `sigmoid` and then
+/// `binary_cross_entropy` instead takes the slope from a rounded `s(x)`,
+/// exactly one past 17 in float32, and a confidently wrong logit's gradient,
+/// near one in size, is lost.
 pub struct BCEWithLogitsLossBackward {
     pub input_ids: [TensorId; 2],
     /// Which of [logits, targets] actually need a gradient; each is computed
@@ -510,33 +504,18 @@ impl GradientFunction for BCEWithLogitsLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
-
-        let divisor = if self.reduction == "mean" {
+        let count = if self.reduction == "mean" {
             self.logits.numel() as f64
         } else {
             1.0
         };
-        let scale = 1.0 / divisor;
-
-        if self.input_requires_grad[1] {
-            let target_grad =
-                bce_with_logits_target_grad(&self.logits, self.pos_weight.as_ref(), scale)?;
-            let target_grad = arithmetic::mul(&target_grad, grad_output)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        let operands = (&self.logits, &self.targets, self.pos_weight.as_ref());
+        let grads = bce_logit_gradients(operands, grad_output, count, self.input_requires_grad)?;
+        for (id, grad) in self.input_ids.into_iter().zip(grads) {
+            if let Some(grad) = grad {
+                accumulate_grad(&mut gradients, id, grad)?;
+            }
         }
-        if !self.input_requires_grad[0] {
-            return Ok(gradients);
-        }
-
-        let base_grad = bce_with_logits_grad(
-            &self.logits,
-            &self.targets,
-            self.pos_weight.as_ref(),
-            divisor,
-        )?;
-        let logit_grad = arithmetic::mul(&base_grad, grad_output)?;
-        accumulate_grad(&mut gradients, self.input_ids[0], logit_grad)?;
-
         Ok(gradients)
     }
 
@@ -544,158 +523,63 @@ impl GradientFunction for BCEWithLogitsLossBackward {
         &self.input_ids
     }
 }
-/// `[(1 - t) s(x) - w t s(-x)] / divisor`, elementwise: the gradient
-/// `(1 - t) + (1 + (w - 1) t) (s(x) - 1)` rearranged, in float64 for either
-/// dtype and rounded once into the logits'.
+
+/// The gradients of `binary_cross_entropy_with_logits` in its logits and
+/// targets, those `wanted`: each term's slope -- `(1 - t) s(x) - w t s(-x)`
+/// in the logit and `-x + (w - 1) softplus(-x)` in the target -- times the
+/// incoming gradient over `count`, rounded once (see [`logit_slopes`]).
 ///
-/// Each sigmoid is taken of its own sign from `e = exp(-|x|)` -- `1 / (1 + e)`
-/// and `e / (1 + e)` -- so for a hard label, one term or the other, nothing
-/// cancels. `s(x) - 1` formed from a rounded `s(x)` was all rounding once
-/// `s(x)` was near one, and a confident, correct logit's gradient zero where it
-/// is `-e^-x` or `e^x`: 1.7e7 ulps out in float32, 9e15 in float64. A soft
-/// label's two terms meet where the logit is the label's own; within a
-/// quarter of each other they are taken as pairs.
-fn bce_with_logits_grad(
-    logits: &Tensor,
-    targets: &Tensor,
-    pos_weight: Option<&Tensor>,
-    divisor: f64,
-) -> Result<Tensor> {
-    macro_rules! grad_for {
-        ($ty:ty, $slice:ident, $dtype:expr) => {{
-            let x = logits.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from logits")
-            })?;
-            let t = targets.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from targets")
-            })?;
-            let compute = move |x: $ty, t: $ty, w: $ty| {
-                (bce_logit_slope(f64::from(x), f64::from(t), f64::from(w)) / divisor) as $ty
-            };
-            let values = match pos_weight {
-                Some(w) => {
-                    let w = w.data().$slice().ok_or_else(|| {
-                        MinitensorError::internal_error("Failed to get slice from pos_weight")
-                    })?;
-                    ternary_map(x, t, w, compute)
-                }
-                None => binary_map(x, t, move |x: $ty, t: $ty| compute(x, t, 1.0)),
-            };
-            TensorData::from_vec::<$ty>(values, $dtype, logits.device())
-        }};
-    }
-
-    let data = match logits.dtype() {
-        DataType::Float32 => grad_for!(f32, as_f32_slice, DataType::Float32),
-        DataType::Float64 => grad_for!(f64, as_f64_slice, DataType::Float64),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "binary_cross_entropy_with_logits requires floating point tensors",
-            ));
+/// [`logit_slopes`]: crate::ops::arithmetic::exact_sum::logit_slopes
+fn bce_logit_gradients(
+    (logits, targets, pos_weight): (&Tensor, &Tensor, Option<&Tensor>),
+    grad_output: &Tensor,
+    count: f64,
+    wanted: [bool; 2],
+) -> Result<[Option<Tensor>; 2]> {
+    use crate::ops::arithmetic::exact_sum::logit_slopes;
+    let (x, t) = (logits.contiguous()?, targets.contiguous()?);
+    let w = pos_weight.map(Tensor::contiguous).transpose()?;
+    let flows = grad_output.astype(DataType::Float64)?.contiguous()?;
+    let missing =
+        || MinitensorError::internal_error("binary_cross_entropy_with_logits: a float operand");
+    let flows = flows.data().as_f64_slice().ok_or_else(missing)?;
+    let (dtype, device) = (x.dtype(), x.device());
+    let mut out = [None, None];
+    for (which, slot) in out.iter_mut().enumerate() {
+        if !wanted[which] {
+            continue;
         }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(data),
-        logits.shape().clone(),
-        logits.dtype(),
-        logits.device(),
-        false,
-    ))
-}
-
-/// One element of [`bce_with_logits_grad`], before the divisor.
-#[inline]
-fn bce_logit_slope(x: f64, t: f64, w: f64) -> f64 {
-    let e = (-x.abs()).exp();
-    let (large, small) = (1.0 / (1.0 + e), e / (1.0 + e));
-    let (of_x, of_minus_x) = if x >= 0.0 {
-        (large, small)
-    } else {
-        (small, large)
-    };
-    let down = (1.0 - t) * of_x;
-    let up = w * t * of_minus_x;
-    let slope = down - up;
-    // Past 700 the smaller sigmoid is below 1e-304, and no label a float can
-    // hold brings the terms near each other.
-    if slope.abs() >= 0.75 * down.abs().max(up.abs()) || !slope.is_finite() || x.abs() > 700.0 {
-        return slope;
-    }
-    cancelled_bce_logit_slope(x, t, w)
-}
-
-/// [`bce_logit_slope`] where its two terms come within a quarter of each
-/// other: `e`, both sigmoids, `1 - t` and `w t` as pairs, rounded once.
-#[cold]
-fn cancelled_bce_logit_slope(x: f64, t: f64, w: f64) -> f64 {
-    use crate::ops::arithmetic::extended::{self, Pair};
-    use crate::ops::arithmetic::rounded_once::two_sum;
-    #[inline(always)]
-    fn body<const FMA: bool>(x: f64, t: f64, w: f64) -> f64 {
-        let e = extended::exp_pair::<FMA>(Pair(-x.abs(), 0.0));
-        let large = Pair(1.0, 0.0).div::<FMA>(Pair(1.0, 0.0).add(e));
-        let small = e.mul::<FMA>(large);
-        let (of_x, of_minus_x) = if x >= 0.0 {
-            (large, small)
-        } else {
-            (small, large)
+        let of_target = which == 1;
+        macro_rules! slopes {
+            ($slice:ident) => {{
+                let (x, t) = (x.data().$slice(), t.data().$slice());
+                let (x, t) = (x.ok_or_else(missing)?, t.ok_or_else(missing)?);
+                let w = match &w {
+                    Some(w) => Some(w.data().$slice().ok_or_else(missing)?),
+                    None => None,
+                };
+                let values = logit_slopes((x, t, w), flows, count, of_target);
+                TensorData::from_vec(values, dtype, device)
+            }};
+        }
+        let data = match dtype {
+            DataType::Float32 => slopes!(as_f32_slice),
+            DataType::Float64 => slopes!(as_f64_slice),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "binary_cross_entropy_with_logits requires floating point tensors",
+                ));
+            }
         };
-        let (rest, rest_low) = two_sum(1.0, -t);
-        let down = Pair(rest, rest_low).mul::<FMA>(of_x);
-        let up = Pair(w, 0.0).mul::<FMA>(Pair(t, 0.0)).mul::<FMA>(of_minus_x);
-        let slope = down.add(up.neg());
-        slope.0 + slope.1
+        *slot = Some(Tensor::new(
+            Arc::new(data),
+            logits.shape().clone(),
+            dtype,
+            device,
+            false,
+        ));
     }
-    extended::fused!(body(x: f64, t: f64, w: f64) -> f64)
-}
-
-/// `scale * d/dt` of the loss from logits, `-x + (w - 1) * softplus(-x)`: the
-/// loss is `(1 - t) x + (1 + (w - 1) t) softplus(-x)`, linear in the target.
-fn bce_with_logits_target_grad(
-    logits: &Tensor,
-    pos_weight: Option<&Tensor>,
-    scale: f64,
-) -> Result<Tensor> {
-    use crate::ops::util::NegLogSigmoid;
-    macro_rules! grad_for {
-        ($ty:ty, $slice:ident) => {{
-            let x = logits.data().$slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get slice from logits")
-            })?;
-            let scale = scale as $ty;
-            let values = match pos_weight {
-                Some(w) => {
-                    let w = w.data().$slice().ok_or_else(|| {
-                        MinitensorError::internal_error("Failed to get slice from pos_weight")
-                    })?;
-                    let mut softplus = vec![<$ty>::default(); x.len()];
-                    <$ty>::neg_log_sigmoid_into(x, &mut softplus);
-                    ternary_map(x, w, &softplus, move |x: $ty, w: $ty, sp: $ty| {
-                        scale * ((w - 1.0) * sp - x)
-                    })
-                }
-                None => crate::ops::map::unary_map(x, move |x: $ty| -scale * x),
-            };
-            TensorData::from_vec::<$ty>(values, logits.dtype(), logits.device())
-        }};
-    }
-    let data = match logits.dtype() {
-        DataType::Float32 => grad_for!(f32, as_f32_slice),
-        DataType::Float64 => grad_for!(f64, as_f64_slice),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "binary_cross_entropy_with_logits requires floating point tensors",
-            ));
-        }
-    };
-    Ok(Tensor::new(
-        Arc::new(data),
-        logits.shape().clone(),
-        logits.dtype(),
-        logits.device(),
-        false,
-    ))
+    Ok(out)
 }
 
 /// Gradient function for KL Divergence loss

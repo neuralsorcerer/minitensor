@@ -457,7 +457,7 @@ unit_grad_kernel!(
 
 // `logsigmoid`'s value kernel is not declared here. `-softplus(-x)` has a
 // vectorized implementation, so the function computes its own values through
-// `NegLogSigmoid` rather than through the scalar unit machinery, and a
+// that kernel rather than through the scalar unit machinery, and a
 // constant restating the same formula would be a second definition that
 // nothing evaluates. The gradient has no such kernel and stays.
 unit_grad_kernel!(
