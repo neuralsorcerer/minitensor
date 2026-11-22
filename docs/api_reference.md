@@ -3375,8 +3375,10 @@ and plus the bias where given -- is in either dtype the float nearest its exact
 value, rounded once, however nearly the bias cancels the product. So is each
 output of `batch_norm` and `instance_norm` under running statistics,
 `w (x - mean) / sqrt(var + eps) + b` with the running mean and variance as
-given, and each input gradient there, `w g / sqrt(var + eps)`. A weight or bias
-of another dtype than the input's meets `group_norm`'s and `instance_norm`'s
+given, and each input gradient there, `w g / sqrt(var + eps)`; and each value a
+training step leaves in `batch_norm`'s running buffers, `(1 - m) old + m new`
+with `new` the batch's mean or its variance over `n - 1`. A weight or bias of
+another dtype than the input's meets `group_norm`'s and `instance_norm`'s
 standardized values, rounded, as arithmetic meets them. A float32 output is
 taken in float64 with a bound on its roundings, and where the bound leaves it
 near a halfway point, as the float64 ones are. A zero output is signed as the

@@ -85,55 +85,13 @@ impl Standard {
     /// and each of its `mul_add`s was a call into a software one.
     #[inline(always)]
     pub(crate) fn of<const FMA: bool>(values: &[f64], eps: f64, centred: bool) -> Option<Self> {
-        let count = values.len();
-        if count == 0 || count >= 1 << 40 || !comfortable(eps) {
+        if !comfortable(eps) {
             return None;
         }
-        if !values.iter().all(|&value| comfortable(value)) {
-            return None;
-        }
-        let n = count as f64;
-        let (centre, centre_rest, centre_bound) = if centred {
-            let sum = <f64 as Element>::block(values);
-            let (value, rest, bound, ordinary) = sum.quotient_parts::<FMA>(n);
-            if !ordinary && value != 0.0 {
-                return None;
-            }
-            (value, rest, bound)
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        // The sum of the squared deviations: each deviation a pair within
-        // `error` of the exact one, its square split, the large parts added
-        // by two-sums and the small ones in float64 with their magnitudes
-        // kept for the bound.
-        let (mut large, mut small, mut magnitude, mut drift) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        for &x in values {
-            let (high, low, error) = deviation(x, centre, centre_rest, centre_bound);
-            let (square, square_error) = split::<FMA>(high, high);
-            let tail = square_error + (2.0 * high + low) * low;
-            let (sum, carry) = two_sum(large, square);
-            large = sum;
-            small += carry + tail;
-            magnitude += carry.abs() + tail.abs() + square_error.abs();
-            // A deviation within `error` of the pair moves its square by at
-            // most `error · (2 |pair| + error)`.
-            drift += error * (2.0 * (high.abs() + low.abs()) + error);
-        }
-        // Each float64 sum of `n` terms that are not negative falls short of
-        // the exact sum by at most `n + 4` units of its last place in all,
-        // the terms' own roundings included: the roundings of the small
-        // parts are bounded by twice that, and the drift grown by it.
-        let slack = generous(
-            magnitude * (n + 4.0) * 2f64.powi(-52) + drift * (1.0 + (n + 4.0) * 2f64.powi(-52)),
-        );
-        let total = Carried {
-            sum: large,
-            error: small,
-            slack,
-        };
+        let ((centre, centre_rest, centre_bound), total) = moments::<FMA>(values, centred)?;
         // Over the count, and the floor added.
-        let (mean, mean_rest, mean_bound, ordinary) = total.quotient_parts::<FMA>(n);
+        let (mean, mean_rest, mean_bound, ordinary) =
+            total.quotient_parts::<FMA>(values.len() as f64);
         if !ordinary && mean != 0.0 {
             return None;
         }
@@ -231,6 +189,201 @@ impl Standard {
             }
         }
     }
+}
+
+/// The mean of `values` as a pair and its bound -- zeros where not
+/// centred -- and the carried sum of the squared deviations from it, or None
+/// where a value or the mean lies too far out for the pairs.
+#[inline(always)]
+fn moments<const FMA: bool>(values: &[f64], centred: bool) -> Option<((f64, f64, f64), Carried)> {
+    let count = values.len();
+    if count == 0 || count >= 1 << 40 || !values.iter().all(|&value| comfortable(value)) {
+        return None;
+    }
+    let n = count as f64;
+    let (centre, centre_rest, centre_bound) = if centred {
+        let sum = <f64 as Element>::block(values);
+        let (value, rest, bound, ordinary) = sum.quotient_parts::<FMA>(n);
+        if !ordinary && value != 0.0 {
+            return None;
+        }
+        (value, rest, bound)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    // The sum of the squared deviations: each deviation a pair within
+    // `error` of the exact one, its square split, the large parts added by
+    // two-sums and the small ones in float64 with their magnitudes kept for
+    // the bound.
+    let (mut large, mut small, mut magnitude, mut drift) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for &x in values {
+        let (high, low, error) = deviation(x, centre, centre_rest, centre_bound);
+        let (square, square_error) = split::<FMA>(high, high);
+        let tail = square_error + (2.0 * high + low) * low;
+        let (sum, carry) = two_sum(large, square);
+        large = sum;
+        small += carry + tail;
+        magnitude += carry.abs() + tail.abs() + square_error.abs();
+        // A deviation within `error` of the pair moves its square by at most
+        // `error · (2 |pair| + error)`.
+        drift += error * (2.0 * (high.abs() + low.abs()) + error);
+    }
+    // Each float64 sum of `n` terms that are not negative falls short of the
+    // exact sum by at most `n + 4` units of its last place in all, the
+    // terms' own roundings included: the roundings of the small parts are
+    // bounded by twice that, and the drift grown by it.
+    let slack = generous(
+        magnitude * (n + 4.0) * 2f64.powi(-52) + drift * (1.0 + (n + 4.0) * 2f64.powi(-52)),
+    );
+    let total = Carried {
+        sum: large,
+        error: small,
+        slack,
+    };
+    Some(((centre, centre_rest, centre_bound), total))
+}
+
+/// What a training step leaves in a channel's running buffers from its
+/// values: `(1 - m) old + m new` for the mean and for the variance, `new` the
+/// values' own -- the variance unbiased, over `n - 1` -- each the value of
+/// `T` nearest its exact one. For a float32 buffer first in plain float64
+/// from carried sums with a bound, as [`plain_row`] takes its statistics;
+/// then from the pairs [`moments`] carries; and in whole numbers where
+/// neither settles it. Values or buffers that are not finite, and a channel
+/// of fewer than two values, take the formula in float64.
+pub(crate) fn running_update<T: Output>(
+    values: &[f64],
+    (mean, var): (f64, f64),
+    momentum: f64,
+) -> (T, T) {
+    let count = values.len();
+    let n = count as f64;
+    let finite = values
+        .iter()
+        .chain(&[mean, var, momentum])
+        .all(|v| v.is_finite());
+    if count < 2 || !finite {
+        let batch_mean = values.iter().sum::<f64>() / n;
+        let squares = values
+            .iter()
+            .map(|&x| (x - batch_mean) * (x - batch_mean))
+            .sum::<f64>();
+        let batch_var = if count > 1 { squares / (n - 1.0) } else { 0.0 };
+        let blend = |old: f64, new: f64| T::narrow(old * (1.0 - momentum) + new * momentum);
+        return (blend(mean, batch_mean), blend(var, batch_var));
+    }
+    let unit = 2f64.powi(-53);
+    if T::PLAIN {
+        // The mean and the sum of the squares off it carried, as `plain_row`
+        // bounds them, the squares over `n - 1`; and `(1 - m) old + m new`
+        // in float64, `1 - m`, its product and the other product and their
+        // sum each rounding once. Settled where both ends of the interval
+        // round alike.
+        let margin = 1.0 + 2f64.powi(-20);
+        let (centre, rest, bound, ordinary) =
+            <f64 as Element>::block(values).quotient_parts::<false>(n);
+        if ordinary || centre == 0.0 {
+            let centre_error = (rest.abs() + bound) * margin;
+            let squares: Vec<f64> = values
+                .iter()
+                .map(|&x| (x - centre) * (x - centre))
+                .collect();
+            let total = <f64 as Element>::block(&squares);
+            let (sum, _) = two_sum(total.sum, total.error);
+            let spread = sum / (n - 1.0);
+            let spread_error = (4.0 * unit * sum + total.slack + n * centre_error * centre_error)
+                / (n - 1.0)
+                * margin
+                + unit * spread;
+            let blend = |old: f64, new: f64, error: f64| -> Option<T> {
+                let (kept, moved) = ((1.0 - momentum) * old, momentum * new);
+                let y = kept + moved;
+                let bound =
+                    (2.0 * unit * kept.abs() + unit * (moved.abs() + y.abs()) + momentum * error)
+                        * margin
+                        + 2f64.powi(-51) * y.abs();
+                let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
+                (low.widen().to_bits() == high.widen().to_bits()).then_some(high)
+            };
+            if let (Some(mean), Some(var)) = (
+                blend(mean, centre, centre_error),
+                blend(var, spread, spread_error),
+            ) {
+                return (mean, var);
+            }
+        }
+    }
+    // The pairs: `1 - m` exact as a two-sum's, each product split, and the
+    // statistic within its bound.
+    let blend = |old: f64, (new, new_rest, new_bound): (f64, f64, f64)| -> Option<T> {
+        let (keep, keep_low) = two_sum(1.0, -momentum);
+        let (kept, kept_error) = split::<false>(keep, old);
+        let kept_low = keep_low * old;
+        let (moved, moved_error) = split::<false>(momentum, new);
+        let moved_low = momentum * new_rest;
+        let (head, head_error) = two_sum(kept, moved);
+        let (first, second) = (kept_error + kept_low, moved_error + moved_low);
+        let inner = first + second;
+        let tail = head_error + inner;
+        let (value, value_rest) = two_sum(head, tail);
+        let bound = generous(
+            momentum * new_bound
+                + (kept_low.abs()
+                    + moved_low.abs()
+                    + first.abs()
+                    + second.abs()
+                    + inner.abs()
+                    + tail.abs())
+                    * unit,
+        );
+        let ordinary = [old, new, momentum, keep, kept, moved, value]
+            .iter()
+            .all(|&v| comfortable(v));
+        if !ordinary {
+            return None;
+        }
+        T::settle(value, value_rest, bound)
+    };
+    if let Some((centre, squares)) = moments::<false>(values, true) {
+        let (spread, spread_rest, spread_bound, ordinary) =
+            squares.quotient_parts::<false>(n - 1.0);
+        if (ordinary || spread == 0.0)
+            && let (Some(mean), Some(var)) = (
+                blend(mean, centre),
+                blend(var, (spread, spread_rest, spread_bound)),
+            )
+        {
+            return (mean, var);
+        }
+    }
+    running_exact::<T>(values, (mean, var), momentum)
+}
+
+/// [`running_update`] in whole numbers: with `S = Σx` and
+/// `D = n Σx^2 - S^2`, the mean `((1 - m) old n + m S) / n` and the variance
+/// `((1 - m) old n (n - 1) + m D) / (n (n - 1))`, each rounded once.
+#[cold]
+#[inline(never)]
+fn running_exact<T: Output>(values: &[f64], (mean, var): (f64, f64), momentum: f64) -> (T, T) {
+    let exactly = Exactly::of(values, 0.0, true);
+    let n = values.len() as f64;
+    let count = Whole::float(n);
+    let keep = Whole::float(1.0).plus(&Whole::float(momentum).negated());
+    let rate = Whole::float(momentum);
+    let mean = keep
+        .times(&Whole::float(mean))
+        .times(&count)
+        .plus(&rate.times(&exactly.sum))
+        .total()
+        .quotient::<T>(count.clone().total());
+    let pairs = count.times(&Whole::float(n - 1.0));
+    let var = keep
+        .times(&Whole::float(var))
+        .times(&pairs)
+        .plus(&rate.times(&exactly.divisor))
+        .total()
+        .quotient::<T>(pairs.total());
+    (mean, var)
 }
 
 /// The inverse root of `high + low`, which is within `bound` of the

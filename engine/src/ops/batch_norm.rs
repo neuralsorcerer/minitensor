@@ -4,27 +4,28 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Batch normalization over a `[N, C, ...]` input in two passes, and its
-//! gradient written out.
+//! Batch normalization over a `[N, C, ...]` input, and its gradient written
+//! out.
 //!
 //! It was a chain of tensor operations -- a mean, a subtraction, a product, a
 //! second mean, a sum with `eps`, a square root, a division, the weight and the
 //! bias -- each allocating and walking a tensor the size of the input, with the
 //! backward composed from all of theirs. Over `[64, 64, 32, 32]` float32 that
-//! was 6.6ms forward and 25.1ms with the backward; this reads the input once
-//! for each statistic and once to write the answer.
+//! was 6.6ms forward and 25.1ms with the backward.
 //!
 //! The data is a run of `N * C` segments, each the `S` values of one channel of
-//! one image, so every pass walks memory in order. The statistics are summed in
-//! float64 and in bands of images fixed by the shape alone, so they do not
-//! depend on the thread count.
+//! one image. Under the batch's statistics a channel's values are gathered and
+//! taken whole -- its outputs, its gradients and the running buffers' new
+//! values -- and under running ones each value is taken where it lies; every
+//! answer is the value nearest its exact one, so none depends on the thread
+//! count.
 
 use crate::ops::arithmetic::exact_sum::{Element, Given, Output, given_values};
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     device::Device,
     error::{MinitensorError, Result},
-    ops::map::{par_map_indexed, par_out_chunks},
+    ops::map::par_out_chunks,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rustc_hash::FxHashMap;
@@ -93,95 +94,6 @@ impl Layout {
 
 /// Elements a task of a pass covers, at the least.
 const TASK_ELEMENTS: usize = 1 << 15;
-
-/// `Σ term(a[i], b[i])` across eight float64 lanes, so it vectorizes.
-#[inline(always)]
-fn lane_sum2<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> f64 {
-    let b = &b[..a.len()];
-    let mut acc = [0.0f64; 8];
-    let (a_blocks, a_rest) = a.as_chunks::<8>();
-    let (b_blocks, b_rest) = b.as_chunks::<8>();
-    for (a_block, b_block) in a_blocks.iter().zip(b_blocks) {
-        for ((lane, &x), &y) in acc.iter_mut().zip(a_block).zip(b_block) {
-            *lane += term(x, y);
-        }
-    }
-    for ((lane, &x), &y) in acc.iter_mut().zip(a_rest).zip(b_rest) {
-        *lane += term(x, y);
-    }
-    ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
-}
-
-/// Per channel, `Σ term(c, a, b)` over every `(a, b)` pair of that channel's
-/// values -- `a` and `b` laid out alike, `[N, C, S]` with `S > 1`.
-///
-/// Summed a band of images at a time and the bands folded in order. A plane of
-/// [`TASK_ELEMENTS`] or more is a task's worth on its own, and a band of one
-/// image is then as fine as the split goes -- a `[1, 3, 1024, 1024]` batch was
-/// three planes for four threads, and the threads took turns at one plane each
-/// -- so there each plane is summed in fixed pieces instead, a task apiece,
-/// folded in order. Either way the grouping follows from the shape alone.
-fn channel_sums<T: NormFloat, F: Fn(usize, T, T) -> f64 + Sync>(
-    layout: Layout,
-    a: &[T],
-    b: &[T],
-    term: &F,
-) -> Vec<f64> {
-    let Layout {
-        channels, spatial, ..
-    } = layout;
-    if spatial >= TASK_ELEMENTS {
-        let pieces = spatial.div_ceil(TASK_ELEMENTS);
-        let partials = par_map_indexed(layout.images * channels * pieces, &|index| {
-            let (segment, piece) = (index / pieces, index % pieces);
-            let c = segment % channels;
-            let start = segment * spatial + piece * TASK_ELEMENTS;
-            let end = (segment + 1) * spatial;
-            let stop = (start + TASK_ELEMENTS).min(end);
-            lane_sum2(&a[start..stop], &b[start..stop], |x, y| term(c, x, y))
-        });
-        let mut total = vec![0.0f64; channels];
-        for (index, partial) in partials.into_iter().enumerate() {
-            total[(index / pieces) % channels] += partial;
-        }
-        return total;
-    }
-    banded(layout, &|sums, at| {
-        for (c, sum) in sums.iter_mut().enumerate() {
-            let at = at + c * spatial;
-            *sum += lane_sum2(&a[at..at + spatial], &b[at..at + spatial], |x, y| {
-                term(c, x, y)
-            });
-        }
-    })
-}
-
-/// Per channel, the sum `add(sums, at)` builds up when called with each
-/// image's offset `at`, a band of images to a task and the bands folded in
-/// order -- so the answer does not depend on the thread count.
-///
-/// The row form of [`channel_sums`], for `S == 1`: a `[N, C]` input has one
-/// value per channel per image, so there is nothing to vectorize along a
-/// channel, and `add` adds a whole row of `C` into the accumulators instead,
-/// zipped against whatever per-channel values its term needs.
-fn banded<F: Fn(&mut [f64], usize) + Sync>(layout: Layout, add: &F) -> Vec<f64> {
-    let image = layout.channels * layout.spatial;
-    let band = TASK_ELEMENTS.div_ceil(image.max(1)).max(1);
-    let partials = par_map_indexed(layout.images.div_ceil(band), &|index| {
-        let mut sums = vec![0.0f64; layout.channels];
-        for n in index * band..((index + 1) * band).min(layout.images) {
-            add(&mut sums, n * image);
-        }
-        sums
-    });
-    let mut total = vec![0.0f64; layout.channels];
-    for partial in partials {
-        for (t, p) in total.iter_mut().zip(partial) {
-            *t += p;
-        }
-    }
-    total
-}
 
 /// Write `row(out_row, at)` for every image's row of `C` values of `out`, the
 /// row starting at element `at`: the `S == 1` form of [`per_segment`].
@@ -357,69 +269,17 @@ fn typed<T: NormFloat + Element + Output>(
     let device = input.device();
     let count = layout.per_channel();
 
+    // What the running buffers held, where a training step moves them.
+    let old = match (running_mean.as_deref(), running_var.as_deref()) {
+        (Some(rm), Some(rv)) if use_batch_stats && training => Some((
+            values::<T>(rm, "running_mean")?,
+            values::<T>(rv, "running_var")?,
+        )),
+        _ => None,
+    };
     let stats = if use_batch_stats {
-        // The batch's mean and variance, in float64, for the running ones
-        // alone: each output and gradient finds them again from the input.
-        if training && let (Some(rm), Some(rv)) = (running_mean, running_var) {
-            let recip = 1.0 / count as f64;
-            // Two passes rather than `E[x^2] - E[x]^2`, which loses every digit
-            // when the mean dominates the spread.
-            let c = layout.channels;
-            let sums = if layout.spatial == 1 {
-                banded(layout, &|acc, at| {
-                    for (a, &v) in acc.iter_mut().zip(&x[at..at + c]) {
-                        *a += v.to_f64();
-                    }
-                })
-            } else {
-                channel_sums(layout, x, x, &|_, v, _| v.to_f64())
-            };
-            let mean: Vec<f64> = sums.into_iter().map(|s| s * recip).collect();
-            let squares = if layout.spatial == 1 {
-                banded(layout, &|acc, at| {
-                    for ((a, &v), &m) in acc.iter_mut().zip(&x[at..at + c]).zip(&mean) {
-                        let d = v.to_f64() - m;
-                        *a += d * d;
-                    }
-                })
-            } else {
-                channel_sums(layout, x, x, &|c, v, _| {
-                    let d = v.to_f64() - mean[c];
-                    d * d
-                })
-            };
-            let var: Vec<f64> = squares.into_iter().map(|s| s * recip).collect();
-            // The running variance is the unbiased one, `n / (n - 1)` times the
-            // biased estimate the normalization itself uses; with one value
-            // per channel there is no unbiased variance and it is left as is.
-            let correction = if count > 1 {
-                count as f64 / (count as f64 - 1.0)
-            } else {
-                1.0
-            };
-            let old_mean = values::<T>(rm, "running_mean")?;
-            let old_var = values::<T>(rv, "running_var")?;
-            let blend = |old: &[f64], new: &[f64], scale: f64| -> Vec<T> {
-                old.iter()
-                    .zip(new)
-                    .map(|(&o, &n)| T::from_f64(o * (1.0 - momentum) + n * scale * momentum))
-                    .collect()
-            };
-            *rm = Tensor::new(
-                Arc::new(T::into_data(blend(&old_mean, &mean, 1.0), rm.device())),
-                rm.shape().clone(),
-                <T as NormFloat>::DTYPE,
-                rm.device(),
-                false,
-            );
-            *rv = Tensor::new(
-                Arc::new(T::into_data(blend(&old_var, &var, correction), rv.device())),
-                rv.shape().clone(),
-                <T as NormFloat>::DTYPE,
-                rv.device(),
-                false,
-            );
-        }
+        // The batch's own, which each output and gradient finds again from
+        // the input.
         Stats {
             mean: Vec::new(),
             var: Vec::new(),
@@ -427,7 +287,7 @@ fn typed<T: NormFloat + Element + Output>(
             eps,
         }
     } else {
-        let (Some(rm), Some(rv)) = (running_mean, running_var) else {
+        let (Some(rm), Some(rv)) = (running_mean.as_deref(), running_var.as_deref()) else {
             return Err(MinitensorError::internal_error(
                 "batch_norm: evaluation without running statistics",
             ));
@@ -452,8 +312,11 @@ fn typed<T: NormFloat + Element + Output>(
     if stats.from_batch {
         // Each output the value nearest its exact one: each channel's values
         // gathered, standardized over themselves with its weight and bias,
-        // and set back.
-        let channel = |c: usize| -> Vec<T> {
+        // and set back. A training step moves the running buffers from the
+        // same values, each to the value nearest `(1 - m) old + m new`: from
+        // the batch's mean and variance summed in float64 and blended in
+        // three roundings, a float64 buffer was up to 2 ulps out.
+        let channel = |c: usize| -> (Vec<T>, Option<(T, T)>) {
             let mut values = Vec::with_capacity(count);
             for image in 0..layout.images {
                 let at = (image * layout.channels + c) * layout.spatial;
@@ -463,14 +326,34 @@ fn typed<T: NormFloat + Element + Output>(
             crate::ops::arithmetic::exact_sum::standardized_slice(
                 &values, eps, gain[c], shift[c], &mut exact,
             );
-            exact
+            let moved = old.as_ref().map(|(mean, var)| {
+                crate::ops::arithmetic::exact_sum::running_update::<T>(
+                    &values,
+                    (mean[c], var[c]),
+                    momentum,
+                )
+            });
+            (exact, moved)
         };
         let exact = crate::ops::map::par_map_indexed(layout.channels, &channel);
-        for (c, values) in exact.iter().enumerate() {
+        for (c, (values, _)) in exact.iter().enumerate() {
             for image in 0..layout.images {
                 let at = (image * layout.channels + c) * layout.spatial;
                 let from = &values[image * layout.spatial..][..layout.spatial];
                 out[at..at + layout.spatial].copy_from_slice(from);
+            }
+        }
+        if let (Some(rm), Some(rv), true) = (running_mean, running_var, old.is_some()) {
+            let (means, vars): (Vec<T>, Vec<T>) =
+                exact.iter().filter_map(|(_, moved)| *moved).unzip();
+            for (buffer, moved) in [(rm, means), (rv, vars)] {
+                *buffer = Tensor::new(
+                    Arc::new(T::into_data(moved, buffer.device())),
+                    buffer.shape().clone(),
+                    <T as NormFloat>::DTYPE,
+                    buffer.device(),
+                    false,
+                );
             }
         }
     } else {
