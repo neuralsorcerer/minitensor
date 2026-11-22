@@ -36,9 +36,10 @@
 //! `N = (n h - G) D - (n H - S G)(n x - S)`, and, not centred, the root of
 //! `n N^2 / D^3` with `N = h D - x H`.
 //!
-//! The weight's gradient sums `g y` down each column. A sum of roots has no
-//! whole number to round from, so it is the sum of the pairs `g y`, rounded
-//! once.
+//! The weight's gradient sums `g y` over the values each weight multiplies:
+//! down a column, or over a channel's positions in every group. A sum of
+//! roots has no whole number to round from, so it is the sum of the pairs
+//! `g y`, rounded once.
 
 use super::super::{Carried, Element, Output, Total, two_sum};
 use super::{Exactly, Standard, Whole, comfortable, deviation, generous, split};
@@ -79,10 +80,13 @@ enum Outcome {
 }
 
 /// Where a row's weight terms `g y` go: each to its column's pair, all of
-/// them to one pair, or nowhere.
+/// them to one pair, each in place -- its head and tail side by side, for
+/// the caller to sum -- or nowhere. Every pass that takes a row writes each
+/// of its terms once.
 enum Columns<'a> {
     Each(&'a mut [(f64, f64)]),
     Total(&'a mut (f64, f64)),
+    Row(&'a mut [f64]),
     Unwanted,
 }
 
@@ -98,6 +102,11 @@ impl Columns<'_> {
         let slot = match self {
             Columns::Each(columns) => &mut columns[k],
             Columns::Total(total) => &mut **total,
+            Columns::Row(row) => {
+                row[2 * k] = head;
+                row[2 * k + 1] = tail;
+                return;
+            }
             Columns::Unwanted => return,
         };
         let (sum, carry) = two_sum(slot.0, head);
@@ -723,21 +732,29 @@ pub(crate) fn round_pair<T: Output>((value, rest): (f64, f64)) -> T {
 /// The gradients of each `norm`-wide row of `input` standardized -- less
 /// its mean where `centred` -- under the upstream gradient `grad` and the
 /// weight: the input's into `input_grad` where given, each the value nearest
-/// its exact one, and, returned where `want_weight`, the weight's, `g y`
-/// summed down each column, the sum of pairs rounded once.
+/// its exact one, and, returned where `want_weight`, the weight's, as
+/// two-sums' pairs. The weight is `period` rows of a value for each run of
+/// `run` columns -- which divides `norm` -- row `r` taking row `r % period`,
+/// and each of its gradients sums the terms `g y` of every value it weighs.
 pub(crate) fn standardized_slopes<I: Element, T: Output>(
     input: &[I],
     grad: &[I],
     weight: Option<&[I]>,
-    (norm, eps, centred): (usize, f64, bool),
+    (norm, period, run): (usize, usize, usize),
+    (eps, centred): (f64, bool),
     input_grad: Option<&mut [T]>,
     want_weight: bool,
-) -> Vec<T> {
+) -> Vec<(f64, f64)> {
     if norm == 0 {
         return Vec::new();
     }
-    let rows = input.len() / norm;
-    let widened: Option<Vec<f64>> = weight.map(|w| w.iter().map(|&v| v.wide()).collect());
+    let (period, run) = (period.max(1), run.max(1));
+    let (rows, width) = (input.len() / norm, norm / run);
+    let widened: Option<Vec<f64>> = weight.map(|w| {
+        w.iter()
+            .flat_map(|&v| std::iter::repeat_n(v.wide(), run))
+            .collect()
+    });
     // Rows a task takes, from the shape alone, as the column sums' grouping
     // decides their rounding; and few enough tasks that their partial sums
     // stay small beside the gradient.
@@ -745,12 +762,10 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
         .max(rows.div_ceil(256))
         .max(1);
     let task = |first: usize, count: usize, mut out: Option<&mut [T]>| -> Vec<(f64, f64)> {
-        let mut sums = vec![(0.0f64, 0.0f64); if want_weight { norm } else { 0 }];
-        let mut columns = if want_weight {
-            Columns::Each(&mut sums)
-        } else {
-            Columns::Unwanted
-        };
+        let mut sums = vec![(0.0f64, 0.0f64); if want_weight { period * width } else { 0 }];
+        // A row's terms in place, where a run is wider than one, each run
+        // summed into its pair once the row is done.
+        let mut terms = vec![0.0f64; if want_weight && run > 1 { 2 * norm } else { 0 }];
         let mut scratch = vec![0.0f64; 4 * norm];
         let (x, scratch_rest) = scratch.split_at_mut(norm);
         let (g, work) = scratch_rest.split_at_mut(norm);
@@ -767,43 +782,68 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
                 *x = input.wide();
                 *g = grad.wide();
             }
+            let slot = row % period;
             let set = Set {
                 x: &*x,
                 g: &*g,
-                weight: widened.as_deref(),
+                weight: widened.as_deref().map(|w| &w[slot * norm..][..norm]),
                 gain: 1.0,
                 eps,
                 centred,
             };
-            if T::PLAIN {
-                let cells = out
-                    .as_deref_mut()
-                    .map(|out| &mut out[(row - first) * norm..][..norm]);
-                if plain_settled(&set, work, cells, &mut columns) {
-                    continue;
+            let mut columns = match (want_weight, run) {
+                (false, _) => Columns::Unwanted,
+                (true, 1) => Columns::Each(&mut sums[slot * norm..][..norm]),
+                (true, _) => Columns::Row(&mut terms),
+            };
+            'row: {
+                if T::PLAIN {
+                    let cells = out
+                        .as_deref_mut()
+                        .map(|out| &mut out[(row - first) * norm..][..norm]);
+                    if plain_settled(&set, work, cells, &mut columns) {
+                        break 'row;
+                    }
+                }
+                let head = &mut work[..norm];
+                if pairs.is_empty() {
+                    pairs = vec![0.0f64; 4 * norm];
+                }
+                let (tail, pairs_rest) = pairs.split_at_mut(norm);
+                let (value, pairs_rest) = pairs_rest.split_at_mut(norm);
+                let (rest, bound) = pairs_rest.split_at_mut(norm);
+                let mut parts = Parts {
+                    head: &mut *head,
+                    tail,
+                    value,
+                    rest,
+                    bound,
+                };
+                let outcome = row_slopes_fused(&set, out.is_some(), &mut parts, &mut columns);
+                if outcome == Outcome::Exact {
+                    exact_columns(&set, &mut columns);
+                }
+                if let Some(out) = out.as_deref_mut() {
+                    let cells = &mut out[(row - first) * norm..][..norm];
+                    round_row(&set, &parts, outcome, cells, &mut open);
                 }
             }
-            let head = &mut work[..norm];
-            if pairs.is_empty() {
-                pairs = vec![0.0f64; 4 * norm];
-            }
-            let (tail, pairs_rest) = pairs.split_at_mut(norm);
-            let (value, pairs_rest) = pairs_rest.split_at_mut(norm);
-            let (rest, bound) = pairs_rest.split_at_mut(norm);
-            let mut parts = Parts {
-                head: &mut *head,
-                tail,
-                value,
-                rest,
-                bound,
-            };
-            let outcome = row_slopes_fused(&set, out.is_some(), &mut parts, &mut columns);
-            if outcome == Outcome::Exact {
-                exact_columns(&set, &mut columns);
-            }
-            if let Some(out) = out.as_deref_mut() {
-                let cells = &mut out[(row - first) * norm..][..norm];
-                round_row(&set, &parts, outcome, cells, &mut open);
+            if !terms.is_empty() {
+                let runs = &mut sums[slot * width..][..width];
+                for (sum, terms) in runs.iter_mut().zip(terms.chunks(2 * run)) {
+                    if run < 32 {
+                        // Term by term: a carried pass over a run this short
+                        // costs more to start and merge than it saves.
+                        for &[head, tail] in terms.as_chunks::<2>().0 {
+                            let (lead, carry) = two_sum(sum.0, head);
+                            *sum = (lead, sum.1 + (carry + tail));
+                        }
+                        continue;
+                    }
+                    let carried = <f64 as Element>::block(terms);
+                    let (lead, carry) = two_sum(sum.0, carried.sum);
+                    *sum = (lead, sum.1 + (carry + carried.error));
+                }
             }
         }
         sums
@@ -824,7 +864,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
     if !want_weight {
         return Vec::new();
     }
-    let mut total = vec![(0.0f64, 0.0f64); norm];
+    let mut total = vec![(0.0f64, 0.0f64); period * width];
     for part in partials {
         for (sum, (head, tail)) in total.iter_mut().zip(part) {
             let (lead, carry) = two_sum(sum.0, head);
@@ -833,7 +873,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
     }
     total
         .into_iter()
-        .map(|(head, tail)| round_pair::<T>(two_sum(head, tail)))
+        .map(|(head, tail)| two_sum(head, tail))
         .collect()
 }
 
@@ -930,7 +970,8 @@ mod tests {
             &x,
             &g,
             Some(&weight),
-            (5, 1e-5, true),
+            (5, 1, 1),
+            (1e-5, true),
             Some(&mut out),
             true,
         );

@@ -42,7 +42,10 @@ pub struct LayerNormBackward {
 /// `weight` -- under `grad`, whichever `wanted` asks for: each input gradient
 /// the value nearest its exact one, from statistics carried as pairs of
 /// float64s and in whole numbers where those cannot settle it, and each of
-/// the weight's the sum down its column of `g y`, `y` a pair, rounded once.
+/// the weight's the sum of `g y` over the values it weighs, `y` a pair,
+/// rounded once. The weight is `period` rows of a value for each run of
+/// `run` columns, row `r` taking row `r % period`: a row's own columns for
+/// `layer_norm`, and a channel's positions in each group for `group_norm`.
 ///
 /// They were formed in the dtype from the standardized values and inverse
 /// root the forward saved, each rounded, as `r (gh - mean(gh) - y mean(gh
@@ -54,10 +57,11 @@ pub(crate) fn standardized_gradients(
     input: &Tensor,
     grad: &Tensor,
     weight: Option<&Tensor>,
-    (norm, eps, centred): (usize, f64, bool),
+    layout: (usize, usize, usize),
+    (eps, centred): (f64, bool),
     wanted: [bool; 2],
 ) -> Result<[Option<Tensor>; 2]> {
-    use crate::ops::arithmetic::exact_sum::standardized_slopes;
+    use crate::ops::arithmetic::exact_sum::{round_pair, standardized_slopes};
     let grad = grad.contiguous()?;
     let weight = weight.map(|w| w.contiguous()).transpose()?;
     let device = input.device();
@@ -73,14 +77,20 @@ pub(crate) fn standardized_gradients(
                 None => None,
             };
             let mut input_grad = vec![0 as $ty; if wanted[0] { x.len() } else { 0 }];
-            let weight_grad = standardized_slopes::<$ty, $ty>(
+            let mut weight_grad: Vec<$ty> = standardized_slopes::<$ty, $ty>(
                 x,
                 g,
                 w,
-                (norm, eps, centred),
+                layout,
+                (eps, centred),
                 wanted[0].then_some(input_grad.as_mut_slice()),
                 wanted[1],
-            );
+            )
+            .into_iter()
+            .map(round_pair::<$ty>)
+            .collect();
+            // A weight over no values has a gradient of nothing.
+            weight_grad.resize(w.map_or(0, |w| w.len()), 0 as $ty);
             let tensor = |values: Vec<$ty>, shape: Shape| {
                 let data = TensorData::from_vec::<$ty>(values, DataType::$variant, device);
                 Tensor::new(Arc::new(data), shape, DataType::$variant, device, false)
@@ -117,7 +127,8 @@ impl GradientFunction for LayerNormBackward {
                 &self.input,
                 &grad_output,
                 self.weight.as_ref(),
-                (self.element_count, self.eps, true),
+                (self.element_count, 1, 1),
+                (self.eps, true),
                 [self.input_requires_grad, want_weight],
             )?;
             if let Some(grad) = input_grad {
@@ -926,6 +937,66 @@ where
     }
 }
 
+/// Gradient function for group normalization: the input's and the weight's
+/// from the saved input, each group's statistics taken again; see
+/// [`standardized_gradients`]. The bias's is each channel's `Σ g`.
+pub struct GroupNormBackward {
+    pub input_ids: SmallVec<[TensorId; 3]>,
+    pub input_id: TensorId,
+    pub weight_id: Option<TensorId>,
+    pub bias_id: Option<TensorId>,
+    /// The input, contiguous.
+    pub input: Tensor,
+    /// The weight as given, a value a channel.
+    pub weight: Option<Tensor>,
+    pub bias_shape: Option<Shape>,
+    /// Each group's values, the number of groups and each channel's
+    /// positions.
+    pub layout: (usize, usize, usize),
+    pub eps: f64,
+    pub input_requires_grad: bool,
+    pub weight_requires_grad: bool,
+    pub bias_requires_grad: bool,
+}
+
+impl GradientFunction for GroupNormBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let grad_output = grad_output.detach();
+        let want_weight = self.weight_requires_grad && self.weight_id.is_some();
+        if self.input_requires_grad || want_weight {
+            let [input_grad, weight_grad] = standardized_gradients(
+                &self.input,
+                &grad_output,
+                self.weight.as_ref(),
+                self.layout,
+                (self.eps, true),
+                [self.input_requires_grad, want_weight],
+            )?;
+            if let Some(grad) = input_grad {
+                accumulate_grad(&mut gradients, self.input_id, grad)?;
+            }
+            if let (Some(grad), Some(weight_id)) = (weight_grad, self.weight_id) {
+                accumulate_grad(&mut gradients, weight_id, grad)?;
+            }
+        }
+        if let (true, Some(bias_id), Some(shape)) =
+            (self.bias_requires_grad, self.bias_id, &self.bias_shape)
+        {
+            let (channels, spatial) = (shape.numel(), self.layout.2);
+            let images = grad_output.numel() / (channels * spatial).max(1);
+            let grad = grad_output.view(Shape::new(vec![images, channels, spatial]))?;
+            let sums = reduction::sum(&grad, Some(vec![0, 2]), false)?;
+            accumulate_grad(&mut gradients, bias_id, sums.view(shape.clone())?)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient of RMSNorm, `y = x r w` with `r = 1 / sqrt(mean(x^2) + eps)`:
 /// the input's and the weight's from the saved input, each row's mean square
 /// taken again; see [`standardized_gradients`], which takes it not centred.
@@ -950,7 +1021,8 @@ impl GradientFunction for RmsNormBackward {
             &self.input,
             &grad_output.detach(),
             self.weight.as_ref(),
-            (self.element_count, self.eps, false),
+            (self.element_count, 1, 1),
+            (self.eps, false),
             [self.input_requires_grad, want_weight],
         )?;
         if let Some(grad) = input_grad {

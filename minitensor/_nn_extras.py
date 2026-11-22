@@ -1207,29 +1207,51 @@ def _check_norm_args(op: str, eps: float, momentum: float | None = None) -> None
         raise ValueError(f"{op} requires momentum to lie in [0, 1], got {momentum}")
 
 
-def _normalized_groups(op: str, tensor: Tensor, groups: int, eps: float) -> Tensor:
-    """`tensor` with each group centred and scaled.
+def _normalized_groups(
+    op: str,
+    tensor: Tensor,
+    groups: int,
+    eps: float,
+    weight: object | None = None,
+    bias: object | None = None,
+) -> Tensor:
+    """`tensor` with each group centred and scaled, then each channel times
+    its weight plus its bias.
 
-    The groups are `(batch, groups, everything else)`, so one reshape puts every
-    element a group owns on a single axis. Which elements a group owns -- some
-    channels and all of their positions -- is the whole difference between
-    this, `layer_norm` and `batch_norm`, and normalizing that axis is
-    `layer_norm`'s own kernel: the statistics and the scaling in one pass over
-    each row, and a backward of its own. Composed from `mean`, `var`, a
-    subtraction and a division it was five passes over the data, 489us for a
-    (16, 32, 16, 16) float32 input.
+    The groups are `(batch, groups, everything else)`: which elements a group
+    owns -- some channels and all of their positions -- is the whole
+    difference between this, `layer_norm` and `batch_norm`. The engine's
+    `_group_norm` standardizes each and applies the weight and bias inside
+    the one rounding of each output. Standardized first and then scaled, the
+    rounding of the standardized value was all that was left wherever the
+    bias all but cancels the product. A weight or bias of another dtype meets
+    the standardized values as arithmetic meets them.
     """
 
     sizes = [int(size) for size in tensor.shape]
-    batch, channels = sizes[0], sizes[1]
+    channels = sizes[1]
     if channels % groups:
         raise ValueError(
             f"{op} needs the channel count ({channels}) to divide by the number "
             f"of groups ({groups})"
         )
-    per_group = (channels // groups) * _math.prod(sizes[2:])
-    grouped = _require_float(tensor, op).reshape(batch, groups, per_group)
-    return _F.layer_norm(grouped, [per_group], None, None, float(eps)).reshape(sizes)
+    tensor = _require_float(tensor, op)
+    parameters = []
+    for name, value in (("weight", weight), ("bias", bias)):
+        if value is None:
+            parameters.append(None)
+            continue
+        parameter = _atleast_tensor(value).reshape(-1)
+        if int(parameter.shape[0]) != channels:
+            raise ValueError(
+                f"{op} expects one {name} per channel ({channels}), got "
+                f"{int(parameter.shape[0])}"
+            )
+        parameters.append(parameter)
+    if all(p is None or p.dtype == tensor.dtype for p in parameters):
+        return _F._group_norm(tensor, groups, parameters[0], parameters[1], float(eps))
+    normalized = _F._group_norm(tensor, groups, None, None, float(eps))
+    return _affine(normalized, weight, bias, op)
 
 
 def group_norm(
@@ -1261,8 +1283,7 @@ def group_norm(
     groups = _operator.index(num_groups)
     if groups < 1:
         raise ValueError(f"group_norm requires at least one group, got {num_groups}")
-    normalized = _normalized_groups("group_norm", tensor, groups, eps)
-    return _affine(normalized, weight, bias, "group_norm")
+    return _normalized_groups("group_norm", tensor, groups, eps, weight, bias)
 
 
 def instance_norm(
@@ -1320,7 +1341,9 @@ def instance_norm(
             "instance_norm needs more than one position per channel to update "
             f"running_var, and this input of shape {tuple(sizes)} has one"
         )
-    normalized = _normalized_groups("instance_norm", tensor, channels, eps)
+    normalized = _normalized_groups(
+        "instance_norm", tensor, channels, eps, weight, bias
+    )
     # An empty batch says nothing about the distribution, and its statistics
     # are the NaN of an average over nothing, so the buffers keep what they had.
     if (running_mean is not None or running_var is not None) and tensor.numel():
@@ -1330,7 +1353,7 @@ def instance_norm(
             running_var,
             float(momentum),
         )
-    return _affine(normalized, weight, bias, "instance_norm")
+    return normalized
 
 
 def _update_running(

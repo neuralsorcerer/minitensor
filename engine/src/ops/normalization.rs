@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
-use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
+use crate::autograd::{GroupNormBackward, LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
@@ -273,14 +273,15 @@ pub fn batch_norm(
 
 /// Each `norm`-wide row of `input` standardized -- less its mean where
 /// `centred` -- and times `weight` plus `bias` where given, each the value
-/// nearest its exact one, as a tensor's data.
+/// nearest its exact one, as a tensor's data. Each parameter is `period`
+/// rows of a value for each run of `spread` columns, row `r` taking row
+/// `r % period`.
 fn standardized_data<T>(
     input: &Tensor,
-    norm: usize,
+    layout: (usize, usize, usize),
     weight: Option<&Tensor>,
     bias: Option<&Tensor>,
-    eps: f64,
-    centred: bool,
+    (eps, centred): (f64, bool),
 ) -> Result<TensorData>
 where
     T: crate::ops::arithmetic::exact_sum::Element
@@ -292,12 +293,11 @@ where
             MinitensorError::internal_error("normalization: an operand of the wrong dtype")
         })
     }
-    let src = slice(input)?;
     let (w, b) = (weight.map(slice).transpose()?, bias.map(slice).transpose()?);
     let mut out = vec![T::narrow(0.0); input.numel()];
     crate::ops::arithmetic::exact_sum::standardized_rows::<T, T>(
-        src,
-        (norm, 1),
+        slice(input)?,
+        layout,
         w,
         b,
         (eps, centred),
@@ -402,8 +402,10 @@ pub fn layer_norm(
 
     // Each output the value nearest its exact one; see `standardized_rows`.
     let output_data = match input.dtype() {
-        DataType::Float32 => standardized_data::<f32>(input, norm, weight, bias, eps, true)?,
-        _ => standardized_data::<f64>(input, norm, weight, bias, eps, true)?,
+        DataType::Float32 => {
+            standardized_data::<f32>(input, (norm, 1, 1), weight, bias, (eps, true))?
+        }
+        _ => standardized_data::<f64>(input, (norm, 1, 1), weight, bias, (eps, true))?,
     };
 
     let output = Tensor::new(
@@ -442,6 +444,106 @@ pub fn layer_norm(
         bias_requires_grad: bias.map(|b| b.requires_grad()).unwrap_or(false),
     });
 
+    with_grad_fn(output, grad_fn)
+}
+
+/// Group normalization of a `[N, C, ...]` input: each sample's channels in
+/// `groups` runs of `C / groups`, each run -- its channels at every position
+/// -- standardized over itself, and then each value times its channel's
+/// weight plus its bias. Each output is the value nearest its exact one; see
+/// `standardized_rows`. `instance_norm` is this with a group per channel.
+///
+/// It was `layer_norm` over each run and then the weight and bias as tensor
+/// operations, the standardized value rounded before they were applied:
+/// where the bias all but cancels the product, that rounding was what was
+/// left, 1.2e9 ulps out in float32 and 3.7e17 in float64, and ordinary
+/// outputs were up to 11 ulps out.
+pub fn group_norm(
+    input: &Tensor,
+    groups: usize,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    eps: f64,
+) -> Result<Tensor> {
+    check_eps("group_norm", eps)?;
+    if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
+        return Err(MinitensorError::invalid_operation(
+            "group_norm only supports floating point tensors".to_string(),
+        ));
+    }
+    let dims = input.shape().dims();
+    if dims.len() < 2 {
+        return Err(MinitensorError::invalid_argument(format!(
+            "group_norm expects a batch and a channel axis, got {} dimensions",
+            dims.len()
+        )));
+    }
+    let channels = dims[1];
+    if groups == 0 || !channels.is_multiple_of(groups) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "group_norm needs the channel count ({channels}) to divide by the number of \
+             groups ({groups})"
+        )));
+    }
+    for parameter in [weight, bias].into_iter().flatten() {
+        if parameter.dtype() != input.dtype() {
+            return Err(MinitensorError::type_mismatch(
+                input.dtype().to_string(),
+                parameter.dtype().to_string(),
+            ));
+        }
+        if parameter.device() != input.device() {
+            return Err(MinitensorError::device_mismatch(
+                input.device().to_string(),
+                parameter.device().to_string(),
+            ));
+        }
+        if parameter.numel() != channels {
+            return Err(MinitensorError::shape_mismatch(
+                vec![channels],
+                parameter.shape().dims().to_vec(),
+            ));
+        }
+    }
+    let spatial: usize = dims[2..].iter().product();
+    let layout = ((channels / groups) * spatial, groups, spatial);
+    let data = match input.dtype() {
+        DataType::Float32 => standardized_data::<f32>(input, layout, weight, bias, (eps, true))?,
+        _ => standardized_data::<f64>(input, layout, weight, bias, (eps, true))?,
+    };
+    let requires_grad = crate::autograd::is_grad_enabled()
+        && (input.requires_grad()
+            || weight.is_some_and(|w| w.requires_grad())
+            || bias.is_some_and(|b| b.requires_grad()));
+    let output = Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+    if !requires_grad {
+        return Ok(output);
+    }
+    let input_ids: SmallVec<[TensorId; 3]> = [Some(input), weight, bias]
+        .into_iter()
+        .flatten()
+        .map(|t| t.id())
+        .collect();
+    let grad_fn = Arc::new(GroupNormBackward {
+        input_ids,
+        input_id: input.id(),
+        weight_id: weight.map(|w| w.id()),
+        bias_id: bias.map(|b| b.id()),
+        input: input.detach(),
+        weight: weight.map(|w| w.detach()),
+        bias_shape: bias.map(|b| b.shape().clone()),
+        layout,
+        eps,
+        input_requires_grad: input.requires_grad(),
+        weight_requires_grad: weight.is_some_and(|w| w.requires_grad()),
+        bias_requires_grad: bias.is_some_and(|b| b.requires_grad()),
+    });
     with_grad_fn(output, grad_fn)
 }
 
@@ -522,8 +624,10 @@ pub fn rms_norm(
     let norm: usize = normalized_shape.iter().product();
 
     let output_data = match input.dtype() {
-        DataType::Float32 => standardized_data::<f32>(input, norm, weight, None, eps, false)?,
-        _ => standardized_data::<f64>(input, norm, weight, None, eps, false)?,
+        DataType::Float32 => {
+            standardized_data::<f32>(input, (norm, 1, 1), weight, None, (eps, false))?
+        }
+        _ => standardized_data::<f64>(input, (norm, 1, 1), weight, None, (eps, false))?,
     };
 
     let requires_grad = input.requires_grad() || weight.map(|w| w.requires_grad()).unwrap_or(false);

@@ -870,6 +870,33 @@ pub fn normalized_rounded(
         .map_err(_convert_error)
 }
 
+/// Group normalization: each sample's channels in `groups` runs, each run
+/// standardized over itself, then each value times its channel's weight
+/// plus its bias, each output the value nearest its exact one. `weight` and
+/// `bias` hold one value a channel and share the input's dtype.
+#[pyfunction]
+#[pyo3(name = "_group_norm", signature = (input, groups, weight=None, bias=None, eps=1e-5))]
+pub fn group_norm_rounded(
+    input: &Bound<PyAny>,
+    groups: usize,
+    weight: Option<&Bound<PyAny>>,
+    bias: Option<&Bound<PyAny>>,
+    eps: f64,
+) -> PyResult<PyTensor> {
+    let input = borrow_tensor(input)?;
+    let weight = borrow_optional_tensor(weight)?;
+    let bias = borrow_optional_tensor(bias)?;
+    engine::ops::normalization::group_norm(
+        input.tensor(),
+        groups,
+        weight.as_deref().map(|w| w.tensor()),
+        bias.as_deref().map(|b| b.tensor()),
+        eps,
+    )
+    .map(PyTensor::from_tensor)
+    .map_err(_convert_error)
+}
+
 /// The gradient of `_normalized`'s quotients in their input at `grad`, each
 /// slice along `dim` taken by its flag in `over` as the forward returned it:
 /// `scale` times `g` less its part along the slice's direction, over its
@@ -2562,6 +2589,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(cross_distances_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_backward_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(group_norm_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(covariance_rounded, parent)?)?;

@@ -601,15 +601,15 @@ impl Exactly {
 }
 
 /// Each `norm`-wide row of `input` standardized into `out` -- less its mean
-/// where `centred`, then times the weight plus the bias where given, `period`
-/// rows of each and row `r` taking row `r % period` of them -- each the value
-/// of `T` nearest its exact value. A row holding a value that is not finite
-/// takes the formula in float64, which carries it as it comes. An `eps`
-/// that is negative or not finite, which the layers refuse, leaves `out` as
-/// it is.
+/// where `centred`, then times the weight plus the bias where given -- each
+/// the value of `T` nearest its exact value. Each parameter is `period` rows
+/// of a value for each run of `spread` columns, which divides `norm`, row `r`
+/// taking row `r % period`. A row holding a value that is not finite takes
+/// the formula in float64, which carries it as it comes. An `eps` that is
+/// negative or not finite, which the layers refuse, leaves `out` as it is.
 pub(crate) fn standardized_rows<I: Element, T: Output>(
     input: &[I],
-    (norm, period): (usize, usize),
+    (norm, period, spread): (usize, usize, usize),
     weight: Option<&[I]>,
     bias: Option<&[I]>,
     (eps, centred): (f64, bool),
@@ -619,7 +619,12 @@ pub(crate) fn standardized_rows<I: Element, T: Output>(
         return;
     }
     let widen = |values: Option<&[I]>| -> Option<Vec<f64>> {
-        values.map(|values| values.iter().map(|&value| value.wide()).collect())
+        values.map(|values| {
+            values
+                .iter()
+                .flat_map(|&value| std::iter::repeat_n(value.wide(), spread.max(1)))
+                .collect()
+        })
     };
     let (weight, bias) = (widen(weight), widen(bias));
     let shape = Row {
@@ -1044,7 +1049,7 @@ mod tests {
         let mut out = vec![f64::NAN; n];
         standardized_rows::<f64, f64>(
             row,
-            (n, 1),
+            (n, 1, 1),
             weights.as_deref(),
             biases.as_deref(),
             (eps, centred),

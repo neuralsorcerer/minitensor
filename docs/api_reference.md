@@ -3369,29 +3369,31 @@ normalization: rescales by the RMS over the trailing `normalized_shape`
 dimensions and applies an optional gain. Unlike `layer_norm` there is no mean
 subtraction and no bias.
 
-Each output of `layer_norm`, `rms_norm` and `batch_norm` with batch
-statistics -- the standardized value, times the weight and plus the bias where
-given -- is in either dtype the float nearest its exact value, rounded once,
-however nearly the bias cancels the product; so is each standardized value of
-`group_norm` and `instance_norm`, whose weight and bias add one rounding after
-it. A float32 output is taken in float64 with a bound on its roundings, and
-where the bound leaves it near a halfway point, as the float64 ones are. A zero output is signed as the formula signs it: a
-zero input keeps its sign, as `x - 0` and `x * r` do, a value equal to a mean
-that is not zero gives a positive zero, and `w * y + b` signs a zero product as
-float arithmetic does. A missing weight or bias changes nothing, not even the
-sign of a zero.
+Each output of `layer_norm`, `rms_norm`, `group_norm`, `instance_norm` and
+`batch_norm` with batch statistics -- the standardized value, times the weight
+and plus the bias where given -- is in either dtype the float nearest its exact
+value, rounded once, however nearly the bias cancels the product. A weight or
+bias of another dtype than the input's meets `group_norm`'s and
+`instance_norm`'s standardized values, rounded, as arithmetic meets them. A
+float32 output is taken in float64 with a bound on its roundings, and where the
+bound leaves it near a halfway point, as the float64 ones are. A zero output is
+signed as the formula signs it: a zero input keeps its sign, as `x - 0` and
+`x * r` do, a value equal to a mean that is not zero gives a positive zero, and
+`w * y + b` signs a zero product as float arithmetic does. A missing weight or
+bias changes nothing, not even the sign of a zero.
 
-The input's gradient of `layer_norm` and `rms_norm`, and of `batch_norm` with
-batch statistics, is in either dtype the float nearest its exact value: with
-`y = d r` -- `d` the deviation from the mean, or the value itself for
-`rms_norm`, and `r` the inverse root -- and the upstream gradient times the
-weight `h`, it is `r (u - r^2 C d)`, `u = h - mean(h)` (`h` for `rms_norm`) and
-`C = mean(u d)`, taken from the input with the statistics found again. An
-upstream gradient that is the same everywhere leaves a centred input exactly
-nothing, as the outputs sum to nothing whatever it is. The weight's gradient
-sums `g y` -- down each column for `layer_norm` and `rms_norm`, over each
-channel for `batch_norm` -- its terms in pairs of float64s, rounded once, and
-`batch_norm`'s bias gradient is each channel's `Σ g`, rounded once. The two
+The input's gradient of `layer_norm`, `rms_norm`, `group_norm` and
+`instance_norm`, and of `batch_norm` with batch statistics, is in either dtype
+the float nearest its exact value: with `y = d r` -- `d` the deviation from the
+mean, or the value itself for `rms_norm`, and `r` the inverse root -- and the
+upstream gradient times the weight `h`, it is `r (u - r^2 C d)`,
+`u = h - mean(h)` (`h` for `rms_norm`) and `C = mean(u d)`, taken from the input
+with the statistics found again. An upstream gradient that is the same
+everywhere leaves a centred input exactly nothing, as the outputs sum to nothing
+whatever it is. The weight's gradient sums `g y` -- down each column for
+`layer_norm` and `rms_norm`, over each channel for the others -- its terms in
+pairs of float64s, rounded once, and the bias gradient of `batch_norm`,
+`group_norm` and `instance_norm` is each channel's `Σ g`, rounded once. The two
 forms of the input's gradient agree only in exact arithmetic: formed from the
 rounded `y` and `r`, its two terms all but cancel where the upstream gradient
 lies near the span of one and `y`, and kept only their roundings there.
