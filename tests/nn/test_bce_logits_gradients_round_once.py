@@ -18,10 +18,11 @@ value.
 
 from __future__ import annotations
 
+import decimal
 import math
+from decimal import Decimal
 from fractions import Fraction
 
-import mpmath
 import numpy as np
 import pytest
 
@@ -49,26 +50,28 @@ def _nearest(value, dtype: str) -> float:
     return sign * (math.inf if rounded >= Fraction(2) ** top else float(rounded))
 
 
-def _fraction(value: mpmath.mpf) -> Fraction:
-    sign, man, exp, _ = value._mpf_
-    whole = Fraction(int(man)) * Fraction(2) ** int(exp)
-    return -whole if sign else whole
+def _log1p(u: Decimal) -> Decimal:
+    """`log(1 + u)`, its series below 1e-40, where `1 + u` would lose `u`."""
+
+    if u < Decimal("1e-40"):
+        return u - u * u / 2 + u * u * u / 3
+    return (1 + u).ln()
 
 
 def _slopes(x: float, t: float, w: float) -> tuple[Fraction, Fraction]:
-    """Both slopes of a term, to 2^-700 of themselves or exactly where they
-    are rational."""
+    """Both slopes of a term, to some 10^-290 of themselves, or exactly where
+    they are rational."""
 
-    with mpmath.workprec(1000):
-        X, T, W = mpmath.mpf(x), mpmath.mpf(t), mpmath.mpf(w)
-        u = mpmath.exp(-abs(X))
+    with decimal.localcontext(prec=300):
+        X, T, W = Decimal(x), Decimal(t), Decimal(w)
+        u = (-abs(X)).exp()
         if x >= 0:
             logit = ((1 - T) - W * T * u) / (1 + u)
         else:
             logit = ((1 - T) * u - W * T) / (1 + u)
         lead = 1 if x >= 0 else W
-        target = -lead * X + (W - 1) * mpmath.log1p(u)
-        logit, target = _fraction(logit), _fraction(target)
+        target = -lead * X + (W - 1) * _log1p(u)
+    logit, target = Fraction(logit), Fraction(target)
     a, b = 1 - Fraction(t), Fraction(w) * Fraction(t)
     if x == 0:
         logit = (a - b) / 2
@@ -77,6 +80,22 @@ def _slopes(x: float, t: float, w: float) -> tuple[Fraction, Fraction]:
     if w == 1:
         target = -Fraction(x)
     return logit, target
+
+
+def _target_zero(weight: float) -> float:
+    """Where `-z + (w - 1) softplus(-z)` is zero, by Newton's iteration: its
+    slope `-1 - (w - 1) s(-z)` stays below -1/2 for weights from 1/2 to 3."""
+
+    with decimal.localcontext(prec=60):
+        w, z = Decimal(weight), Decimal("0.5")
+        for _ in range(100):
+            u = (-z).exp()
+            value = -z + (w - 1) * (1 + u).ln()
+            step = value / (-1 - (w - 1) * u / (1 + u))
+            z -= step
+            if abs(step) < Decimal("1e-50"):
+                break
+        return float(z)
 
 
 def _check(x, t, w, dtype, reduction, g=None, which=(True, True)):
@@ -133,14 +152,8 @@ def test_near_the_slopes_zeros(dtype, spread):
     fit = np.log(w * t / (1 - t))
     x = (fit * (1 + rng.uniform(-spread, spread, 41))).astype(dtype)
     _check(x, t.astype(dtype), w.astype(dtype), dtype, "sum", which=(True, False))
-    roots = []
-    for weight in w:
-        with mpmath.workprec(200):
-            root = mpmath.findroot(
-                lambda z: -z + (weight - 1) * mpmath.log1p(mpmath.exp(-z)), 0.5
-            )
-        roots.append(float(root))
-    x = (np.array(roots) * (1 + rng.uniform(-spread, spread, 41))).astype(dtype)
+    roots = np.array([_target_zero(weight) for weight in w])
+    x = (roots * (1 + rng.uniform(-spread, spread, 41))).astype(dtype)
     _check(x, t.astype(dtype), w.astype(dtype), dtype, "sum", which=(False, True))
 
 
