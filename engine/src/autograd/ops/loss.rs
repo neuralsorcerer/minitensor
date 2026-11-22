@@ -391,8 +391,8 @@ impl GradientFunction for BCELossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
-        let scale = if self.reduction == "mean" {
-            1.0 / self.predictions.numel().max(1) as f64
+        let count = if self.reduction == "mean" {
+            self.predictions.numel().max(1) as f64
         } else {
             1.0
         };
@@ -400,7 +400,7 @@ impl GradientFunction for BCELossBackward {
             &self.predictions,
             &self.targets,
             grad_output,
-            scale,
+            count,
             self.input_requires_grad,
         )?;
         if let Some(grad) = by_target {
@@ -418,17 +418,17 @@ impl GradientFunction for BCELossBackward {
 }
 
 /// Binary cross entropy's gradients at `predictions` against `targets`, times
-/// the incoming gradient -- one value, or one an element -- and `scale`: the
-/// derivative of the forward as it takes the loss, each logarithm floored at
-/// -100, in float64 and rounded once.
+/// the incoming gradient -- one value, or one an element -- and over `count`:
+/// the derivative of the forward as it takes the loss, each logarithm floored
+/// at -100. See `arithmetic::exact_sum::bce_slopes`, which rounds each once.
 ///
 /// In the prediction it is `(p - t) / (p (1 - p))` where neither logarithm is
-/// floored, `p - t` exact, and where one is, the other term's alone: `-t / p`
-/// or `(1 - t) / (1 - p)`. Its denominator was clamped at `1e-12`, which is
-/// no derivative of the forward: a float32 prediction of `1e-15` against a
-/// target of 0 had a slope of `0.001` where it is 1, and against 1 one of
-/// `-1e12` where it is `-1e15` -- which through a sigmoid left a confidently
-/// wrong logit of -40 with `-4e-6` of the `-1` it moves the loss by.
+/// floored, and where one is, the other term's alone: `-t / p` or
+/// `(1 - t) / (1 - p)`. Its denominator was clamped at `1e-12`, which is no
+/// derivative of the forward: a float32 prediction of `1e-15` against a target
+/// of 0 had a slope of `0.001` where it is 1, and against 1 one of `-1e12`
+/// where it is `-1e15` -- which through a sigmoid left a confidently wrong
+/// logit of -40 with `-4e-6` of the `-1` it moves the loss by.
 ///
 /// In the target it is `log((1 - p) / p)`, each logarithm floored, and near a
 /// half `log1p((1 - 2p) / p)`, where the two logarithms all but cancel.
@@ -436,60 +436,47 @@ fn bce_gradients(
     predictions: &Tensor,
     targets: &Tensor,
     grad_output: &Tensor,
-    scale: f64,
+    count: f64,
     wanted: [bool; 2],
 ) -> Result<[Option<Tensor>; 2]> {
-    let wide = |tensor: &Tensor| tensor.astype(DataType::Float64)?.contiguous();
-    let (p, t, g) = (wide(predictions)?, wide(targets)?, wide(grad_output)?);
-    let missing = || MinitensorError::internal_error("binary_cross_entropy: a float64 operand");
-    let (p, t, g) = (
-        p.data().as_f64_slice().ok_or_else(missing)?.to_vec(),
-        t.data().as_f64_slice().ok_or_else(missing)?.to_vec(),
-        g.data().as_f64_slice().ok_or_else(missing)?.to_vec(),
-    );
-    let flowing = |k: usize| scale * g[if g.len() == 1 { 0 } else { k }];
-    let narrowed = |values: Vec<f64>| -> Result<Tensor> {
-        let data = TensorData::from_vec_f64(values, predictions.device());
-        Tensor::new(
-            Arc::new(data),
-            predictions.shape().clone(),
-            DataType::Float64,
-            predictions.device(),
-            false,
-        )
-        .astype(predictions.dtype())
-    };
+    use crate::ops::arithmetic::exact_sum::bce_slopes;
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let flows = grad_output.astype(DataType::Float64)?.contiguous()?;
+    let missing = || MinitensorError::internal_error("binary_cross_entropy: a float operand");
+    let flows = flows.data().as_f64_slice().ok_or_else(missing)?;
+    let (dtype, device) = (p.dtype(), p.device());
     let mut out = [None, None];
     for (which, slot) in out.iter_mut().enumerate() {
         if !wanted[which] {
             continue;
         }
-        let values = (0..p.len())
-            .map(|k| bce_slope(p[k], t[k], which == 1) * flowing(k))
-            .collect();
-        *slot = Some(narrowed(values)?);
+        let of_target = which == 1;
+        let data = match dtype {
+            DataType::Float32 => {
+                let (x, y) = (p.data().as_f32_slice(), t.data().as_f32_slice());
+                let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+                TensorData::from_vec(bce_slopes((x, y), flows, count, of_target), dtype, device)
+            }
+            DataType::Float64 => {
+                let (x, y) = (p.data().as_f64_slice(), t.data().as_f64_slice());
+                let (x, y) = (x.ok_or_else(missing)?, y.ok_or_else(missing)?);
+                TensorData::from_vec(bce_slopes((x, y), flows, count, of_target), dtype, device)
+            }
+            other => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "binary_cross_entropy needs floating-point inputs, got {other:?}"
+                )));
+            }
+        };
+        *slot = Some(Tensor::new(
+            Arc::new(data),
+            predictions.shape().clone(),
+            dtype,
+            device,
+            false,
+        ));
     }
     Ok(out)
-}
-
-/// Binary cross entropy's slope at `p` and `t`, in the prediction or with
-/// `of_target` in the target; see [`bce_gradients`].
-fn bce_slope(p: f64, t: f64, of_target: bool) -> f64 {
-    let floor = |log: f64| if log < -100.0 { -100.0 } else { log };
-    let (log_p, log_q) = (p.ln(), (-p).ln_1p());
-    if of_target {
-        if (0.25..=0.75).contains(&p) {
-            return ((1.0 - 2.0 * p) / p).ln_1p();
-        }
-        return floor(log_q) - floor(log_p);
-    }
-    match (log_p >= -100.0, log_q >= -100.0) {
-        (true, true) => (p - t) / (p * (1.0 - p)),
-        (true, false) => -t / p,
-        (false, true) => (1.0 - t) / (1.0 - p),
-        // A NaN prediction, whose slope is NaN.
-        (false, false) => p + t,
-    }
 }
 
 /// Gradient function for binary cross entropy computed from logits.

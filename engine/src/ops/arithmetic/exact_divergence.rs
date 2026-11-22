@@ -150,7 +150,7 @@ fn log_ratio(t: f64, p: f64, fma: bool) -> (Pair, f64) {
 /// of one, so that `m - 1` is exact and its `log1p` small. A subnormal head
 /// is moved up by `2^64` first.
 #[inline(always)]
-fn ln_pair(x: Pair, fma: bool) -> Pair {
+pub(super) fn ln_pair(x: Pair, fma: bool) -> Pair {
     let (x, shift) = if x.0 < f64::MIN_POSITIVE {
         (Pair(x.0 * 2f64.powi(64), x.1 * 2f64.powi(64)), -64)
     } else {

@@ -37,6 +37,10 @@ use super::close::add_shifted;
 use super::rounded_once::{Exact, Target, product_error, rounded, two_sum};
 use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 
+#[path = "exact_bce.rs"]
+mod bce;
+pub(crate) use self::bce::bce_slopes;
+
 #[path = "exact_broadcast.rs"]
 mod broadcast;
 pub(crate) use self::broadcast::{divisor_slopes, group_dots};
