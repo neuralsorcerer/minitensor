@@ -999,6 +999,16 @@ exact in float64, where the operation's exact error rounds the result to odd and
 the one narrowing to float32 is then correct; an int64 past 2^53 is carried in
 integer arithmetic.
 
+The gradients of `*` and `/` round once as well, where the incoming gradient and
+both operands share a float dtype. A factor broadcast against the other gathers,
+at each of its elements, the dot of the incoming gradient with the other factor
+over the positions it was read at; a divisor -- one value at all of them --
+minus that dot with the numerator over its square, `-Σ g x / y^2`, and
+elementwise `-g x / y^2`. Each is the float nearest its exact value. Each term
+had been rounded and the terms then added: a broadcast weight's gradient over 64
+rows was up to 8.4 ulps out in float32 and 3.7 in float64, and a divisor's own
+up to 1.5.
+
 Comparisons do not promote. They answer in booleans, so there is no result
 width to keep narrow, and an integer against a float is compared exactly: an
 int32 `20_000_001` is not equal to `20_000_000.0`, though the two are the same

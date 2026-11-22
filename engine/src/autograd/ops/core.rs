@@ -695,15 +695,20 @@ impl GradientFunction for MulBackward {
         gradients.reserve(2);
 
         // d/dx(x*y) = y and d/dy(x*y) = x; skip frozen inputs entirely.
-        if self.input_requires_grad[0] {
-            let lhs_term = arithmetic::mul(grad_output, &self.rhs.detach())?;
-            let lhs_grad = reduce_gradient_for_broadcasting(&lhs_term, self.lhs.shape())?;
-            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        }
-        if self.input_requires_grad[1] {
-            let rhs_term = arithmetic::mul(grad_output, &self.lhs.detach())?;
-            let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
-            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        let sides = [(&self.lhs, &self.rhs), (&self.rhs, &self.lhs)];
+        for (side, (operand, other)) in sides.into_iter().enumerate() {
+            if !self.input_requires_grad[side] {
+                continue;
+            }
+            let other = other.detach();
+            let grad = match gathered_gradient(grad_output, &other, None, operand.shape())? {
+                Some(grad) => grad,
+                None => {
+                    let term = arithmetic::mul(grad_output, &other)?;
+                    reduce_gradient_for_broadcasting(&term, operand.shape())?
+                }
+            };
+            accumulate_grad(&mut gradients, self.input_ids[side], grad)?;
         }
 
         Ok(gradients)
@@ -712,6 +717,94 @@ impl GradientFunction for MulBackward {
     fn input_ids(&self) -> &[TensorId] {
         &self.input_ids
     }
+}
+
+/// The gradient of a product or a quotient in an operand of `shape` that
+/// they broadcast, each element of it gathered from the positions it was
+/// read at and rounded once: for a factor, the dot of `grad_output` with
+/// the `other` factor; for a `divisor`, which is one value at all of them,
+/// minus that dot with the numerator `other` over its square. None where the
+/// three do not share one float dtype, and for a factor not broadcast, whose
+/// gradient is a product rounded once already.
+#[inline(never)]
+fn gathered_gradient(
+    grad_output: &Tensor,
+    other: &Tensor,
+    divisor: Option<&Tensor>,
+    shape: &Shape,
+) -> Result<Option<Tensor>> {
+    use crate::ops::arithmetic::exact_sum::{divisor_slopes, dot_f32, dot_f64, group_dots};
+    let (dtype, device) = (grad_output.dtype(), grad_output.device());
+    let same = |tensor: &Tensor| tensor.dtype() == dtype;
+    let float = matches!(dtype, DataType::Float32 | DataType::Float64);
+    let broadcast = grad_output.shape() != shape;
+    let fits = shape.dims().len() <= grad_output.shape().dims().len();
+    if !(float
+        && fits
+        && same(other)
+        && divisor.is_none_or(same)
+        && (broadcast || divisor.is_some()))
+    {
+        return Ok(None);
+    }
+    // The axes `shape` keeps first, in their order, and those it broadcasts
+    // over last, so that each of its elements gathers from one run.
+    let dims = grad_output.shape().dims();
+    let extra = dims.len() - shape.dims().len();
+    let summed = |axis: usize| axis < extra || (shape.dims()[axis - extra] == 1 && dims[axis] != 1);
+    let axes = 0..dims.len();
+    let order: Vec<isize> = (axes.clone().filter(|&axis| !summed(axis)))
+        .chain(axes.clone().filter(|&axis| summed(axis)))
+        .map(|axis| axis as isize)
+        .collect();
+    let run = axes
+        .filter(|&axis| summed(axis))
+        .map(|axis| dims[axis])
+        .product();
+    let full: Vec<isize> = dims.iter().map(|&dim| dim as isize).collect();
+    let moved = order
+        .iter()
+        .enumerate()
+        .any(|(axis, &from)| from != axis as isize);
+    let lay = |tensor: &Tensor| {
+        let tensor = tensor.expand(full.clone())?;
+        if moved {
+            tensor.permute(order.clone())?.contiguous()
+        } else {
+            tensor.contiguous()
+        }
+    };
+    let (g, b, y) = (
+        lay(grad_output)?,
+        lay(other)?,
+        divisor.map(Tensor::contiguous).transpose()?,
+    );
+    let bad = || MinitensorError::internal_error("broadcast gradient: a float slice");
+    macro_rules! arm {
+        ($slice:ident, $dot:ident) => {{
+            let (g, b) = (
+                g.data().$slice().ok_or_else(bad)?,
+                b.data().$slice().ok_or_else(bad)?,
+            );
+            let values = match &y {
+                Some(y) => divisor_slopes((g, b), y.data().$slice().ok_or_else(bad)?, run),
+                None => group_dots((g, b), (run, shape.numel()), $dot),
+            };
+            TensorData::from_vec(values, dtype, device)
+        }};
+    }
+    let data = if dtype == DataType::Float32 {
+        arm!(as_f32_slice, dot_f32)
+    } else {
+        arm!(as_f64_slice, dot_f64)
+    };
+    Ok(Some(Tensor::new(
+        Arc::new(data),
+        shape.clone(),
+        dtype,
+        device,
+        false,
+    )))
 }
 
 /// Gradient function for division operation
@@ -730,22 +823,26 @@ impl GradientFunction for DivBackward {
 
         let rhs = self.rhs.detach();
 
-        // grad/y is needed by both branches; compute it once if either input
-        // requires a gradient.
-        let grad_over_rhs = arithmetic::div(grad_output, &rhs)?;
-
         // d/dx(x/y) = 1/y  =>  grad_x = grad / y
         if self.input_requires_grad[0] {
+            let grad_over_rhs = arithmetic::div(grad_output, &rhs)?;
             let lhs_grad = reduce_gradient_for_broadcasting(&grad_over_rhs, self.lhs.shape())?;
             accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
         }
 
-        // d/dy(x/y) = -x/y^2  =>  grad_y = -(grad / y) * (x / y)
+        // d/dy(x/y) = -x/y^2, rounded once however y broadcasts.
         if self.input_requires_grad[1] {
-            let lhs_over_rhs = arithmetic::div(&self.lhs.detach(), &rhs)?;
-            let rhs_term = arithmetic::mul(&grad_over_rhs, &lhs_over_rhs)?;
-            let rhs_term = arithmetic::neg(&rhs_term)?;
-            let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
+            let lhs = self.lhs.detach();
+            let rhs_grad = match gathered_gradient(grad_output, &lhs, Some(&rhs), self.rhs.shape())?
+            {
+                Some(grad) => grad,
+                None => {
+                    let grad_over_rhs = arithmetic::div(grad_output, &rhs)?;
+                    let lhs_over_rhs = arithmetic::div(&lhs, &rhs)?;
+                    let term = arithmetic::neg(&arithmetic::mul(&grad_over_rhs, &lhs_over_rhs)?)?;
+                    reduce_gradient_for_broadcasting(&term, self.rhs.shape())?
+                }
+            };
             accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
         }
 

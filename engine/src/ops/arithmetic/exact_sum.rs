@@ -37,6 +37,10 @@ use super::close::add_shifted;
 use super::rounded_once::{Exact, Target, product_error, rounded, two_sum};
 use crate::ops::util::{pairwise_fold, pairwise_fold_vectors};
 
+#[path = "exact_broadcast.rs"]
+mod broadcast;
+pub(crate) use self::broadcast::{divisor_slopes, group_dots};
+
 #[path = "exact_covariance.rs"]
 mod covariance;
 pub(crate) use self::covariance::{Refusal, Sample, covariances};

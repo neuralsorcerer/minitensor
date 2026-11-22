@@ -103,7 +103,12 @@ pub(crate) fn regression_slopes<I: Element, T: Output>(
                     &upstream[start..end]
                 },
             );
-            if fma {
+            // For float64 alone: a float32 gradient is settled plainly where
+            // it can be, its products exact, and the rare float64 operands of
+            // a float32 loss -- an integer target's parts, or an incoming
+            // gradient of another dtype -- take the errors by splits, the same
+            // to the bit.
+            if fma && !T::PLAIN && std::mem::size_of::<I>() == std::mem::size_of::<T>() {
                 // SAFETY: where `fma` the CPU has avx2 and fma, or the target a
                 // fused multiply-add of its own.
                 #[allow(unused_unsafe)]
@@ -262,7 +267,7 @@ fn term<T: Output, const FMA: bool>(
 /// mispredicts, where a zero bound settles: for float64, whose pair is
 /// rounded by the two-sum, and not for float32, whose ties it is not.
 #[inline(always)]
-fn rounded<T: Output>(total: Carried) -> Option<T> {
+pub(super) fn rounded<T: Output>(total: Carried) -> Option<T> {
     if T::PLAIN {
         return total.rounded::<T>();
     }
@@ -274,7 +279,7 @@ fn rounded<T: Output>(total: Carried) -> Option<T> {
 /// Whether `value` lies far enough inside the range that its product's
 /// split, and what is carried beside it, stay clear of underflow.
 #[inline(always)]
-fn in_range(value: f64) -> bool {
+pub(super) fn in_range(value: f64) -> bool {
     (value.abs() >= 2f64.powi(-900)) & (value.abs() <= 2f64.powi(900))
 }
 
@@ -282,14 +287,17 @@ fn in_range(value: f64) -> bool {
 /// with its bound, or None where a part of it might underflow: exactly for a
 /// power of two, and otherwise as [`Carried::quotient_parts`] divides.
 #[inline(always)]
-fn divided<const FMA: bool>(total: Carried, (divisor, inverse): (f64, f64)) -> Option<Carried> {
+pub(super) fn divided<const FMA: bool>(
+    total: Carried,
+    (divisor, inverse): (f64, f64),
+) -> Option<Carried> {
     if divisor == 1.0 {
         return Some(total);
     }
     // Whether a part that was `before` is zero, or `after` a normal float,
     // whose rounding is relative.
     let clear = |before: f64, after: f64| before == 0.0 || after.abs() >= f64::MIN_POSITIVE;
-    let spread = total.slack * inverse;
+    let spread = total.slack * inverse.abs();
     if divisor.to_bits() & ((1 << 52) - 1) == 0 {
         // A power of two: each part scales exactly where it stays normal.
         let error = total.error * inverse;
@@ -297,7 +305,7 @@ fn divided<const FMA: bool>(total: Carried, (divisor, inverse): (f64, f64)) -> O
         let fine = in_range(sum)
             & clear(total.error, error)
             & clear(total.slack, spread)
-            & (divisor < 2f64.powi(990));
+            & (divisor.abs() < 2f64.powi(990));
         return fine.then_some(Carried {
             sum,
             error,
@@ -322,7 +330,7 @@ fn divided<const FMA: bool>(total: Carried, (divisor, inverse): (f64, f64)) -> O
     let slack = spread * (1.0 + 2f64.powi(-50)) + tail.abs() * 2f64.powi(-50);
     let fine = in_range(total.sum)
         & in_range(sum)
-        & (divisor < 2f64.powi(990))
+        & (divisor.abs() < 2f64.powi(990))
         & clear(numerator, tail)
         & clear(total.slack, spread);
     fine.then_some(Carried { sum, error, slack })
