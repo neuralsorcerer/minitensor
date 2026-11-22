@@ -245,76 +245,123 @@ fn moments<const FMA: bool>(values: &[f64], centred: bool) -> Option<((f64, f64,
 
 /// What a training step leaves in a channel's running buffers from its
 /// values: `(1 - m) old + m new` for the mean and for the variance, `new` the
-/// values' own -- the variance unbiased, over `n - 1` -- each the value of
-/// `T` nearest its exact one. For a float32 buffer first in plain float64
-/// from carried sums with a bound, as [`plain_row`] takes its statistics;
-/// then from the pairs [`moments`] carries; and in whole numbers where
-/// neither settles it. Values or buffers that are not finite, and a channel
-/// of fewer than two values, take the formula in float64.
+/// values' own mean and, over the `runs` equal runs they come in -- one for
+/// `batch_norm`, a sample's positions for `instance_norm` -- the mean of
+/// each run's variance over its count less one; each the value of `T`
+/// nearest its exact one. For a float32 buffer first in plain float64 from
+/// carried sums with a bound, as [`plain_row`] takes its statistics; then
+/// from the pairs [`moments`] carries; and in whole numbers where neither
+/// settles it. Values or buffers that are not finite, and runs of fewer than
+/// two values, take the formula in float64.
 pub(crate) fn running_update<T: Output>(
     values: &[f64],
     (mean, var): (f64, f64),
     momentum: f64,
+    runs: usize,
 ) -> (T, T) {
     let count = values.len();
-    let n = count as f64;
+    let runs = runs.max(1);
+    let per = count / runs;
+    let (n, r, p) = (count as f64, runs as f64, per as f64);
     let finite = values
         .iter()
         .chain(&[mean, var, momentum])
         .all(|v| v.is_finite());
-    if count < 2 || !finite {
+    if per < 2 || per * runs != count || !finite {
         let batch_mean = values.iter().sum::<f64>() / n;
-        let squares = values
-            .iter()
-            .map(|&x| (x - batch_mean) * (x - batch_mean))
-            .sum::<f64>();
-        let batch_var = if count > 1 { squares / (n - 1.0) } else { 0.0 };
+        let batch_var = values
+            .chunks(per.max(1))
+            .map(|run| {
+                let centre = run.iter().sum::<f64>() / run.len() as f64;
+                let squares = run
+                    .iter()
+                    .map(|&x| (x - centre) * (x - centre))
+                    .sum::<f64>();
+                if run.len() > 1 {
+                    squares / (run.len() as f64 - 1.0)
+                } else {
+                    0.0
+                }
+            })
+            .sum::<f64>()
+            / r;
         let blend = |old: f64, new: f64| T::narrow(old * (1.0 - momentum) + new * momentum);
         return (blend(mean, batch_mean), blend(var, batch_var));
     }
     let unit = 2f64.powi(-53);
-    if T::PLAIN {
-        // The mean and the sum of the squares off it carried, as `plain_row`
-        // bounds them, the squares over `n - 1`; and `(1 - m) old + m new`
-        // in float64, `1 - m`, its product and the other product and their
-        // sum each rounding once. Settled where both ends of the interval
-        // round alike.
+    let (centre, centre_rest, centre_bound, ordinary) =
+        <f64 as Element>::block(values).quotient_parts::<false>(n);
+    let centre = (ordinary || centre == 0.0).then_some((centre, centre_rest, centre_bound));
+    if T::PLAIN
+        && let Some((centre, centre_rest, centre_bound)) = centre
+    {
+        // A run at a time, its mean and the sum of the squares off it carried
+        // as `plain_row` bounds them, over the run's count less one; the
+        // runs' sum rounding once an addition and the quotient once more.
+        // Then `(1 - m) old + m new` in float64, `1 - m`, its product and the
+        // other product and their sum each rounding once. Settled where both
+        // ends of the interval round alike.
         let margin = 1.0 + 2f64.powi(-20);
-        let (centre, rest, bound, ordinary) =
-            <f64 as Element>::block(values).quotient_parts::<false>(n);
-        if ordinary || centre == 0.0 {
-            let centre_error = (rest.abs() + bound) * margin;
-            let squares: Vec<f64> = values
-                .iter()
-                .map(|&x| (x - centre) * (x - centre))
-                .collect();
+        let (mut spreads, mut error, mut clear) = (0.0f64, 0.0f64, true);
+        let mut squares = Vec::with_capacity(per);
+        for run in values.chunks(per) {
+            let (middle, rest, bound, ordinary) =
+                <f64 as Element>::block(run).quotient_parts::<false>(p);
+            clear &= ordinary || middle == 0.0;
+            let middle_error = (rest.abs() + bound) * margin;
+            squares.clear();
+            squares.extend(run.iter().map(|&x| (x - middle) * (x - middle)));
             let total = <f64 as Element>::block(&squares);
             let (sum, _) = two_sum(total.sum, total.error);
-            let spread = sum / (n - 1.0);
-            let spread_error = (4.0 * unit * sum + total.slack + n * centre_error * centre_error)
-                / (n - 1.0)
+            let spread = sum / (p - 1.0);
+            spreads += spread;
+            error += (4.0 * unit * sum + total.slack + p * middle_error * middle_error) / (p - 1.0)
                 * margin
-                + unit * spread;
-            let blend = |old: f64, new: f64, error: f64| -> Option<T> {
-                let (kept, moved) = ((1.0 - momentum) * old, momentum * new);
-                let y = kept + moved;
-                let bound =
-                    (2.0 * unit * kept.abs() + unit * (moved.abs() + y.abs()) + momentum * error)
-                        * margin
-                        + 2f64.powi(-51) * y.abs();
-                let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
-                (low.widen().to_bits() == high.widen().to_bits()).then_some(high)
-            };
-            if let (Some(mean), Some(var)) = (
+                + unit * (spread + spreads.abs());
+        }
+        let spread = spreads / r;
+        let spread_error = error / r * margin + unit * spread;
+        let blend = |old: f64, new: f64, error: f64| -> Option<T> {
+            let (kept, moved) = ((1.0 - momentum) * old, momentum * new);
+            let y = kept + moved;
+            let bound =
+                (2.0 * unit * kept.abs() + unit * (moved.abs() + y.abs()) + momentum * error)
+                    * margin
+                    + 2f64.powi(-51) * y.abs();
+            let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
+            (low.widen().to_bits() == high.widen().to_bits()).then_some(high)
+        };
+        let centre_error = (centre_rest.abs() + centre_bound) * margin;
+        if clear
+            && let (Some(mean), Some(var)) = (
                 blend(mean, centre, centre_error),
                 blend(var, spread, spread_error),
-            ) {
-                return (mean, var);
-            }
+            )
+        {
+            return (mean, var);
         }
     }
-    // The pairs: `1 - m` exact as a two-sum's, each product split, and the
-    // statistic within its bound.
+    // The pairs: each run's squares as the forward's statistics take them,
+    // their quotients summed as a carried pair; `1 - m` exact as a
+    // two-sum's, each product split, and the statistic within its bound.
+    let spread = || -> Option<(f64, f64, f64)> {
+        let (mut sum, mut error, mut slack) = (0.0f64, 0.0f64, 0.0f64);
+        for run in values.chunks(per) {
+            let (spread, rest, bound) = run_spread(run)?;
+            let (total, carry) = two_sum(sum, spread);
+            sum = total;
+            let term = carry + rest;
+            error += term;
+            slack += bound + (term.abs() + error.abs()) * unit;
+        }
+        let total = Carried {
+            sum,
+            error,
+            slack: generous(slack),
+        };
+        let (value, rest, bound, ordinary) = total.quotient_parts::<false>(r);
+        (ordinary || value == 0.0).then_some((value, rest, bound))
+    };
     let blend = |old: f64, (new, new_rest, new_bound): (f64, f64, f64)| -> Option<T> {
         let (keep, keep_low) = two_sum(1.0, -momentum);
         let (kept, kept_error) = split::<false>(keep, old);
@@ -344,43 +391,64 @@ pub(crate) fn running_update<T: Output>(
         }
         T::settle(value, value_rest, bound)
     };
-    if let Some((centre, squares)) = moments::<false>(values, true) {
-        let (spread, spread_rest, spread_bound, ordinary) =
-            squares.quotient_parts::<false>(n - 1.0);
-        if (ordinary || spread == 0.0)
-            && let (Some(mean), Some(var)) = (
-                blend(mean, centre),
-                blend(var, (spread, spread_rest, spread_bound)),
-            )
-        {
-            return (mean, var);
-        }
+    if let (Some(centre), Some(spread)) = (centre, spread())
+        && let (Some(mean), Some(var)) = (blend(mean, centre), blend(var, spread))
+    {
+        return (mean, var);
     }
-    running_exact::<T>(values, (mean, var), momentum)
+    running_exact::<T>(values, (mean, var), momentum, runs)
 }
 
-/// [`running_update`] in whole numbers: with `S = Σx` and
-/// `D = n Σx^2 - S^2`, the mean `((1 - m) old n + m S) / n` and the variance
-/// `((1 - m) old n (n - 1) + m D) / (n (n - 1))`, each rounded once.
+/// A run's variance over its count less one, as a pair and its bound, from
+/// the squares [`moments`] carries: in the widest build the CPU runs, each
+/// product's error exact either way, so the same to the bit.
+fn run_spread(run: &[f64]) -> Option<(f64, f64, f64)> {
+    use crate::ops::arithmetic::extended::fused;
+    fused!(run_spread_lanes(run: &[f64]) -> Option<(f64, f64, f64)>)
+}
+
+#[inline(always)]
+fn run_spread_lanes<const FMA: bool>(run: &[f64]) -> Option<(f64, f64, f64)> {
+    let (_, squares) = moments::<FMA>(run, true)?;
+    let (spread, rest, bound, ordinary) = squares.quotient_parts::<FMA>(run.len() as f64 - 1.0);
+    (ordinary || spread == 0.0).then_some((spread, rest, bound))
+}
+
+/// [`running_update`] in whole numbers: with `S = Σx` over every value, `P`
+/// values a run and each run's `D = P Σx^2 - S_run^2`, the mean
+/// `((1 - m) old n + m S) / n` and the variance
+/// `((1 - m) old R P (P - 1) + m ΣD) / (R P (P - 1))`, each rounded once.
 #[cold]
 #[inline(never)]
-fn running_exact<T: Output>(values: &[f64], (mean, var): (f64, f64), momentum: f64) -> (T, T) {
-    let exactly = Exactly::of(values, 0.0, true);
-    let n = values.len() as f64;
-    let count = Whole::float(n);
+fn running_exact<T: Output>(
+    values: &[f64],
+    (mean, var): (f64, f64),
+    momentum: f64,
+    runs: usize,
+) -> (T, T) {
+    let per = values.len() / runs;
+    let (mut sum, mut divisors) = (Whole::float(0.0), Whole::float(0.0));
+    for run in values.chunks(per) {
+        let exactly = Exactly::of(run, 0.0, true);
+        sum = sum.plus(&exactly.sum);
+        divisors = divisors.plus(&exactly.divisor);
+    }
+    let count = Whole::float(values.len() as f64);
     let keep = Whole::float(1.0).plus(&Whole::float(momentum).negated());
     let rate = Whole::float(momentum);
     let mean = keep
         .times(&Whole::float(mean))
         .times(&count)
-        .plus(&rate.times(&exactly.sum))
+        .plus(&rate.times(&sum))
         .total()
-        .quotient::<T>(count.clone().total());
-    let pairs = count.times(&Whole::float(n - 1.0));
+        .quotient::<T>(count.total());
+    let pairs = Whole::float(runs as f64)
+        .times(&Whole::float(per as f64))
+        .times(&Whole::float(per as f64 - 1.0));
     let var = keep
         .times(&Whole::float(var))
         .times(&pairs)
-        .plus(&rate.times(&exactly.divisor))
+        .plus(&rate.times(&divisors))
         .total()
         .quotient::<T>(pairs.total());
     (mean, var)

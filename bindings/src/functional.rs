@@ -897,6 +897,33 @@ pub fn group_norm_rounded(
     .map_err(_convert_error)
 }
 
+/// What a training step of `instance_norm` leaves in its running buffers:
+/// each channel's `(1 - m) old + m new`, the value nearest its exact one,
+/// and None for a buffer not given. The buffers share the input's dtype.
+#[pyfunction]
+#[pyo3(name = "_instance_running", signature = (input, running_mean, running_var, momentum))]
+pub fn instance_running_rounded(
+    input: &Bound<PyAny>,
+    running_mean: Option<&Bound<PyAny>>,
+    running_var: Option<&Bound<PyAny>>,
+    momentum: f64,
+) -> PyResult<(Option<PyTensor>, Option<PyTensor>)> {
+    let input = borrow_tensor(input)?;
+    let mean = borrow_optional_tensor(running_mean)?;
+    let var = borrow_optional_tensor(running_var)?;
+    let [mean, var] = engine::ops::normalization::instance_running(
+        input.tensor(),
+        mean.as_deref().map(|t| t.tensor()),
+        var.as_deref().map(|t| t.tensor()),
+        momentum,
+    )
+    .map_err(_convert_error)?;
+    Ok((
+        mean.map(PyTensor::from_tensor),
+        var.map(PyTensor::from_tensor),
+    ))
+}
+
 /// The gradient of `_normalized`'s quotients in their input at `grad`, each
 /// slice along `dim` taken by its flag in `over` as the forward returned it:
 /// `scale` times `g` less its part along the slice's direction, over its
@@ -2590,6 +2617,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(normalized_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(normalized_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(group_norm_rounded, parent)?)?;
+    parent.add_function(wrap_pyfunction!(instance_running_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(affine_grid_backward_rounded, parent)?)?;
     parent.add_function(wrap_pyfunction!(covariance_rounded, parent)?)?;

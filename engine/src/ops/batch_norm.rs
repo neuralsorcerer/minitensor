@@ -331,6 +331,7 @@ fn typed<T: NormFloat + Element + Output>(
                     &values,
                     (mean[c], var[c]),
                     momentum,
+                    1,
                 )
             });
             (exact, moved)

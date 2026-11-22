@@ -3376,16 +3376,16 @@ value, rounded once, however nearly the bias cancels the product. So is each
 output of `batch_norm` and `instance_norm` under running statistics,
 `w (x - mean) / sqrt(var + eps) + b` with the running mean and variance as
 given, and each input gradient there, `w g / sqrt(var + eps)`; and each value a
-training step leaves in `batch_norm`'s running buffers, `(1 - m) old + m new`
-with `new` the batch's mean or its variance over `n - 1`. A weight or bias of
-another dtype than the input's meets `group_norm`'s and `instance_norm`'s
-standardized values, rounded, as arithmetic meets them. A float32 output is
-taken in float64 with a bound on its roundings, and where the bound leaves it
-near a halfway point, as the float64 ones are. A zero output is signed as the
-formula signs it: a zero input keeps its sign, as `x - 0` and `x * r` do, a
-value equal to a mean that is not zero gives a positive zero, and `w * y + b`
-signs a zero product as float arithmetic does. A missing weight or bias changes
-nothing, not even the sign of a zero.
+training step leaves in the running buffers, `(1 - m) old + m new` with `new`
+the batch's mean, or its variance over `n - 1` -- for `instance_norm` the mean
+of each sample's. A weight or bias of another dtype than the input's meets
+`group_norm`'s and `instance_norm`'s standardized values, rounded, as arithmetic
+meets them. A float32 output is taken in float64 with a bound on its roundings,
+and where the bound leaves it near a halfway point, as the float64 ones are. A
+zero output is signed as the formula signs it: a zero input keeps its sign, as
+`x - 0` and `x * r` do, a value equal to a mean that is not zero gives a
+positive zero, and `w * y + b` signs a zero product as float arithmetic does. A
+missing weight or bias changes nothing, not even the sign of a zero.
 
 The input's gradient of `layer_norm`, `rms_norm`, `group_norm` and
 `instance_norm`, and of `batch_norm` with batch statistics, is in either dtype

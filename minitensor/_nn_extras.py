@@ -1385,14 +1385,28 @@ def _update_running(
     """
 
     with _C.no_grad():
-        if running_mean is not None:
-            buffer = _atleast_tensor(running_mean)
+        buffers = [
+            None if value is None else _atleast_tensor(value)
+            for value in (running_mean, running_var)
+        ]
+        if flat.dtype in ("float32", "float64") and all(
+            buffer is None or buffer.dtype == flat.dtype for buffer in buffers
+        ):
+            # Each buffer value the one nearest `(1 - m) old + m new`, the
+            # variance the samples' mean over its positions less one.
+            # Composed from means, a variance and a blend, it was up to an ulp
+            # out.
+            moved = _F._instance_running(flat, buffers[0], buffers[1], momentum)
+            for buffer, value in zip(buffers, moved):
+                if buffer is not None:
+                    buffer.copy_(value)
+            return
+        if buffers[0] is not None:
             batch_mean = _F.mean(_F.mean(flat, -1), 0).detach()
-            buffer.copy_(buffer * (1.0 - momentum) + batch_mean * momentum)
-        if running_var is not None:
-            buffer = _atleast_tensor(running_var)
+            buffers[0].copy_(buffers[0] * (1.0 - momentum) + batch_mean * momentum)
+        if buffers[1] is not None:
             batch_var = _F.mean(_F.var(flat, -1, True), 0).detach()
-            buffer.copy_(buffer * (1.0 - momentum) + batch_var * momentum)
+            buffers[1].copy_(buffers[1] * (1.0 - momentum) + batch_var * momentum)
 
 
 def local_response_norm(

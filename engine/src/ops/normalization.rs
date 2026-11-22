@@ -547,6 +547,105 @@ pub fn group_norm(
     with_grad_fn(output, grad_fn)
 }
 
+/// What a training step of `instance_norm` leaves in its running buffers,
+/// from a `[N, C, ...]` input: each channel's `(1 - m) old + m new`, `new` the
+/// mean of its values for the mean and, for the variance, the mean over the
+/// samples of each one's variance over its positions less one -- each the
+/// value nearest its exact one (see `running_update`). A buffer not given
+/// is not moved, and comes back as None.
+pub fn instance_running(
+    input: &Tensor,
+    running_mean: Option<&Tensor>,
+    running_var: Option<&Tensor>,
+    momentum: f64,
+) -> Result<[Option<Tensor>; 2]> {
+    check_momentum("instance_norm", momentum)?;
+    let dims = input.shape().dims();
+    if dims.len() < 2 || !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
+        return Err(MinitensorError::invalid_operation(
+            "instance_norm's running statistics need a float input with a batch and a \
+             channel axis",
+        ));
+    }
+    let channels = dims[1];
+    for buffer in [running_mean, running_var].into_iter().flatten() {
+        if buffer.dtype() != input.dtype() {
+            return Err(MinitensorError::type_mismatch(
+                input.dtype().to_string(),
+                buffer.dtype().to_string(),
+            ));
+        }
+        if buffer.numel() != channels {
+            return Err(MinitensorError::shape_mismatch(
+                vec![channels],
+                buffer.shape().dims().to_vec(),
+            ));
+        }
+    }
+    match input.dtype() {
+        DataType::Float32 => {
+            instance_running_typed::<f32>(input, running_mean, running_var, momentum)
+        }
+        _ => instance_running_typed::<f64>(input, running_mean, running_var, momentum),
+    }
+}
+
+fn instance_running_typed<T>(
+    input: &Tensor,
+    running_mean: Option<&Tensor>,
+    running_var: Option<&Tensor>,
+    momentum: f64,
+) -> Result<[Option<Tensor>; 2]>
+where
+    T: crate::ops::arithmetic::exact_sum::Output + crate::ops::batch_norm::NormFloat,
+{
+    let values_of = |tensor: &Tensor| -> Result<Vec<f64>> {
+        let tensor = tensor.contiguous()?;
+        T::slice(tensor.data())
+            .map(|values| values.iter().map(|&v| v.to_f64()).collect())
+            .ok_or_else(|| {
+                MinitensorError::internal_error("instance_norm: a buffer of the wrong dtype")
+            })
+    };
+    let input = input.contiguous()?;
+    let x = T::slice(input.data()).ok_or_else(|| {
+        MinitensorError::internal_error("instance_norm: an input of the wrong dtype")
+    })?;
+    let dims = input.shape().dims();
+    let (images, channels) = (dims[0], dims[1]);
+    let spatial: usize = dims[2..].iter().product();
+    let old_mean = running_mean.map(values_of).transpose()?;
+    let old_var = running_var.map(values_of).transpose()?;
+    let moved = crate::ops::map::par_map_indexed(channels, &|c| {
+        let mut values = Vec::with_capacity(images * spatial);
+        for image in 0..images {
+            let at = (image * channels + c) * spatial;
+            values.extend(x[at..at + spatial].iter().map(|&v| v.to_f64()));
+        }
+        let old = (
+            old_mean.as_ref().map_or(0.0, |m| m[c]),
+            old_var.as_ref().map_or(0.0, |v| v[c]),
+        );
+        crate::ops::arithmetic::exact_sum::running_update::<T>(&values, old, momentum, images)
+    });
+    let tensor = |buffer: &Tensor, values: Vec<T>| {
+        Tensor::new(
+            Arc::new(<T as crate::ops::batch_norm::NormFloat>::into_data(
+                values,
+                buffer.device(),
+            )),
+            buffer.shape().clone(),
+            buffer.dtype(),
+            buffer.device(),
+            false,
+        )
+    };
+    Ok([
+        running_mean.map(|b| tensor(b, moved.iter().map(|m| m.0).collect())),
+        running_var.map(|b| tensor(b, moved.iter().map(|m| m.1).collect())),
+    ])
+}
+
 /// Apply root-mean-square layer normalization (RMSNorm) to the input tensor.
 ///
 /// RMSNorm (Zhang & Sennrich, 2019) normalizes activations by their root mean
