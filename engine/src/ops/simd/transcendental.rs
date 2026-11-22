@@ -429,7 +429,7 @@ fn reduce_exp<const FMA: bool>(v: f64) -> (f64, f64) {
 /// on it: `tanh` is `u/(u+2)`, `sinh` is `u(u+2)/(2(u+1))`, `cosh` follows from
 /// the same `u`. Splitting it out is why they cost so little to add.
 #[inline(always)]
-fn expm1_reduced<const FMA: bool>(v: f64) -> f64 {
+pub(crate) fn expm1_reduced<const FMA: bool>(v: f64) -> f64 {
     let (two_pow_n, r) = reduce_exp::<FMA>(v);
     fma_or::<FMA>(two_pow_n, expm1_poly::<FMA>(r), two_pow_n - 1.0)
 }

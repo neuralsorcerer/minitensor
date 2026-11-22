@@ -49,6 +49,9 @@ pub(crate) use self::covariance::{Refusal, Sample, covariances};
 mod huber;
 pub(crate) use self::huber::{Huber, huber_terms, huber_total};
 
+#[path = "exact_log_cosh.rs"]
+mod log_cosh;
+
 #[path = "exact_pool.rs"]
 mod pool;
 pub(crate) use self::pool::{Tallies, sum_of_quotients, sum_over, weighted_quotient};

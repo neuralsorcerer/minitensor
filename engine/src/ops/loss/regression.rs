@@ -13,7 +13,7 @@ use crate::ops::map::par_out_chunks_gated;
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
-        KLDivLossBackward, LogCoshLossBackward, NoGradGuard, RegressionLossBackward,
+        KLDivLossBackward, NoGradGuard, RegressionLossBackward,
     },
     error::{MinitensorError, Result},
     ops::{
@@ -981,8 +981,9 @@ fn regression_backward(
 /// A regression loss's gradients, in its predictions where `wanted[0]` and in
 /// its targets where `wanted[1]`: each the float nearest `s(p - t) g / n` --
 /// `s` the term's slope, `g` the incoming gradient, one value or one a term,
-/// and `n` the count for a `mean` -- and its negative. A float32 loss reads
-/// its limit at float32, as its forward does.
+/// and `n` the count for a `mean` -- and its negative; for log-cosh's
+/// `tanh`, wherever a bound settles which that is. A float32 loss reads its
+/// limit at float32, as its forward does.
 pub(crate) fn regression_gradients(
     (predictions, targets): (&Tensor, &Tensor),
     grad_output: &Tensor,
@@ -1054,9 +1055,10 @@ pub(crate) fn regression_gradients(
 }
 
 /// Log-cosh loss for robust regression: `log(cosh(p - t))`, each term the
-/// value of the exact difference in float64, narrowed once for float32; see
-/// [`log_cosh_term`]. The gradient, `tanh(p - t)`, comes from
-/// `LogCoshLossBackward`.
+/// value of the exact difference in float64, an integer target's included,
+/// narrowed once for float32; see [`log_cosh_term`]. The gradient, `tanh(p -
+/// t)` times the incoming gradient and over the count for a mean, is the
+/// float nearest it where a bound settles it; see `regression_gradients`.
 ///
 /// It was `|d| + log1p(exp(-2|d|)) - log 2`, which is right where the
 /// difference is large and cancels where it is small: the loss there is near
@@ -1071,33 +1073,61 @@ pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) ->
     let (predictions, targets) = difference_operands(predictions, targets)?;
     let (predictions, targets) = (predictions.as_ref(), targets.as_ref());
     let needs_grad = manual_backward_needed(&[predictions, targets]);
-    let (loss, diff) = {
+    let loss = {
         let _guard = NoGradGuard::new();
-        let diff = sub(predictions, targets)?.detach();
-        // The exact difference as a two-sum's pair where both operands are
-        // floats of one width; an integer target leaves the difference the
-        // float nearest it.
+        // The exact difference as a two-sum's pair.
         let values = if targets.dtype() == predictions.dtype() {
             wide_terms(predictions, targets, |p, t| {
                 let (head, tail) = crate::ops::arithmetic::rounded_once::two_sum(p, -t);
                 log_cosh_term(head, tail)
             })?
         } else {
-            wide_terms(&diff, &diff, |d, _| log_cosh_term(d, 0.0))?
+            log_cosh_integer_terms(predictions, targets)?
         };
         let n = values.numel() as f64;
-        (reduce_detached(values, reduction, n, None)?, diff)
+        reduce_detached(values, reduction, n, None)?
     };
     if !needs_grad {
         return Ok(loss);
     }
-    let grad_fn = Arc::new(LogCoshLossBackward {
-        input_ids: [predictions.id(), targets.id()],
-        input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
-        reduction: reduction.to_string(),
-        diff,
-    });
-    with_grad_fn(loss.requires_grad_(true), grad_fn)
+    regression_backward(loss, (predictions, targets), Slope::Tanh, reduction)
+}
+
+/// [`log_cosh_term`] of each prediction less an integer target, narrowed
+/// once to the predictions' dtype: the target as its parts, and the
+/// difference a pair within 2^-105 of it. It was the term of the difference
+/// rounded to the predictions' dtype, which for float32 is 2^-24 of it.
+fn log_cosh_integer_terms(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    let (p, t) = (predictions.contiguous()?, targets.contiguous()?);
+    let x = widened(&p)?;
+    let (highs, lows) = integer_parts(&t)?;
+    let lows = lows.unwrap_or_else(|| vec![0.0; x.len()]);
+    let term = |p: f64, high: f64, low: f64| {
+        let (first, error) = two_sum(p, -high);
+        if !first.is_finite() {
+            // An infinite prediction's, or NaN's.
+            return log_cosh_term(first, 0.0);
+        }
+        let (head, second) = two_sum(first, -low);
+        let (head, tail) = two_sum(head, error + second);
+        log_cosh_term(head, tail)
+    };
+    let (dtype, device) = (p.dtype(), p.device());
+    let values = crate::ops::map::ternary_map(&x, &highs, &lows, term);
+    let data = if dtype == DataType::Float32 {
+        let values: Vec<f32> = values.iter().map(|&value| value as f32).collect();
+        TensorData::from_vec(values, dtype, device)
+    } else {
+        TensorData::from_vec(values, dtype, device)
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        p.shape().clone(),
+        dtype,
+        device,
+        false,
+    ))
 }
 
 /// `log(cosh(d))` for the difference `d = head + tail`, a two-sum's pair,

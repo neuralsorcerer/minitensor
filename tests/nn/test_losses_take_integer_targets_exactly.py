@@ -10,11 +10,10 @@ An int32 or int64 target was cast to the predictions' float dtype before
 the loss, which rounded every target past 2^24 for float32 predictions, and
 past 2^53 for float64 ones: a prediction of `2^24` against a target of
 `2^24 + 1` lost nothing. `mse_loss` and `l1_loss` are now of the exact
-differences, rounded once, and the losses of the difference alone --
-`huber_loss`, `smooth_l1_loss` and `log_cosh_loss` -- of the difference
-rounded once from the exact one, as `predictions - targets` gives it. A
-Python int or list the predictions' dtype does not hold is read exactly too,
-as arithmetic reads it.
+differences, rounded once, and so are the losses of the difference alone --
+`huber_loss`, `smooth_l1_loss` and `log_cosh_loss`. A Python int or list the
+predictions' dtype does not hold is read exactly too, as arithmetic reads
+it.
 """
 
 from __future__ import annotations
@@ -105,8 +104,8 @@ def test_targets_past_float64():
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_losses_of_the_difference(dtype):
     # Each is a function of the difference alone, so against an integer
-    # target it is the loss of the difference arithmetic gives, rounded once
-    # from the exact one, against zero.
+    # target whose difference from the prediction the dtype holds, as these
+    # are, it is the loss of that difference against zero.
     rng = np.random.default_rng(661)
     p, t = _draw(rng, dtype, "int64")
     predictions, targets = mt.Tensor(p, dtype=dtype), mt.Tensor(t, dtype="int64")
@@ -126,6 +125,25 @@ def test_losses_of_the_difference(dtype):
         mt.tensor([2.0**24], dtype="float32"), mt.tensor([2**24 + 1], dtype="int64")
     )
     assert got.item() == 0.5
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_log_cosh_of_the_exact_difference(dtype):
+    # A quarter less one past 2^24, or 2^53, is no float of the dtype, and
+    # rounded it was 2^24: the loss of that, 2^24 less log 2, rounded to the
+    # float below, where the exact loss rounds to 2^24 itself.
+    big = 2**24 if dtype == "float32" else 2**53
+    got = nn.log_cosh_loss(
+        mt.tensor([0.25], dtype=dtype), mt.tensor([big + 1], dtype="int64"), "none"
+    )
+    assert got.tolist() == [float(big)]
+    # An infinite prediction's loss is infinite, and a NaN's NaN.
+    got = nn.log_cosh_loss(
+        mt.tensor([math.inf, -math.inf, math.nan], dtype=dtype),
+        mt.tensor([big + 1, -big, 3], dtype="int64"),
+        "none",
+    ).tolist()
+    assert got[:2] == [math.inf, math.inf] and math.isnan(got[2])
 
 
 def test_python_integers():

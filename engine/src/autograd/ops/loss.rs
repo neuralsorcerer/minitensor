@@ -19,9 +19,9 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// Gradient function for the regression losses of the difference alone --
-/// squared, absolute, Huber and smooth-L1 -- each gradient the float nearest
-/// `s(p - t) g / n` in the predictions and its negative in the targets, `s`
-/// the term's slope and `n` the count for a mean; see
+/// squared, absolute, Huber, smooth-L1 and log-cosh -- each gradient the
+/// float nearest `s(p - t) g / n` in the predictions and its negative in the
+/// targets, `s` the term's slope and `n` the count for a mean; see
 /// [`crate::ops::loss::regression_gradients`].
 pub(crate) struct RegressionLossBackward {
     pub input_ids: [TensorId; 2],
@@ -64,45 +64,10 @@ impl GradientFunction for RegressionLossBackward {
             Slope::Absolute => "MAELossBackward",
             Slope::Huber(_) => "HuberLossBackward",
             Slope::Smooth(_) => "SmoothL1LossBackward",
+            Slope::Tanh => "LogCoshLossBackward",
         }
     }
 }
-/// Gradient function for log-cosh loss: `tanh(p - t)` in the predictions
-/// and its negative in the targets, over the count for a mean.
-pub struct LogCoshLossBackward {
-    pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] need a gradient.
-    pub input_requires_grad: [bool; 2],
-    pub reduction: String,
-    /// `p - t`, rounded once.
-    pub diff: Tensor,
-}
-
-impl GradientFunction for LogCoshLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        let mut base = crate::ops::activation::tanh(&self.diff)?;
-        if self.reduction == "mean" {
-            let count = self.diff.numel().max(1) as f64;
-            let scale = create_scalar_tensor(1.0 / count, base.dtype(), base.device())?;
-            base = arithmetic::mul(&base, &scale)?;
-        }
-        let pred_grad = arithmetic::mul(&base, grad_output)?;
-        if self.input_requires_grad[1] {
-            let target_grad = arithmetic::neg(&pred_grad)?;
-            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
-        }
-        if self.input_requires_grad[0] {
-            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        }
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        &self.input_ids
-    }
-}
-
 /// Gradient function for Cross Entropy loss
 pub struct CrossEntropyLossBackward {
     pub predictions_shape: Vec<usize>,

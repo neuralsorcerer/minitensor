@@ -28,6 +28,8 @@ pub(crate) enum Slope {
     Huber(f64),
     /// `d / beta` while `|d| <= beta` and `d`'s sign beyond: smooth-L1's.
     Smooth(f64),
+    /// `tanh(d)`, log-cosh's, which [`super::log_cosh`] takes.
+    Tanh,
 }
 
 /// The slope at one difference `d`: `scale d / q`, or where `scale` is zero
@@ -73,6 +75,7 @@ impl Slope {
                     flat(sign)
                 }
             }
+            Self::Tanh => unreachable!("log-cosh's slopes are taken apart"),
         }
     }
 }
@@ -80,9 +83,11 @@ impl Slope {
 /// Each `s(p - t) g / count`: the gradient of a regression loss
 /// in its predictions `p`, each target `high + low` exactly -- a float, or an
 /// integer as two -- and `g` one upstream gradient for every term or each
-/// term's own. Each is the value of `T` nearest its exact one; where an
-/// operand is not finite, it is the formula's. The products' errors are
-/// taken by fused multiply-adds where the CPU has them, the same to the bit.
+/// term's own. Each is the value of `T` nearest its exact one -- for
+/// log-cosh's `tanh`, wherever a bound settles which that is, as
+/// [`super::log_cosh`] says -- and where an operand is not finite, the
+/// formula's. The products' errors are taken by fused multiply-adds where
+/// the CPU has them, the same to the bit.
 pub(crate) fn regression_slopes<I: Element, T: Output>(
     predictions: &[I],
     (highs, lows): (&[I], Option<&[f64]>),
@@ -103,12 +108,10 @@ pub(crate) fn regression_slopes<I: Element, T: Output>(
                     &upstream[start..end]
                 },
             );
-            // For float64 alone: a float32 gradient is settled plainly where
-            // it can be, its products exact, and the rare float64 operands of
-            // a float32 loss -- an integer target's parts, or an incoming
-            // gradient of another dtype -- take the errors by splits, the same
-            // to the bit.
-            if fma && !T::PLAIN && std::mem::size_of::<I>() == std::mem::size_of::<T>() {
+            // Not for the rare float64 operands of a float32 loss -- an integer
+            // target's parts, or an incoming gradient of another dtype --
+            // which take the errors by splits, the same to the bit.
+            if fma && std::mem::size_of::<I>() == std::mem::size_of::<T>() {
                 // SAFETY: where `fma` the CPU has avx2 and fma, or the target a
                 // fused multiply-add of its own.
                 #[allow(unused_unsafe)]
@@ -123,7 +126,7 @@ pub(crate) fn regression_slopes<I: Element, T: Output>(
 
 /// The operands of a run of terms: predictions, targets and the upstream
 /// gradients, one for all or one a term.
-type Operands<'a, I> = (&'a [I], (&'a [I], Option<&'a [f64]>), &'a [I]);
+pub(super) type Operands<'a, I> = (&'a [I], (&'a [I], Option<&'a [f64]>), &'a [I]);
 
 /// [`slopes`] compiled for fused multiply-adds.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx2,fma"))]
@@ -142,6 +145,10 @@ fn slopes<I: Element, T: Output, const FMA: bool>(
     (slope, count): (Slope, f64),
     out: &mut [MaybeUninit<T>],
 ) {
+    if let Slope::Tanh = slope {
+        let operands = (x, (highs, lows), upstream);
+        return super::log_cosh::tanh_slopes::<I, T, FMA>(operands, count, out);
+    }
     // The divisors' reciprocals, once.
     let inverses = match slope {
         Slope::Smooth(beta) => (1.0 / beta, 1.0 / count),

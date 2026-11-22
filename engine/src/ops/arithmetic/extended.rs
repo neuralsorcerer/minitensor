@@ -275,15 +275,7 @@ fn exp_parts<const FMA: bool>(x: Pair) -> (f64, usize, Pair) {
         .add(Pair(-steps * LN_2_64.1, 0.0));
     let n = (steps / 64.0).floor();
     let j = (steps - 64.0 * n) as usize;
-    let s = r.0;
-    let tail = (((((s * (1.0 / 39_916_800.0) + 1.0 / 3_628_800.0) * s + 1.0 / 362_880.0) * s
-        + 1.0 / 40_320.0)
-        * s
-        + 1.0 / 5_040.0)
-        * s
-        + 1.0 / 720.0)
-        * s;
-    let mut q = Pair(tail, 0.0);
+    let mut q = Pair(series_tail(r.0), 0.0);
     for &c in SERIES.iter().rev() {
         q = q.add(c).mul::<FMA>(r);
     }
@@ -291,12 +283,35 @@ fn exp_parts<const FMA: bool>(x: Pair) -> (f64, usize, Pair) {
     (n, j, q.add(Pair(1.0, 0.0)).mul::<FMA>(r))
 }
 
+/// The terms of `expm1(s) / s - 1` past [`SERIES`], to the eleventh, in
+/// float64: below 2^-53 of the whole at `|s| = log 2 / 128`.
+#[inline(always)]
+fn series_tail(s: f64) -> f64 {
+    (((((s * (1.0 / 39_916_800.0) + 1.0 / 3_628_800.0) * s + 1.0 / 362_880.0) * s
+        + 1.0 / 40_320.0)
+        * s
+        + 1.0 / 5_040.0)
+        * s
+        + 1.0 / 720.0)
+        * s
+}
+
+/// `2^n` for a whole `n` of a normal float's exponent, from its bits:
+/// `n + 1.5 * 2^52` holds `n` in its low bits, which moved up into the
+/// exponent field make the power. A call to `powi`, and its loop of
+/// products, where it was taken so.
+#[inline(always)]
+fn two_to(n: f64) -> f64 {
+    let held = (n + 6_755_399_441_055_744.0).to_bits();
+    f64::from_bits(held.wrapping_add(1023) << 52)
+}
+
 /// `exp(x)` as a pair, for `x` from -708 to 708.
 #[inline(always)]
 pub(crate) fn exp<const FMA: bool>(x: Pair) -> Pair {
     let (n, j, e) = exp_parts::<FMA>(x);
-    let power = POWERS[j];
-    power.add(power.mul::<FMA>(e)).scaled(2f64.powi(n as i32))
+    let power = POWERS[j % 64];
+    power.add(power.mul::<FMA>(e)).scaled(two_to(n))
 }
 
 /// A float64 kept as `m 2^e`, `|m|` in `[1/2, 1)` and the exponent apart: for
@@ -442,17 +457,105 @@ pub(crate) fn exp_pair_any_cpu(x: Pair) -> Pair {
 
 /// `exp(x) - 1` as a pair, for `x` from -708 to 708: the reduced `e` itself
 /// where the reduction took nothing out, which keeps a small result's digits.
+///
+/// Without a branch, both formed and one chosen, so that callers can run
+/// several side by side.
 #[inline(always)]
 pub(crate) fn expm1<const FMA: bool>(x: Pair) -> Pair {
     let (n, j, e) = exp_parts::<FMA>(x);
-    if n == 0.0 && j == 0 {
-        return e;
-    }
-    let power = POWERS[j];
-    power
+    let power = POWERS[j % 64];
+    let whole = power
         .add(power.mul::<FMA>(e))
-        .scaled(2f64.powi(n as i32))
-        .add(Pair(-1.0, 0.0))
+        .scaled(two_to(n))
+        .add(Pair(-1.0, 0.0));
+    let reduced = (n == 0.0) & (j == 0);
+    Pair(
+        if reduced { e.0 } else { whole.0 },
+        if reduced { e.1 } else { whole.1 },
+    )
+}
+
+/// Lanes a [`Pairs`] holds.
+pub(crate) const WIDTH: usize = 8;
+
+/// [`WIDTH`] pairs side by side, their leading parts and their trailing
+/// ones: each operation [`Pair`]'s on every lane, in the same order and so
+/// to the same bits, laid out so that the lanes' chains run together. One
+/// pair's `expm1` is a chain of some two hundred operations, each waiting
+/// on the one before.
+#[derive(Clone, Copy)]
+pub(crate) struct Pairs(pub(crate) [f64; WIDTH], pub(crate) [f64; WIDTH]);
+
+impl Pairs {
+    /// The pairs `each(lane)`.
+    #[inline(always)]
+    pub(crate) fn of(each: impl Fn(usize) -> Pair) -> Self {
+        let (mut high, mut low) = ([0.0; WIDTH], [0.0; WIDTH]);
+        for lane in 0..WIDTH {
+            let pair = each(lane);
+            high[lane] = pair.0;
+            low[lane] = pair.1;
+        }
+        Pairs(high, low)
+    }
+
+    /// The pair at `lane`.
+    #[inline(always)]
+    pub(crate) fn lane(self, lane: usize) -> Pair {
+        Pair(self.0[lane], self.1[lane])
+    }
+
+    #[inline(always)]
+    pub(crate) fn add(self, other: Self) -> Self {
+        Self::of(|lane| self.lane(lane).add(other.lane(lane)))
+    }
+
+    #[inline(always)]
+    pub(crate) fn neg(self) -> Self {
+        Self::of(|lane| self.lane(lane).neg())
+    }
+
+    #[inline(always)]
+    pub(crate) fn mul<const FMA: bool>(self, other: Self) -> Self {
+        Self::of(|lane| self.lane(lane).mul::<FMA>(other.lane(lane)))
+    }
+
+    #[inline(always)]
+    pub(crate) fn div<const FMA: bool>(self, other: Self) -> Self {
+        Self::of(|lane| self.lane(lane).div::<FMA>(other.lane(lane)))
+    }
+}
+
+/// [`expm1`] on each of [`WIDTH`] lanes, to the same bits.
+#[inline(always)]
+pub(crate) fn expm1_lanes<const FMA: bool>(x: Pairs) -> Pairs {
+    let steps = x.0.map(|lead| (lead * (64.0 * LOG2_E.0)).round());
+    let lead = Pairs::of(|lane| {
+        let lead = steps[lane] * LN_2_64.0;
+        Pair(-lead, -error_of::<FMA>(steps[lane], LN_2_64.0, lead))
+    });
+    let r = x
+        .add(lead)
+        .add(Pairs::of(|lane| Pair(-steps[lane] * LN_2_64.1, 0.0)));
+    let n = steps.map(|steps| (steps / 64.0).floor());
+    let mut q = Pairs(r.0.map(series_tail), [0.0; WIDTH]);
+    for &c in SERIES.iter().rev() {
+        q = q.add(Pairs::of(|_| c)).mul::<FMA>(r);
+    }
+    let e = q.add(Pairs::of(|_| Pair(1.0, 0.0))).mul::<FMA>(r);
+    let j: [usize; WIDTH] = std::array::from_fn(|lane| (steps[lane] - 64.0 * n[lane]) as usize);
+    let power = Pairs::of(|lane| POWERS[j[lane] % 64]);
+    let grown = power.add(power.mul::<FMA>(e));
+    let whole = Pairs::of(|lane| grown.lane(lane).scaled(two_to(n[lane])))
+        .add(Pairs::of(|_| Pair(-1.0, 0.0)));
+    Pairs::of(|lane| {
+        let reduced = (n[lane] == 0.0) & (j[lane] == 0);
+        let (e, whole) = (e.lane(lane), whole.lane(lane));
+        Pair(
+            if reduced { e.0 } else { whole.0 },
+            if reduced { e.1 } else { whole.1 },
+        )
+    })
 }
 
 /// `log(1 + w)` as a pair, for `w` above -1 and below 2^1000.
