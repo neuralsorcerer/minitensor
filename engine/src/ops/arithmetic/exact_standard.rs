@@ -170,6 +170,17 @@ impl Standard {
         x: f64,
         affine: Option<(f64, f64)>,
     ) -> (f64, bool) {
+        self.settled_to::<f64, FMA>(x, affine)
+    }
+
+    /// [`Standard::settled`] for an output of `T`: the value of `T` nearest
+    /// the pair, and whether the bound settles it.
+    #[inline(always)]
+    pub(crate) fn settled_to<T: Output, const FMA: bool>(
+        &self,
+        x: f64,
+        affine: Option<(f64, f64)>,
+    ) -> (T, bool) {
         let (high, low, error) = deviation(x, self.centre, self.centre_rest, self.centre_bound);
         let (product, product_error) = split::<FMA>(high, self.scale);
         let parts = [
@@ -201,7 +212,7 @@ impl Standard {
         let signed = (value.abs() > rest.abs() + bound) | (bound == 0.0);
         match affine {
             None => {
-                let (settled, clear) = f64::settle_lanes(value, rest, bound);
+                let (settled, clear) = T::settle_lanes(value, rest, bound);
                 (settled, clear & comfortable(value))
             }
             Some((weight, bias)) => {
@@ -220,7 +231,7 @@ impl Standard {
                 // adding the zero `tail` could turn.
                 let direct = (value == 0.0) | (weight == 0.0);
                 let sum = if direct { head } else { sum };
-                let (settled, clear) = f64::settle_lanes(sum, sum_rest, bound);
+                let (settled, clear) = T::settle_lanes(sum, sum_rest, bound);
                 let ordinary = comfortable(value)
                     & comfortable(sum)
                     & comfortable(weight)
@@ -427,22 +438,34 @@ impl Exactly {
     /// The float64 nearest the standardized `x`, times `weight` plus `bias`
     /// with `affine`; `guess` is a float64 near it.
     pub(crate) fn value(&self, x: f64, affine: Option<(f64, f64)>, guess: f64) -> f64 {
+        self.value_to::<f64>(x, affine, guess)
+    }
+
+    /// The standardized value -- the root of `U / D` with its sign -- as the
+    /// value of `T` nearest it, and where `U` is zero the formula's zero: a
+    /// zero input keeps its sign, a value equal to a mean that is not zero
+    /// gives a positive zero.
+    fn standardized<T: Output>(&self, x: f64, square: Whole, negative: bool) -> T {
+        if square.is_zero() && !self.divisor.is_zero() {
+            return T::narrow(if x == 0.0 { x } else { 0.0 });
+        }
+        let magnitude = square
+            .total()
+            .quotient_root::<T>(self.divisor.clone().total())
+            .widen();
+        T::narrow(if negative { -magnitude } else { magnitude })
+    }
+
+    /// [`Exactly::value`] as the value of `T` nearest it.
+    ///
+    /// With an affine part the float64 nearest is found first. Narrowed, it
+    /// rounds again, which goes astray only where it is itself the halfway
+    /// point between two values of `T`; there the exact value's side of it
+    /// decides.
+    pub(crate) fn value_to<T: Output>(&self, x: f64, affine: Option<(f64, f64)>, guess: f64) -> T {
         let (square, negative) = self.numerator(x);
-        // The standardized value: the root of `U / D` with its sign, and
-        // where `U` is zero the formula's zero -- a zero input keeps its
-        // sign, a value equal to a mean that is not zero gives a positive
-        // zero.
-        let standardized = |square: Whole| -> f64 {
-            if square.is_zero() && !self.divisor.is_zero() {
-                return if x == 0.0 { x } else { 0.0 };
-            }
-            let magnitude = square
-                .total()
-                .quotient_root::<f64>(self.divisor.clone().total());
-            if negative { -magnitude } else { magnitude }
-        };
         let Some((weight, bias)) = affine else {
-            return standardized(square);
+            return self.standardized::<T>(x, square, negative);
         };
         // `w y + b` with `y = s sqrt(U / D)`: the gain `g = w s` and the
         // value `g sqrt(U / D) + b`.
@@ -450,7 +473,8 @@ impl Exactly {
         if gain == 0.0 || square.is_zero() || self.divisor.is_zero() {
             // A zero product, whose sum with the bias float64 holds exactly
             // and signs as the formula does, or a value that is not finite.
-            return standardized(square) * weight + bias;
+            let wide: f64 = self.standardized::<f64>(x, square, negative);
+            return T::narrow(wide * weight + bias);
         }
         let weighed = square.times(&Whole::float(gain).times(&Whole::float(gain)));
         let bias_exact = Whole::float(bias);
@@ -523,7 +547,7 @@ impl Exactly {
                 }
                 if next == top {
                     // Past the overflow line: the value rounds to infinity.
-                    return f64::INFINITY;
+                    return T::narrow(f64::INFINITY);
                 }
                 low = next;
                 step = step.saturating_mul(2);
@@ -543,7 +567,7 @@ impl Exactly {
             // going out as it does at the top.
             let line = Whole::float(-f64::MAX).plus(&Whole::float(-(2f64.powi(970))));
             if compare(&line) != Ordering::Greater {
-                return f64::NEG_INFINITY;
+                return T::narrow(f64::NEG_INFINITY);
             }
         }
         let mut answer = float(high);
@@ -561,81 +585,94 @@ impl Exactly {
             // positive one.
             answer = -0.0;
         }
-        answer
+        let narrow = T::narrow(answer);
+        if !answer.is_finite() || narrow.widen() == answer {
+            return narrow;
+        }
+        // Within half a float64's gap of `answer`.
+        let half = (answer.next_up() - answer)
+            .abs()
+            .max((answer - answer.next_down()).abs())
+            * 0.5;
+        let side =
+            |high: f64, low: f64| Some(compare(&Whole::float(high).plus(&Whole::float(low))));
+        T::split(answer, 0.0, half, side).unwrap_or(narrow)
     }
 }
 
-/// Each row of `input`, `norm` wide, standardized into `out` -- times
-/// `weight` plus `bias` where given -- each the float64 nearest the exact
-/// value; `normalized`, where given, takes the standardized values alone.
-/// A row holding a value that is not finite is left as `out` has it, and so
-/// is every row under an `eps` that is negative or not finite, which the
-/// layers refuse.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn standardized_rows(
-    input: &[f64],
-    norm: usize,
-    weight: Option<&[f64]>,
-    bias: Option<&[f64]>,
-    eps: f64,
-    centred: bool,
-    out: &mut [f64],
-    normalized: Option<&mut [f64]>,
+/// Each `norm`-wide row of `input` standardized into `out` -- less its mean
+/// where `centred`, then times the weight plus the bias where given, `period`
+/// rows of each and row `r` taking row `r % period` of them -- each the value
+/// of `T` nearest its exact value. A row holding a value that is not finite
+/// takes the formula in float64, which carries it as it comes. An `eps`
+/// that is negative or not finite, which the layers refuse, leaves `out` as
+/// it is.
+pub(crate) fn standardized_rows<I: Element, T: Output>(
+    input: &[I],
+    (norm, period): (usize, usize),
+    weight: Option<&[I]>,
+    bias: Option<&[I]>,
+    (eps, centred): (f64, bool),
+    out: &mut [T],
 ) {
     if norm == 0 || !(eps.is_finite() && eps >= 0.0) {
         return;
     }
+    let widen = |values: Option<&[I]>| -> Option<Vec<f64>> {
+        values.map(|values| values.iter().map(|&value| value.wide()).collect())
+    };
+    let (weight, bias) = (widen(weight), widen(bias));
     let shape = Row {
         norm,
-        weight,
-        bias,
+        weight: weight.as_deref(),
+        bias: bias.as_deref(),
+        period: period.max(1),
         constant: None,
         eps,
         centred,
     };
-    let per_task = crate::ops::map::outputs_per_task(norm * 8).max(1);
-    let run = |first: usize, out: &mut [f64], normalized: Option<&mut [f64]>| {
-        #[cfg(target_arch = "x86_64")]
-        if crate::ops::simd::simd_capabilities().avx2_fma {
-            // SAFETY: avx2 and fma were detected on this CPU.
-            return unsafe { rows_fma(input, &shape, first, out, normalized) };
+    // Rows a task takes, by their work: the plain pass a float32 row takes
+    // is light beside the pairs a float64 one does.
+    let per_task = crate::ops::map::outputs_per_task(if T::PLAIN { norm } else { norm * 8 }).max(1);
+    crate::ops::map::par_out_chunks(out, per_task * norm, &|start, out| {
+        // The row in float64, and its squares for the plain pass.
+        let mut scratch = vec![0.0f64; 2 * norm];
+        let (values, squares) = scratch.split_at_mut(norm);
+        let first = start / norm;
+        for (offset, cells) in out.chunks_mut(norm).enumerate() {
+            let index = first + offset;
+            let row = &input[index * norm..][..norm];
+            for (value, &x) in values.iter_mut().zip(row) {
+                *value = x.wide();
+            }
+            one_row(values, squares, &shape, index, cells);
         }
-        rows::<false>(input, &shape, first, out, normalized);
-    };
-    match normalized {
-        Some(normalized) => crate::ops::map::par_out_chunks2(
-            out,
-            normalized,
-            per_task * norm,
-            &|start, out, normalized| run(start / norm, out, Some(normalized)),
-        ),
-        None => crate::ops::map::par_out_chunks(out, per_task * norm, &|start, out| {
-            run(start / norm, out, None)
-        }),
-    }
+    });
 }
 
 /// What every row of a [`standardized_rows`] call shares.
 struct Row<'a> {
     norm: usize,
+    /// The weight and bias, `period` rows of `norm` each.
     weight: Option<&'a [f64]>,
     bias: Option<&'a [f64]>,
+    period: usize,
     /// One weight and bias for every value, in place of the two slices.
     constant: Option<(f64, f64)>,
     eps: f64,
     centred: bool,
 }
 
-/// Each of `values` less their mean, over the root of their variance plus
-/// `eps`, times `weight` plus `bias`, into `out`: each the float64 nearest
-/// its exact value. Values that are not all finite, or an `eps` that is
-/// negative or not finite, leave `out` as it is.
-pub(crate) fn standardized_slice(
+/// `values` less their mean, over the root of their variance plus `eps`,
+/// times `weight` plus `bias`, into `out`: each the value of `T` nearest its
+/// exact one, or the formula's for values that are not all finite. An `eps`
+/// that is negative or not finite leaves `out` as it is.
+pub(crate) fn standardized_slice<T: Output>(
     values: &[f64],
     eps: f64,
     weight: f64,
     bias: f64,
-    out: &mut [f64],
+    out: &mut [T],
 ) {
     // A weight of one and a bias of negative zero change no value at all;
     // a bias of positive zero still turns a negative zero positive.
@@ -644,6 +681,7 @@ pub(crate) fn standardized_slice(
         norm: values.len(),
         weight: None,
         bias: None,
+        period: 1,
         constant: (!identity).then_some((weight, bias)),
         eps,
         centred: true,
@@ -651,44 +689,8 @@ pub(crate) fn standardized_slice(
     if values.is_empty() || !(eps.is_finite() && eps >= 0.0) {
         return;
     }
-    #[cfg(target_arch = "x86_64")]
-    if crate::ops::simd::simd_capabilities().avx2_fma {
-        // SAFETY: avx2 and fma were detected on this CPU.
-        return unsafe { rows_fma(values, &shape, 0, out, None) };
-    }
-    rows::<false>(values, &shape, 0, out, None);
-}
-
-/// [`rows`] built with AVX2 and fused multiply-adds.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn rows_fma(
-    input: &[f64],
-    shape: &Row<'_>,
-    first: usize,
-    out: &mut [f64],
-    normalized: Option<&mut [f64]>,
-) {
-    rows::<true>(input, shape, first, out, normalized);
-}
-
-/// The rows from `first` that `out` holds, `normalized` beside it.
-#[inline(always)]
-fn rows<const FMA: bool>(
-    input: &[f64],
-    shape: &Row<'_>,
-    first: usize,
-    out: &mut [f64],
-    mut normalized: Option<&mut [f64]>,
-) {
-    let norm = shape.norm;
-    for (offset, out) in out.chunks_mut(norm).enumerate() {
-        let row = &input[(first + offset) * norm..][..norm];
-        let normalized = normalized
-            .as_deref_mut()
-            .map(|normalized| &mut normalized[offset * norm..][..norm]);
-        one_row::<FMA>(row, shape, out, normalized);
-    }
+    let mut squares = vec![0.0f64; values.len()];
+    one_row(values, &mut squares, &shape, 0, out);
 }
 
 impl Row<'_> {
@@ -697,61 +699,226 @@ impl Row<'_> {
         self.weight.is_some() || self.bias.is_some() || self.constant.is_some()
     }
 
-    /// The weight and bias of value `i` of a row: a missing one is the value
-    /// that changes nothing, a weight of one or a bias of negative zero.
+    /// The weight and bias of value `i` of row `row`: a missing one is the
+    /// value that changes nothing, a weight of one or a bias of negative
+    /// zero.
     #[inline(always)]
-    fn parameters(&self, i: usize) -> (f64, f64) {
+    fn parameters(&self, row: usize, i: usize) -> (f64, f64) {
         match self.constant {
             Some(constant) => constant,
-            None => (
-                self.weight.map_or(1.0, |weight| weight[i]),
-                self.bias.map_or(-0.0, |bias| bias[i]),
-            ),
+            None => {
+                let at = (row % self.period) * self.norm + i;
+                (
+                    self.weight.map_or(1.0, |weight| weight[at]),
+                    self.bias.map_or(-0.0, |bias| bias[at]),
+                )
+            }
         }
     }
 }
 
-/// One row: each output from its pair where the bound settles it, in loops
-/// with nothing to branch on, and then, only where one did not, the row's
-/// outputs again by [`exact_row`].
-#[inline(always)]
-fn one_row<const FMA: bool>(
+/// One row, row `index` of its call: for a float32 output first in plain
+/// float64 with a bound, then each output from its pair where the bound
+/// settles it, and only where one did not, the row in whole numbers.
+fn one_row<T: Output>(
     row: &[f64],
+    squares: &mut [f64],
     shape: &Row<'_>,
-    out: &mut [f64],
-    mut normalized: Option<&mut [f64]>,
+    index: usize,
+    out: &mut [T],
 ) {
     if !row.iter().all(|value| value.is_finite()) {
+        return formula_row(row, shape, index, out);
+    }
+    if T::PLAIN && plain_row_built(row, squares, shape, index, out) {
         return;
     }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { pair_row_fma(row, shape, index, out) };
+    }
+    pair_row::<T, false>(row, shape, index, out);
+}
+
+/// [`pair_row`] built with AVX2 and fused multiply-adds.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn pair_row_fma<T: Output>(row: &[f64], shape: &Row<'_>, index: usize, out: &mut [T]) {
+    pair_row::<T, true>(row, shape, index, out);
+}
+
+/// Each output from its pair where the bound settles it, and then, only
+/// where one did not, the row's outputs again by [`exact_row`].
+#[inline(always)]
+fn pair_row<T: Output, const FMA: bool>(row: &[f64], shape: &Row<'_>, index: usize, out: &mut [T]) {
     let Some(standard) = Standard::of::<FMA>(row, shape.eps, shape.centred) else {
-        return exact_row(row, shape, None, out, normalized);
+        return exact_row(row, shape, index, None, out);
     };
     let mut open = false;
-    if let Some(normalized) = normalized.as_deref_mut() {
-        for (cell, &x) in normalized.iter_mut().zip(row) {
-            let (value, clear) = standard.settled::<FMA>(x, None);
-            *cell = value;
-            open |= !clear;
-        }
-    }
     if shape.affine() {
         for (i, (cell, &x)) in out.iter_mut().zip(row).enumerate() {
-            let (value, clear) = standard.settled::<FMA>(x, Some(shape.parameters(i)));
+            let parameters = shape.parameters(index, i);
+            let (value, clear) = standard.settled_to::<T, FMA>(x, Some(parameters));
             *cell = value;
             open |= !clear;
         }
-    } else if let Some(normalized) = normalized.as_deref() {
-        out.copy_from_slice(normalized);
     } else {
         for (cell, &x) in out.iter_mut().zip(row) {
-            let (value, clear) = standard.settled::<FMA>(x, None);
+            let (value, clear) = standard.settled_to::<T, FMA>(x, None);
             *cell = value;
             open |= !clear;
         }
     }
     if open {
-        exact_row(row, shape, Some(&standard), out, normalized);
+        exact_row(row, shape, index, Some(&standard), out);
+    }
+}
+
+/// [`plain_row`] in the widest build the CPU runs: built with AVX2 it holds
+/// four float64s to a register, and Rust neither fuses nor reorders the
+/// arithmetic, so every value and bound is the same to the bit.
+fn plain_row_built<T: Output>(
+    row: &[f64],
+    squares: &mut [f64],
+    shape: &Row<'_>,
+    index: usize,
+    out: &mut [T],
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::simd::simd_capabilities().avx2_fma {
+        // SAFETY: avx2 and fma were detected on this CPU.
+        return unsafe { plain_row_avx2(row, squares, shape, index, out) };
+    }
+    plain_row(row, squares, shape, index, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn plain_row_avx2<T: Output>(
+    row: &[f64],
+    squares: &mut [f64],
+    shape: &Row<'_>,
+    index: usize,
+    out: &mut [T],
+) -> bool {
+    plain_row(row, squares, shape, index, out)
+}
+
+/// A row's outputs in plain float64 for a float32 output, each with a bound
+/// on how far its roundings can have moved it: whether every bound places
+/// its value clear of the halfway points around it.
+///
+/// The mean and the sum of squares are carried sums, each within a few
+/// units of its own last place, so that the deviation `d` is within
+/// `e + |d| 2^-53` of the exact one and the inverse root within `ρ` of it,
+/// relative to it. Then `z = d r` is within `B0 + B1 |d| + |z| 2^-53`,
+/// `p = z w` within `|w|` times that and `|p| 2^-53`, and `y = p + b` within
+/// that and `|y| 2^-53`. The margins cover the bounds' own roundings.
+#[inline(always)]
+fn plain_row<T: Output>(
+    row: &[f64],
+    squares: &mut [f64],
+    shape: &Row<'_>,
+    index: usize,
+    out: &mut [T],
+) -> bool {
+    let n = row.len() as f64;
+    let unit = 2f64.powi(-53);
+    let margin = 1.0 + 2f64.powi(-20);
+    let (mean, mean_error) = if shape.centred {
+        let (value, rest, bound, ordinary) =
+            <f64 as Element>::block(row).quotient_parts::<false>(n);
+        if !(ordinary || value == 0.0) {
+            return false;
+        }
+        (value, (rest.abs() + bound) * margin)
+    } else {
+        (0.0, 0.0)
+    };
+    // The squares, each rounded twice -- within `3 2^-53` of itself -- and
+    // their carried sum; off the exact mean they sum to `n (m - μ)^2` less.
+    for (square, &x) in squares.iter_mut().zip(row) {
+        let d = x - mean;
+        *square = d * d;
+    }
+    let total = <f64 as Element>::block(squares);
+    let (sum, _) = super::two_sum(total.sum, total.error);
+    let q = sum / n + shape.eps;
+    let q_error = (4.0 * unit * sum + total.slack + n * mean_error * mean_error) / n * margin
+        + 2.0 * unit * q;
+    if !(q > 0.0 && q.is_finite() && q_error <= q * 2f64.powi(-30)) {
+        return false;
+    }
+    let r = 1.0 / q.sqrt();
+    let relative = (0.5 * (q_error / q) * (1.0 + q_error / q) + 2.0 * unit) * margin;
+    let b0 = r * (1.0 + relative) * mean_error * margin;
+    let b1 = r * (relative + unit * (1.0 + relative)) * margin;
+    let statistics = (mean, r, b0, b1);
+    // A loop for each kind of parameter, so that none is tested or looked up
+    // through an option for each value.
+    let at = (index % shape.period) * shape.norm;
+    let len = row.len();
+    let weights = shape.weight.map(|values| &values[at..at + len]);
+    let biases = shape.bias.map(|values| &values[at..at + len]);
+    match (shape.constant, weights, biases) {
+        (Some((weight, bias)), _, _) => plain_outputs(row, statistics, |_| weight, |_| bias, out),
+        (None, Some(w), Some(b)) => plain_outputs(row, statistics, |i| w[i], |i| b[i], out),
+        (None, Some(w), None) => plain_outputs(row, statistics, |i| w[i], |_| -0.0, out),
+        (None, None, Some(b)) => plain_outputs(row, statistics, |_| 1.0, |i| b[i], out),
+        (None, None, None) => plain_outputs(row, statistics, |_| 1.0, |_| -0.0, out),
+    }
+}
+
+/// [`plain_row`]'s outputs from its statistics: `z = d r` is within
+/// `B0 + B1 |d| + |z| 2^-53` of the exact value, `p = z w` within `|w|` times
+/// that and `|p| 2^-53`, and `y = p + b` within that and `|y| 2^-53`; each
+/// settled where both ends of its interval round to the same value, so that
+/// every number between them does, rounding being monotonic. A zero's sign
+/// counts.
+#[inline(always)]
+fn plain_outputs<T: Output>(
+    row: &[f64],
+    (mean, r, b0, b1): (f64, f64, f64, f64),
+    weight: impl Fn(usize) -> f64,
+    bias: impl Fn(usize) -> f64,
+    out: &mut [T],
+) -> bool {
+    let unit = 2f64.powi(-53);
+    let margin = 1.0 + 2f64.powi(-20);
+    let mut clear = true;
+    for (i, (cell, &x)) in out.iter_mut().zip(row).enumerate() {
+        let (weight, bias) = (weight(i), bias(i));
+        let d = x - mean;
+        let z = d * r;
+        let p = z * weight;
+        let y = p + bias;
+        let bound = (weight.abs() * (b0 + b1 * d.abs() + unit * z.abs())
+            + unit * (p.abs() + y.abs()))
+            * margin
+            + 2f64.powi(-51) * y.abs();
+        let (low, high) = (T::narrow(y - bound), T::narrow(y + bound));
+        *cell = high;
+        clear &= low.widen().to_bits() == high.widen().to_bits();
+    }
+    clear
+}
+
+/// A row holding a value that is not finite: the formula in float64.
+#[cold]
+#[inline(never)]
+fn formula_row<T: Output>(row: &[f64], shape: &Row<'_>, index: usize, out: &mut [T]) {
+    let n = row.len() as f64;
+    let mean = if shape.centred {
+        row.iter().sum::<f64>() / n
+    } else {
+        0.0
+    };
+    let var = row.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / n;
+    let r = 1.0 / (var + shape.eps).sqrt();
+    for (i, (cell, &x)) in out.iter_mut().zip(row).enumerate() {
+        let (weight, bias) = shape.parameters(index, i);
+        *cell = T::narrow((x - mean) * r * weight + bias);
     }
 }
 
@@ -760,31 +927,32 @@ fn one_row<const FMA: bool>(
 /// pair, and the rest in whole numbers.
 #[cold]
 #[inline(never)]
-fn exact_row(
+fn exact_row<T: Output>(
     row: &[f64],
     shape: &Row<'_>,
+    index: usize,
     standard: Option<&Standard>,
-    out: &mut [f64],
-    mut normalized: Option<&mut [f64]>,
+    out: &mut [T],
 ) {
     let exactly = Exactly::of(row, shape.eps, shape.centred);
     for (i, &x) in row.iter().enumerate() {
-        let take = |affine: Option<(f64, f64)>, fallback: f64| -> f64 {
-            match standard.map(|standard| standard.settled::<false>(x, affine)) {
-                Some((value, true)) => value,
-                Some((value, false)) => exactly.value(x, affine, value),
-                None => exactly.value(x, affine, fallback),
-            }
+        let plain = match standard.map(|standard| standard.settled::<false>(x, None)) {
+            Some((value, true)) => value,
+            Some((value, false)) => exactly.value(x, None, value),
+            None => exactly.value(x, None, 0.0),
         };
-        let plain = take(None, 0.0);
-        if let Some(normalized) = normalized.as_deref_mut() {
-            normalized[i] = plain;
+        if !shape.affine() {
+            out[i] = match standard.map(|standard| standard.settled_to::<T, false>(x, None)) {
+                Some((value, true)) => value,
+                _ => exactly.value_to::<T>(x, None, plain),
+            };
+            continue;
         }
-        out[i] = if shape.affine() {
-            let (weight, bias) = shape.parameters(i);
-            take(Some((weight, bias)), plain * weight + bias)
-        } else {
-            plain
+        let (weight, bias) = shape.parameters(index, i);
+        let affine = Some((weight, bias));
+        out[i] = match standard.map(|standard| standard.settled_to::<T, false>(x, affine)) {
+            Some((value, true)) => value,
+            _ => exactly.value_to::<T>(x, affine, plain * weight + bias),
         };
     }
 }
@@ -874,15 +1042,13 @@ mod tests {
         let weights = weight.map(|weight| vec![weight; n]);
         let biases = bias.map(|bias| vec![bias; n]);
         let mut out = vec![f64::NAN; n];
-        standardized_rows(
+        standardized_rows::<f64, f64>(
             row,
-            n,
+            (n, 1),
             weights.as_deref(),
             biases.as_deref(),
-            eps,
-            centred,
+            (eps, centred),
             &mut out,
-            None,
         );
         out
     }

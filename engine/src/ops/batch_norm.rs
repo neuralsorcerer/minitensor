@@ -309,7 +309,7 @@ fn values<T: NormFloat>(tensor: &Tensor, what: &str) -> Result<Vec<f64>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn typed<T: NormFloat>(
+fn typed<T: NormFloat + Output>(
     input: &Tensor,
     running_mean: Option<&mut Tensor>,
     running_var: Option<&mut Tensor>,
@@ -380,14 +380,14 @@ fn typed<T: NormFloat>(
             *rm = Tensor::new(
                 Arc::new(T::into_data(blend(&old_mean, &mean, 1.0), rm.device())),
                 rm.shape().clone(),
-                T::DTYPE,
+                <T as NormFloat>::DTYPE,
                 rm.device(),
                 false,
             );
             *rv = Tensor::new(
                 Arc::new(T::into_data(blend(&old_var, &var, correction), rv.device())),
                 rv.shape().clone(),
-                T::DTYPE,
+                <T as NormFloat>::DTYPE,
                 rv.device(),
                 false,
             );
@@ -443,24 +443,19 @@ fn typed<T: NormFloat>(
         });
     }
 
-    if T::DTYPE == DataType::Float64 && stats.from_batch {
-        // Each output again as the float64 nearest its exact value, where
-        // each step above rounded in float64 and most came out an ulp or
-        // more off: each channel's values gathered, standardized over
-        // themselves with its weight and bias, and set back.
-        let channel = |c: usize| -> Vec<f64> {
+    if stats.from_batch {
+        // Each output again as the value nearest its exact one, where each
+        // step above rounded in float64 and a float64 output came out an ulp
+        // or more off, and a bias that all but cancels the product took the
+        // float32 one's digits: each channel's values gathered, standardized
+        // over themselves with its weight and bias, and set back.
+        let channel = |c: usize| -> Vec<T> {
             let mut values = Vec::with_capacity(count);
             for image in 0..layout.images {
                 let at = (image * layout.channels + c) * layout.spatial;
                 values.extend(x[at..at + layout.spatial].iter().map(|&v| v.to_f64()));
             }
-            // What the formula gave, which a channel holding a value that is
-            // not finite keeps.
-            let mut exact = Vec::with_capacity(count);
-            for image in 0..layout.images {
-                let at = (image * layout.channels + c) * layout.spatial;
-                exact.extend(out[at..at + layout.spatial].iter().map(|&v| v.to_f64()));
-            }
+            let mut exact = vec![T::from_f64(0.0); count];
             crate::ops::arithmetic::exact_sum::standardized_slice(
                 &values, eps, gain[c], shift[c], &mut exact,
             );
@@ -468,12 +463,10 @@ fn typed<T: NormFloat>(
         };
         let exact = crate::ops::map::par_map_indexed(layout.channels, &channel);
         for (c, values) in exact.iter().enumerate() {
-            let mut values = values.iter();
             for image in 0..layout.images {
                 let at = (image * layout.channels + c) * layout.spatial;
-                for (o, &v) in out[at..at + layout.spatial].iter_mut().zip(&mut values) {
-                    *o = T::from_f64(v);
-                }
+                let from = &values[image * layout.spatial..][..layout.spatial];
+                out[at..at + layout.spatial].copy_from_slice(from);
             }
         }
     }
@@ -485,7 +478,7 @@ fn typed<T: NormFloat>(
     let output = Tensor::new(
         Arc::new(T::into_data(out, device)),
         input.shape().clone(),
-        T::DTYPE,
+        <T as NormFloat>::DTYPE,
         device,
         requires_grad,
     );

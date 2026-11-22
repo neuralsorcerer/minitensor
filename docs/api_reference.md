@@ -3369,11 +3369,13 @@ normalization: rescales by the RMS over the trailing `normalized_shape`
 dimensions and applies an optional gain. Unlike `layer_norm` there is no mean
 subtraction and no bias.
 
-For float64, each output of `layer_norm`, `rms_norm` and `batch_norm` with
-batch statistics -- the standardized value, times the weight and plus the bias
-where given -- is the float nearest its exact value, rounded once; so is each
-standardized value of `group_norm` and `instance_norm`, whose weight and bias
-add one rounding after it. A zero output is signed as the formula signs it: a
+Each output of `layer_norm`, `rms_norm` and `batch_norm` with batch
+statistics -- the standardized value, times the weight and plus the bias where
+given -- is in either dtype the float nearest its exact value, rounded once,
+however nearly the bias cancels the product; so is each standardized value of
+`group_norm` and `instance_norm`, whose weight and bias add one rounding after
+it. A float32 output is taken in float64 with a bound on its roundings, and
+where the bound leaves it near a halfway point, as the float64 ones are. A zero output is signed as the formula signs it: a
 zero input keeps its sign, as `x - 0` and `x * r` do, a value equal to a mean
 that is not zero gives a positive zero, and `w * y + b` signs a zero product as
 float arithmetic does. A missing weight or bias changes nothing, not even the

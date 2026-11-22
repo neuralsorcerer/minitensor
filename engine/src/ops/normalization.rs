@@ -8,7 +8,6 @@ use crate::autograd::with_grad_fn;
 use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
-use crate::ops::map::{PAR_THRESHOLD, outputs_per_task, par_out_chunks};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -272,203 +271,43 @@ pub fn batch_norm(
     Ok(output)
 }
 
-/// A row's sum of `term(v)`, in eight f64 lanes combined pairwise at the end.
-///
-/// One accumulator is a chain of dependent adds the compiler may not reorder
-/// -- an add's latency per element, the bulk of a 95us layer_norm forward over
-/// 64 rows of 512 -- and eight independent ones vectorise, with an error bound
-/// no worse.
-#[inline(always)]
-fn lane_sum<T: Copy>(row: &[T], term: impl Fn(T) -> f64) -> f64 {
-    lane_sum_zip(row, row, |v, _| term(v))
-}
-
-/// [`lane_sum`] of `term(a[i], b[i])`, for a sum whose terms come from two
-/// rows of the same length.
-#[inline(always)]
-fn lane_sum_zip<A: Copy, B: Copy>(a: &[A], b: &[B], term: impl Fn(A, B) -> f64) -> f64 {
-    let b = &b[..a.len()];
-    let mut acc = [0.0f64; 8];
-    let (a_blocks, a_rest) = a.as_chunks::<8>();
-    let (b_blocks, b_rest) = b.as_chunks::<8>();
-    for (a_block, b_block) in a_blocks.iter().zip(b_blocks) {
-        for ((lane, &x), &y) in acc.iter_mut().zip(a_block).zip(b_block) {
-            *lane += term(x, y);
-        }
+/// Each `norm`-wide row of `input` standardized -- less its mean where
+/// `centred` -- and times `weight` plus `bias` where given, each the value
+/// nearest its exact one, as a tensor's data.
+fn standardized_data<T>(
+    input: &Tensor,
+    norm: usize,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    eps: f64,
+    centred: bool,
+) -> Result<TensorData>
+where
+    T: crate::ops::arithmetic::exact_sum::Element
+        + crate::ops::arithmetic::exact_sum::Output
+        + crate::ops::batch_norm::NormFloat,
+{
+    fn slice<T: crate::ops::batch_norm::NormFloat>(tensor: &Tensor) -> Result<&[T]> {
+        T::slice(tensor.data()).ok_or_else(|| {
+            MinitensorError::internal_error("normalization: an operand of the wrong dtype")
+        })
     }
-    for ((lane, &x), &y) in acc.iter_mut().zip(a_rest).zip(b_rest) {
-        *lane += term(x, y);
-    }
-    ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
+    let src = slice(input)?;
+    let (w, b) = (weight.map(slice).transpose()?, bias.map(slice).transpose()?);
+    let mut out = vec![T::narrow(0.0); input.numel()];
+    crate::ops::arithmetic::exact_sum::standardized_rows::<T, T>(
+        src,
+        (norm, 1),
+        w,
+        b,
+        (eps, centred),
+        &mut out,
+    );
+    Ok(<T as crate::ops::batch_norm::NormFloat>::into_data(
+        out,
+        input.device(),
+    ))
 }
-
-/// Rows per task for a normalization over rows of `norm` elements.
-///
-/// All of them below [`PAR_THRESHOLD`] elements: a task of
-/// [`outputs_per_task`]'s size is about as much work as waking a thread
-/// for it, so splitting a tensor only a few tasks wide costs more than it
-/// saves. Measured on a float32 `layer_norm` over 512 wide rows, 33 rows --
-/// the first count that split -- took 116us against 39 for 32 on one core.
-fn rows_per_task(rows: usize, norm: usize) -> usize {
-    if rows.saturating_mul(norm) < PAR_THRESHOLD {
-        rows
-    } else {
-        outputs_per_task(norm)
-    }
-}
-
-/// Fused LayerNorm forward, one row at a time.
-///
-/// The composed form this replaces cost six full-size tensor operations --
-/// `mean`, `sub`, `mul`, `mean`, `sqrt`, `div`, then two more for weight and
-/// bias -- each allocating and traversing a tensor the size of the input, and
-/// three of them going through the *broadcasting* path because the statistics
-/// have a trailing 1. On a 32x128x512 float32 tensor that measured 18.4ms
-/// against 0.47ms for a single `mean` over the same data.
-///
-/// The normalized dimensions are trailing and contiguous, so the input is just
-/// `[rows, norm]` in memory and each row can be reduced and written while it is
-/// still in L1. The three passes over a row cost far less than one pass over
-/// the whole tensor. Nothing else is written: the backward takes each row's
-/// statistics again from the input.
-macro_rules! layer_norm_rows {
-    ($name:ident, $ty:ty) => {
-        fn $name(
-            input: &[$ty],
-            norm: usize,
-            weight: Option<&[$ty]>,
-            bias: Option<&[$ty]>,
-            eps: f64,
-            out: &mut [$ty],
-        ) {
-            // Normalizing over an empty axis: every buffer is empty and
-            // `par_chunks_mut(0)` would panic. The shape still has to survive,
-            // which the caller handles.
-            if norm == 0 {
-                return;
-            }
-            let recip = 1.0 / norm as f64;
-
-            /// Mean and `1/sqrt(var + eps)` for one row.
-            ///
-            /// Two reduction passes rather than one. `E[x^2] - E[x]^2` would
-            /// halve the traffic and lose every significant digit when the mean
-            /// dominates the spread, which is exactly the regime a
-            /// normalization layer sits in. Each pass is a [`lane_sum`].
-            #[inline(always)]
-            fn stats(row: &[$ty], recip: f64, eps: f64) -> (f64, f64) {
-                let mean = lane_sum(row, |v| v as f64) * recip;
-                let sq = lane_sum(row, |v| {
-                    let d = v as f64 - mean;
-                    d * d
-                });
-                (mean, 1.0 / (sq * recip + eps).sqrt())
-            }
-
-            let rows = out.len() / norm;
-            par_out_chunks(out, rows_per_task(rows, norm) * norm, &|start, out| {
-                let first_row = start / norm;
-                #[cfg(target_arch = "x86_64")]
-                if crate::ops::simd::simd_capabilities().avx2_fma {
-                    // SAFETY: avx2 and fma were detected on this CPU.
-                    return unsafe {
-                        task_avx2(input, norm, recip, eps, weight, bias, first_row, out)
-                    };
-                }
-                task(input, norm, recip, eps, weight, bias, first_row, out)
-            });
-
-            /// [`task`] built with AVX2. The row works in float64, which the
-            /// baseline holds two to a register; this holds four. Rust neither
-            /// fuses nor reorders the arithmetic, so the answer is the same to
-            /// the bit; on its own it was worth about 10% on one core.
-            #[cfg(target_arch = "x86_64")]
-            #[target_feature(enable = "avx2,fma")]
-            #[allow(clippy::too_many_arguments)]
-            fn task_avx2(
-                input: &[$ty],
-                norm: usize,
-                recip: f64,
-                eps: f64,
-                weight: Option<&[$ty]>,
-                bias: Option<&[$ty]>,
-                first_row: usize,
-                out: &mut [$ty],
-            ) {
-                task(input, norm, recip, eps, weight, bias, first_row, out)
-            }
-
-            /// The rows from `first_row` that one task of the split writes.
-            #[inline(always)]
-            #[allow(clippy::too_many_arguments)]
-            fn task(
-                input: &[$ty],
-                norm: usize,
-                recip: f64,
-                eps: f64,
-                weight: Option<&[$ty]>,
-                bias: Option<&[$ty]>,
-                first_row: usize,
-                out: &mut [$ty],
-            ) {
-                for (r, o) in out.chunks_mut(norm).enumerate() {
-                    let row = &input[(first_row + r) * norm..][..norm];
-                    let (mean, scale) = stats(row, recip, eps);
-                    // Every combination of parameters is its own loop, so the
-                    // body has nothing to test and nothing to bounds-check.
-                    // Indexing the parameters through options inside one loop
-                    // kept it scalar, at 4ns an element: a `[4096, 1024]`
-                    // float32 forward with trained parameters took 19.8ms on
-                    // one core and takes 11.8, and 8.2ms on four and takes 5.8,
-                    // with every output the same to the bit.
-                    match (weight, bias) {
-                        (Some(w), Some(b)) => affine_row::<true, true>(row, mean, scale, w, b, o),
-                        (Some(w), None) => affine_row::<true, false>(row, mean, scale, w, &[], o),
-                        (None, Some(b)) => affine_row::<false, true>(row, mean, scale, &[], b, o),
-                        (None, None) => affine_row::<false, false>(row, mean, scale, &[], &[], o),
-                    }
-                }
-            }
-
-            /// `out = (row - mean) * scale`, then times `weight` and plus
-            /// `bias` where they are present.
-            ///
-            /// The affine parameters are applied in f64 and rounded once,
-            /// deliberately: rounding `z` to the element type first and scaling
-            /// the rounded value costs a second rounding on every element, in
-            /// the one layer whose whole job is numerical stability.
-            #[inline(always)]
-            fn affine_row<const W: bool, const B: bool>(
-                row: &[$ty],
-                mean: f64,
-                scale: f64,
-                weight: &[$ty],
-                bias: &[$ty],
-                out: &mut [$ty],
-            ) {
-                let len = row.len();
-                let (weight, bias) = (
-                    &weight[..if W { len } else { 0 }],
-                    &bias[..if B { len } else { 0 }],
-                );
-                let out = &mut out[..len];
-                for i in 0..len {
-                    let mut y = (row[i] as f64 - mean) * scale;
-                    if W {
-                        y *= weight[i] as f64;
-                    }
-                    if B {
-                        y += bias[i] as f64;
-                    }
-                    out[i] = y as $ty;
-                }
-            }
-        }
-    };
-}
-
-layer_norm_rows!(layer_norm_rows_f32, f32);
-layer_norm_rows!(layer_norm_rows_f64, f64);
 
 /// Apply layer normalization to the input tensor.
 pub fn layer_norm(
@@ -555,40 +394,16 @@ pub fn layer_norm(
     }
 
     let norm: usize = normalized_shape.iter().product();
-    let total = input.numel();
 
     let requires_grad = crate::autograd::is_grad_enabled()
         && (input.requires_grad()
             || weight.map(|w| w.requires_grad()).unwrap_or(false)
             || bias.map(|b| b.requires_grad()).unwrap_or(false));
 
+    // Each output the value nearest its exact one; see `standardized_rows`.
     let output_data = match input.dtype() {
-        DataType::Float32 => {
-            let src = input.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-            })?;
-            let w = weight.and_then(|t| t.data().as_f32_slice());
-            let b = bias.and_then(|t| t.data().as_f32_slice());
-            let mut o = vec![0f32; total];
-            layer_norm_rows_f32(src, norm, w, b, eps, &mut o);
-            TensorData::from_vec::<f32>(o, DataType::Float32, input.device())
-        }
-        _ => {
-            let src = input.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-            })?;
-            let w = weight.and_then(|t| t.data().as_f64_slice());
-            let b = bias.and_then(|t| t.data().as_f64_slice());
-            let mut o = vec![0f64; total];
-            layer_norm_rows_f64(src, norm, w, b, eps, &mut o);
-            // Each output again as the float64 nearest its exact value, where
-            // each step above rounded in float64 and most came out an ulp or
-            // more off.
-            crate::ops::arithmetic::exact_sum::standardized_rows(
-                src, norm, w, b, eps, true, &mut o, None,
-            );
-            TensorData::from_vec::<f64>(o, DataType::Float64, input.device())
-        }
+        DataType::Float32 => standardized_data::<f32>(input, norm, weight, bias, eps, true)?,
+        _ => standardized_data::<f64>(input, norm, weight, bias, eps, true)?,
     };
 
     let output = Tensor::new(
@@ -643,59 +458,9 @@ pub fn layer_norm(
 ///
 /// It is the normalization used by LLaMA, Mistral, Gemma, Qwen and most modern
 /// large language models: cheaper than LayerNorm (no mean/variance, no re-
-/// centering) while matching or improving training stability. Built by composing
-/// autograd-tracked primitives, so gradients — including the coupling of the
-/// input through the RMS denominator — flow automatically.
-/// Fused RMSNorm forward, one row at a time.
-///
-/// Same shape as [`layer_norm_rows`] and for the same reason: the composed form
-/// cost a full-size `mul`, a reduction, a broadcast `add`, an `rsqrt` and two
-/// more full-size broadcast multiplies. On a 32x128x512 float32 tensor that
-/// measured 21.6ms, against 0.47ms for a single `mean` over the same data.
-///
-/// Only one reduction pass here -- RMSNorm has no mean to subtract, so there is
-/// no cancellation to avoid and `sum(x^2)` is the whole statistic. It still
-/// accumulates in float64.
-macro_rules! rms_norm_rows {
-    ($name:ident, $ty:ty) => {
-        fn $name(input: &[$ty], norm: usize, weight: Option<&[$ty]>, eps: f64, out: &mut [$ty]) {
-            if norm == 0 {
-                return;
-            }
-            let recip = 1.0 / norm as f64;
-            let rows = out.len() / norm;
-            par_out_chunks(out, rows_per_task(rows, norm) * norm, &|start, out| {
-                let first_row = start / norm;
-                for (r, o) in out.chunks_mut(norm).enumerate() {
-                    let row = &input[(first_row + r) * norm..][..norm];
-                    let sq = lane_sum(row, |v| {
-                        let d = v as f64;
-                        d * d
-                    });
-                    let scale = 1.0 / (sq * recip + eps).sqrt();
-                    // A loop for each case, as in `layer_norm`: the weight
-                    // tested and indexed per element kept this scalar.
-                    match weight {
-                        Some(w) => {
-                            for ((o, &x), &w) in o.iter_mut().zip(row).zip(&w[..norm]) {
-                                *o = (x as f64 * scale * w as f64) as $ty;
-                            }
-                        }
-                        None => {
-                            for (o, &x) in o.iter_mut().zip(row) {
-                                *o = (x as f64 * scale) as $ty;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    };
-}
-
-rms_norm_rows!(rms_norm_rows_f32, f32);
-rms_norm_rows!(rms_norm_rows_f64, f64);
-
+/// centering) while matching or improving training stability. Each output is
+/// the value nearest its exact one, as `layer_norm`'s is, and its gradient
+/// comes from [`RmsNormBackward`].
 pub fn rms_norm(
     input: &Tensor,
     normalized_shape: &[usize],
@@ -755,32 +520,10 @@ pub fn rms_norm(
     }
 
     let norm: usize = normalized_shape.iter().product();
-    let total = input.numel();
 
     let output_data = match input.dtype() {
-        DataType::Float32 => {
-            let src = input.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-            })?;
-            let w = weight.and_then(|t| t.data().as_f32_slice());
-            let mut o = vec![0f32; total];
-            rms_norm_rows_f32(src, norm, w, eps, &mut o);
-            TensorData::from_vec::<f32>(o, DataType::Float32, input.device())
-        }
-        _ => {
-            let src = input.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-            })?;
-            let w = weight.and_then(|t| t.data().as_f64_slice());
-            let mut o = vec![0f64; total];
-            rms_norm_rows_f64(src, norm, w, eps, &mut o);
-            // Each output again as the float64 nearest its exact value; see
-            // `layer_norm`.
-            crate::ops::arithmetic::exact_sum::standardized_rows(
-                src, norm, w, None, eps, false, &mut o, None,
-            );
-            TensorData::from_vec::<f64>(o, DataType::Float64, input.device())
-        }
+        DataType::Float32 => standardized_data::<f32>(input, norm, weight, None, eps, false)?,
+        _ => standardized_data::<f64>(input, norm, weight, None, eps, false)?,
     };
 
     let requires_grad = input.requires_grad() || weight.map(|w| w.requires_grad()).unwrap_or(false);
