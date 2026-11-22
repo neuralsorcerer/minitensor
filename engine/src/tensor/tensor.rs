@@ -3193,7 +3193,14 @@ impl Tensor {
         if self.dtype == dtype {
             return Ok(self.clone());
         }
+        self.converted(dtype)
+    }
 
+    /// [`Self::astype`] to a dtype other than this tensor's: a pass over
+    /// every element, out of line, so that only the test of the dtype is
+    /// copied into each of the many places that convert.
+    #[inline(never)]
+    fn converted(&self, dtype: DataType) -> Result<Self> {
         // Non-contiguous storage (e.g. `expand` views) must be materialized
         // first so the stored element count matches the logical shape. The
         // previous zip-based fill silently zero-padded the tail in that case.
