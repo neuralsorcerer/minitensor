@@ -390,6 +390,39 @@ pub(crate) fn exp_pair<const FMA: bool>(x: Pair) -> Pair {
     }
 }
 
+/// [`ln_1p`] as [`exp_pair`] is `exp`: one copy for each build of its
+/// callers rather than one at each of their call sites.
+#[inline(always)]
+pub(crate) fn ln_1p_pair<const FMA: bool>(w: Pair) -> Pair {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "fma")]
+        #[inline(never)]
+        fn fused(w: Pair) -> Pair {
+            ln_1p::<true>(w)
+        }
+        #[inline(never)]
+        fn plain(w: Pair) -> Pair {
+            ln_1p::<false>(w)
+        }
+        if FMA {
+            // SAFETY: a build with `FMA` runs only where the CPU has the fused
+            // multiply-add; see [`exp_pair`].
+            unsafe { fused(w) }
+        } else {
+            plain(w)
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        #[inline(never)]
+        fn any<const FMA: bool>(w: Pair) -> Pair {
+            ln_1p::<FMA>(w)
+        }
+        any::<FMA>(w)
+    }
+}
+
 /// [`exp_pair`] for a caller built for neither CPU in particular: the fused
 /// copy where this one has the fused multiply-add.
 pub(crate) fn exp_pair_any_cpu(x: Pair) -> Pair {

@@ -13,8 +13,8 @@
 //! is already differentiated -- two places to be wrong instead of one, for a
 //! forward that costs a few passes over a batch-sized tensor.
 //!
-//! The cosine is the exception. Rounded once, it is one kernel rather than a
-//! composition, and records its own backward.
+//! The cosine is the exception, and the Poisson terms: rounded once, each is
+//! one kernel rather than a composition, and records its own backward.
 
 use std::sync::Arc;
 
@@ -368,7 +368,9 @@ pub fn soft_margin_loss(input: &Tensor, target: &Tensor, reduction: &str) -> Res
 /// `log_input` says whether `input` is the log of the rate (the usual case,
 /// and the numerically kind one) or the rate itself. `full` adds the Stirling
 /// term that makes the result an actual log-likelihood rather than one short
-/// of a constant; it changes no gradient, since it depends only on `target`.
+/// of a constant; it changes no gradient in `input`, since it depends only on
+/// `target`. Each term and its gradients are rounded once; see
+/// [`PoissonBackward`].
 pub fn poisson_nll_loss(
     input: &Tensor,
     target: &Tensor,
@@ -388,23 +390,301 @@ pub fn poisson_nll_loss(
 
     ensure_counts(target)?;
 
-    let mut values = if log_input {
-        // exp(input) - target * input
-        sub(&crate::ops::activation::exp(input)?, &mul(target, input)?)?
-    } else {
-        // input - target * log(input + eps)
-        let shifted = add(input, &scalar(eps, input)?)?;
-        sub(
-            input,
-            &mul(target, &crate::ops::activation::log(&shifted)?)?,
-        )?
-    };
+    let mut values = poisson_terms(input, target, log_input, eps)?;
 
     if full {
         values = add(&values, &stirling_correction(target)?)?;
     }
 
     reduce_loss(values, reduction)
+}
+
+/// Each Poisson term, `exp(x) - t x` for a log-rate and `x - t log(x + eps)`
+/// for a rate, rounded once from float64 pairs; with its gradient,
+/// [`PoissonBackward`].
+fn poisson_terms(input: &Tensor, target: &Tensor, log_input: bool, eps: f64) -> Result<Tensor> {
+    let needs_grad = manual_backward_needed(&[input, target]);
+    let (x, t) = (widened(input)?, widened(target)?);
+    let (values, counts) = (f64_values(&x)?, f64_values(&t)?);
+    let mut out = vec![0.0f64; values.len()];
+    let wide = input.dtype() == DataType::Float64;
+    poisson_pass(values, counts, None, (log_input, eps, wide), &mut out);
+    let terms = narrowed(out, input)?;
+    if !needs_grad {
+        return Ok(terms);
+    }
+    let grad_fn = Arc::new(PoissonBackward {
+        input: x.detach(),
+        target: t.detach(),
+        log_input,
+        eps,
+        input_ids: [input.id(), target.id()],
+        input_requires_grad: [input.requires_grad(), target.requires_grad()],
+    });
+    with_grad_fn(terms.requires_grad_(true), grad_fn)
+}
+
+/// The gradient of [`poisson_terms`]: in the input `g` times `exp(x) - t`, or
+/// `1 - t / (x + eps)`, each formed where its two terms cancel -- near the
+/// fit, `exp(x)` or `x` beside `t` -- without taking either rounded first,
+/// and in the target `-g x` or `-g log(x + eps)`, the logarithm a pair;
+/// each rounded once.
+pub struct PoissonBackward {
+    /// The operands, widened to float64.
+    input: Tensor,
+    target: Tensor,
+    log_input: bool,
+    eps: f64,
+    input_ids: [crate::autograd::TensorId; 2],
+    input_requires_grad: [bool; 2],
+}
+
+impl crate::autograd::GradientFunction for PoissonBackward {
+    fn backward(
+        &self,
+        grad_output: &Tensor,
+    ) -> Result<rustc_hash::FxHashMap<crate::autograd::TensorId, Tensor>> {
+        let mut gradients = rustc_hash::FxHashMap::default();
+        let flowing = widened(grad_output)?;
+        let (x, t, g) = (
+            f64_values(&self.input)?,
+            f64_values(&self.target)?,
+            f64_values(&flowing)?,
+        );
+        let like = grad_output;
+        let wide = like.dtype() == DataType::Float64;
+        if self.input_requires_grad[0] {
+            let mut out = vec![0.0f64; x.len()];
+            poisson_pass(
+                x,
+                t,
+                Some((g, false)),
+                (self.log_input, self.eps, wide),
+                &mut out,
+            );
+            let grad = narrowed(out, like)?;
+            crate::autograd::accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let mut out = vec![0.0f64; x.len()];
+            poisson_pass(
+                x,
+                t,
+                Some((g, true)),
+                (self.log_input, self.eps, wide),
+                &mut out,
+            );
+            let grad = narrowed(out, like)?;
+            crate::autograd::accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[crate::autograd::TensorId] {
+        &self.input_ids
+    }
+}
+
+/// `tensor` in float64, contiguous.
+fn widened(tensor: &Tensor) -> Result<Tensor> {
+    tensor.astype(DataType::Float64)?.contiguous()
+}
+
+fn f64_values(tensor: &Tensor) -> Result<&[f64]> {
+    tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("poisson_nll_loss: a float64 operand"))
+}
+
+/// `values` as a tensor of `like`'s shape and dtype, rounded once.
+fn narrowed(values: Vec<f64>, like: &Tensor) -> Result<Tensor> {
+    let data = crate::tensor::TensorData::from_vec_f64(values, like.device());
+    let wide = Tensor::new(
+        Arc::new(data),
+        like.shape().clone(),
+        DataType::Float64,
+        like.device(),
+        false,
+    );
+    wide.astype(like.dtype())
+}
+
+/// The Poisson terms of `x` and `t` into `out`, or with `g` their slopes
+/// times it: in `x`, or with the flag in `t`. `wide` asks for float64's
+/// digits, where float32's are wanted otherwise: float64 arithmetic gives
+/// either everywhere but where two terms all but cancel, and there a pair
+/// takes over, for float32 only once the cancellation reaches 2^-20.
+fn poisson_pass(
+    x: &[f64],
+    t: &[f64],
+    g: Option<(&[f64], bool)>,
+    setting: (bool, f64, bool),
+    out: &mut [f64],
+) {
+    use crate::ops::arithmetic::extended::fused;
+    crate::ops::map::par_out_chunks_gated(
+        out,
+        4096,
+        crate::ops::map::PAR_THRESHOLD / 8,
+        &|start, part| {
+            let end = start + part.len();
+            let (x, t) = (&x[start..end], &t[start..end]);
+            let g = g.map(|(g, of_t)| (&g[start..end], of_t));
+            fused!(
+                poisson_part(
+                    x: &[f64],
+                    t: &[f64],
+                    g: Option<(&[f64], bool)>,
+                    setting: (bool, f64, bool),
+                    part: &mut [f64],
+                ) -> ()
+            )
+        },
+    );
+}
+
+#[inline(always)]
+fn poisson_part<const FMA: bool>(
+    x: &[f64],
+    t: &[f64],
+    g: Option<(&[f64], bool)>,
+    (log_input, eps, wide): (bool, f64, bool),
+    out: &mut [f64],
+) {
+    use crate::ops::arithmetic::extended::Pair;
+    // The logarithms of the counts below 64 as pairs, found once a task.
+    let mut logs = [Pair(f64::NAN, 0.0); 64];
+    for (k, slot) in out.iter_mut().enumerate() {
+        let (x, t) = (x[k], t[k]);
+        *slot = match (g, log_input) {
+            (None, true) => log_rate_term::<FMA>(x, t, wide),
+            (None, false) => rate_term::<FMA>(x, t, eps, wide),
+            (Some((g, false)), true) => {
+                rate_less_count::<FMA>(x, t, wide, &mut logs).times_rounded::<FMA>(g[k])
+            }
+            (Some((g, false)), false) => {
+                Pair(rate_slope(x, t, eps), 0.0).times_rounded::<FMA>(g[k])
+            }
+            (Some((g, true)), true) => -(g[k] * x),
+            (Some((g, true)), false) => -log_shifted(x, eps).times_rounded::<FMA>(g[k]),
+        };
+    }
+}
+
+/// How far below its terms' magnitudes a difference taken in float64 may
+/// fall before a pair takes it instead: a quarter of them for a float64
+/// answer, which keeps it within two and a half ulps above that, and `2^-20`
+/// of them for a float32 one.
+fn cancels(difference: f64, magnitudes: f64, wide: bool) -> bool {
+    let share = if wide { 0.25 } else { 2f64.powi(-20) };
+    difference.abs() < share * magnitudes
+}
+
+/// `exp(x) - t x`: in float64 where the two are apart, and where they all
+/// but cancel with the exponential a pair, the product exact, rounded once.
+#[inline(always)]
+fn log_rate_term<const FMA: bool>(x: f64, t: f64, wide: bool) -> f64 {
+    use crate::ops::arithmetic::extended::{Pair, exp_pair};
+    let (e, p) = (x.exp(), t * x);
+    let plain = e - p;
+    if !(cancels(plain, e + p.abs(), wide) && x.abs() <= 708.0 && t.is_finite()) {
+        return plain;
+    }
+    let product = Pair(t, 0.0).mul::<FMA>(Pair(x, 0.0));
+    exp_pair::<FMA>(Pair(x, 0.0)).add(product.neg()).0
+}
+
+/// `x - t log(x + eps)`: in float64 where the two are apart, the logarithm
+/// as [`log_shifted`] takes it, and where they all but cancel with the
+/// logarithm a pair, rounded once.
+#[inline(always)]
+fn rate_term<const FMA: bool>(x: f64, t: f64, eps: f64, wide: bool) -> f64 {
+    use crate::ops::arithmetic::extended::Pair;
+    let log = log_shifted(x, eps);
+    let taken = t * log.0;
+    let plain = x - (taken + t * log.1);
+    let finite = x.is_finite() && t.is_finite() && log.0.is_finite();
+    if !(finite && cancels(plain, x.abs() + taken.abs(), wide)) {
+        return plain;
+    }
+    let log = log_pair::<FMA>(x, eps);
+    Pair(x, 0.0).add(log.mul::<FMA>(Pair(t, 0.0)).neg()).0
+}
+
+/// `log(x + eps)`, with a trailing correction: near one, where it is small,
+/// `log1p` of the exact `x + eps - 1` and the share of what that leaves out,
+/// where the rounded sum's logarithm would keep few of its digits; the
+/// float64 logarithm elsewhere. Within an ulp or two either way.
+#[inline(always)]
+fn log_shifted(x: f64, eps: f64) -> crate::ops::arithmetic::extended::Pair {
+    use crate::ops::arithmetic::extended::Pair;
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    let (s, s_lo) = two_sum(x, eps);
+    let (w, w_lo) = two_sum(s, -1.0);
+    if w.is_nan() || w.abs() >= 0.5 {
+        return Pair((x + eps).ln(), 0.0);
+    }
+    Pair(w.ln_1p(), (w_lo + s_lo) / (1.0 + w))
+}
+
+/// `log(x + eps)` as a pair, of the sum a pair, where that is positive and in
+/// range; the float64 logarithm of the rounded sum elsewhere.
+#[inline(always)]
+fn log_pair<const FMA: bool>(x: f64, eps: f64) -> crate::ops::arithmetic::extended::Pair {
+    use crate::ops::arithmetic::extended::{Pair, ln_1p_pair};
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    let (s, s_lo) = two_sum(x, eps);
+    if !(s > 0.0 && s < 2f64.powi(1000)) {
+        return Pair((x + eps).ln(), 0.0);
+    }
+    let (w, w_lo) = two_sum(s, -1.0);
+    ln_1p_pair::<FMA>(Pair(w, w_lo + s_lo))
+}
+
+/// `exp(x) - t` as a pair: the float64 difference where the two are apart,
+/// and where they all but cancel `t expm1(x - log t)`, the logarithm a pair
+/// and so the difference exact, its `expm1` the float64 one beside the
+/// trailing part's share.
+#[inline(always)]
+fn rate_less_count<const FMA: bool>(
+    x: f64,
+    t: f64,
+    wide: bool,
+    logs: &mut [crate::ops::arithmetic::extended::Pair; 64],
+) -> crate::ops::arithmetic::extended::Pair {
+    use crate::ops::arithmetic::extended::Pair;
+    let e = x.exp();
+    let plain = e - t;
+    let near = t > 0.0 && t < 2f64.powi(1000) && x.abs() <= 708.0;
+    if !(near && cancels(plain, e + t, wide)) {
+        return Pair(plain, 0.0);
+    }
+    let log = match logs.get_mut(t as usize) {
+        Some(log) if t.fract() == 0.0 => {
+            if log.0.is_nan() {
+                *log = log_pair::<FMA>(t, 0.0);
+            }
+            *log
+        }
+        _ => log_pair::<FMA>(t, 0.0),
+    };
+    let u = Pair(x, 0.0).add(log.neg());
+    let rest = u.0.exp_m1();
+    Pair(rest, u.1 * (1.0 + rest)).mul::<FMA>(Pair(t, 0.0))
+}
+
+/// `1 - t / (x + eps)`, as `((x - t) + eps) / (x + eps)`: `x - t` exact,
+/// where the two cancel.
+#[inline(always)]
+fn rate_slope(x: f64, t: f64, eps: f64) -> f64 {
+    use crate::ops::arithmetic::rounded_once::two_sum;
+    if !(x.is_finite() && t.is_finite()) {
+        return 1.0 - t / (x + eps);
+    }
+    let (d, d_lo) = two_sum(x, -t);
+    let (n, n_lo) = two_sum(d, eps);
+    (n + (n_lo + d_lo)) / (x + eps)
 }
 
 /// Refuse a negative Poisson target.
