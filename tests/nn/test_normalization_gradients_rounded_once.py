@@ -150,3 +150,49 @@ def test_a_row_holding_a_nan_is_nan_and_the_others_are_not(dtype):
         got_x, _ = _run(kind, x, g, None, dtype)
         assert np.all(np.isnan(got_x[1]))
         assert np.all(np.isfinite(got_x[[0, 2]]))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("case", ["ordinary", "offset", "aligned"])
+def test_batch_norm_gradients_are_the_nearest_floats(case, dtype):
+    # Each channel is one set: its values over the batch and positions, its
+    # weight the same for all of them.
+    rng = np.random.default_rng({"ordinary": 11, "offset": 12, "aligned": 13}[case])
+    x = rng.standard_normal((6, 3, 5))
+    if case == "offset":
+        x = 1e4 + x if dtype == "float32" else 1e9 + x
+    x = x.astype(dtype)
+    g = rng.standard_normal(x.shape)
+    if case == "aligned":
+        mean = x.mean((0, 2), keepdims=True)
+        g = 0.7 + 1.3 * (x - mean) / x.std((0, 2), keepdims=True) + 1e-4 * g
+    g = g.astype(dtype)
+    w = rng.uniform(0.5, 2.0, 3).astype(dtype)
+    b = rng.uniform(-1.0, 1.0, 3).astype(dtype)
+    xi = mt.Tensor(x, dtype=dtype, requires_grad=True)
+    wi = mt.Tensor(w, dtype=dtype, requires_grad=True)
+    bi = mt.Tensor(b, dtype=dtype, requires_grad=True)
+    y = F.batch_norm(xi, None, None, wi, bi, True, 0.1, _EPS)
+    y.backward(mt.Tensor(g, dtype=dtype))
+    got_x, got_w, got_b = xi.grad.numpy(), wi.grad.numpy(), bi.grad.numpy()
+    with decimal.localcontext(prec=80):
+        for c in range(3):
+            values = x[:, c, :].reshape(1, -1)
+            upstream = g[:, c, :].reshape(1, -1)
+            weight = np.full(values.shape[1], w[c])
+            grads, columns = _exact(values, upstream, weight, _EPS, True)
+            for k, want in enumerate(grads[0]):
+                assert _ulps(got_x[:, c, :].ravel()[k], want, dtype) <= 0.5, (c, k)
+            assert _ulps(got_w[c], sum(columns), dtype) <= 0.5, c
+            bias = sum(Decimal(float(v)) for v in upstream[0])
+            assert _ulps(got_b[c], bias, dtype) <= 0.5, c
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_batch_norm_under_a_constant_upstream_gradient_is_exactly_zero(dtype):
+    x = np.random.default_rng(15).standard_normal((6, 3, 7)).astype(dtype)
+    w = mt.Tensor(np.full(3, 1.0 / 3.0, dtype=dtype), dtype=dtype)
+    xi = mt.Tensor(x, dtype=dtype, requires_grad=True)
+    F.batch_norm(xi, None, None, w, None, True, 0.1, _EPS).mean().backward()
+    grad = xi.grad.numpy()
+    assert np.all(grad == 0.0) and not np.any(np.signbit(grad))

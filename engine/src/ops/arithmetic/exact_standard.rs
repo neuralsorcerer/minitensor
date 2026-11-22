@@ -31,7 +31,7 @@ use super::{Carried, Element, Output, Total, at_least, shifted, subtract, two_su
 
 #[path = "exact_standard_slope.rs"]
 mod slope;
-pub(crate) use self::slope::standardized_slopes;
+pub(crate) use self::slope::{round_pair, standardized_slice_slopes, standardized_slopes};
 
 /// A slice's statistics as pairs of float64s, with bounds.
 pub(crate) struct Standard {

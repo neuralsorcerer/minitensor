@@ -19,6 +19,7 @@
 //! float64 and in bands of images fixed by the shape alone, so they do not
 //! depend on the thread count.
 
+use crate::ops::arithmetic::exact_sum::Output;
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     device::Device,
@@ -241,6 +242,7 @@ struct Stats {
     inv_std: Vec<f64>,
     /// Whether they are this batch's, so the gradient flows through them.
     from_batch: bool,
+    eps: f64,
 }
 
 /// The running statistics, handed back when the fused kernel declines.
@@ -394,6 +396,7 @@ fn typed<T: NormFloat>(
             inv_std: var.iter().map(|&v| 1.0 / (v + eps).sqrt()).collect(),
             mean,
             from_batch: true,
+            eps,
         }
     } else {
         let (Some(rm), Some(rv)) = (running_mean, running_var) else {
@@ -408,6 +411,7 @@ fn typed<T: NormFloat>(
                 .map(|v| 1.0 / (v + eps).sqrt())
                 .collect(),
             from_batch: false,
+            eps,
         }
     };
 
@@ -534,7 +538,7 @@ struct BatchNormBackward {
 }
 
 impl BatchNormBackward {
-    fn typed<T: NormFloat>(
+    fn typed<T: NormFloat + Output>(
         &self,
         grad_output: &Tensor,
         gradients: &mut FxHashMap<TensorId, Tensor>,
@@ -556,7 +560,11 @@ impl BatchNormBackward {
             mean,
             inv_std,
             from_batch,
+            eps,
         } = &self.stats;
+        if *from_batch {
+            return self.batch_gradients(g, x, layout, *eps, gradients);
+        }
 
         let need_sums = self.weight_requires_grad
             || self.bias_requires_grad
@@ -598,7 +606,7 @@ impl BatchNormBackward {
                     device,
                 )),
                 Shape::new(vec![layout.channels]),
-                T::DTYPE,
+                <T as NormFloat>::DTYPE,
                 device,
                 false,
             )
@@ -664,7 +672,7 @@ impl BatchNormBackward {
             let dx = Tensor::new(
                 Arc::new(T::into_data(dx, device)),
                 self.input.shape().clone(),
-                T::DTYPE,
+                <T as NormFloat>::DTYPE,
                 device,
                 false,
             );
@@ -679,6 +687,120 @@ impl BatchNormBackward {
             && let Some(id) = self.bias_id
         {
             crate::autograd::accumulate_grad(gradients, id, channel_tensor(&sum_g))?;
+        }
+        Ok(())
+    }
+}
+
+impl BatchNormBackward {
+    /// The gradients under the batch's statistics, a channel at a time:
+    /// each input gradient the value nearest its exact one, from the
+    /// channel's statistics taken again (see
+    /// [`standardized_slice_slopes`](crate::ops::arithmetic::exact_sum::standardized_slice_slopes));
+    /// the weight's `Σ g y` from pairs, rounded once; and the bias's `Σ g`,
+    /// rounded once.
+    ///
+    /// Formed in float64 from the rounded mean and inverse root, as
+    /// `w r (g - mean(g) - y mean(g y))`, the input's two terms all but
+    /// cancel where the upstream gradient lies near the span of one and
+    /// `y`: a float64 gradient was 27 ulps out on ordinary data, 1.6e5 on
+    /// data far from zero against its spread, and 1.2e6 near that span; and
+    /// an upstream gradient the same everywhere, which moves no output,
+    /// left a float32 input 1e-19.
+    fn batch_gradients<T: NormFloat + Output>(
+        &self,
+        g: &[T],
+        x: &[T],
+        layout: Layout,
+        eps: f64,
+        gradients: &mut FxHashMap<TensorId, Tensor>,
+    ) -> Result<()> {
+        use crate::ops::arithmetic::exact_sum::{round_pair, standardized_slice_slopes, sum_to};
+        let device = self.input.device();
+        let want_slopes = self.input_requires_grad || self.weight_requires_grad;
+        let gather = |into: &mut Vec<f64>, values: &[T], c: usize| {
+            into.clear();
+            for image in 0..layout.images {
+                let at = (image * layout.channels + c) * layout.spatial;
+                into.extend(values[at..at + layout.spatial].iter().map(|&v| v.to_f64()));
+            }
+        };
+        let zero = T::from_f64(0.0);
+        // Channels a task takes, from the shape alone, its buffers kept from
+        // one channel to the next.
+        let band = layout.channels.div_ceil(16).max(1);
+        let task = |first: usize| -> Vec<(Vec<T>, T, T)> {
+            let (mut values, mut grad, mut scratch) = (Vec::new(), Vec::new(), Vec::new());
+            let channels = first * band..((first + 1) * band).min(layout.channels);
+            channels
+                .map(|c| {
+                    gather(&mut grad, g, c);
+                    let (mut slopes, mut weight_grad) = (Vec::new(), zero);
+                    if want_slopes {
+                        gather(&mut values, x, c);
+                        let gain = self.weight.as_ref().map_or(1.0, |w| w[c]);
+                        slopes = vec![zero; grad.len()];
+                        let pair = standardized_slice_slopes(
+                            &values,
+                            &grad,
+                            (gain, eps),
+                            &mut slopes,
+                            (self.weight_requires_grad, &mut scratch),
+                        );
+                        weight_grad = round_pair::<T>(pair);
+                    }
+                    let bias_grad = if self.bias_requires_grad {
+                        sum_to::<f64, T>(&grad)
+                    } else {
+                        zero
+                    };
+                    (slopes, weight_grad, bias_grad)
+                })
+                .collect()
+        };
+        let channels: Vec<(Vec<T>, T, T)> =
+            crate::ops::map::par_map_indexed(layout.channels.div_ceil(band), &task)
+                .into_iter()
+                .flatten()
+                .collect();
+        let channel_tensor = |values: Vec<T>| {
+            Tensor::new(
+                Arc::new(T::into_data(values, device)),
+                Shape::new(vec![layout.channels]),
+                <T as NormFloat>::DTYPE,
+                device,
+                false,
+            )
+        };
+        if self.input_requires_grad {
+            let mut dx = vec![zero; x.len()];
+            for (c, (slopes, _, _)) in channels.iter().enumerate() {
+                for image in 0..layout.images {
+                    let at = (image * layout.channels + c) * layout.spatial;
+                    let from = &slopes[image * layout.spatial..][..layout.spatial];
+                    dx[at..at + layout.spatial].copy_from_slice(from);
+                }
+            }
+            let dx = Tensor::new(
+                Arc::new(T::into_data(dx, device)),
+                self.input.shape().clone(),
+                <T as NormFloat>::DTYPE,
+                device,
+                false,
+            );
+            crate::autograd::accumulate_grad(gradients, self.input_id, dx)?;
+        }
+        if self.weight_requires_grad
+            && let Some(id) = self.weight_id
+        {
+            let values = channels.iter().map(|&(_, weight, _)| weight).collect();
+            crate::autograd::accumulate_grad(gradients, id, channel_tensor(values))?;
+        }
+        if self.bias_requires_grad
+            && let Some(id) = self.bias_id
+        {
+            let values = channels.iter().map(|&(_, _, bias)| bias).collect();
+            crate::autograd::accumulate_grad(gradients, id, channel_tensor(values))?;
         }
         Ok(())
     }

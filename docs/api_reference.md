@@ -3379,18 +3379,20 @@ that is not zero gives a positive zero, and `w * y + b` signs a zero product as
 float arithmetic does. A missing weight or bias changes nothing, not even the
 sign of a zero.
 
-The input's gradient of `layer_norm` and `rms_norm`, in either dtype, is the
-float nearest its exact value: with `y = d r` -- `d` the deviation from the
-mean, or the value itself for `rms_norm`, and `r` the inverse root -- and the
-upstream gradient times the weight `h`, it is `r (u - r^2 C d)`, `u = h -
-mean(h)` (`h` for `rms_norm`) and `C = mean(u d)`, taken from the input with
-each row's statistics found again. An upstream gradient that is the same
-everywhere leaves a `layer_norm` input exactly nothing, as the outputs sum to
-nothing whatever it is. The weight's gradient sums `g y` down each column, its
-terms in pairs of float64s, rounded once. The two forms of the input's
-gradient agree only in exact arithmetic: formed from the rounded `y` and `r`,
-its two terms all but cancel where the upstream gradient lies near the span of
-one and `y`, and kept only their roundings there.
+The input's gradient of `layer_norm` and `rms_norm`, and of `batch_norm` with
+batch statistics, is in either dtype the float nearest its exact value: with
+`y = d r` -- `d` the deviation from the mean, or the value itself for
+`rms_norm`, and `r` the inverse root -- and the upstream gradient times the
+weight `h`, it is `r (u - r^2 C d)`, `u = h - mean(h)` (`h` for `rms_norm`) and
+`C = mean(u d)`, taken from the input with the statistics found again. An
+upstream gradient that is the same everywhere leaves a centred input exactly
+nothing, as the outputs sum to nothing whatever it is. The weight's gradient
+sums `g y` -- down each column for `layer_norm` and `rms_norm`, over each
+channel for `batch_norm` -- its terms in pairs of float64s, rounded once, and
+`batch_norm`'s bias gradient is each channel's `Σ g`, rounded once. The two
+forms of the input's gradient agree only in exact arithmetic: formed from the
+rounded `y` and `r`, its two terms all but cancel where the upstream gradient
+lies near the span of one and `y`, and kept only their roundings there.
 
 `scaled_dot_product_attention(query, key, value, attn_mask=None, is_causal=False, scale=None)`
 -- computes `softmax(Q Kᵀ / sqrt(E) + bias) V` over the key axis. Shapes are

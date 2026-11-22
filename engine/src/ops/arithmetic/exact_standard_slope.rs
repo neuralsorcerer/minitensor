@@ -49,6 +49,8 @@ struct Set<'a> {
     x: &'a [f64],
     g: &'a [f64],
     weight: Option<&'a [f64]>,
+    /// The weight of every value, where `weight` is None.
+    gain: f64,
     eps: f64,
     centred: bool,
 }
@@ -74,6 +76,33 @@ enum Outcome {
     /// None: the values lie too far out for the pairs, so every one is
     /// decided in whole numbers.
     Exact,
+}
+
+/// Where a row's weight terms `g y` go: each to its column's pair, all of
+/// them to one pair, or nowhere.
+enum Columns<'a> {
+    Each(&'a mut [(f64, f64)]),
+    Total(&'a mut (f64, f64)),
+    Unwanted,
+}
+
+impl Columns<'_> {
+    fn wanted(&self) -> bool {
+        !matches!(self, Columns::Unwanted)
+    }
+
+    /// The term `head + tail` of value `k` added to where it goes, by a
+    /// two-sum.
+    #[inline(always)]
+    fn add(&mut self, k: usize, head: f64, tail: f64) {
+        let slot = match self {
+            Columns::Each(columns) => &mut columns[k],
+            Columns::Total(total) => &mut **total,
+            Columns::Unwanted => return,
+        };
+        let (sum, carry) = two_sum(slot.0, head);
+        *slot = (sum, slot.1 + (carry + tail));
+    }
 }
 
 /// A total over `n` as a pair and its bound: zeros for a total that is
@@ -113,17 +142,17 @@ fn upstream(
 }
 
 /// One row's input gradients into `parts` where `input`, and `g y` added to
-/// `columns` where it is not empty.
+/// `columns`.
 #[inline(always)]
 fn row_slopes<const FMA: bool>(
     set: &Set<'_>,
     input: bool,
     parts: &mut Parts<'_>,
-    columns: &mut [(f64, f64)],
+    columns: &mut Columns<'_>,
 ) -> Outcome {
     let len = set.x.len();
     for k in 0..len {
-        let (head, tail) = split::<FMA>(set.g[k], set.weight.map_or(1.0, |w| w[k]));
+        let (head, tail) = split::<FMA>(set.g[k], set.weight.map_or(set.gain, |w| w[k]));
         parts.head[k] = head;
         parts.tail[k] = tail;
     }
@@ -265,13 +294,12 @@ fn row_slopes<const FMA: bool>(
             }
         }
     }
-    if !columns.is_empty() {
-        for (k, column) in columns.iter_mut().enumerate() {
+    if columns.wanted() {
+        for k in 0..len {
             let (d, d_low, _) = deviation(set.x[k], centre.0, centre.1, centre.2);
             let y = Pair(d, d_low).mul::<FMA>(r);
             let term = y.mul::<FMA>(Pair(set.g[k], 0.0));
-            let (sum, carry) = two_sum(column.0, term.0);
-            *column = (sum, column.1 + (carry + term.1));
+            columns.add(k, term.0, term.1);
         }
     }
     Outcome::Pairs
@@ -282,7 +310,7 @@ fn row_slopes_fused(
     set: &Set<'_>,
     input: bool,
     parts: &mut Parts<'_>,
-    columns: &mut [(f64, f64)],
+    columns: &mut Columns<'_>,
 ) -> Outcome {
     use crate::ops::arithmetic::extended::fused;
     fused!(
@@ -290,7 +318,7 @@ fn row_slopes_fused(
             set: &Set<'_>,
             input: bool,
             parts: &mut Parts<'_>,
-            columns: &mut [(f64, f64)],
+            columns: &mut Columns<'_>,
         ) -> Outcome
     )
 }
@@ -299,10 +327,10 @@ fn row_slopes_fused(
 /// in float64, which carries its infinities and NaNs as they come.
 #[cold]
 #[inline(never)]
-fn plain_row(set: &Set<'_>, parts: &mut Parts<'_>, columns: &mut [(f64, f64)]) {
+fn plain_row(set: &Set<'_>, parts: &mut Parts<'_>, columns: &mut Columns<'_>) {
     let len = set.x.len();
     let n = len as f64;
-    let h = |k: usize| set.g[k] * set.weight.map_or(1.0, |w| w[k]);
+    let h = |k: usize| set.g[k] * set.weight.map_or(set.gain, |w| w[k]);
     let mean = if set.centred {
         set.x.iter().sum::<f64>() / n
     } else {
@@ -325,9 +353,7 @@ fn plain_row(set: &Set<'_>, parts: &mut Parts<'_>, columns: &mut [(f64, f64)]) {
         parts.value[k] = r * ((h(k) - upstream_mean) - t * d);
         parts.rest[k] = 0.0;
         parts.bound[k] = 0.0;
-        if let Some(column) = columns.get_mut(k) {
-            column.0 += set.g[k] * (d * r);
-        }
+        columns.add(k, set.g[k] * (d * r), 0.0);
     }
 }
 
@@ -416,13 +442,12 @@ fn exact_slopes<T: Output>(
 /// pairs: each `y` the float64 nearest it, its product with `g` exact.
 #[cold]
 #[inline(never)]
-fn exact_columns(set: &Set<'_>, columns: &mut [(f64, f64)]) {
+fn exact_columns(set: &Set<'_>, columns: &mut Columns<'_>) {
     let exactly = Exactly::of(set.x, set.eps, set.centred);
-    for (k, column) in columns.iter_mut().enumerate() {
+    for k in 0..set.x.len() {
         let y = exactly.value(set.x[k], None, 0.0);
         let (product, error) = split::<false>(y, set.g[k]);
-        let (sum, carry) = two_sum(column.0, product);
-        *column = (sum, column.1 + (carry + error));
+        columns.add(k, product, error);
     }
 }
 
@@ -443,16 +468,16 @@ fn exact_columns(set: &Set<'_>, columns: &mut [(f64, f64)]) {
 /// roundings.
 fn plain_settled<T: Output>(
     set: &Set<'_>,
-    h: &mut [f64],
+    scratch: &mut [f64],
     out: Option<&mut [T]>,
-    columns: &mut [(f64, f64)],
+    columns: &mut Columns<'_>,
 ) -> bool {
     #[cfg(target_arch = "x86_64")]
     if crate::ops::simd::simd_capabilities().avx2_fma {
         // SAFETY: avx2 and fma were detected on this CPU.
-        return unsafe { plain_settled_avx2(set, h, out, columns) };
+        return unsafe { plain_settled_avx2(set, scratch, out, columns) };
     }
-    plain_settled_body(set, h, out, columns)
+    plain_settled_body(set, scratch, out, columns)
 }
 
 /// [`plain_settled`] built with AVX2, four float64s to a register. Rust
@@ -462,34 +487,38 @@ fn plain_settled<T: Output>(
 #[target_feature(enable = "avx2,fma")]
 fn plain_settled_avx2<T: Output>(
     set: &Set<'_>,
-    h: &mut [f64],
+    scratch: &mut [f64],
     out: Option<&mut [T]>,
-    columns: &mut [(f64, f64)],
+    columns: &mut Columns<'_>,
 ) -> bool {
-    plain_settled_body(set, h, out, columns)
+    plain_settled_body(set, scratch, out, columns)
 }
 
 #[inline(always)]
 fn plain_settled_body<T: Output>(
     set: &Set<'_>,
-    h: &mut [f64],
+    scratch: &mut [f64],
     out: Option<&mut [T]>,
-    columns: &mut [(f64, f64)],
+    columns: &mut Columns<'_>,
 ) -> bool {
     let len = set.x.len();
-    let (x, g, h) = (&set.x[..len], &set.g[..len], &mut h[..len]);
+    let (h, squares) = scratch[..2 * len].split_at_mut(len);
+    let (x, g) = (&set.x[..len], &set.g[..len]);
     match set.weight {
         Some(weight) => {
             for ((h, &g), &w) in h.iter_mut().zip(g).zip(&weight[..len]) {
                 *h = g * w;
             }
         }
-        None => h.copy_from_slice(g),
+        None => {
+            for (h, &g) in h.iter_mut().zip(g) {
+                *h = g * set.gain;
+            }
+        }
     }
     let h = &*h;
     let n = len as f64;
     let unit = 2f64.powi(-53);
-    let gamma = (n + 4.0) * 2f64.powi(-52);
     let margin = 1.0 + 2f64.powi(-20);
     let (sum_x, sum_h) = (<f64 as Element>::block(x), <f64 as Element>::block(h));
     // A carried sum over the count, and how far its leading part can be from
@@ -507,12 +536,17 @@ fn plain_settled_body<T: Output>(
         return false;
     };
     // The squares of the deviations off the float64 mean, each rounded twice
-    // and added plainly; off the exact mean they sum to `n (m - μ)^2` less.
-    let squares = <f64 as Element>::plain_squares(x, mean);
+    // -- within `3 2^-53` of itself -- and their carried sum; off the exact
+    // mean they sum to `n (m - μ)^2` less.
+    for (square, &x) in squares.iter_mut().zip(x) {
+        let d = x - mean;
+        *square = d * d;
+    }
+    let carried = <f64 as Element>::block(squares);
+    let (squares, _) = two_sum(carried.sum, carried.error);
     let q = squares / n + set.eps;
-    let q_error =
-        ((gamma + 3.0 * unit) * (1.0 + gamma) * squares + n * mean_error * mean_error) / n * margin
-            + 2.0 * unit * q;
+    let q_error = (4.0 * unit * squares + carried.slack + n * mean_error * mean_error) / n * margin
+        + 2.0 * unit * q;
     if !(q > 0.0 && q.is_finite() && q_error <= q * 2f64.powi(-30)) {
         return false;
     }
@@ -522,7 +556,7 @@ fn plain_settled_body<T: Output>(
     let relative = (0.5 * (q_error / q) * (1.0 + q_error / q) + 2.0 * unit) * margin;
     // The weight's terms want each `y` well inside a float32's last place.
     let close = mean_error * r <= 2f64.powi(-40);
-    if !columns.is_empty() && !close {
+    if columns.wanted() && !close {
         return false;
     }
     let mut clear = true;
@@ -583,11 +617,9 @@ fn plain_settled_body<T: Output>(
             }
         }
     }
-    if clear {
-        for ((column, &x), &g) in columns.iter_mut().zip(x).zip(g) {
-            let term = g * ((x - mean) * r);
-            let (sum, carry) = two_sum(column.0, term);
-            *column = (sum, column.1 + carry);
+    if clear && columns.wanted() {
+        for (k, (&x, &g)) in x.iter().zip(g).enumerate() {
+            columns.add(k, g * ((x - mean) * r), 0.0);
         }
     }
     clear
@@ -625,6 +657,69 @@ fn round_row<T: Output>(
     }
 }
 
+/// The gradients of `values` standardized over themselves, then times
+/// `gain`, under `grad`: the input's into `out`, each the value nearest its
+/// exact one, and the weight's, `Σ g y` where `want_weight`, returned as the
+/// pair the terms' pairs sum to. A slice holding a value that is not finite
+/// takes the formula's float64 values. For a float32 output the values, the
+/// upstream gradient and the gain are float32s. `scratch` is the caller's,
+/// kept from one slice to the next.
+pub(crate) fn standardized_slice_slopes<T: Output>(
+    values: &[f64],
+    grad: &[f64],
+    (gain, eps): (f64, f64),
+    out: &mut [T],
+    (want_weight, scratch): (bool, &mut Vec<f64>),
+) -> (f64, f64) {
+    let len = values.len();
+    let set = Set {
+        x: values,
+        g: grad,
+        weight: None,
+        gain,
+        eps,
+        centred: true,
+    };
+    let mut total = (0.0f64, 0.0f64);
+    let mut columns = if want_weight {
+        Columns::Total(&mut total)
+    } else {
+        Columns::Unwanted
+    };
+    // The plain pass's two rows, and the pairs' five where it does not settle.
+    let rows = |scratch: &mut Vec<f64>, count: usize| {
+        if scratch.len() < count * len {
+            scratch.resize(count * len, 0.0);
+        }
+    };
+    rows(scratch, if T::PLAIN { 2 } else { 5 });
+    if !(T::PLAIN && plain_settled(&set, scratch, Some(&mut *out), &mut columns)) {
+        rows(scratch, 5);
+        let (head, scratch_rest) = scratch.split_at_mut(len);
+        let (tail, scratch_rest) = scratch_rest.split_at_mut(len);
+        let (value, scratch_rest) = scratch_rest.split_at_mut(len);
+        let (rest, bound) = scratch_rest[..2 * len].split_at_mut(len);
+        let mut parts = Parts {
+            head,
+            tail,
+            value,
+            rest,
+            bound,
+        };
+        let outcome = row_slopes_fused(&set, true, &mut parts, &mut columns);
+        if outcome == Outcome::Exact {
+            exact_columns(&set, &mut columns);
+        }
+        round_row::<T>(&set, &parts, outcome, out, &mut Vec::new());
+    }
+    two_sum(total.0, total.1)
+}
+
+/// A pair `value + rest`, a two-sum's, rounded once to `T`.
+pub(crate) fn round_pair<T: Output>((value, rest): (f64, f64)) -> T {
+    T::settle(value, rest, 0.0).unwrap_or_else(|| T::narrow(value))
+}
+
 /// The gradients of each `norm`-wide row of `input` standardized -- less
 /// its mean where `centred` -- under the upstream gradient `grad` and the
 /// weight: the input's into `input_grad` where given, each the value nearest
@@ -650,10 +745,15 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
         .max(rows.div_ceil(256))
         .max(1);
     let task = |first: usize, count: usize, mut out: Option<&mut [T]>| -> Vec<(f64, f64)> {
-        let mut columns = vec![(0.0f64, 0.0f64); if want_weight { norm } else { 0 }];
-        let mut scratch = vec![0.0f64; 3 * norm];
+        let mut sums = vec![(0.0f64, 0.0f64); if want_weight { norm } else { 0 }];
+        let mut columns = if want_weight {
+            Columns::Each(&mut sums)
+        } else {
+            Columns::Unwanted
+        };
+        let mut scratch = vec![0.0f64; 4 * norm];
         let (x, scratch_rest) = scratch.split_at_mut(norm);
-        let (g, head) = scratch_rest.split_at_mut(norm);
+        let (g, work) = scratch_rest.split_at_mut(norm);
         // The pairs' buffers, made for the first row that needs them.
         let mut pairs: Vec<f64> = Vec::new();
         let mut open = Vec::new();
@@ -671,6 +771,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
                 x: &*x,
                 g: &*g,
                 weight: widened.as_deref(),
+                gain: 1.0,
                 eps,
                 centred,
             };
@@ -678,10 +779,11 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
                 let cells = out
                     .as_deref_mut()
                     .map(|out| &mut out[(row - first) * norm..][..norm]);
-                if plain_settled(&set, head, cells, &mut columns) {
+                if plain_settled(&set, work, cells, &mut columns) {
                     continue;
                 }
             }
+            let head = &mut work[..norm];
             if pairs.is_empty() {
                 pairs = vec![0.0f64; 4 * norm];
             }
@@ -696,7 +798,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
                 bound,
             };
             let outcome = row_slopes_fused(&set, out.is_some(), &mut parts, &mut columns);
-            if outcome == Outcome::Exact && !columns.is_empty() {
+            if outcome == Outcome::Exact {
                 exact_columns(&set, &mut columns);
             }
             if let Some(out) = out.as_deref_mut() {
@@ -704,7 +806,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
                 round_row(&set, &parts, outcome, cells, &mut open);
             }
         }
-        columns
+        sums
     };
     let partials = match input_grad {
         Some(out) => {
@@ -731,10 +833,7 @@ pub(crate) fn standardized_slopes<I: Element, T: Output>(
     }
     total
         .into_iter()
-        .map(|(head, tail)| {
-            let (value, rest) = two_sum(head, tail);
-            T::settle(value, rest, 0.0).unwrap_or_else(|| T::narrow(value))
-        })
+        .map(|(head, tail)| round_pair::<T>(two_sum(head, tail)))
         .collect()
 }
 
@@ -782,6 +881,7 @@ mod tests {
                     x: &x,
                     g: &g,
                     weight: (trial % 2 == 0).then_some(weight.as_slice()),
+                    gain: 1.0,
                     eps,
                     centred,
                 };
@@ -797,7 +897,7 @@ mod tests {
                     rest,
                     bound,
                 };
-                let outcome = row_slopes::<false>(&set, true, &mut parts, &mut []);
+                let outcome = row_slopes::<false>(&set, true, &mut parts, &mut Columns::Unwanted);
                 let mut exact = vec![0.0f64; width];
                 exact_slopes::<f64>(&set, &parts, None, &mut exact);
                 if outcome != Outcome::Pairs {
