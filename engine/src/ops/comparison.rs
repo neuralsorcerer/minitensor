@@ -72,70 +72,78 @@ fn int_against_float(int: i64, float: f64) -> Option<Ordering> {
     })
 }
 
-/// A comparison between an integer tensor and a float one, made exactly; see
-/// [`int_against_float`]. `None` when the operands are not such a pair.
+/// Whether `int` lies below, at and above `float`, exactly and without a
+/// branch: none of the three for a NaN.
 ///
-/// `holds` says whether an ordering satisfies the comparison, read with the
-/// operands in their original order, and `in_f64` is the same comparison of
-/// two float64s; a NaN satisfies only `!=`.
+/// `x`, the integer rounded, orders as the integer does against every float but
+/// itself -- a float other than `x` lies a whole step from it, and the integer
+/// within half of one -- and at that float, a whole number, the two compare
+/// exactly as integers, 2^63 past every int64.
+#[inline(always)]
+fn orders(int: i64, float: f64) -> (bool, bool, bool) {
+    let x = int as f64;
+    let tie = x == float;
+    let top = float >= 9_223_372_036_854_775_808.0;
+    let whole = float as i64;
+    let below = (x < float) | (tie & (top | (int < whole)));
+    let above = (x > float) | (tie & !top & (int > whole));
+    (below, tie & !top & (int == whole), above)
+}
+
+/// A comparison between an integer tensor and a float one, made exactly; see
+/// [`orders`]. `None` when the operands are not such a pair.
+///
+/// The integer is put on the left, the relation turned with it, and the
+/// relation read as what it holds of an integer below, at and above the float
+/// and of a NaN: one comparison for each pair of dtypes, whatever the
+/// relation, rather than a copy for each of the six. Each pair is widened as it
+/// is read and compared without a branch, exactly.
 fn mixed_comparison(
     lhs: &Tensor,
     rhs: &Tensor,
-    holds: impl Fn(Ordering) -> bool + Copy + Send + Sync,
-    in_f64: impl Fn(f64, f64) -> bool + Copy + Send + Sync,
-    nan_holds: bool,
+    relation: Relation,
 ) -> Result<Option<(TensorData, Shape)>> {
     let is_int = |t: &Tensor| matches!(t.dtype(), DataType::Int32 | DataType::Int64);
     let is_float = |t: &Tensor| matches!(t.dtype(), DataType::Float32 | DataType::Float64);
-    let (int_side, float_side, int_on_left) = if is_int(lhs) && is_float(rhs) {
-        (lhs, rhs, true)
+    let (ints, floats, relation) = if is_int(lhs) && is_float(rhs) {
+        (lhs, rhs, relation)
     } else if is_float(lhs) && is_int(rhs) {
-        (rhs, lhs, false)
+        (rhs, lhs, relation.swapped())
     } else {
         return Ok(None);
     };
     let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
     let missing = || MinitensorError::internal_error("comparison: operand slice missing");
-    let answer = move |ordering: Option<Ordering>| match ordering {
-        Some(ordering) => holds(ordering),
-        None => nan_holds,
+    let wants = [
+        relation.holds(Some(Ordering::Less)),
+        relation.holds(Some(Ordering::Equal)),
+        relation.holds(Some(Ordering::Greater)),
+        relation.holds(None),
+    ];
+    // An int32 is a float64 exactly, and compares as one.
+    let plain = |int: i64, float: f64| {
+        let x = int as f64;
+        (x < float, x == float, x > float)
     };
-    // Each pair is widened as it is read rather than both tensors copied
-    // first. A float is a float64 exactly, and so is every int32 and every
-    // int64 within 2^53, and those pairs compare exactly as float64s -- with
-    // the plain operator, which vectorizes. Only an int64 past 2^53 needs the
-    // floor.
     macro_rules! compare_as {
-        ($int_slice:ident, $float_slice:ident, $exact:expr) => {{
-            let ints = int_side.data().$int_slice().ok_or_else(missing)?;
-            let floats = float_side.data().$float_slice().ok_or_else(missing)?;
-            let exact = $exact;
-            if int_on_left {
-                broadcast_binary_data(int_side, float_side, ints, floats, &output_shape, |a, b| {
-                    let b = f64::from(b);
-                    match exact(a) {
-                        Some(a) => in_f64(a, b),
-                        None => answer(int_against_float(a.into(), b)),
-                    }
-                })?
-            } else {
-                broadcast_binary_data(float_side, int_side, floats, ints, &output_shape, |b, a| {
-                    let b = f64::from(b);
-                    match exact(a) {
-                        Some(a) => in_f64(b, a),
-                        None => answer(int_against_float(a.into(), b).map(Ordering::reverse)),
-                    }
-                })?
-            }
+        ($int_slice:ident, $float_slice:ident, $orders:expr) => {{
+            let a = ints.data().$int_slice().ok_or_else(missing)?;
+            let b = floats.data().$float_slice().ok_or_else(missing)?;
+            broadcast_binary_data(ints, floats, a, b, &output_shape, move |a, b| {
+                let (below, equal, above) = $orders(i64::from(a), f64::from(b));
+                let unordered = !(below | equal | above);
+                (below & wants[0])
+                    | (equal & wants[1])
+                    | (above & wants[2])
+                    | (unordered & wants[3])
+            })?
         }};
     }
-    let int32 = |a: i32| Some(f64::from(a));
-    let int64 = |a: i64| (a.unsigned_abs() <= 1 << 53).then_some(a as f64);
-    let data = match (int_side.dtype(), float_side.dtype()) {
-        (DataType::Int32, DataType::Float32) => compare_as!(as_i32_slice, as_f32_slice, int32),
-        (DataType::Int32, _) => compare_as!(as_i32_slice, as_f64_slice, int32),
-        (_, DataType::Float32) => compare_as!(as_i64_slice, as_f32_slice, int64),
-        _ => compare_as!(as_i64_slice, as_f64_slice, int64),
+    let data = match (ints.dtype(), floats.dtype()) {
+        (DataType::Int32, DataType::Float32) => compare_as!(as_i32_slice, as_f32_slice, plain),
+        (DataType::Int32, _) => compare_as!(as_i32_slice, as_f64_slice, plain),
+        (_, DataType::Float32) => compare_as!(as_i64_slice, as_f32_slice, orders),
+        _ => compare_as!(as_i64_slice, as_f64_slice, orders),
     };
     Ok(Some((data, output_shape)))
 }
@@ -171,6 +179,18 @@ impl Relation {
     /// Whether `x ? value` holds of an `x` below the value.
     fn holds_below(self) -> bool {
         matches!(self, Relation::Ne | Relation::Lt | Relation::Le)
+    }
+
+    /// Whether `x ? value` holds of an `x` that compares with the value as
+    /// `ordering`; a NaN, with no ordering, satisfies only `!=`.
+    #[inline(always)]
+    fn holds(self, ordering: Option<Ordering>) -> bool {
+        match ordering {
+            None => self == Relation::Ne,
+            Some(Ordering::Less) => self.holds_below(),
+            Some(Ordering::Greater) => self.holds_above(),
+            Some(Ordering::Equal) => matches!(self, Relation::Eq | Relation::Le | Relation::Ge),
+        }
     }
 }
 
@@ -497,13 +517,7 @@ macro_rules! cmp_op {
             if let Some(result) = scalar_comparison(lhs, rhs, $relation)? {
                 return Ok(result);
             }
-            if let Some((data, shape)) = mixed_comparison(
-                lhs,
-                rhs,
-                |ordering| ordering $op Ordering::Equal,
-                |a: f64, b: f64| a $op b,
-                stringify!($op) == "!=",
-            )? {
+            if let Some((data, shape)) = mixed_comparison(lhs, rhs, $relation)? {
                 return Ok(Tensor::new(
                     Arc::new(data),
                     shape,
@@ -696,6 +710,53 @@ mod tests {
     /// The ordering against exact arithmetic, at the edges of both ranges:
     /// either side of an integer, the float64 rounding gap past 2^53, the
     /// int64 limits and the floats just outside them, and the non-finite.
+    #[test]
+    fn orders_as_int_against_float_does() {
+        let ints = [
+            0,
+            1,
+            -1,
+            3,
+            (1 << 53) - 1,
+            1 << 53,
+            (1 << 53) + 1,
+            -(1 << 53) - 1,
+            (1 << 62) + 1,
+            i64::MAX,
+            i64::MAX - 511,
+            i64::MAX - 512,
+            i64::MIN,
+            i64::MIN + 1,
+        ];
+        let mut floats = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            3.0,
+            3.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_775_808.0,
+            9_223_372_036_854_774_784.0,
+        ];
+        for &int in &ints {
+            let x = int as f64;
+            floats.extend([x, x.next_up(), x.next_down(), x + 0.5, x - 0.5]);
+        }
+        for &int in &ints {
+            for &float in &floats {
+                let (below, equal, above) = orders(int, float);
+                let want = int_against_float(int, float);
+                assert_eq!(below, want == Some(Ordering::Less), "{int} {float}");
+                assert_eq!(equal, want == Some(Ordering::Equal), "{int} {float}");
+                assert_eq!(above, want == Some(Ordering::Greater), "{int} {float}");
+            }
+        }
+    }
+
     #[test]
     fn int_against_float_is_exact() {
         use Ordering::*;
